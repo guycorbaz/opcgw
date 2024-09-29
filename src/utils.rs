@@ -3,7 +3,8 @@
 //! Ce module contient des fonctions et des structures utilitaires communes à l'application.
 
 use thiserror::Error;
-use log;
+use log::{LevelFilter, SetLoggerError};
+use env_logger::Builder;
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -17,8 +18,11 @@ pub enum AppError {
     StorageError(String),
 }
 
-pub fn setup_logger() -> Result<(), log::SetLoggerError> {
-    // Implémentez ici la configuration du logger
+pub fn setup_logger() -> Result<(), SetLoggerError> {
+    Builder::new()
+        .filter(None, LevelFilter::Info)
+        .format_timestamp_secs()
+        .init();
     Ok(())
 }
 
