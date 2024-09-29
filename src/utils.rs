@@ -3,6 +3,7 @@
 //! Ce module contient des fonctions et des structures utilitaires communes à l'application.
 
 use thiserror::Error;
+use log;
 
 #[derive(Error, Debug)]
 pub enum AppError {
