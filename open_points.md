@@ -21,21 +21,44 @@
    - Implémentation d'un serveur OPC UA uniquement (pas de client)
    - Bibliothèque recommandée : `opcua-server`
    - Modélisation des données ChirpStack dans l'espace d'adressage OPC UA
-   - Option: Utilisation de `opcua-types` pour la définition des types de données personnalisés
+   - Utilisation des types de données standard d'OPC UA
 
 5. Gestion des métriques et des commandes :
-   - Évaluation des options de stockage :
-     a. Stockage en mémoire :
-        - Avantages : Rapidité, simplicité
-        - Inconvénients : Perte des données en cas de redémarrage, limitation par la RAM
-     b. Base de données (ex: SQLite) :
-        - Avantages : Persistance, requêtes complexes possibles
-        - Inconvénients : Complexité accrue, potentiellement plus lent
-   - Recommandation : Commencer par un stockage en mémoire (ex: avec `dashmap` pour la concurrence), 
-     puis évoluer vers une BD si nécessaire
-   - File d'attente pour les commandes : Utilisation de `crossbeam-channel` ou `tokio::sync::mpsc`
+   - Implémentation d'un stockage en mémoire avec `dashmap` pour la concurrence
+   - File d'attente pour les commandes : Utilisation de `tokio::sync::mpsc`
 
-6. Conteneurisation :
+6. Planification du projet :
+   Phase 1 : Configuration et structure de base
+   - Mise en place de la structure du projet avec Cargo
+   - Implémentation de la gestion de la configuration avec `config-rs`
+   - Création de la fonction `main()` et `run()`
+
+   Phase 2 : Communication avec ChirpStack
+   - Intégration du client gRPC avec `tonic`
+   - Génération des structures Rust à partir des fichiers .proto de ChirpStack
+   - Implémentation des fonctions de base pour communiquer avec ChirpStack
+
+   Phase 3 : Implémentation du serveur OPC UA
+   - Mise en place du serveur OPC UA avec `opcua-server`
+   - Définition de l'espace d'adressage OPC UA pour les données ChirpStack
+   - Implémentation des fonctions de base pour exposer les données via OPC UA
+
+   Phase 4 : Gestion des métriques et des commandes
+   - Implémentation du stockage en mémoire avec `dashmap`
+   - Mise en place de la file d'attente des commandes avec `tokio::sync::mpsc`
+   - Intégration des métriques et des commandes dans le flux de données
+
+   Phase 5 : Tests et optimisation
+   - Écriture des tests unitaires et d'intégration
+   - Optimisation des performances et de la concurrence
+   - Implémentation de la gestion des erreurs et du logging
+
+   Phase 6 : Conteneurisation et déploiement
+   - Création du Dockerfile et optimisation de l'image
+   - Mise en place du pipeline CI/CD
+   - Tests de déploiement et de performance
+
+7. Conteneurisation :
    - Création d'un Dockerfile multi-stage pour optimiser la taille de l'image
    - Utilisation de `rust:alpine` comme base pour réduire la taille
    - Compilation statique des dépendances quand possible
