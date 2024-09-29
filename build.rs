@@ -21,10 +21,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "proto/chirpstack/common/common.proto",
                 "proto/chirpstack/gw/gw.proto",
                 "proto/chirpstack/integration/integration.proto",
-                "proto/google/api/annotations.proto",
-                "proto/google/api/http.proto",
+                "proto/chirpstack/google/api/annotations.proto",
+                "proto/chirpstack/google/api/http.proto",
             ],
-            &["proto"],
+            &["proto/chirpstack"],
         )?;
     Ok(())
 }
