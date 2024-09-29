@@ -1,0 +1,7 @@
+[chirpstack]
+server_address = "localhost:8080"
+api_token = "your_api_token_here"
+
+[opcua]
+server_url = "opc.tcp://localhost:4840"
+server_name = "ChirpStack OPC UA Server"
