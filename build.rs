@@ -3,7 +3,7 @@ use std::io::Result;
 fn main() -> Result<()> {
     tonic_build::configure()
         .build_server(true)
-        .compile(
+        .compile_protos(
             &[
                 "proto/chirpstack/api/device.proto",
                 "proto/chirpstack/api/application.proto",

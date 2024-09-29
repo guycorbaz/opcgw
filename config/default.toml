@@ -1,6 +1,6 @@
 [chirpstack]
-server_address = "localhost:8080"
-api_token = "your_api_token_here"
+server_address = "http://192.168.1.12:8080"
+api_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJjaGlycHN0YWNrIiwiaXNzIjoiY2hpcnBzdGFjayIsInN1YiI6IjMwOWMxNmNmLWQ3ZDEtNDkxYS1hZWQ5LTMxNmYzNWI4OTZjYiIsInR5cCI6ImtleSJ9.eecxwbJlmCa6DBev2XWsKeJ83dbScd27IWM9-rX3hxM"
 
 [opcua]
 server_url = "opc.tcp://localhost:4840"

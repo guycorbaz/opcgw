@@ -13,13 +13,12 @@ use config::AppConfig;
 use chirpstack::ChirpstackClient;
 use opc_ua::OpcUaServer;
 use storage::Storage;
-use utils::setup_logger;
-use log::{info, error};
+use log::{info, warn, error};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Configurer le logger
-    setup_logger().expect("Failed to set up logger");
+    log4rs::init_file("log4rs.yaml", Default::default()).unwrap();
 
     // Charger la configuration
     let config = AppConfig::new().expect("Failed to load configuration");

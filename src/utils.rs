@@ -22,17 +22,6 @@ pub enum AppError {
     StorageError(String),
 }
 
-pub fn setup_logger() -> Result<(), log4rs::Error> {
-    let logfile = FileAppender::builder()
-        .encoder(Box::new(PatternEncoder::new("{d} - {l} - {m}\n")))
-        .build("log/output.log")?;
 
-    let config = Config::builder()
-        .appender(Appender::builder().build("logfile", Box::new(logfile)))
-        .build(Root::builder().appender("logfile").build(LevelFilter::Info))?;
-
-    log4rs::init_config(config)?;
-    Ok(())
-}
 
 // Ajoutez ici d'autres fonctions utilitaires selon les besoins
