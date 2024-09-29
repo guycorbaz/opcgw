@@ -4,6 +4,11 @@ mod opc_ua;
 mod storage;
 mod utils;
 
+// Inclure le module généré
+pub mod chirpstack_api {
+    tonic::include_proto!("chirpstack");
+}
+
 use config::AppConfig;
 use chirpstack::ChirpstackClient;
 use opc_ua::OpcUaServer;
@@ -23,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("OPC UA server: {}", config.opcua.server_url);
 
     // Initialiser les composants
-    let chirpstack_client = ChirpstackClient::new(config.chirpstack);
+    let chirpstack_client = ChirpstackClient::new(config.chirpstack).await?;
     let opc_ua_server = OpcUaServer::new(config.opcua);
     let (storage, command_receiver) = Storage::new();
 
