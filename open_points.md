@@ -58,10 +58,16 @@
    - Optimisation des performances et de la concurrence
    - Réalisation de tests de charge
 
-   Phase 6 : Finalisation et documentation
+   Phase 6 : Finalisation, documentation et déploiement
    - Gestion des erreurs et logging
    - Conteneurisation avec Docker
-   - Rédaction de la documentation utilisateur et développeur
+   - Rédaction complète de la documentation :
+     * Documentation du code avec Rust Doc
+     * README détaillé du projet
+     * Guide d'utilisation pour les utilisateurs finaux
+     * Documentation API pour les développeurs
+   - Intégration de la génération de documentation dans le pipeline CI/CD
+   - Préparation du déploiement et des instructions d'installation
 
 7. Conteneurisation :
    - Création d'un Dockerfile pour l'application
@@ -88,3 +94,10 @@
     - Gestion sécurisée des secrets (par exemple, avec `dotenv` pour le développement)
     - Mise en place d'une politique de mise à jour régulière des dépendances
     - Implémentation de la limitation de débit (rate limiting) pour les requêtes entrantes
+
+12. Documentation :
+    - Utilisation de Rust Doc pour la documentation du code
+    - Création d'un README détaillé pour le projet
+    - Rédaction d'un guide d'utilisation pour les utilisateurs finaux
+    - Mise en place d'une documentation API pour les développeurs
+    - Intégration de la génération de documentation dans le processus de CI/CD
