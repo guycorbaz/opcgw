@@ -68,7 +68,7 @@ pub struct Application {
         response.result.into_iter().map(|app: ApplicationListItem| Application {
             id: app.id,
             name: app.name,
-            description: app.description,
+            description: app.description.unwrap_or_default(),
             tenant_id: app.tenant_id,
             // Mappez d'autres champs ici
         }).collect()
