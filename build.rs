@@ -24,7 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "proto/chirpstack/google/api/annotations.proto",
                 "proto/chirpstack/google/api/http.proto",
             ],
-            &["proto/chirpstack"],
+            &["proto"],
         )?;
     Ok(())
 }
