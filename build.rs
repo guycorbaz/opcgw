@@ -1,11 +1,8 @@
-use std::env;
-use std::path::PathBuf;
+use std::io::Result;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+fn main() -> Result<()> {
     tonic_build::configure()
-        .build_server(false)
-        .file_descriptor_set_path(out_dir.join("chirpstack_descriptor.bin"))
+        .build_server(true)
         .compile(
             &[
                 "proto/chirpstack/api/device.proto",
@@ -18,11 +15,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "proto/chirpstack/api/gateway.proto",
                 "proto/chirpstack/api/tenant.proto",
                 "proto/chirpstack/api/relay.proto",
-                "proto/chirpstack/common/common.proto",
-                "proto/chirpstack/gw/gw.proto",
-                "proto/chirpstack/integration/integration.proto",
-                "proto/chirpstack/google/api/annotations.proto",
-                "proto/chirpstack/google/api/http.proto",
             ],
             &["proto"],
         )?;
