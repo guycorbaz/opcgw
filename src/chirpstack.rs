@@ -64,6 +64,8 @@ pub struct Application {
     pub tenant_id: String,
     // Ajoutez d'autres champs pertinents ici
 }
+
+impl Application {
     fn convert_to_applications(&self, response: ListApplicationsResponse) -> Vec<Application> {
         response.result.into_iter().map(|app: ApplicationListItem| Application {
             id: app.id,
@@ -73,3 +75,4 @@ pub struct Application {
             // Mappez d'autres champs ici
         }).collect()
     }
+}
