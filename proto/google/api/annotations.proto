@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package google.api;
+
+import "google/protobuf/descriptor.proto";
+
+option go_package = "google.golang.org/genproto/googleapis/api/annotations;annotations";
+option java_multiple_files = true;
+option java_outer_classname = "AnnotationsProto";
+option java_package = "com.google.api";
+option objc_class_prefix = "GAPI";
+
+extend google.protobuf.MethodOptions {
+  // See `HttpRule`.
+  HttpRule http = 72295728;
+}
+
+// `HttpRule` defines the mapping of an RPC method to one or more HTTP
+// REST API methods. The mapping specifies how different parts of the RPC
+// request message are mapped to URL path, URL query parameters, and
+// HTTP request body. The mapping is typically specified as an
+// `google.api.http` annotation on the RPC method,
+// see "google/api/annotations.proto" for details.
+//
+// The mapping consists of a field specifying the path template and
+// method kind, followed by an optional `body` field specifying the
+// HTTP request body. The field name for the path template and method
+// kind is one of the following:
+//
+// - get
+// - put
+// - post
+// - delete
+// - patch
+//
+// The path template can use placeholders of the form `{field_name}`, which
+// will be filled with the value of the corresponding field in the request
+// message. If the field referred to by the placeholder is repeated, the
+// placeholder will be replaced with the list of values of that field,
+// separated by commas.
+message HttpRule {
+  // Selects methods to which this rule applies.
+  //
+  // Refer to [selector][google.api.DocumentationRule.selector] for syntax details.
+  string selector = 1;
+
+  // Determines the URL pattern is matched by this rules. This pattern can be
+  // used with any of the {get|put|post|delete|patch} methods. A custom method
+  // can be defined using the 'custom' field.
+  oneof pattern {
+    // Used for listing and getting information about resources.
+    string get = 2;
+
+    // Used for updating a resource.
+    string put = 3;
+
+    // Used for creating a resource.
+    string post = 4;
+
+    // Used for deleting a resource.
+    string delete = 5;
+
+    // Used for updating a resource.
+    string patch = 6;
+
+    // The custom pattern is used for specifying an HTTP method that is not
+    // included in the `pattern` field, such as HEAD, or "*" to leave the
+    // HTTP method unspecified for this rule. The wild-card rule is useful
+    // for services that provide content to Web (HTML) clients.
+    CustomHttpPattern custom = 8;
+  }
+
+  // The name of the request field whose value is mapped to the HTTP body, or
+  // `*` for mapping all fields not captured by the path pattern to the HTTP
+  // body. NOTE: the referred field must not be a repeated field and must be
+  // present at the top-level of request message type.
+  string body = 7;
+
+  // Additional HTTP bindings for the selector. Nested bindings must
+  // not contain an `additional_bindings` field themselves (that is,
+  // the nesting may only be one level deep).
+  repeated HttpRule additional_bindings = 11;
+}
+
+// A custom pattern is used for defining custom HTTP verb.
+message CustomHttpPattern {
+  // The name of this custom HTTP verb.
+  string kind = 1;
+
+  // The path matched by this custom verb.
+  string path = 2;
+}

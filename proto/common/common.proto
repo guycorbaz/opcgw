@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+package common;
+
+option go_package = "github.com/chirpstack/chirpstack/api/go/v4/common";
+option java_package = "io.chirpstack.api";
+option java_multiple_files = true;
+option java_outer_classname = "CommonProto";
+option rust_package = "chirpstack_api_common";
+
+enum Modulation {
+    LORA = 0;
+    FSK = 1;
+    LR_FHSS = 2;
+}
+
+enum Region {
+    EU868 = 0;
+    US915 = 1;
+    CN779 = 2;
+    EU433 = 3;
+    AU915 = 4;
+    CN470 = 5;
+    AS923 = 6;
+    AS923_2 = 7;
+    AS923_3 = 8;
+    AS923_4 = 9;
+    KR920 = 10;
+    IN865 = 11;
+    RU864 = 12;
+    ISM2400 = 13;
+}
+
+enum MType {
+    JOIN_REQUEST = 0;
+    JOIN_ACCEPT = 1;
+    UNCONFIRMED_DATA_UP = 2;
+    UNCONFIRMED_DATA_DOWN = 3;
+    CONFIRMED_DATA_UP = 4;
+    CONFIRMED_DATA_DOWN = 5;
+    REJOIN_REQUEST = 6;
+    PROPRIETARY = 7;
+}
+
+message Location {
+    // Latitude
+    double latitude = 1;
+
+    // Longitude
+    double longitude = 2;
+
+    // Altitude
+    double altitude = 3;
+
+    // Source of the location information
+    string source = 4;
+
+    // Accuracy of the location
+    uint32 accuracy = 5;
+}
+
+message KeyEnvelope {
+    // KEK label.
+    string kek_label = 1;
+
+    // AES key (encrypted).
+    bytes aes_key = 2;
+}
+
+enum DeviceClass {
+    CLASS_A = 0;
+    CLASS_B = 1;
+    CLASS_C = 2;
+}
+
+message JoinServerContext {
+    // AppSKey envelope.
+    KeyEnvelope app_s_key = 1;
+
+    // NwkSKey envelope.
+    KeyEnvelope nwk_s_key = 2;
+}
+
+enum Aggregation {
+    HOUR = 0;
+    DAY = 1;
+    MONTH = 2;
+}
+
+enum Metric {
+    METRIC_UNKNOWN = 0;
+    RX_PACKET = 1;
+    GW_RX_PACKET = 2;
+    TX_PACKET = 3;
+    GW_TX_PACKET = 4;
+    TX_PACKET_PER_FREQ = 5;
+    RX_PACKET_PER_FREQ = 6;
+    RX_PACKET_PER_DR = 7;
+    TX_PACKET_PER_DR = 8;
+    RX_PACKET_PER_STATUS = 9;
+}

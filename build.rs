@@ -6,6 +6,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .build_server(false)
         .file_descriptor_set_path(out_dir.join("chirpstack_descriptor.bin"))
-        .compile(&["proto/chirpstack/api/device.proto"], &["proto"])?;
+        .compile(
+            &[
+                "proto/chirpstack/api/device.proto",
+                "proto/common/common.proto",
+                "proto/google/api/annotations.proto",
+            ],
+            &["proto"],
+        )?;
     Ok(())
 }
