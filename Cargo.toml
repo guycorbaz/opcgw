@@ -10,3 +10,9 @@ tokio = { version = "1.36.0", features = ["full"] }
 thiserror = "1.0"
 log = "0.4"
 env_logger = "0.10.0"
+tonic = "0.10"
+prost = "0.12"
+tonic-build = "0.10"
+
+[build-dependencies]
+tonic-build = "0.10"
