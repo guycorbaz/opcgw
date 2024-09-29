@@ -8,11 +8,13 @@ use crate::utils::AppError;
 
 // Importation des types générés
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
-use chirpstack_api::api::{GetDeviceRequest, Device};
+use chirpstack_api::api::application_service_client::ApplicationServiceClient;
+use chirpstack_api::api::{GetDeviceRequest, Device, ListApplicationsRequest, ListApplicationsResponse};
 
 pub struct ChirpstackClient {
     config: ChirpstackConfig,
-    client: DeviceServiceClient<Channel>,
+    device_client: DeviceServiceClient<Channel>,
+    application_client: ApplicationServiceClient<Channel>,
 }
 
 impl ChirpstackClient {
