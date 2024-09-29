@@ -90,7 +90,7 @@ impl ChirpstackClient {
             name: app.name,
             description: app.description.unwrap_or_default(),
             tenant_id: app.tenant_id,
-            // Mappez d'autres champs ici
+            // Map other fields here if needed
         }).collect()
     }
 
