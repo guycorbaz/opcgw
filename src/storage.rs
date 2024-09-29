@@ -30,7 +30,7 @@ impl Storage {
         self.metrics.get(key)
     }
 
-    pub fn send_command(&self, command: String) -> Result<(), mpsc::error::SendError<String>> {
-        self.command_queue.try_send(command)
-    }
+    //pub fn send_command(&self, command: String) -> Result<(), tokio::sync::mpsc::error::SendError<String>> {
+    //    self.command_queue.try_send(command)
+    //}
 }

@@ -9,7 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .compile(
             &[
                 "proto/chirpstack/api/device.proto",
-                "proto/common/common.proto",
+                "proto/chirpstack/common/common.proto",
                 "proto/google/api/annotations.proto",
             ],
             &["proto"],
