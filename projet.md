@@ -9,26 +9,26 @@ L'architecture du projet sera composée des modules suivants :
    - Initialisation de la configuration
    - Lancement des composants principaux
 
-2. **Module de Configuration** (`config/mod.rs`)
+2. **Module de Configuration** (`config.rs`)
    - Chargement et gestion de la configuration
    - Utilisation de `config-rs` pour le parsing TOML et les variables d'environnement
 
-3. **Module ChirpStack** (`chirpstack/mod.rs`)
+3. **Module ChirpStack** (`chirpstack.rs`)
    - Client gRPC pour la communication avec ChirpStack
    - Gestion des connexions et reconnexions
    - Traitement des données reçues de ChirpStack
 
-4. **Module OPC UA** (`opc_ua/mod.rs`)
+4. **Module OPC UA** (`opc_ua.rs`)
    - Serveur OPC UA
    - Modélisation des données ChirpStack dans l'espace d'adressage OPC UA
    - Gestion de la sécurité OPC UA
 
-5. **Module de Stockage** (`storage/mod.rs`)
+5. **Module de Stockage** (`storage.rs`)
    - Gestion du stockage en mémoire des métriques
    - File d'attente pour les commandes
    - Interface pour la persistance optionnelle
 
-6. **Module Utilitaire** (`utils/mod.rs`)
+6. **Module Utilitaire** (`utils.rs`)
    - Fonctions et structures utilitaires communes
    - Gestion des erreurs personnalisées
    - Configuration du logging
