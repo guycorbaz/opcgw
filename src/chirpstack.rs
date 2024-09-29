@@ -55,17 +55,6 @@ impl ChirpstackClient {
         Ok(applications)
     }
 
-    // Ajoutez ici d'autres méthodes pour interagir avec ChirpStack
-}
-pub struct Application {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub tenant_id: String,
-    // Ajoutez d'autres champs pertinents ici
-}
-
-impl Application {
     fn convert_to_applications(&self, response: ListApplicationsResponse) -> Vec<Application> {
         response.result.into_iter().map(|app: ApplicationListItem| Application {
             id: app.id,
@@ -75,4 +64,14 @@ impl Application {
             // Mappez d'autres champs ici
         }).collect()
     }
+
+    // Ajoutez ici d'autres méthodes pour interagir avec ChirpStack
+}
+
+pub struct Application {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub tenant_id: String,
+    // Ajoutez d'autres champs pertinents ici
 }
