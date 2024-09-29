@@ -13,7 +13,7 @@ option php_metadata_namespace = "GPBMetadata\\Chirpstack\\Api";
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/empty.proto";
 import "common/common.proto";
-import "api/user.proto";
+import "chirpstack/api/user.proto";
 
 // InternalService is the service providing API endpoints for internal usage.
 service InternalService {

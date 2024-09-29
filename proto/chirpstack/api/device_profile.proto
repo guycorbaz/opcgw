@@ -13,7 +13,7 @@ option php_metadata_namespace = "GPBMetadata\\Chirpstack\\Api";
 import "google/api/annotations.proto";
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/empty.proto";
-import "chirpstack/common/common.proto";
+import "common/common.proto";
 
 enum CodecRuntime {
   // None.

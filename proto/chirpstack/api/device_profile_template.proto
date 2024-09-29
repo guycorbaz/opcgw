@@ -14,7 +14,7 @@ import "google/api/annotations.proto";
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/empty.proto";
 import "common/common.proto";
-import "api/device_profile.proto";
+import "chirpstack/api/device_profile.proto";
 
 // DeviceProfileTemplateService is the service providing API methods for managing device-profile templates.
 service DeviceProfileTemplateService {

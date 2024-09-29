@@ -10,7 +10,7 @@ option csharp_namespace = "Chirpstack.Api";
 option php_namespace = "Chirpstack\\Api";
 option php_metadata_namespace = "GPBMetadata\\Chirpstack\\Api";
 
-import "chirpstack/common/common.proto";
+import "common/common.proto";
 import "google/api/annotations.proto";
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";
