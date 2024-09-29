@@ -7,6 +7,7 @@
 use tonic::{transport::Channel, Request};
 use crate::config::ChirpstackConfig;
 use crate::utils::AppError;
+use log::{info,warn,error,debug};
 
 // Importation des types générés
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
@@ -35,6 +36,7 @@ impl ChirpstackClient {
     /// Un `Result` contenant soit le `ChirpstackClient` créé, soit une `AppError`.
     pub async fn new(config: ChirpstackConfig) -> Result<Self, AppError> {
         // Créez une connexion au serveur ChirpStack
+        debug!("new");
         let channel = Channel::from_shared(config.server_address.clone())
             .unwrap()
             .connect()
@@ -58,6 +60,7 @@ impl ChirpstackClient {
     ///
     /// Un `Result` contenant soit un vecteur d'`Application`, soit une `AppError`.
     pub async fn list_applications(&self) -> Result<Vec<Application>, AppError> {
+        debug!("Get list of applications");
         let request = Request::new(ListApplicationsRequest {
             limit: 100,  // Vous pouvez ajuster cette valeur selon vos besoins
             offset: 0,
@@ -85,10 +88,12 @@ impl ChirpstackClient {
     ///
     /// Un vecteur d'`Application`.
     fn convert_to_applications(&self, response: ListApplicationsResponse) -> Vec<Application> {
+        debug!("convert_to_application");
         response.result.into_iter().map(|app: ApplicationListItem| Application {
             id: app.id,
             name: app.name,
             description: app.description,
+            tenant_id: "0".to_string(), //TODO: add the correct tenant id
             // Map other fields here if needed
         }).collect()
     }
@@ -104,5 +109,7 @@ pub struct Application {
     pub name: String,
     /// Description de l'application.
     pub description: String,
+    /// Denant id auquel l'application est liée.
+    pub tenant_id: String,
     // Ajoutez d'autres champs pertinents ici
 }

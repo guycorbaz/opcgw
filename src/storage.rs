@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use tokio::sync::mpsc;
+use log::{info, warn, error, debug};
 
 pub struct Storage {
     metrics: HashMap<String, String>,
@@ -12,6 +13,7 @@ pub struct Storage {
 
 impl Storage {
     pub fn new() -> (Self, mpsc::Receiver<String>) {
+        debug!("new");
         let (tx, rx) = mpsc::channel(100);
         (
             Storage {
@@ -23,10 +25,12 @@ impl Storage {
     }
 
     pub fn store_metric(&mut self, key: String, value: String) {
+        debug!("store");
         self.metrics.insert(key, value);
     }
 
     pub fn get_metric(&self, key: &str) -> Option<&String> {
+        debug!("get");
         self.metrics.get(key)
     }
 

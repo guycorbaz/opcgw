@@ -5,6 +5,7 @@
 
 use config::{Config, ConfigError, Environment, File};
 use serde::Deserialize;
+use log::{info, warn, error, debug};
 
 /// Configuration pour la connexion à ChirpStack.
 #[derive(Debug, Deserialize)]
@@ -44,6 +45,7 @@ impl AppConfig {
     ///
     /// Retourne un `Result` contenant soit la configuration chargée, soit une erreur de configuration.
     pub fn new() -> Result<Self, ConfigError> {
+        debug!("new");
         let config_path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config".to_string());
         
         let s = Config::builder()

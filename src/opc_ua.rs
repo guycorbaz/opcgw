@@ -3,6 +3,7 @@
 //! Ce module gère la création et le fonctionnement du serveur OPC UA.
 
 use crate::config::OpcUaConfig;
+use log::{info, warn, error, debug};
 
 pub struct OpcUaServer {
     config: OpcUaConfig,
@@ -10,10 +11,12 @@ pub struct OpcUaServer {
 
 impl OpcUaServer {
     pub fn new(config: OpcUaConfig) -> Self {
+        debug!("new");
         OpcUaServer { config }
     }
 
     pub fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
+        debug!("start");
         // Implémentez ici la logique de démarrage du serveur OPC UA
         Ok(())
     }
