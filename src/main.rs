@@ -6,7 +6,7 @@ mod utils;
 
 // Inclure le module généré
 pub mod chirpstack_api {
-    tonic::include_proto!("chirpstack");
+    //tonic::include_proto!("chirpstack");
 }
 
 use config::AppConfig;
