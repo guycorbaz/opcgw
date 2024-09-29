@@ -88,7 +88,7 @@ impl ChirpstackClient {
         response.result.into_iter().map(|app: ApplicationListItem| Application {
             id: app.id,
             name: app.name,
-            description: app.description.unwrap_or_else(String::new),
+            description: app.description.unwrap_or_default(),
             // Map other fields here if needed
         }).collect()
     }
