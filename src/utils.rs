@@ -3,8 +3,12 @@
 //! Ce module contient des fonctions et des structures utilitaires communes à l'application.
 
 use thiserror::Error;
-use log::{LevelFilter, SetLoggerError};
-use env_logger::Builder;
+use log::LevelFilter;
+use log4rs::{
+    append::file::FileAppender,
+    config::{Appender, Config, Root},
+    encode::pattern::PatternEncoder,
+};
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -18,11 +22,16 @@ pub enum AppError {
     StorageError(String),
 }
 
-pub fn setup_logger() -> Result<(), SetLoggerError> {
-    Builder::new()
-        .filter(None, LevelFilter::Info)
-        .format_timestamp_secs()
-        .init();
+pub fn setup_logger() -> Result<(), log4rs::Error> {
+    let logfile = FileAppender::builder()
+        .encoder(Box::new(PatternEncoder::new("{d} - {l} - {m}\n")))
+        .build("log/output.log")?;
+
+    let config = Config::builder()
+        .appender(Appender::builder().build("logfile", Box::new(logfile)))
+        .build(Root::builder().appender("logfile").build(LevelFilter::Info))?;
+
+    log4rs::init_config(config)?;
     Ok(())
 }
 

@@ -14,18 +14,19 @@ use chirpstack::ChirpstackClient;
 use opc_ua::OpcUaServer;
 use storage::Storage;
 use utils::setup_logger;
+use log::{info, error};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Configurer le logger
-    setup_logger()?;
+    setup_logger().expect("Failed to set up logger");
 
     // Charger la configuration
     let config = AppConfig::new().expect("Failed to load configuration");
     
-    println!("ChirpStack to OPC UA Gateway");
-    println!("ChirpStack server: {}", config.chirpstack.server_address);
-    println!("OPC UA server: {}", config.opcua.server_url);
+    info!("ChirpStack to OPC UA Gateway");
+    info!("ChirpStack server: {}", config.chirpstack.server_address);
+    info!("OPC UA server: {}", config.opcua.server_url);
 
     // Initialiser les composants
     let chirpstack_client = ChirpstackClient::new(config.chirpstack).await?;
