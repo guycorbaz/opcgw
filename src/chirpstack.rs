@@ -45,7 +45,7 @@ impl ChirpstackClient {
             tenant_id: String::new(),
         });
 
-        let response = self.application_client
+        let response = &self.application_client
             .list(request)
             .await
             .map_err(|e| AppError::ChirpStackError(format!("Erreur lors de la récupération des applications: {}", e)))?;
