@@ -24,31 +24,34 @@ impl ChirpstackClient {
             .unwrap()
             .connect()
             .await
-            .map_err(|e| {AppError::ChirpStackError(format!("Erreur de connexion: {}", e))
-                
-            })?;
+            .map_err(|e| AppError::ChirpStackError(format!("Erreur de connexion: {}", e)))?;
 
-        // Créez le client gRPC
-        let client = DeviceServiceClient::new(channel);
+        // Créez les clients gRPC
+        let device_client = DeviceServiceClient::new(channel.clone());
+        let application_client = ApplicationServiceClient::new(channel);
 
         Ok(ChirpstackClient { 
             config,
-            client,
+            device_client,
+            application_client,
         })
     }
 
-    //pub async fn get_device(&self, dev_eui: &str) -> Result<Device, AppError> {
-    //    let request = Request::new(GetDeviceRequest {
-    //        dev_eui: dev_eui.to_string(),
-    //    });
+    pub async fn list_applications(&self) -> Result<ListApplicationsResponse, AppError> {
+        let request = Request::new(ListApplicationsRequest {
+            limit: 100,  // Vous pouvez ajuster cette valeur selon vos besoins
+            offset: 0,
+            search: String::new(),
+            tenant_id: String::new(),
+        });
 
-    //    let response = self.client
-    //        .get_device(request)
-    //        .await
-    //        .map_err(|e| AppError::ChirpStackError(format!("Erreur lors de la récupération du device: {}", e)))?;
+        let response = self.application_client
+            .list(request)
+            .await
+            .map_err(|e| AppError::ChirpStackError(format!("Erreur lors de la récupération des applications: {}", e)))?;
 
-    //    Ok(response.into_inner().device.unwrap())
-    //}
+        Ok(response.into_inner())
+    }
 
     // Ajoutez ici d'autres méthodes pour interagir avec ChirpStack
 }
