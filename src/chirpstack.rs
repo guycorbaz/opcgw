@@ -89,7 +89,6 @@ impl ChirpstackClient {
             id: app.id,
             name: app.name,
             description: app.description.unwrap_or_default(),
-            tenant_id: app.tenant_id,
             // Map other fields here if needed
         }).collect()
     }
@@ -105,7 +104,5 @@ pub struct Application {
     pub name: String,
     /// Description de l'application.
     pub description: String,
-    /// Identifiant du tenant auquel appartient l'application.
-    pub tenant_id: String,
     // Ajoutez d'autres champs pertinents ici
 }
