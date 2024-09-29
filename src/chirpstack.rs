@@ -9,7 +9,7 @@ use crate::utils::AppError;
 // Importation des types générés
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
-use chirpstack_api::api::{GetDeviceRequest, Device, ListApplicationsRequest, ListApplicationsResponse};
+use chirpstack_api::api::{GetDeviceRequest, Device, ListApplicationsRequest, ListApplicationsResponse, ApplicationListItem};
 
 pub struct ChirpstackClient {
     config: ChirpstackConfig,
@@ -37,7 +37,7 @@ impl ChirpstackClient {
         })
     }
 
-    pub async fn list_applications(&self) -> Result<ListApplicationsResponse, AppError> {
+    pub async fn list_applications(&self) -> Result<Vec<Application>, AppError> {
         let request = Request::new(ListApplicationsRequest {
             limit: 100,  // Vous pouvez ajuster cette valeur selon vos besoins
             offset: 0,
@@ -51,8 +51,25 @@ impl ChirpstackClient {
             .await
             .map_err(|e| AppError::ChirpStackError(format!("Erreur lors de la récupération des applications: {}", e)))?;
 
-        Ok(response.into_inner())
+        let applications = self.convert_to_applications(response.into_inner());
+        Ok(applications)
     }
 
     // Ajoutez ici d'autres méthodes pour interagir avec ChirpStack
 }
+pub struct Application {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub tenant_id: String,
+    // Ajoutez d'autres champs pertinents ici
+}
+    fn convert_to_applications(&self, response: ListApplicationsResponse) -> Vec<Application> {
+        response.result.into_iter().map(|app: ApplicationListItem| Application {
+            id: app.id,
+            name: app.name,
+            description: app.description,
+            tenant_id: app.tenant_id,
+            // Mappez d'autres champs ici
+        }).collect()
+    }
