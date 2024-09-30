@@ -66,7 +66,7 @@ impl ChirpstackClient {
         };
 
         // Créez les clients gRPC avec l'intercepteur
-        let device_client = DeviceServiceClient::with_interceptor(channel.clone(), auth_interceptor.clone());
+        let device_client = DeviceServiceClient::with_interceptor(channel.clone(), auth_interceptor);
         let application_client = ApplicationServiceClient::with_interceptor(channel, auth_interceptor);
 
         Ok(ChirpstackClient { 
