@@ -26,6 +26,7 @@ pub struct ChirpstackClient {
 }
 
 // Définition de l'intercepteur pour l'authentification
+#[derive(Clone)]
 struct AuthInterceptor {
     api_token: String,
 }
