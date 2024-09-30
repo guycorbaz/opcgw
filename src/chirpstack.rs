@@ -89,7 +89,7 @@ impl ChirpstackClient {
     ///
     /// Un vecteur d'`Application`.
     fn convert_to_applications(&self, response: ListApplicationsResponse) -> Vec<Application> {
-        debug!("convert_to_application");
+        debug!("convert_to_applications");
         
         response.result.into_iter().map(|app: ApplicationListItem| Application {
             id: app.id,
