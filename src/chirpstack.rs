@@ -41,11 +41,11 @@ impl ChirpstackClient {
             .unwrap()
             .connect()
             .await
-            .map_err(|e| AppError::ChirpStackError(format!("Erreur de connexion: {}", e)))?;
+            .map_err(|e| AppError::ChirpStackError(format!("Connexion error: {}", e)))?;
 
         // Créez les clients gRPC
         let device_client = DeviceServiceClient::new(channel.clone());
-        let application_client = ApplicationServiceClient::new(channel);
+        let application_client = ApplicationServiceClient::new(channel.clone());
 
         Ok(ChirpstackClient { 
             config,
@@ -56,24 +56,31 @@ impl ChirpstackClient {
 
     /// Liste les applications disponibles sur le serveur ChirpStack.
     ///
+    /// # Arguments
+    ///
+    /// * `tenand_id` - L'id du tenant qui contient les applications
+    ///
     /// # Retourne
     ///
     /// Un `Result` contenant soit un vecteur d'`Application`, soit une `AppError`.
-    pub async fn list_applications(&self) -> Result<Vec<Application>, AppError> {
+    pub async fn list_applications(&self, tenant_id :String) -> Result<Vec<Application>, AppError> {
         debug!("Get list of applications");
+        debug!("Create request");
         let request = Request::new(ListApplicationsRequest {
             limit: 100,  // Vous pouvez ajuster cette valeur selon vos besoins
             offset: 0,
             search: String::new(),
-            tenant_id: String::new(),
+            tenant_id: tenant_id,
         });
-
+        debug!("Request created with: {:?}", request);
+        
+        debug!("Send equest");
         let response = self.application_client
             .clone()
             .list(request)
             .await
             .map_err(|e| AppError::ChirpStackError(format!("Erreur when collecting application list: {}", e)))?;
-
+        debug!("Convert result");
         let applications = self.convert_to_applications(response.into_inner());
         Ok(applications)
     }
