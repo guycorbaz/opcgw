@@ -4,7 +4,7 @@
 //! Il fournit une interface pour effectuer des opérations sur les applications
 //! et les appareils via l'API gRPC de ChirpStack.
 
-use tonic::{transport::Channel, Request, service::Interceptor};
+use tonic::{transport::Channel, Request};
 use crate::config::ChirpstackConfig;
 use crate::utils::AppError;
 use log::{info,warn,error,debug};
@@ -36,7 +36,7 @@ impl ChirpstackClient {
     /// Un `Result` contenant soit le `ChirpstackClient` créé, soit une `AppError`.
     pub async fn new(config: ChirpstackConfig) -> Result<Self, AppError> {
         // Créez une connexion au serveur ChirpStack
-        debug!("new");
+        debug!("new {:?}", config);
         let channel = Channel::from_shared(config.server_address.clone())
             .unwrap()
             .connect()
