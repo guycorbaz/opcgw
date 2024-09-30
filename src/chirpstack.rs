@@ -72,7 +72,7 @@ impl ChirpstackClient {
             .clone()
             .list(request)
             .await
-            .map_err(|e| AppError::ChirpStackError(format!("Erreur lors de la récupération des applications: {}", e)))?;
+            .map_err(|e| AppError::ChirpStackError(format!("Erreur when collecting application list: {}", e)))?;
 
         let applications = self.convert_to_applications(response.into_inner());
         Ok(applications)

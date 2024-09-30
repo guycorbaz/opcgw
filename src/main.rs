@@ -34,11 +34,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let chirpstack_client = ChirpstackClient::new(config.chirpstack).await?;
     match chirpstack_client.list_applications().await {
         Ok(applications) => {
-            println!("Liste des applications:");
-            chirpstack::print_list(&applications);
+            debug!("Print list of applications");
+            chirpstack::print_list(&applications)
         },
-        Err(e) => error!("Erreur lors de la récupération des applications: {}", e),
+        Err(e) => error!("Error when collecting applications: {}",e),
     }
+    
+    
+    //chirpstack::print_list(&applications); //TODO: remove: for debugging purpose
     //let opc_ua_server = OpcUaServer::new(config.opcua); TODO: uncoment
     //let (storage, command_receiver) = Storage::new(); TODO: uncoment
 
