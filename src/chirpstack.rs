@@ -4,7 +4,7 @@
 //! Il fournit une interface pour effectuer des opérations sur les applications
 //! et les appareils via l'API gRPC de ChirpStack.
 
-use tonic::{transport::Channel, Request};
+use tonic::{transport::Channel, Request, service::Interceptor};
 use crate::config::ChirpstackConfig;
 use crate::utils::AppError;
 use log::{info,warn,error,debug};
@@ -42,6 +42,7 @@ impl ChirpstackClient {
             .connect()
             .await
             .map_err(|e| AppError::ChirpStackError(format!("Connexion error: {}", e)))?;
+
 
         // Créez les clients gRPC
         let device_client = DeviceServiceClient::new(channel.clone());
