@@ -77,6 +77,7 @@ impl ChirpstackClient {
         let applications = self.convert_to_applications(response.into_inner());
         Ok(applications)
     }
+    
 
     /// Convertit la réponse de l'API en un vecteur d'`Application`.
     ///
@@ -89,11 +90,11 @@ impl ChirpstackClient {
     /// Un vecteur d'`Application`.
     fn convert_to_applications(&self, response: ListApplicationsResponse) -> Vec<Application> {
         debug!("convert_to_application");
+        
         response.result.into_iter().map(|app: ApplicationListItem| Application {
             id: app.id,
             name: app.name,
             description: app.description,
-            tenant_id: "0".to_string(), //TODO: add the correct tenant id
             // Map other fields here if needed
         }).collect()
     }
@@ -102,6 +103,7 @@ impl ChirpstackClient {
 }
 
 /// Structure représentant une application ChirpStack.
+#[derive(Debug)]
 pub struct Application {
     /// Identifiant unique de l'application.
     pub id: String,
@@ -109,7 +111,21 @@ pub struct Application {
     pub name: String,
     /// Description de l'application.
     pub description: String,
-    /// Denant id auquel l'application est liée.
-    pub tenant_id: String,
-    // Ajoutez d'autres champs pertinents ici
 }
+
+
+/// Affiche la liste des applications sur la console
+///
+/// # Arguments
+///
+/// `list` - La liste des éléments à imprimer
+///
+/// # Retourne
+///
+/// .
+pub fn print_list<T: std::fmt::Display>(list: &Vec<T>) {
+    for element in list {
+        println!("Element: ");
+    }
+}
+
