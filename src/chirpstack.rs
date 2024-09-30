@@ -123,9 +123,9 @@ pub struct Application {
 /// # Retourne
 ///
 /// .
-pub fn print_list<T: std::fmt::Display>(list: &Vec<T>) {
-    for element in list {
-        println!("Element: ");
+pub fn print_list(list: &Vec<Application>) {
+    for app in list {
+        println!("ID: {}, Nom: {}, Description: {}", app.id, app.name, app.description);
     }
 }
 
