@@ -4,7 +4,8 @@
 //! Il fournit une interface pour effectuer des opérations sur les applications
 //! et les appareils via l'API gRPC de ChirpStack.
 
-use tonic::{transport::Channel, Request};
+use tonic::{transport::Channel, Request, Status};
+use tonic::service::Interceptor;
 use crate::config::ChirpstackConfig;
 use crate::utils::AppError;
 use log::{info,warn,error,debug};
@@ -22,6 +23,21 @@ pub struct ChirpstackClient {
     config: ChirpstackConfig,
     device_client: DeviceServiceClient<Channel>,
     application_client: ApplicationServiceClient<Channel>,
+}
+
+// Définition de l'intercepteur pour l'authentification
+struct AuthInterceptor {
+    api_token: String,
+}
+
+impl Interceptor for AuthInterceptor {
+    fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {}", self.api_token).parse().unwrap(),
+        );
+        Ok(request)
+    }
 }
 
 impl ChirpstackClient {
@@ -43,10 +59,14 @@ impl ChirpstackClient {
             .await
             .map_err(|e| AppError::ChirpStackError(format!("Connexion error: {}", e)))?;
 
+        // Créez l'intercepteur d'authentification
+        let auth_interceptor = AuthInterceptor {
+            api_token: config.api_token.clone(),
+        };
 
-        // Créez les clients gRPC
-        let device_client = DeviceServiceClient::new(channel.clone());
-        let application_client = ApplicationServiceClient::new(channel.clone());
+        // Créez les clients gRPC avec l'intercepteur
+        let device_client = DeviceServiceClient::with_interceptor(channel.clone(), auth_interceptor.clone());
+        let application_client = ApplicationServiceClient::with_interceptor(channel, auth_interceptor);
 
         Ok(ChirpstackClient { 
             config,
