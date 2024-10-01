@@ -24,4 +24,32 @@ pub async fn test_chirpstack(chirpstack_client: ChirpstackClient) {
         },
         Err(e) => error!("Error when collecting devices: {}", e),
     }
+
+    pub async fn get_device_metrics(&self, dev_eui: String) -> Result<DeviceMetrics, AppError> {
+        debug!("Get device metrics for DevEUI: {}", dev_eui);
+        let request = Request::new(GetDeviceRequest {
+            dev_eui,
+        });
+
+        match self.device_client.get(request).await {
+            Ok(response) => {
+                let device = response.into_inner();
+                Ok(DeviceMetrics {
+                    dev_eui: device.dev_eui,
+                    battery_level: device.device_status.battery_level,
+                    margin: device.device_status.margin,
+                    // Ajoutez d'autres métriques selon vos besoins
+                })
+            },
+            Err(e) => Err(AppError::ChirpStackError(format!("Failed to get device metrics: {}", e))),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct DeviceMetrics {
+    pub dev_eui: String,
+    pub battery_level: u32,
+    pub margin: i32,
+    // Ajoutez d'autres champs de métriques selon vos besoins
 }
