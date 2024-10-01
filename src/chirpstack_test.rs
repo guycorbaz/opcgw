@@ -18,7 +18,7 @@ pub async fn test_chirpstack( chirpstack_client: ChirpstackClient) {
     }
 
     // Get the list of devices
-    match chirpstack_client.list_devices("ae2012c2-75a1-407d-98ab-1520fb511edf".to_string()).await {
+    match chirpstack_client.list_devices("194f12ab-d0ab-4389-a446-f1b3e7152b07".to_string()).await {
         Ok(devices) => {
             debug!("Print list of devices");
             chirpstack::print_dev_list(&devices);
