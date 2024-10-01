@@ -1,5 +1,7 @@
 mod config;
 mod chirpstack;
+
+mod chirpstack_test;
 mod opc_ua;
 mod storage;
 mod utils;
@@ -14,6 +16,7 @@ use chirpstack::ChirpstackClient;
 use opc_ua::OpcUaServer;
 use storage::Storage;
 use log::{info, warn, error, debug};
+use crate::chirpstack_test::test_chirpstack;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -32,25 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialiser les composants
     let chirpstack_client = ChirpstackClient::new(config.chirpstack).await?;
-
-    // Get the list of applications TODO: remove after testing
-    match chirpstack_client.list_applications("52f14cd4-c6f1-4fbd-8f87-4025e1d49242".to_string()).await {
-        Ok(applications) => {
-            debug!("Print list of applications");
-            chirpstack::print_app_list(&applications)
-        },
-        Err(e) => error!("Error when collecting applications: {}",e),
-    }
-
-    // Get the list of devices TODO: remove after testing
-    match chirpstack_client.list_devices("ae2012c2-75a1-407d-98ab-1520fb511edf".to_string()).await {
-        Ok(devices) => {
-            debug!("Print list of devices");
-            chirpstack::print_dev_list(&devices);
-        },
-        Err(e) => error!("Error when collecting devices: {}",e),
-    }
-    
+    test_chirpstack(chirpstack_client).await; //TODO: Remove: for testing only
     
     //chirpstack::print_list(&applications); //TODO: remove: for debugging purpose
     //let opc_ua_server = OpcUaServer::new(config.opcua); TODO: uncoment
