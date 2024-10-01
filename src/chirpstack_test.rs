@@ -1,7 +1,7 @@
 
 use crate::config::ChirpstackConfig;
 use crate::chirpstack;
-use crate::chirpstack::ChirpstackClient;
+use crate::chirpstack::{ChirpstackClient, DeviceMetrics};
 use log::{debug, error, info, warn};
 
 /// Test function for ChirpStack operations
@@ -21,6 +21,16 @@ pub async fn test_chirpstack(chirpstack_client: ChirpstackClient) {
         Ok(devices) => {
             debug!("Print list of devices");
             chirpstack::print_dev_list(&devices);
+
+            // Test get_device_metrics for the first device in the list
+            if let Some(first_device) = devices.first() {
+                match chirpstack_client.get_device_metrics(first_device.dev_eui.clone()).await {
+                    Ok(metrics) => {
+                        debug!("Device metrics: {:?}", metrics);
+                    },
+                    Err(e) => error!("Error when getting device metrics: {}", e),
+                }
+            }
         },
         Err(e) => error!("Error when collecting devices: {}", e),
     }
