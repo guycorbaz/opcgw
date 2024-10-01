@@ -89,14 +89,14 @@ impl ChirpstackClient {
     /// # Retourne
     ///
     /// Un `Result` contenant soit un vecteur d'`Application`, soit une `AppError`.
-    pub async fn list_applications(&self, tenant_id: String) -> Result<Vec<ApplicationDetail>, AppError> {
+    pub async fn list_applications(&self) -> Result<Vec<ApplicationDetail>, AppError> {
         debug!("Get list of applications");
         debug!("Create request");
         let request = Request::new(ListApplicationsRequest {
             limit: 100, // Vous pouvez ajuster cette valeur selon vos besoins
             offset: 0,
             search: String::new(),
-            tenant_id: tenant_id,
+            tenant_id: self.config.tenant_id.clone(), // We work on only one tenant defined in parameter file
         });
         debug!("Request created with: {:?}", request);
 
@@ -141,6 +141,8 @@ impl ChirpstackClient {
 
 
     }
+
+
 
     /// Convertit la réponse de l'API en un vecteur d'`Application`.
     ///
@@ -201,6 +203,7 @@ pub struct DeviceDetail {
     pub name: String,
     pub description: String,
 }
+
 
 /// Affiche la liste des applications sur la console
 ///

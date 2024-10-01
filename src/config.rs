@@ -14,6 +14,7 @@ pub struct ChirpstackConfig {
     pub server_address: String,
     /// Token API pour l'authentification auprès de ChirpStack.
     pub api_token: String,
+    pub tenant_id: String,
 }
 
 /// Configuration pour le serveur OPC UA.
@@ -70,6 +71,7 @@ mod tests {
         
         assert_eq!(config.chirpstack.server_address, "localhost:8080");
         assert_eq!(config.chirpstack.api_token, "test_token");
+        assert_eq!(config.chirpstack.tenant_id, "tenant_id");
         assert_eq!(config.opcua.server_url, "opc.tcp://localhost:4840");
         assert_eq!(config.opcua.server_name, "ChirpStack OPC UA Server");
     }
