@@ -20,7 +20,7 @@ use crate::chirpstack_test::test_chirpstack;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Configurer le logger
+    // Configure logger
     log4rs::init_file("log4rs.yaml", Default::default()).unwrap();
     info!("Starting opc ua chirpstack gateway");
 
@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //info!("OPC UA server: {}", config.opcua.server_url); TODO: uncoment
     //info!("OPC UA server name: {}", config.opcua.server_name); TODO: uncoment
 
-    // Initialiser les composants
+    // Initialize components
     let chirpstack_client = ChirpstackClient::new(config.chirpstack).await?;
     test_chirpstack(chirpstack_client).await; //TODO: Remove: for testing only
     
@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //let opc_ua_server = OpcUaServer::new(config.opcua); TODO: uncoment
     //let (storage, command_receiver) = Storage::new(); TODO: uncoment
 
-    // Démarrer le serveur OPC UA
+    // Start OPC UA server
     //debug!("Start OPC UA server");
     //opc_ua_server.start()?; TODO:uncoment
 

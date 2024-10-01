@@ -1,8 +1,8 @@
-//! Module pour la communication avec ChirpStack.
+//! Module for communication with ChirpStack.
 //!
-//! Ce module gère la connexion et l'interaction avec le serveur ChirpStack.
-//! Il fournit une interface pour effectuer des opérations sur les applications
-//! et les appareils via l'API gRPC de ChirpStack.
+//! This module manages the connection and interaction with the ChirpStack server.
+//! It provides an interface to perform operations on applications
+//! and devices via the ChirpStack gRPC API.
 
 use crate::config::ChirpstackConfig;
 use crate::utils::AppError;
@@ -10,16 +10,16 @@ use log::{debug, error, info, warn};
 use tonic::service::{interceptor, Interceptor};
 use tonic::{transport::Channel, Request, Status};
 
-// Importation des types générés
+// Import generated types
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
 use chirpstack_api::api::{ApplicationListItem, Device, DeviceListItem, GetDeviceRequest, ListApplicationsRequest, ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse};
 use tonic::codegen::InterceptedService;
 
-/// Structure représentant un client ChirpStack.
+/// Structure representing a ChirpStack client.
 ///
-/// Cette structure encapsule la configuration et les clients gRPC nécessaires
-/// pour interagir avec l'API ChirpStack.
+/// This structure encapsulates the configuration and the gRPC clients needed
+/// to interact with the ChirpStack API.
 pub struct ChirpstackClient {
     config: ChirpstackConfig,
     //device_client: DeviceServiceClient<Channel>,
@@ -28,7 +28,7 @@ pub struct ChirpstackClient {
     application_client: ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>,
 }
 
-// Définition de l'intercepteur pour l'authentification
+// Definition of the interceptor for authentication
 #[derive(Clone)]
 struct AuthInterceptor {
     api_token: String,
@@ -45,15 +45,18 @@ impl Interceptor for AuthInterceptor {
 }
 
 impl ChirpstackClient {
-    /// Crée une nouvelle instance de `ChirpstackClient`.
+    pub fn config(&self) -> &ChirpstackConfig {
+        &self.config
+    }
+    /// Creates a new instance of `ChirpstackClient`.
     ///
     /// # Arguments
     ///
-    /// * `config` - La configuration ChirpStack à utiliser pour la connexion.
+    /// * `config` - The ChirpStack configuration to use for the connection.
     ///
-    /// # Retourne
+    /// # Returns
     ///
-    /// Un `Result` contenant soit le `ChirpstackClient` créé, soit une `AppError`.
+    /// A `Result` containing either the created `ChirpstackClient` or an `AppError`.
     pub async fn new(config: ChirpstackConfig) -> Result<Self, AppError> {
         // Create a connexion to server
         debug!("new {:?}", config);
@@ -80,15 +83,15 @@ impl ChirpstackClient {
         })
     }
 
-    /// Liste les applications disponibles sur le serveur ChirpStack.
+    /// Lists the applications available on the ChirpStack server.
     ///
     /// # Arguments
     ///
-    /// * `tenand_id` - L'id du tenant qui contient les applications
+    /// * `tenand_id` - The ID of the tenant containing the applications
     ///
-    /// # Retourne
+    /// # Returns
     ///
-    /// Un `Result` contenant soit un vecteur d'`Application`, soit une `AppError`.
+    /// A `Result` containing either a vector of `Application`, or an `AppError`.
     pub async fn list_applications(&self) -> Result<Vec<ApplicationDetail>, AppError> {
         debug!("Get list of applications");
         debug!("Create request");
@@ -144,15 +147,15 @@ impl ChirpstackClient {
 
 
 
-    /// Convertit la réponse de l'API en un vecteur d'`Application`.
+    /// Converts the API response into a vector of `Application`.
     ///
     /// # Arguments
     ///
-    /// * `response` - La réponse de l'API contenant la liste des applications.
+    /// * `response` - The API response containing the list of applications.
     ///
-    /// # Retourne
+    /// # Returns
     ///
-    /// Un vecteur d'`Application`.
+    /// A vector of `Application`.
     fn convert_to_applications(&self, response: ListApplicationsResponse) -> Vec<ApplicationDetail> {
         debug!("convert_to_applications");
 
@@ -189,11 +192,11 @@ impl ChirpstackClient {
 /// Structure représentant une application ChirpStack.
 #[derive(Debug)]
 pub struct ApplicationDetail {
-    /// Identifiant unique de l'application.
+    /// Unique application identifier
     pub id: String,
-    /// Nom de l'application.
+    /// Application name
     pub name: String,
-    /// Description de l'application.
+    /// Application description
     pub description: String,
 }
 
@@ -204,14 +207,26 @@ pub struct DeviceDetail {
     pub description: String,
 }
 
+#[derive(Debug)]
+pub struct DeviceStatusDetail {
+    pub margin: i32,
+    pub external_power_source: bool,
+    pub battery_level: f32,
+}
 
-/// Affiche la liste des applications sur la console
+#[derive(Debug)]
+pub struct DeviceStateDetail {
+    pub name: String,
+    pub value: String,
+}
+
+/// Prints the list of applications to the console
 ///
 /// # Arguments
 ///
-/// `list` - La liste des éléments à imprimer
+/// `list` - The list of applications to print
 ///
-/// # Retourne
+/// # Returns
 ///
 /// .
 pub fn print_app_list(list: &Vec<ApplicationDetail>) {
@@ -223,6 +238,15 @@ pub fn print_app_list(list: &Vec<ApplicationDetail>) {
     }
 }
 
+/// Prints the list of deices to the console
+///
+/// # Arguments
+///
+/// `list` - The list of devices to print
+///
+/// # Returns
+///
+/// .
 pub fn print_dev_list(list: &Vec<DeviceDetail>) {
     for dev in list {
         println!(
