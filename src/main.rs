@@ -34,8 +34,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //info!("OPC UA server name: {}", config.opcua.server_name); TODO: uncoment
 
     // Initialize components
-    let chirpstack_client = ChirpstackClient::new(config.chirpstack).await?;
-    test_chirpstack(chirpstack_client).await; //TODO: Remove: for testing only
+    let mut chirpstack_client = ChirpstackClient::new(config.chirpstack).await?;
+    test_chirpstack(&mut chirpstack_client).await; //TODO: Remove: for testing only
     
     //chirpstack::print_list(&applications); //TODO: remove: for debugging purpose
     //let opc_ua_server = OpcUaServer::new(config.opcua); TODO: uncoment

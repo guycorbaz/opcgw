@@ -13,20 +13,9 @@ use tonic::{transport::Channel, Request, Status};
 // Import generated types
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
-use chirpstack_api::api::{ApplicationListItem, Device, DeviceListItem, GetDeviceRequest, ListApplicationsRequest, ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse};
+use chirpstack_api::api::{ApplicationListItem, Device, DeviceListItem, ListApplicationsRequest, ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse, GetDeviceRequest};
 use tonic::codegen::InterceptedService;
 
-/// Structure representing a ChirpStack client.
-///
-/// This structure encapsulates the configuration and the gRPC clients needed
-/// to interact with the ChirpStack API.
-pub struct ChirpstackClient {
-    config: ChirpstackConfig,
-    //device_client: DeviceServiceClient<Channel>,
-    device_client: DeviceServiceClient<InterceptedService<Channel, AuthInterceptor>>,
-    //application_client: ApplicationServiceClient<Channel>,
-    application_client: ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>,
-}
 
 // Definition of the interceptor for authentication
 #[derive(Clone)]
@@ -43,6 +32,20 @@ impl Interceptor for AuthInterceptor {
         Ok(request)
     }
 }
+
+/// Structure representing a ChirpStack client.
+///
+/// This structure encapsulates the configuration and the gRPC clients needed
+/// to interact with the ChirpStack API.
+pub struct ChirpstackClient {
+    config: ChirpstackConfig,
+    //device_client: DeviceServiceClient<Channel>,
+    device_client: DeviceServiceClient<InterceptedService<Channel, AuthInterceptor>>,
+    //application_client: ApplicationServiceClient<Channel>,
+    application_client: ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>,
+}
+
+
 
 impl ChirpstackClient {
     pub fn config(&self) -> &ChirpstackConfig {
@@ -141,8 +144,25 @@ impl ChirpstackClient {
             debug!("Convert result");
             let devices: Vec<DeviceDetail> = self.convert_to_devices(response.into_inner());
             Ok(devices)
+    }
 
+    pub async fn get_device_metrics(&mut self, dev_eui: String) -> Result<DeviceMetrics, AppError> {
+        debug!("Get device metrics for device {dev_eui}");
+        let request = Request::new(GetDeviceRequest {
+            dev_eui,
+        });
 
+        match self.device_client.get(request).await {
+            Ok(response) => {
+                let device = response.into_inner();
+                Ok(DeviceMetrics {
+                    dev_eui: "test".to_string(),    //TODO: change to correct value
+                    battery_level: device.device_status.unwrap().battery_level,
+                    margin: device.device_status.unwrap().margin,
+                })
+            },
+            Err(e) => Err(AppError::ChirpStackError(format!("Error getting device metrics: {}", e))),
+        }
     }
 
 
@@ -189,7 +209,7 @@ impl ChirpstackClient {
     // Ajoutez ici d'autres méthodes pour interagir avec ChirpStack
 }
 
-/// Structure représentant une application ChirpStack.
+/// Structure representing a chirpstack application.
 #[derive(Debug)]
 pub struct ApplicationDetail {
     /// Unique application identifier
@@ -208,50 +228,16 @@ pub struct DeviceDetail {
 }
 
 #[derive(Debug)]
-pub struct DeviceStatusDetail {
-    pub margin: i32,
-    pub external_power_source: bool,
-    pub battery_level: f32,
-}
-
-#[derive(Debug)]
 pub struct DeviceStateDetail {
     pub name: String,
     pub value: String,
 }
 
-/// Prints the list of applications to the console
-///
-/// # Arguments
-///
-/// `list` - The list of applications to print
-///
-/// # Returns
-///
-/// .
-pub fn print_app_list(list: &Vec<ApplicationDetail>) {
-    for app in list {
-        println!(
-            "ID: {}, Nom: {}, Description: {}",
-            app.id, app.name, app.description
-        );
-    }
+#[derive(Debug)]
+pub struct DeviceMetrics {
+    pub dev_eui: String,
+    pub battery_level: f32,
+    pub margin: i32,
 }
 
-/// Prints the list of deices to the console
-///
-/// # Arguments
-///
-/// `list` - The list of devices to print
-///
-/// # Returns
-///
-/// .
-pub fn print_dev_list(list: &Vec<DeviceDetail>) {
-    for dev in list {
-        println!(
-            "euid: {}, Nom: {}, Description: {}",
-            dev.dev_eui, dev.name, dev.description
-        );
-    }
-}
+
