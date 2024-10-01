@@ -13,10 +13,7 @@ use tonic::{transport::Channel, Request, Status};
 // Importation des types générés
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
-use chirpstack_api::api::{
-    ApplicationListItem, Device, GetDeviceRequest, ListApplicationsRequest,
-    ListApplicationsResponse,
-};
+use chirpstack_api::api::{ApplicationListItem, Device, DeviceListItem, GetDeviceRequest, ListApplicationsRequest, ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse};
 use tonic::codegen::InterceptedService;
 
 /// Structure représentant un client ChirpStack.
@@ -92,7 +89,7 @@ impl ChirpstackClient {
     /// # Retourne
     ///
     /// Un `Result` contenant soit un vecteur d'`Application`, soit une `AppError`.
-    pub async fn list_applications(&self, tenant_id: String) -> Result<Vec<Application>, AppError> {
+    pub async fn list_applications(&self, tenant_id: String) -> Result<Vec<ApplicationDetail>, AppError> {
         debug!("Get list of applications");
         debug!("Create request");
         let request = Request::new(ListApplicationsRequest {
@@ -110,11 +107,39 @@ impl ChirpstackClient {
             .list(request)
             .await
             .map_err(|e| {
-                AppError::ChirpStackError(format!("Erreur when collecting application list: {}", e))
+                AppError::ChirpStackError(format!("Error when collecting application list: {}", e))
             })?;
         debug!("Convert result");
         let applications = self.convert_to_applications(response.into_inner());
         Ok(applications)
+    }
+
+    pub async fn list_devices(&self, application_id: String) -> Result<Vec<DeviceDetail>, AppError> {
+        debug!("Get list of devices");
+        debug!("Create request");
+        let request = Request::new(ListDevicesRequest {
+            limit: 100,
+            offset: 0,
+            search: String::new(),
+            application_id: application_id,
+            multicast_group_id: String::new(),
+        });
+        debug!("Request created with: {:?}", request);
+
+        debug!("Send request");
+        let response= self
+            .device_client
+            .clone()
+            .list(request)
+            .await
+            .map_err(|e: Status| {
+                AppError::ChirpStackError(format!("Error when collecting devices list: {e}"))
+            })?;
+            debug!("Convert result");
+            let devices: Vec<DeviceDetail> = self.convert_to_devices(response.into_inner());
+            Ok(devices)
+
+
     }
 
     /// Convertit la réponse de l'API en un vecteur d'`Application`.
@@ -126,16 +151,31 @@ impl ChirpstackClient {
     /// # Retourne
     ///
     /// Un vecteur d'`Application`.
-    fn convert_to_applications(&self, response: ListApplicationsResponse) -> Vec<Application> {
+    fn convert_to_applications(&self, response: ListApplicationsResponse) -> Vec<ApplicationDetail> {
         debug!("convert_to_applications");
 
         response
             .result
             .into_iter()
-            .map(|app: ApplicationListItem| Application {
+            .map(|app: ApplicationListItem| ApplicationDetail {
                 id: app.id,
                 name: app.name,
                 description: app.description,
+                // Map other fields here if needed
+            })
+            .collect()
+    }
+
+    fn convert_to_devices(&self, response: ListDevicesResponse) -> Vec<DeviceDetail> {
+        debug!("convert_to_devices");
+
+        response
+            .result
+            .into_iter()
+            .map(|dev:DeviceListItem| DeviceDetail {
+                dev_eui: dev.dev_eui,
+                name: dev.name,
+                description: dev.description,
                 // Map other fields here if needed
             })
             .collect()
@@ -146,12 +186,19 @@ impl ChirpstackClient {
 
 /// Structure représentant une application ChirpStack.
 #[derive(Debug)]
-pub struct Application {
+pub struct ApplicationDetail {
     /// Identifiant unique de l'application.
     pub id: String,
     /// Nom de l'application.
     pub name: String,
     /// Description de l'application.
+    pub description: String,
+}
+
+#[derive(Debug)]
+pub struct DeviceDetail {
+    pub dev_eui: String,
+    pub name: String,
     pub description: String,
 }
 
@@ -164,11 +211,20 @@ pub struct Application {
 /// # Retourne
 ///
 /// .
-pub fn print_list(list: &Vec<Application>) {
+pub fn print_app_list(list: &Vec<ApplicationDetail>) {
     for app in list {
         println!(
             "ID: {}, Nom: {}, Description: {}",
             app.id, app.name, app.description
+        );
+    }
+}
+
+pub fn print_dev_list(list: &Vec<DeviceDetail>) {
+    for dev in list {
+        println!(
+            "euid: {}, Nom: {}, Description: {}",
+            dev.dev_eui, dev.name, dev.description
         );
     }
 }
