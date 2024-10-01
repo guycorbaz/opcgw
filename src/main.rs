@@ -32,7 +32,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialiser les composants
     let chirpstack_client = ChirpstackClient::new(config.chirpstack).await?;
-    match chirpstack_client.list_applications().await {
+
+    // Get the list of applications TODO: remove after testing
+    match chirpstack_client.list_applications("52f14cd4-c6f1-4fbd-8f87-4025e1d49242".to_string()).await {
         Ok(applications) => {
             debug!("Print list of applications");
             chirpstack::print_list(&applications)

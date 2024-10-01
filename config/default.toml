@@ -1,7 +1,6 @@
 [chirpstack]
 server_address = "http://192.168.1.12:8080"
-api_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJjaGlycHN0YWNrIiwiaXNzIjoiY2hpcnBzdGFjayIsInN1YiI6IjMwOWMxNmNmLWQ3ZDEtNDkxYS1hZWQ5LTMxNmYzNWI4OTZjYiIsInR5cCI6ImtleSJ9.eecxwbJlmCa6DBev2XWsKeJ83dbScd27IWM9-rX3hxM"
-
+api_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJjaGlycHN0YWNrIiwiaXNzIjoiY2hpcnBzdGFjayIsInN1YiI6ImY5MGIzNmM1LTNkMTAtNGY1YS05NTQ4LWZhNmFlMDllYzE5ZSIsInR5cCI6ImtleSJ9.j9sCvXaMhS1gzJBOhG0lYvN83NVTW6htQssHfQ79Mgo"
 [opcua]
 server_url = "opc.tcp://localhost:4840"
 server_name = "ChirpStack OPC UA Server"

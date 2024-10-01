@@ -1,28 +1,34 @@
 //! Module pour la communication avec ChirpStack.
-//! 
+//!
 //! Ce module gère la connexion et l'interaction avec le serveur ChirpStack.
 //! Il fournit une interface pour effectuer des opérations sur les applications
 //! et les appareils via l'API gRPC de ChirpStack.
 
-use tonic::{transport::Channel, Request, Status};
-use tonic::service::Interceptor;
 use crate::config::ChirpstackConfig;
 use crate::utils::AppError;
-use log::{info,warn,error,debug};
+use log::{debug, error, info, warn};
+use tonic::service::{interceptor, Interceptor};
+use tonic::{transport::Channel, Request, Status};
 
 // Importation des types générés
-use chirpstack_api::api::device_service_client::DeviceServiceClient;
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
-use chirpstack_api::api::{GetDeviceRequest, Device, ListApplicationsRequest, ListApplicationsResponse, ApplicationListItem};
+use chirpstack_api::api::device_service_client::DeviceServiceClient;
+use chirpstack_api::api::{
+    ApplicationListItem, Device, GetDeviceRequest, ListApplicationsRequest,
+    ListApplicationsResponse,
+};
+use tonic::codegen::InterceptedService;
 
 /// Structure représentant un client ChirpStack.
-/// 
+///
 /// Cette structure encapsule la configuration et les clients gRPC nécessaires
 /// pour interagir avec l'API ChirpStack.
 pub struct ChirpstackClient {
     config: ChirpstackConfig,
-    device_client: DeviceServiceClient<Channel>,
-    application_client: ApplicationServiceClient<Channel>,
+    //device_client: DeviceServiceClient<Channel>,
+    device_client: DeviceServiceClient<InterceptedService<Channel, AuthInterceptor>>,
+    //application_client: ApplicationServiceClient<Channel>,
+    application_client: ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>,
 }
 
 // Définition de l'intercepteur pour l'authentification
@@ -52,7 +58,7 @@ impl ChirpstackClient {
     ///
     /// Un `Result` contenant soit le `ChirpstackClient` créé, soit une `AppError`.
     pub async fn new(config: ChirpstackConfig) -> Result<Self, AppError> {
-        // Créez une connexion au serveur ChirpStack
+        // Create a connexion to server
         debug!("new {:?}", config);
         let channel = Channel::from_shared(config.server_address.clone())
             .unwrap()
@@ -60,16 +66,17 @@ impl ChirpstackClient {
             .await
             .map_err(|e| AppError::ChirpStackError(format!("Connexion error: {}", e)))?;
 
-        // Créez l'intercepteur d'authentification
-        let auth_interceptor = AuthInterceptor {
+
+        let interceptor = AuthInterceptor {
             api_token: config.api_token.clone(),
         };
 
-        // Créez les clients gRPC avec l'intercepteur
-        let device_client = DeviceServiceClient::with_interceptor(channel.clone(), auth_interceptor);
-        let application_client = ApplicationServiceClient::with_interceptor(channel, auth_interceptor);
+        //let device_client = DeviceServiceClient::new(channel.clone());
+        //let application_client = ApplicationServiceClient::new(channel.clone());
+        let device_client = DeviceServiceClient::with_interceptor(channel.clone(), interceptor.clone());
+        let application_client = ApplicationServiceClient::with_interceptor(channel, interceptor.clone());
 
-        Ok(ChirpstackClient { 
+        Ok(ChirpstackClient {
             config,
             device_client,
             application_client,
@@ -85,28 +92,30 @@ impl ChirpstackClient {
     /// # Retourne
     ///
     /// Un `Result` contenant soit un vecteur d'`Application`, soit une `AppError`.
-    pub async fn list_applications(&self, tenant_id :String) -> Result<Vec<Application>, AppError> {
+    pub async fn list_applications(&self, tenant_id: String) -> Result<Vec<Application>, AppError> {
         debug!("Get list of applications");
         debug!("Create request");
         let request = Request::new(ListApplicationsRequest {
-            limit: 100,  // Vous pouvez ajuster cette valeur selon vos besoins
+            limit: 100, // Vous pouvez ajuster cette valeur selon vos besoins
             offset: 0,
             search: String::new(),
             tenant_id: tenant_id,
         });
         debug!("Request created with: {:?}", request);
-        
-        debug!("Send equest");
-        let response = self.application_client
+
+        debug!("Send request");
+        let response = self
+            .application_client
             .clone()
             .list(request)
             .await
-            .map_err(|e| AppError::ChirpStackError(format!("Erreur when collecting application list: {}", e)))?;
+            .map_err(|e| {
+                AppError::ChirpStackError(format!("Erreur when collecting application list: {}", e))
+            })?;
         debug!("Convert result");
         let applications = self.convert_to_applications(response.into_inner());
         Ok(applications)
     }
-    
 
     /// Convertit la réponse de l'API en un vecteur d'`Application`.
     ///
@@ -119,13 +128,17 @@ impl ChirpstackClient {
     /// Un vecteur d'`Application`.
     fn convert_to_applications(&self, response: ListApplicationsResponse) -> Vec<Application> {
         debug!("convert_to_applications");
-        
-        response.result.into_iter().map(|app: ApplicationListItem| Application {
-            id: app.id,
-            name: app.name,
-            description: app.description,
-            // Map other fields here if needed
-        }).collect()
+
+        response
+            .result
+            .into_iter()
+            .map(|app: ApplicationListItem| Application {
+                id: app.id,
+                name: app.name,
+                description: app.description,
+                // Map other fields here if needed
+            })
+            .collect()
     }
 
     // Ajoutez ici d'autres méthodes pour interagir avec ChirpStack
@@ -142,7 +155,6 @@ pub struct Application {
     pub description: String,
 }
 
-
 /// Affiche la liste des applications sur la console
 ///
 /// # Arguments
@@ -154,7 +166,9 @@ pub struct Application {
 /// .
 pub fn print_list(list: &Vec<Application>) {
     for app in list {
-        println!("ID: {}, Nom: {}, Description: {}", app.id, app.name, app.description);
+        println!(
+            "ID: {}, Nom: {}, Description: {}",
+            app.id, app.name, app.description
+        );
     }
 }
-
