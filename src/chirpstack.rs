@@ -156,7 +156,11 @@ impl ChirpstackClient {
             Ok(response) => {
                 let device = response.into_inner();
                 Ok(DeviceMetrics {
-                    dev_eui: "test".to_string(),    //TODO: change to correct value
+                    dev_eui: device.device.clone().unwrap().dev_eui,
+                    name: device.device.clone().unwrap().name,
+                    application_id: device.device.clone().unwrap().application_id,
+                    is_disabled: device.device.clone().unwrap().is_disabled,
+                    description: device.device.clone().unwrap().description,
                     battery_level: device.device_status.unwrap().battery_level,
                     margin: device.device_status.unwrap().margin,
                 })
@@ -228,14 +232,12 @@ pub struct DeviceDetail {
 }
 
 #[derive(Debug)]
-pub struct DeviceStateDetail {
-    pub name: String,
-    pub value: String,
-}
-
-#[derive(Debug)]
 pub struct DeviceMetrics {
     pub dev_eui: String,
+    pub name: String,
+    pub description: String,
+    pub application_id: String,
+    pub is_disabled: bool,
     pub battery_level: f32,
     pub margin: i32,
 }
