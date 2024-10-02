@@ -4,16 +4,23 @@
 //! It provides an interface to perform operations on applications
 //! and devices via the ChirpStack gRPC API.
 
+use std::collections::HashMap;
+use std::time::{Duration, SystemTime};
 use crate::config::ChirpstackConfig;
 use crate::utils::AppError;
 use log::{debug, error, info, warn};
 use tonic::service::{interceptor, Interceptor};
 use tonic::{transport::Channel, Request, Status};
+use prost_types::Timestamp;
+
 
 // Import generated types
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
+use chirpstack_api::api::{DeviceState, GetDeviceMetricsRequest};
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
-use chirpstack_api::api::{ApplicationListItem, Device, DeviceListItem, ListApplicationsRequest, ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse, GetDeviceRequest};
+use chirpstack_api::api::{ApplicationListItem, Device, DeviceListItem, ListApplicationsRequest, ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse, GetDeviceRequest, GetDeviceMetricsRequest, GetApplicationResponse};
+use chirpstack_api::common::{Metric, MetricDataset};
+use tokio::time::Instant;
 use tonic::codegen::InterceptedService;
 
 
@@ -39,10 +46,10 @@ impl Interceptor for AuthInterceptor {
 /// to interact with the ChirpStack API.
 pub struct ChirpstackClient {
     config: ChirpstackConfig,
-    //device_client: DeviceServiceClient<Channel>,
     device_client: DeviceServiceClient<InterceptedService<Channel, AuthInterceptor>>,
-    //application_client: ApplicationServiceClient<Channel>,
+
     application_client: ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>,
+
 }
 
 
@@ -120,9 +127,10 @@ impl ChirpstackClient {
         Ok(applications)
     }
 
-    pub async fn list_devices(&self, application_id: String) -> Result<Vec<DeviceDetail>, AppError> {
+    pub async fn list_devices(&self, application_id: String) -> Result<Vec<DeviceListDetail>, AppError> {
         debug!("Get list of devices");
         debug!("Create request");
+
         let request = Request::new(ListDevicesRequest {
             limit: 100,
             offset: 0,
@@ -142,12 +150,12 @@ impl ChirpstackClient {
                 AppError::ChirpStackError(format!("Error when collecting devices list: {e}"))
             })?;
             debug!("Convert result");
-            let devices: Vec<DeviceDetail> = self.convert_to_devices(response.into_inner());
+            let devices: Vec<DeviceListDetail> = self.convert_to_devices(response.into_inner());
             Ok(devices)
     }
 
-    pub async fn get_device_metrics(&mut self, dev_eui: String) -> Result<DeviceMetrics, AppError> {
-        debug!("Get device metrics for device {dev_eui}");
+    pub async fn get_device_details(&mut self, dev_eui: String) -> Result<DeviceDetails, AppError> {
+        debug!("Get device details for device {dev_eui}");
         let request = Request::new(GetDeviceRequest {
             dev_eui,
         });
@@ -155,7 +163,7 @@ impl ChirpstackClient {
         match self.device_client.get(request).await {
             Ok(response) => {
                 let device = response.into_inner();
-                Ok(DeviceMetrics {
+                Ok(DeviceDetails {
                     dev_eui: device.device.clone().unwrap().dev_eui,
                     name: device.device.clone().unwrap().name,
                     application_id: device.device.clone().unwrap().application_id,
@@ -163,10 +171,17 @@ impl ChirpstackClient {
                     description: device.device.clone().unwrap().description,
                     battery_level: device.device_status.unwrap().battery_level,
                     margin: device.device_status.unwrap().margin,
+                    variables: device.device.clone().unwrap().variables,
+                    tags: device.device.clone().unwrap().tags,
                 })
             },
             Err(e) => Err(AppError::ChirpStackError(format!("Error getting device metrics: {}", e))),
         }
+    }
+
+    pub async fn get_device_metrics(&mut self, dev_eui: String ) -> Result<DeviceMetric, AppError> {
+        debug!("Get device metrics for device {dev_eui}");
+
     }
 
 
@@ -195,13 +210,13 @@ impl ChirpstackClient {
             .collect()
     }
 
-    fn convert_to_devices(&self, response: ListDevicesResponse) -> Vec<DeviceDetail> {
+    fn convert_to_devices(&self, response: ListDevicesResponse) -> Vec<DeviceListDetail> {
         debug!("convert_to_devices");
 
         response
             .result
             .into_iter()
-            .map(|dev:DeviceListItem| DeviceDetail {
+            .map(|dev:DeviceListItem| DeviceListDetail {
                 dev_eui: dev.dev_eui,
                 name: dev.name,
                 description: dev.description,
@@ -225,14 +240,14 @@ pub struct ApplicationDetail {
 }
 
 #[derive(Debug)]
-pub struct DeviceDetail {
+pub struct DeviceListDetail {
     pub dev_eui: String,
     pub name: String,
     pub description: String,
 }
 
 #[derive(Debug)]
-pub struct DeviceMetrics {
+pub struct DeviceDetails {
     pub dev_eui: String,
     pub name: String,
     pub description: String,
@@ -240,6 +255,14 @@ pub struct DeviceMetrics {
     pub is_disabled: bool,
     pub battery_level: f32,
     pub margin: i32,
+    pub variables: HashMap<String,String>,
+    pub tags: HashMap<String,String>,
+}
+
+
+pub struct DeviceMetric {
+    pub metrics: HashMap<String, Metric>,
+    pub states: HashMap<String, DeviceState>
 }
 
 
