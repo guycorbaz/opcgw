@@ -1,10 +1,10 @@
 //! Module pour le stockage des données.
-//! 
+//!
 //! Ce module gère le stockage en mémoire des métriques et la file d'attente pour les commandes.
 
+use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
-use log::{info, warn, error, debug};
 
 pub struct Storage {
     metrics: HashMap<String, String>,

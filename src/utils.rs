@@ -1,14 +1,14 @@
 //! Module pour les fonctions et structures utilitaires.
-//! 
+//!
 //! Ce module contient des fonctions et des structures utilitaires communes à l'application.
 
-use thiserror::Error;
 use log::LevelFilter;
 use log4rs::{
     append::file::FileAppender,
     config::{Appender, Config, Root},
     encode::pattern::PatternEncoder,
 };
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -21,7 +21,5 @@ pub enum AppError {
     #[error("Erreur de stockage: {0}")]
     StorageError(String),
 }
-
-
 
 // Ajoutez ici d'autres fonctions utilitaires selon les besoins

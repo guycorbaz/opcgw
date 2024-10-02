@@ -1,5 +1,5 @@
-mod config;
 mod chirpstack;
+mod config;
 
 mod chirpstack_test;
 mod opc_ua;
@@ -11,12 +11,12 @@ pub mod chirpstack_api {
     //tonic::include_proto!("chirpstack");
 }
 
-use config::AppConfig;
+use crate::chirpstack_test::test_chirpstack;
 use chirpstack::ChirpstackClient;
+use config::AppConfig;
+use log::{debug, error, info, warn};
 use opc_ua::OpcUaServer;
 use storage::Storage;
-use log::{info, warn, error, debug};
-use crate::chirpstack_test::test_chirpstack;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Charger la configuration
     //debug!("Load configuration");
     let config = AppConfig::new().expect("Failed to load configuration");
-    
+
     info!("ChirpStack to OPC UA Gateway");
     info!("ChirpStack server: {}", config.chirpstack.server_address);
     //info!("OPC UA server: {}", config.opcua.server_url); TODO: uncoment
@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize components
     let mut chirpstack_client = ChirpstackClient::new(config.chirpstack).await?;
     test_chirpstack(&mut chirpstack_client).await; //TODO: Remove: for testing only
-    
+
     //chirpstack::print_list(&applications); //TODO: remove: for debugging purpose
     //let opc_ua_server = OpcUaServer::new(config.opcua); TODO: uncoment
     //let (storage, command_receiver) = Storage::new(); TODO: uncoment

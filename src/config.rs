@@ -1,11 +1,11 @@
 //! Configuration module for the ChirpStack to OPC UA Gateway application.
-//! 
+//!
 //! This module handles loading and structuring the application configuration
 //! from TOML files and environment variables.
 
 use config::{Config, ConfigError, Environment, File};
+use log::{debug, error, info, warn};
 use serde::Deserialize;
-use log::{info, warn, error, debug};
 
 /// Configuration for the ChirpStack connection.
 #[derive(Debug, Deserialize)]
@@ -49,7 +49,7 @@ impl AppConfig {
     pub fn new() -> Result<Self, ConfigError> {
         debug!("Creating new AppConfig");
         let config_path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config".to_string());
-        
+
         let s = Config::builder()
             .add_source(File::with_name(&format!("{}/default", config_path)))
             .add_source(File::with_name(&format!("{}/local", config_path)).required(false))
@@ -69,7 +69,7 @@ mod tests {
     fn test_load_config() {
         env::set_var("CONFIG_PATH", "tests/config");
         let config = AppConfig::new().expect("Failed to load configuration");
-        
+
         assert_eq!(config.chirpstack.server_address, "localhost:8080");
         assert_eq!(config.chirpstack.api_token, "test_token");
         assert_eq!(config.chirpstack.tenant_id, "tenant_id");

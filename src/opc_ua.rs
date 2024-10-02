@@ -1,9 +1,9 @@
 //! Module pour le serveur OPC UA.
-//! 
+//!
 //! Ce module gère la création et le fonctionnement du serveur OPC UA.
 
 use crate::config::OpcUaConfig;
-use log::{info, warn, error, debug};
+use log::{debug, error, info, warn};
 
 pub struct OpcUaServer {
     config: OpcUaConfig,

@@ -18,3 +18,9 @@ prost-types = "0.13.3"
 
 [build-dependencies]
 tonic-build = "0.12"
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3

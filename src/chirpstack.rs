@@ -4,25 +4,26 @@
 //! It provides an interface to perform operations on applications
 //! and devices via the ChirpStack gRPC API.
 
-use std::collections::HashMap;
-use std::time::{Duration, SystemTime};
 use crate::config::ChirpstackConfig;
 use crate::utils::AppError;
 use log::{debug, error, info, warn};
+use prost_types::Timestamp;
+use std::collections::HashMap;
+use std::time::{Duration, SystemTime};
 use tonic::service::{interceptor, Interceptor};
 use tonic::{transport::Channel, Request, Status};
-use prost_types::Timestamp;
-
 
 // Import generated types
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
-use chirpstack_api::api::{DeviceState, GetDeviceMetricsRequest};
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
-use chirpstack_api::api::{ApplicationListItem, Device, DeviceListItem, ListApplicationsRequest, ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse, GetDeviceRequest, GetApplicationResponse};
+use chirpstack_api::api::{
+    ApplicationListItem, Device, DeviceListItem, GetApplicationResponse, GetDeviceRequest,
+    ListApplicationsRequest, ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse,
+};
+use chirpstack_api::api::{DeviceState, GetDeviceMetricsRequest};
 use chirpstack_api::common::{Aggregation, Metric, MetricDataset};
 use tokio::time::Instant;
 use tonic::codegen::InterceptedService;
-
 
 // Definition of the interceptor for authentication
 #[derive(Clone)]
@@ -54,8 +55,6 @@ pub struct ChirpstackClient {
     application_client: ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>,
 }
 
-
-
 impl ChirpstackClient {
     pub fn config(&self) -> &ChirpstackConfig {
         &self.config
@@ -78,15 +77,16 @@ impl ChirpstackClient {
             .await
             .map_err(|e| AppError::ChirpStackError(format!("Connexion error: {}", e)))?;
 
-
         let interceptor = AuthInterceptor {
             api_token: config.api_token.clone(),
         };
 
         //let device_client = DeviceServiceClient::new(channel.clone());
         //let application_client = ApplicationServiceClient::new(channel.clone());
-        let device_client = DeviceServiceClient::with_interceptor(channel.clone(), interceptor.clone());
-        let application_client = ApplicationServiceClient::with_interceptor(channel, interceptor.clone());
+        let device_client =
+            DeviceServiceClient::with_interceptor(channel.clone(), interceptor.clone());
+        let application_client =
+            ApplicationServiceClient::with_interceptor(channel, interceptor.clone());
 
         Ok(ChirpstackClient {
             config,
@@ -129,7 +129,10 @@ impl ChirpstackClient {
         Ok(applications)
     }
 
-    pub async fn list_devices(&self, application_id: String) -> Result<Vec<DeviceListDetail>, AppError> {
+    pub async fn list_devices(
+        &self,
+        application_id: String,
+    ) -> Result<Vec<DeviceListDetail>, AppError> {
         debug!("Get list of devices");
         debug!("Create request");
 
@@ -143,7 +146,7 @@ impl ChirpstackClient {
         debug!("Request created with: {:?}", request);
 
         debug!("Send request");
-        let response= self
+        let response = self
             .device_client
             .clone()
             .list(request)
@@ -151,16 +154,14 @@ impl ChirpstackClient {
             .map_err(|e: Status| {
                 AppError::ChirpStackError(format!("Error when collecting devices list: {e}"))
             })?;
-            debug!("Convert result");
-            let devices: Vec<DeviceListDetail> = self.convert_to_devices(response.into_inner());
-            Ok(devices)
+        debug!("Convert result");
+        let devices: Vec<DeviceListDetail> = self.convert_to_devices(response.into_inner());
+        Ok(devices)
     }
 
     pub async fn get_device_details(&mut self, dev_eui: String) -> Result<DeviceDetails, AppError> {
         debug!("Get device details for device {dev_eui}");
-        let request = Request::new(GetDeviceRequest {
-            dev_eui,
-        });
+        let request = Request::new(GetDeviceRequest { dev_eui });
 
         match self.device_client.get(request).await {
             Ok(response) => {
@@ -176,45 +177,55 @@ impl ChirpstackClient {
                     variables: device.device.clone().unwrap().variables,
                     tags: device.device.clone().unwrap().tags,
                 })
-            },
-            Err(e) => Err(AppError::ChirpStackError(format!("Error getting device metrics: {}", e))),
+            }
+            Err(e) => Err(AppError::ChirpStackError(format!(
+                "Error getting device metrics: {}",
+                e
+            ))),
         }
     }
 
-    pub async fn get_device_metrics(&mut self, dev_eui: String, duration: u64, aggregation: i32) -> Result<DeviceMetric, AppError> {
+    pub async fn get_device_metrics(
+        &mut self,
+        dev_eui: String,
+        duration: u64,
+        aggregation: i32,
+    ) -> Result<DeviceMetric, AppError> {
         debug!("Get device metrics for device {}", dev_eui);
 
         let request = Request::new(GetDeviceMetricsRequest {
             dev_eui: dev_eui.clone(),
             start: Some(Timestamp::from(SystemTime::now())),
-            end: Some(Timestamp::from(SystemTime::now() + Duration::from_secs(duration))),
-            aggregation: aggregation,   //TODO: check this value
+            end: Some(Timestamp::from(
+                SystemTime::now() + Duration::from_secs(duration),
+            )),
+            aggregation: aggregation, //TODO: check this value
         });
 
         match self.device_client.get_metrics(request).await {
             Ok(response) => {
                 let inner_response = response.into_inner();
-                
-                let metrics: HashMap<String, Metric> = inner_response.metrics
+
+                let metrics: HashMap<String, Metric> = inner_response
+                    .metrics
                     .into_iter()
                     .map(|(key, value)| (key, value))
                     .collect();
 
-                let states: HashMap<String, DeviceState> = inner_response.states
+                let states: HashMap<String, DeviceState> = inner_response
+                    .states
                     .into_iter()
                     .map(|(key, value)| (key, value))
                     .collect();
 
-                Ok(DeviceMetric {
-                    metrics,
-                    states,
-                })
-            },
-            Err(e) => Err(AppError::ChirpStackError(format!("Error getting device metrics: {}", e))),
+                Ok(DeviceMetric { metrics, states })
+            }
+            Err(e) => Err(AppError::ChirpStackError(format!(
+                "Error getting device metrics: {}",
+                e
+            ))),
         }
     }
-
-
 
     /// Converts the API response into a vector of `Application`.
     ///
@@ -225,7 +236,10 @@ impl ChirpstackClient {
     /// # Returns
     ///
     /// A vector of `Application`.
-    fn convert_to_applications(&self, response: ListApplicationsResponse) -> Vec<ApplicationDetail> {
+    fn convert_to_applications(
+        &self,
+        response: ListApplicationsResponse,
+    ) -> Vec<ApplicationDetail> {
         debug!("convert_to_applications");
 
         response
@@ -255,7 +269,7 @@ impl ChirpstackClient {
         response
             .result
             .into_iter()
-            .map(|dev:DeviceListItem| DeviceListDetail {
+            .map(|dev: DeviceListItem| DeviceListDetail {
                 dev_eui: dev.dev_eui,
                 name: dev.name,
                 description: dev.description,
@@ -307,18 +321,15 @@ pub struct DeviceDetails {
     /// The signal margin of the device.
     pub margin: i32,
     /// Custom variables associated with the device.
-    pub variables: HashMap<String,String>,
+    pub variables: HashMap<String, String>,
     /// Tags associated with the device.
-    pub tags: HashMap<String,String>,
+    pub tags: HashMap<String, String>,
 }
-
 
 /// Represents metrics and states for a device.
 pub struct DeviceMetric {
     /// A map of metric names to their corresponding Metric objects.
     pub metrics: HashMap<String, Metric>,
     /// A map of state names to their corresponding DeviceState objects.
-    pub states: HashMap<String, DeviceState>
+    pub states: HashMap<String, DeviceState>,
 }
-
-
