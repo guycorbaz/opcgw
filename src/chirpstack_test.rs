@@ -1,7 +1,7 @@
 
 use crate::config::ChirpstackConfig;
 use crate::chirpstack;
-use crate::chirpstack::{ApplicationDetail, ChirpstackClient, DeviceDetail, DeviceMetrics};
+use crate::chirpstack::{ApplicationDetail, ChirpstackClient, DeviceListDetail, DeviceDetails};
 use log::{debug, error, info, warn};
 
 /// Test function for ChirpStack operations
@@ -24,7 +24,7 @@ async fn test_list_devices(chirpstack_client: &mut ChirpstackClient) {
 
             // Test get_device_metrics for the first device in the list
             if let Some(first_device) = devices.first() {
-                match chirpstack_client.get_device_metrics(first_device.dev_eui.clone()).await {
+                match chirpstack_client.get_device_details(first_device.dev_eui.clone()).await {
                     Ok(metrics) => {
                         debug!("Device metrics: {:?}", metrics);
                     },
@@ -49,9 +49,10 @@ async fn test_list_application(chirpstack_client: &mut ChirpstackClient) {
 }
 
 async fn test_get_device_metrics(chirpstack_client: &mut ChirpstackClient) {
-    match chirpstack_client.get_device_metrics("a840414bf185f365".to_string()).await {
-        Ok(devices) => {
-            debug!("Print device data: {:?}", devices)
+    match chirpstack_client.get_device_metrics("a840414bf185f365".to_string(), 3600).await {
+        Ok(device) => {
+            debug!("Device states: {:?}", device.states);
+            debug!("Device metrics: {:?}", device.metrics)
         },
         Err(e) => error!("Error when getting device data: {}",e),
     }
@@ -85,7 +86,7 @@ pub fn print_app_list(list: &Vec<ApplicationDetail>) {
 /// # Returns
 ///
 /// .
-pub fn print_dev_list(list: &Vec<DeviceDetail>) {
+pub fn print_dev_list(list: &Vec<DeviceListDetail>) {
     for dev in list {
         println!(
             "euid: {}, Nom: {}, Description: {}",

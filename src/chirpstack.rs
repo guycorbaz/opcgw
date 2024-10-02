@@ -18,7 +18,7 @@ use prost_types::Timestamp;
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
 use chirpstack_api::api::{DeviceState, GetDeviceMetricsRequest};
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
-use chirpstack_api::api::{ApplicationListItem, Device, DeviceListItem, ListApplicationsRequest, ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse, GetDeviceRequest, GetDeviceMetricsRequest, GetApplicationResponse};
+use chirpstack_api::api::{ApplicationListItem, Device, DeviceListItem, ListApplicationsRequest, ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse, GetDeviceRequest, GetApplicationResponse};
 use chirpstack_api::common::{Metric, MetricDataset};
 use tokio::time::Instant;
 use tonic::codegen::InterceptedService;
@@ -179,11 +179,14 @@ impl ChirpstackClient {
         }
     }
 
-    pub async fn get_device_metrics(&mut self, dev_eui: String) -> Result<DeviceMetric, AppError> {
+    pub async fn get_device_metrics(&mut self, dev_eui: String, duration: u64) -> Result<DeviceMetric, AppError> {
         debug!("Get device metrics for device {}", dev_eui);
 
         let request = Request::new(GetDeviceMetricsRequest {
             dev_eui: dev_eui.clone(),
+            start: Some(Timestamp::from(SystemTime::now())),
+            end: Some(Timestamp::from(SystemTime::now() + Duration::from_secs(duration))),
+            aggregation: 140,   //TODO: check this value
         });
 
         match self.device_client.get_metrics(request).await {

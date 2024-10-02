@@ -10,10 +10,11 @@ use log::{info, warn, error, debug};
 /// Configuration pour la connexion à ChirpStack.
 #[derive(Debug, Deserialize)]
 pub struct ChirpstackConfig {
-    /// Adresse du serveur ChirpStack.
+    /// Chirpstack server address.
     pub server_address: String,
     /// Token API pour l'authentification auprès de ChirpStack.
     pub api_token: String,
+    /// Tenant Id we are working with
     pub tenant_id: String,
 }
 

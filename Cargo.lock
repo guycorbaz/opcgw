@@ -888,6 +888,7 @@ dependencies = [
  "log",
  "log4rs",
  "prost",
+ "prost-types",
  "serde",
  "thiserror",
  "tokio",
