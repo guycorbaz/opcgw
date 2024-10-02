@@ -1,53 +1,53 @@
-//! Module de configuration pour l'application ChirpStack to OPC UA Gateway.
+//! Configuration module for the ChirpStack to OPC UA Gateway application.
 //! 
-//! Ce module gère le chargement et la structure de la configuration de l'application
-//! à partir de fichiers TOML et de variables d'environnement.
+//! This module handles loading and structuring the application configuration
+//! from TOML files and environment variables.
 
 use config::{Config, ConfigError, Environment, File};
 use serde::Deserialize;
 use log::{info, warn, error, debug};
 
-/// Configuration pour la connexion à ChirpStack.
+/// Configuration for the ChirpStack connection.
 #[derive(Debug, Deserialize)]
 pub struct ChirpstackConfig {
-    /// Chirpstack server address.
+    /// ChirpStack server address.
     pub server_address: String,
-    /// Token API pour l'authentification auprès de ChirpStack.
+    /// API token for authentication with ChirpStack.
     pub api_token: String,
-    /// Tenant Id we are working with
+    /// Tenant ID we are working with.
     pub tenant_id: String,
 }
 
-/// Configuration pour le serveur OPC UA.
+/// Configuration for the OPC UA server.
 #[derive(Debug, Deserialize)]
 pub struct OpcUaConfig {
-    /// URL du serveur OPC UA.
+    /// URL of the OPC UA server.
     pub server_url: String,
-    /// Nom du serveur OPC UA.
+    /// Name of the OPC UA server.
     pub server_name: String,
 }
 
-/// Configuration globale de l'application.
+/// Global application configuration.
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
-    /// Configuration spécifique à ChirpStack.
+    /// ChirpStack-specific configuration.
     pub chirpstack: ChirpstackConfig,
-    /// Configuration spécifique au serveur OPC UA.
+    /// OPC UA server-specific configuration.
     pub opcua: OpcUaConfig,
 }
 
 impl AppConfig {
-    /// Crée une nouvelle instance de la configuration de l'application.
+    /// Creates a new instance of the application configuration.
     ///
-    /// Cette méthode charge la configuration à partir de fichiers TOML et de variables d'environnement.
-    /// Elle recherche d'abord un fichier de configuration par défaut, puis un fichier local optionnel,
-    /// et enfin des variables d'environnement préfixées par "APP_".
+    /// This method loads the configuration from TOML files and environment variables.
+    /// It first looks for a default configuration file, then an optional local file,
+    /// and finally environment variables prefixed with "APP_".
     ///
-    /// # Retours
+    /// # Returns
     ///
-    /// Retourne un `Result` contenant soit la configuration chargée, soit une erreur de configuration.
+    /// Returns a `Result` containing either the loaded configuration or a configuration error.
     pub fn new() -> Result<Self, ConfigError> {
-        debug!("new");
+        debug!("Creating new AppConfig");
         let config_path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config".to_string());
         
         let s = Config::builder()
