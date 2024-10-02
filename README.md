@@ -16,7 +16,13 @@ This project implements a gateway between ChirpStack and OPC UA, enabling commun
 
 ## Introduction
 
-[Brief description of the project and its purpose]
+The main goal of the Chirpstack to OPC UA gateway is to allow connecting an SCADA
+to Chirpstack, in order to collect metrics and send commands that will be enqueues
+on the device.
+
+Some SCADA only understand Sparkplug specification. On the other hand, it's rather difficult
+to use, using tenant id, application id or device eui: they are not ver human friendly and can
+easily lead to mistakes which can be quite tricky to identify and solve.
 
 ## Features
 
@@ -25,6 +31,14 @@ This project implements a gateway between ChirpStack and OPC UA, enabling commun
 - Management of device metrics
 - [Other main features]
 
+## Limitations
+Chirpstack propose 5 metric types:
+- Unknown/Unset
+- Counter
+- Absolute
+- Gauge
+- String
+At the time being, only gauge is supported.
 ## Prerequisites
 
 - Rust [version]
