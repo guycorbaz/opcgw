@@ -179,9 +179,34 @@ impl ChirpstackClient {
         }
     }
 
-    pub async fn get_device_metrics(&mut self, dev_eui: String ) -> Result<DeviceMetric, AppError> {
-        debug!("Get device metrics for device {dev_eui}");
+    pub async fn get_device_metrics(&mut self, dev_eui: String) -> Result<DeviceMetric, AppError> {
+        debug!("Get device metrics for device {}", dev_eui);
 
+        let request = Request::new(GetDeviceMetricsRequest {
+            dev_eui: dev_eui.clone(),
+        });
+
+        match self.device_client.get_metrics(request).await {
+            Ok(response) => {
+                let inner_response = response.into_inner();
+                
+                let metrics: HashMap<String, Metric> = inner_response.metrics
+                    .into_iter()
+                    .map(|(key, value)| (key, value))
+                    .collect();
+
+                let states: HashMap<String, DeviceState> = inner_response.states
+                    .into_iter()
+                    .map(|(key, value)| (key, value))
+                    .collect();
+
+                Ok(DeviceMetric {
+                    metrics,
+                    states,
+                })
+            },
+            Err(e) => Err(AppError::ChirpStackError(format!("Error getting device metrics: {}", e))),
+        }
     }
 
 
