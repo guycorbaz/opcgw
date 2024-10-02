@@ -44,12 +44,14 @@ impl Interceptor for AuthInterceptor {
 ///
 /// This structure encapsulates the configuration and the gRPC clients needed
 /// to interact with the ChirpStack API.
+/// Represents a client for interacting with the ChirpStack API.
 pub struct ChirpstackClient {
+    /// Configuration for the ChirpStack connection.
     config: ChirpstackConfig,
+    /// Client for interacting with device-related endpoints.
     device_client: DeviceServiceClient<InterceptedService<Channel, AuthInterceptor>>,
-
+    /// Client for interacting with application-related endpoints.
     application_client: ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>,
-
 }
 
 
@@ -268,28 +270,45 @@ pub struct ApplicationDetail {
 }
 
 #[derive(Debug)]
+/// Represents details of a device in a list format.
 pub struct DeviceListDetail {
+    /// The unique identifier for the device (DevEUI).
     pub dev_eui: String,
+    /// The name of the device.
     pub name: String,
+    /// A description of the device.
     pub description: String,
 }
 
 #[derive(Debug)]
+/// Represents detailed information about a device.
 pub struct DeviceDetails {
+    /// The unique identifier for the device (DevEUI).
     pub dev_eui: String,
+    /// The name of the device.
     pub name: String,
+    /// A description of the device.
     pub description: String,
+    /// The ID of the application this device belongs to.
     pub application_id: String,
+    /// Indicates whether the device is disabled.
     pub is_disabled: bool,
+    /// The current battery level of the device.
     pub battery_level: f32,
+    /// The signal margin of the device.
     pub margin: i32,
+    /// Custom variables associated with the device.
     pub variables: HashMap<String,String>,
+    /// Tags associated with the device.
     pub tags: HashMap<String,String>,
 }
 
 
+/// Represents metrics and states for a device.
 pub struct DeviceMetric {
+    /// A map of metric names to their corresponding Metric objects.
     pub metrics: HashMap<String, Metric>,
+    /// A map of state names to their corresponding DeviceState objects.
     pub states: HashMap<String, DeviceState>
 }
 
