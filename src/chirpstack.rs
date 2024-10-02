@@ -186,7 +186,7 @@ impl ChirpstackClient {
             dev_eui: dev_eui.clone(),
             start: Some(Timestamp::from(SystemTime::now())),
             end: Some(Timestamp::from(SystemTime::now() + Duration::from_secs(duration))),
-            aggregation: 140,   //TODO: check this value
+            aggregation: 1,   //TODO: check this value
         });
 
         match self.device_client.get_metrics(request).await {
