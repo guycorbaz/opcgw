@@ -49,10 +49,10 @@ async fn test_list_application(chirpstack_client: &mut ChirpstackClient) {
 }
 
 async fn test_get_device_metrics(chirpstack_client: &mut ChirpstackClient) {
-    match chirpstack_client.get_device_metrics("a840414bf185f365".to_string(), 3600).await {
+    match chirpstack_client.get_device_metrics("a840414bf185f365".to_string(), 1, 100).await {
         Ok(device) => {
-            debug!("Device states: {:?}", device.states);
-            debug!("Device metrics: {:?}", device.metrics)
+            debug!("Device states: {:#?}", device.states);
+            debug!("Device metrics: {:#?}", device.metrics)
         },
         Err(e) => error!("Error when getting device data: {}",e),
     }
