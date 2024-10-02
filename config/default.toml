@@ -1,7 +1,24 @@
+#
+# Chirpstack server parameters
+#
+
 [chirpstack]
+
+# Server address
 server_address = "http://192.168.1.12:8080"
+# API token defined on the chirpstack server
 api_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJjaGlycHN0YWNrIiwiaXNzIjoiY2hpcnBzdGFjayIsInN1YiI6ImY5MGIzNmM1LTNkMTAtNGY1YS05NTQ4LWZhNmFlMDllYzE5ZSIsInR5cCI6ImtleSJ9.j9sCvXaMhS1gzJBOhG0lYvN83NVTW6htQssHfQ79Mgo"
+# Tenant Id that will be used
 tenant_id = "52f14cd4-c6f1-4fbd-8f87-4025e1d49242"
+
+
+#
+# OPC UA parameters
+#
+
 [opcua]
+# OPC UA server url
 server_url = "opc.tcp://localhost:4840"
+# OPC UA server name
 server_name = "ChirpStack OPC UA Server"
+
