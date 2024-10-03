@@ -20,10 +20,26 @@ tenant_id = "52f14cd4-c6f1-4fbd-8f87-4025e1d49242"
 
 # OPC UA parameters
 [opcua]
+config_file = "config/server.conf"
+# Endpoints
 # OPC UA server url
 server_url = "opc.tcp://localhost:4840"
+
+policy = "http://opcfoundation.org/UA/SecurityPolicy#None"
+mode = "None"
+# Application
+uri = "urn:MyOPCUAServer"
 # OPC UA server name
 server_name = "ChirpStack OPC UA Server"
+system_type = "Server"
+discovery_urls = ""
+# PKI config
+# Use openssl to create key
+# Exemple:
+# - openssl req -newkey rsa:4096 -nodes -keyout server.pem -x509 -days 365 -out server.der -outform DER
+cert_file = "pki/own/certs/server.der"
+private_key_file = "pki/own/private/server.pem"
+
 
 # List of applications that have to be displayed in UPC UA
 [applications]

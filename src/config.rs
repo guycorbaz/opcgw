@@ -9,6 +9,7 @@ use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use crate::utils::OpcGwError;
 use crate::utils::OpcGwError::ConfigurationError;
+use crate::opc_ua::OpcUa;
 
 /// General configuration for the application
 #[derive(Debug, Deserialize)]
@@ -29,10 +30,18 @@ pub struct ChirpstackConfig {
 /// Configuration for the OPC UA server.
 #[derive(Debug, Deserialize)]
 pub struct OpcUaConfig {
+    pub config_file: String,
     /// URL of the OPC UA server.
     pub server_url: String,
+    pub policy: String,
+    pub mode: String,
+    pub uri: String,
     /// Name of the OPC UA server.
     pub server_name: String,
+    pub system_type: String,
+    pub discovery_urls: String, //TODO: change it to a vector to pass several URLs
+    pub cert_file: String,
+    pub private_key_file: String,
 }
 
 #[derive(Debug, Deserialize)]

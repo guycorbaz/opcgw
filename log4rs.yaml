@@ -11,7 +11,7 @@ appenders:
       pattern: "{d} - {l} - {t} - {m}{n}"
 
 root:
-  level: debug
+  level: trace
   appenders:
     - stdout
     - file

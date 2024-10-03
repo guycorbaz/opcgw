@@ -14,14 +14,30 @@ pub mod chirpstack_api {
 use crate::chirpstack_test::test_chirpstack;
 use chirpstack::ChirpstackClient;
 use config::Config;
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
+use opcua::server::server::Server;
 use opc_ua::OpcUa;
 use storage::Storage;
+use tokio::runtime::{Builder, Runtime};
+use std::{path::PathBuf, sync::Arc};
+use opcua::sync::RwLock;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Configure logger
     log4rs::init_file("log4rs.yaml", Default::default()).unwrap();
-    info!("Starting opc ua chirpstack gateway");
+    info!("starting up");
+
+    trace!("Create configuration:");
+    let config = Config::new()?;
+
+    trace!("Create chirpstack server");
+    let chirpstack_server = ChirpstackClient::new(config.chirpstack);
+
+    trace!("Creating opc ua server");
+    let opc_ua_server_config = OpcUa::new(config.opcua);
+    let mut opc_ua_server = Server::new(opc_ua_server_config.server_config);
+
+    // Add opc ua structure
 
     // Create the runtime
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -29,21 +45,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .expect("Failed to create Tokio runtime");
 
-    // Run the async main function
-    runtime.block_on(async {
-        // Charger la configuration
-        let config = Config::new().expect("Failed to load configuration");
-
-        // Initialize components
-        let mut chirpstack_client = ChirpstackClient::new(config.chirpstack).await?;
-        let opc_ua_server = OpcUa::new(config.opcua);
-
-        // Start OPC UA server
-        opc_ua_server.start_server(&runtime).await;
-
-        // Ici, nous ajouterons la logique principale de l'application
-        // Par exemple, une boucle pour traiter les commandes et les données
+    trace!("Run OPC UA server");
+    Server::run_server_on_runtime(
+        runtime,
+        Server::new_server_task(Arc::new(RwLock::new(opc_ua_server))),
+        true
+    );
 
         Ok(())
-    })
+
 }

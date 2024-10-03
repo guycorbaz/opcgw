@@ -12,11 +12,17 @@ use opcua::sync::RwLock;
 
 #[derive(Debug)]
 pub struct OpcUa {
-    config: OpcUaConfig,
-    server_config: ServerConfig,
+    pub config: OpcUaConfig,
+    pub server_config: ServerConfig,
 }
 
+
+
 impl OpcUa {
+
+    pub fn server_config(&self) -> &ServerConfig {
+        &self.server_config
+    }
 
     pub fn new(opc_ua_config: OpcUaConfig) -> Self {
         trace!("New OPC UA server");
@@ -27,18 +33,7 @@ impl OpcUa {
         }
     }
 
-    /// Start opc ua server
-    pub async fn start_server(&self, runtime: &tokio::runtime::Runtime) {
-        trace!("Starting OPC UA server");
-        let mut server = Server::new(self.server_config.clone());
-        trace!("Created OPC UA server");
 
-        Server::run_server_on_runtime(
-            runtime.clone(),
-            Server::new_server_task(Arc::new(RwLock::new(server))),
-            true,
-        );
-    }
 
     fn create_server_config(opc_ua_cfg: &OpcUaConfig) -> ServerConfig {
         trace!("Creating OpcUaConfig with config in: {:#?}",opc_ua_cfg.config_file);

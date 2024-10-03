@@ -199,7 +199,7 @@ impl ChirpstackClient {
             end: Some(Timestamp::from(
                 SystemTime::now() + Duration::from_secs(duration),
             )),
-            aggregation: aggregation, //TODO: check this value
+            aggregation: aggregation,
         });
 
         match self.device_client.get_metrics(request).await {
