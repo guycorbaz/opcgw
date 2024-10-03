@@ -15,7 +15,7 @@ use crate::chirpstack_test::test_chirpstack;
 use chirpstack::ChirpstackClient;
 use config::Config;
 use log::{debug, error, info, warn};
-use opc_ua::OpcUaServer;
+use opc_ua::OpcUa;
 use storage::Storage;
 
 #[tokio::main]
@@ -36,7 +36,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //test_chirpstack(&mut chirpstack_client).await; //TODO: Remove: for testing only
 
     //chirpstack::print_list(&applications); //TODO: remove: for debugging purpose
-    //let opc_ua_server = OpcUaServer::new(config.opcua); TODO: uncoment
+    let opc_ua_server = OpcUa::new(config.opcua);
+    //opc_ua_server.start_server().await;
     //let (storage, command_receiver) = Storage::new(); TODO: uncoment
 
     // Start OPC UA server

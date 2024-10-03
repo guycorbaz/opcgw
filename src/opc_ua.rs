@@ -2,54 +2,58 @@
 //!
 //! Ce module gère la création et le fonctionnement du serveur OPC UA.
 
-use crate::config::OpcUaConfig;
-use log::{debug, error, info, warn};
+use std::{path::PathBuf, sync::Arc};
 use opcua::server::prelude::*;
-use std::sync::Arc;
-use std::path::Path;
-use thiserror::Error;
+use tokio::signal;
+use log::{debug, error, info, warn, trace};
+use tokio::io::AsyncWriteExt;
+use crate::config::OpcUaConfig;
+use opcua::sync::RwLock;
 
-// Définir les erreurs spécifiques pour OpcUaServer
-#[derive(Debug, Error)]
-pub enum OpcUaServerError {
-    #[error("Failed to load server configuration: {0}")]
-    ConfigLoadError(String),
-    #[error("General server error: {0}")]
-    General(String),
-}
-
-pub struct OpcUaServer {
+#[derive(Debug)]
+pub struct OpcUa {
     config: OpcUaConfig,
-    server: Option<Server>,
+    server_config: ServerConfig,
 }
 
-impl OpcUaServer {
-    pub fn new(config: OpcUaConfig) -> Self {
-        debug!("Creating new OPC UA server");
-        OpcUaServer {
-            config,
-            server: None,
+impl OpcUa {
+
+    pub fn new(opc_ua_config: OpcUaConfig) -> Self {
+        trace!("New OPC UA server");
+
+        OpcUa {
+            server_config: OpcUa::create_server_config( &opc_ua_config),
+            config: opc_ua_config
         }
     }
 
-    // TODO: Redesign this method
-    //pub fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-    //    debug!("Starting OPC UA server");
-        
+    /// Start opc ua server
+    pub async fn start_server(&self) {
+        trace!("Started OPC UA server");
+        let mut server = Server::new(self.server_config.clone());
+        trace!("Started OPC UA server");
 
-    //    Ok(())
-    //}
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
 
-    //pub fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-    //    debug!("Stopping OPC UA server");
-    //    if let Some(server) = self.server.take() {
-    //        server.stop();
-    //        info!("OPC UA server stopped successfully");
-    //    } else {
-    //        warn!("OPC UA server was not running");
-    //    }
-    //    Ok(())
-    //}
+        Server::run_server_on_runtime(
+            runtime,
+            Server::new_server_task(Arc::new(RwLock::new(server))),
+            true,
+        );
+    }
 
-    // Ajoutez ici d'autres méthodes pour gérer le serveur OPC UA
+    fn create_server_config(opc_ua_cfg: &OpcUaConfig) -> ServerConfig {
+        trace!("Creating OpcUaConfig with config in: {:#?}",opc_ua_cfg.config_file);
+        let mut config_path = PathBuf::from(&opc_ua_cfg.config_file);
+        let server_config = ServerConfig::load(&mut config_path)
+            .expect("Failed to load server config");  //TODO: Improve error handling
+        server_config
+    }
+
+
 }
+
+
