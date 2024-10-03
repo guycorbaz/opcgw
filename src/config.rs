@@ -7,7 +7,6 @@ use serde::Deserialize;
 use figment::{Figment, providers::{Format, Toml, Env}};
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
-use chirpstack_api::api::Device;
 use crate::utils::OpcGwError;
 use crate::utils::OpcGwError::ConfigurationError;
 

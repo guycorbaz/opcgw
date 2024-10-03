@@ -2,12 +2,7 @@
 //!
 //! Ce module contient des fonctions et des structures utilitaires communes à l'application.
 
-use log::LevelFilter;
-use log4rs::{
-    append::file::FileAppender,
-    config::{Appender, Config, Root},
-    encode::pattern::PatternEncoder,
-};
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]
