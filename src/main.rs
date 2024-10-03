@@ -18,34 +18,32 @@ use log::{debug, error, info, warn};
 use opc_ua::OpcUa;
 use storage::Storage;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Configure logger
     log4rs::init_file("log4rs.yaml", Default::default()).unwrap();
     info!("Starting opc ua chirpstack gateway");
 
-    // Charger la configuration
-    //debug!("Load configuration");
-    let config = Config::new().expect("Failed to load configuration");
+    // Create the runtime
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create Tokio runtime");
 
-    //info!("OPC UA server: {}", config.opcua.server_url); TODO: uncoment
-    //info!("OPC UA server name: {}", config.opcua.server_name); TODO: uncoment
+    // Run the async main function
+    runtime.block_on(async {
+        // Charger la configuration
+        let config = Config::new().expect("Failed to load configuration");
 
-    // Initialize components
-    let mut chirpstack_client = ChirpstackClient::new(config.chirpstack).await?;
-    //test_chirpstack(&mut chirpstack_client).await; //TODO: Remove: for testing only
+        // Initialize components
+        let mut chirpstack_client = ChirpstackClient::new(config.chirpstack).await?;
+        let opc_ua_server = OpcUa::new(config.opcua);
 
-    //chirpstack::print_list(&applications); //TODO: remove: for debugging purpose
-    let opc_ua_server = OpcUa::new(config.opcua);
-    //opc_ua_server.start_server().await;
-    //let (storage, command_receiver) = Storage::new(); TODO: uncoment
+        // Start OPC UA server
+        opc_ua_server.start_server(&runtime).await;
 
-    // Start OPC UA server
-    //debug!("Start OPC UA server");
-    //opc_ua_server.start()?; TODO:uncoment
+        // Ici, nous ajouterons la logique principale de l'application
+        // Par exemple, une boucle pour traiter les commandes et les données
 
-    // Ici, nous ajouterons la logique principale de l'application
-    // Par exemple, une boucle pour traiter les commandes et les données
-
-    Ok(())
+        Ok(())
+    })
 }

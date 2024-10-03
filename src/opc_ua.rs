@@ -28,18 +28,13 @@ impl OpcUa {
     }
 
     /// Start opc ua server
-    pub async fn start_server(&self) {
-        trace!("Started OPC UA server");
+    pub async fn start_server(&self, runtime: &tokio::runtime::Runtime) {
+        trace!("Starting OPC UA server");
         let mut server = Server::new(self.server_config.clone());
-        trace!("Started OPC UA server");
-
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        trace!("Created OPC UA server");
 
         Server::run_server_on_runtime(
-            runtime,
+            runtime.clone(),
             Server::new_server_task(Arc::new(RwLock::new(server))),
             true,
         );
