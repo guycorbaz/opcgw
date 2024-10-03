@@ -3,10 +3,19 @@
 //! This module handles loading and structuring the application configuration
 //! from TOML files and environment variables.
 
-use config::{Config, ConfigError, Environment, File};
-use log::{debug, error, info, warn};
 use serde::Deserialize;
+use figment::{Figment, providers::{Format, Toml, Env}};
+use log::{debug, error, info, warn};
+use std::collections::HashMap;
+use chirpstack_api::api::Device;
+use crate::utils::OpcGwError;
+use crate::utils::OpcGwError::ConfigurationError;
 
+/// General configuration for the application
+#[derive(Debug, Deserialize)]
+pub struct Application {
+    pub debug: bool,
+}
 /// Configuration for the ChirpStack connection.
 #[derive(Debug, Deserialize)]
 pub struct ChirpstackConfig {
@@ -27,16 +36,25 @@ pub struct OpcUaConfig {
     pub server_name: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ChirpStackApplications {
+    pub name: String,
+    id: String,
+}
+
 /// Global application configuration.
 #[derive(Debug, Deserialize)]
-pub struct AppConfig {
+pub struct Config {
+    pub application: Application,
     /// ChirpStack-specific configuration.
     pub chirpstack: ChirpstackConfig,
     /// OPC UA server-specific configuration.
     pub opcua: OpcUaConfig,
+    pub applications: HashMap<String, String>,
+    pub devices: HashMap<String, String>,
 }
 
-impl AppConfig {
+impl Config {
     /// Creates a new instance of the application configuration.
     ///
     /// This method loads the configuration from TOML files and environment variables.
@@ -46,20 +64,24 @@ impl AppConfig {
     /// # Returns
     ///
     /// Returns a `Result` containing either the loaded configuration or a configuration error.
-    pub fn new() -> Result<Self, ConfigError> {
+    pub fn new() -> Result<Self, OpcGwError> {
         debug!("Creating new AppConfig");
-        let config_path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config".to_string());
+        let config_path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config/default.toml".to_string());
+        debug!("Config path: {}", config_path);
+        let config: Config = Figment::new()
+            .merge(Toml::file(&config_path))
+            .merge(Env::prefixed("OPCGW_").global())
+            .extract()
+            .map_err(|e| OpcGwError::ConfigurationError(format!("Connexion error: {}", e)))?;
 
-        let s = Config::builder()
-            .add_source(File::with_name(&format!("{}/default", config_path)))
-            .add_source(File::with_name(&format!("{}/local", config_path)).required(false))
-            .add_source(Environment::with_prefix("APP"))
-            .build()?;
-
-        s.try_deserialize()
+        Ok({
+            debug!{"Configuration: {:#?}", config,}
+            config})
     }
 }
 
+///Test load_config
+/// This function does NOT test applications neither devices
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,9 +89,14 @@ mod tests {
 
     #[test]
     fn test_load_config() {
-        env::set_var("CONFIG_PATH", "tests/config");
-        let config = AppConfig::new().expect("Failed to load configuration");
 
+        let config_path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| "tests/config/default.toml".to_string());
+        let config: Config = Figment::new()
+            .merge(Toml::file(&config_path))
+            .extract()
+            .expect("Failed to load configuration");
+
+        assert_eq!(config.application.debug, true);
         assert_eq!(config.chirpstack.server_address, "localhost:8080");
         assert_eq!(config.chirpstack.api_token, "test_token");
         assert_eq!(config.chirpstack.tenant_id, "tenant_id");

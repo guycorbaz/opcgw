@@ -11,14 +11,14 @@ use log4rs::{
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum AppError {
-    #[error("Erreur de configuration: {0}")]
-    ConfigError(String),
-    #[error("Erreur ChirpStack: {0}")]
+pub enum OpcGwError {
+    #[error("Configuration error: {0}")]
+    ConfigurationError(String),
+    #[error("ChirpStack error: {0}")]
     ChirpStackError(String),
-    #[error("Erreur OPC UA: {0}")]
+    #[error("OPC UA error: {0}")]
     OpcUaError(String),
-    #[error("Erreur de stockage: {0}")]
+    #[error("Stockage error: {0}")]
     StorageError(String),
 }
 

@@ -1,3 +1,6 @@
+[application]
+debug = true
+
 [chirpstack]
 server_address = "localhost:8080"
 api_token = "test_token"
@@ -6,3 +9,11 @@ tenant_id = "tenant_id"
 [opcua]
 server_url = "opc.tcp://localhost:4840"
 server_name = "ChirpStack OPC UA Server"
+
+[applications]
+application_1 = "Application01"
+application_2 = "Application02"
+
+[devices]
+device_1 = "Device01"
+device_2 = "Device02"

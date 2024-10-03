@@ -5,19 +5,19 @@
 //! and devices via the ChirpStack gRPC API.
 
 use crate::config::ChirpstackConfig;
-use crate::utils::AppError;
+use crate::utils::OpcGwError;
 use log::{debug, error, info, warn};
 use prost_types::Timestamp;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
-use tonic::service::{interceptor, Interceptor};
+use tonic::service::Interceptor;
 use tonic::{transport::Channel, Request, Status};
 
 // Import generated types
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
 use chirpstack_api::api::{
-    ApplicationListItem, Device, DeviceListItem, GetApplicationResponse, GetDeviceRequest,
+    ApplicationListItem, DeviceListItem, GetDeviceRequest,
     ListApplicationsRequest, ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse,
 };
 use chirpstack_api::api::{DeviceState, GetDeviceMetricsRequest};
@@ -68,14 +68,14 @@ impl ChirpstackClient {
     /// # Returns
     ///
     /// A `Result` containing either the created `ChirpstackClient` or an `AppError`.
-    pub async fn new(config: ChirpstackConfig) -> Result<Self, AppError> {
+    pub async fn new(config: ChirpstackConfig) -> Result<Self, OpcGwError> {
         // Create a connexion to server
-        debug!("new {:?}", config);
+        //debug!("new {:?}", config);
         let channel = Channel::from_shared(config.server_address.clone())
             .unwrap()
             .connect()
             .await
-            .map_err(|e| AppError::ChirpStackError(format!("Connexion error: {}", e)))?;
+            .map_err(|e| OpcGwError::ChirpStackError(format!("Connexion error: {}", e)))?;
 
         let interceptor = AuthInterceptor {
             api_token: config.api_token.clone(),
@@ -104,7 +104,7 @@ impl ChirpstackClient {
     /// # Returns
     ///
     /// A `Result` containing either a vector of `Application`, or an `AppError`.
-    pub async fn list_applications(&self) -> Result<Vec<ApplicationDetail>, AppError> {
+    pub async fn list_applications(&self) -> Result<Vec<ApplicationDetail>, OpcGwError> {
         debug!("Get list of applications");
         debug!("Create request");
         let request = Request::new(ListApplicationsRequest {
@@ -122,7 +122,7 @@ impl ChirpstackClient {
             .list(request)
             .await
             .map_err(|e| {
-                AppError::ChirpStackError(format!("Error when collecting application list: {}", e))
+                OpcGwError::ChirpStackError(format!("Error when collecting application list: {}", e))
             })?;
         debug!("Convert result");
         let applications = self.convert_to_applications(response.into_inner());
@@ -132,7 +132,7 @@ impl ChirpstackClient {
     pub async fn list_devices(
         &self,
         application_id: String,
-    ) -> Result<Vec<DeviceListDetail>, AppError> {
+    ) -> Result<Vec<DeviceListDetail>, OpcGwError> {
         debug!("Get list of devices");
         debug!("Create request");
 
@@ -152,14 +152,14 @@ impl ChirpstackClient {
             .list(request)
             .await
             .map_err(|e: Status| {
-                AppError::ChirpStackError(format!("Error when collecting devices list: {e}"))
+                OpcGwError::ChirpStackError(format!("Error when collecting devices list: {e}"))
             })?;
         debug!("Convert result");
         let devices: Vec<DeviceListDetail> = self.convert_to_devices(response.into_inner());
         Ok(devices)
     }
 
-    pub async fn get_device_details(&mut self, dev_eui: String) -> Result<DeviceDetails, AppError> {
+    pub async fn get_device_details(&mut self, dev_eui: String) -> Result<DeviceDetails, OpcGwError> {
         debug!("Get device details for device {dev_eui}");
         let request = Request::new(GetDeviceRequest { dev_eui });
 
@@ -178,7 +178,7 @@ impl ChirpstackClient {
                     tags: device.device.clone().unwrap().tags,
                 })
             }
-            Err(e) => Err(AppError::ChirpStackError(format!(
+            Err(e) => Err(OpcGwError::ChirpStackError(format!(
                 "Error getting device metrics: {}",
                 e
             ))),
@@ -190,7 +190,7 @@ impl ChirpstackClient {
         dev_eui: String,
         duration: u64,
         aggregation: i32,
-    ) -> Result<DeviceMetric, AppError> {
+    ) -> Result<DeviceMetric, OpcGwError> {
         debug!("Get device metrics for device {}", dev_eui);
 
         let request = Request::new(GetDeviceMetricsRequest {
@@ -220,7 +220,7 @@ impl ChirpstackClient {
 
                 Ok(DeviceMetric { metrics, states })
             }
-            Err(e) => Err(AppError::ChirpStackError(format!(
+            Err(e) => Err(OpcGwError::ChirpStackError(format!(
                 "Error getting device metrics: {}",
                 e
             ))),

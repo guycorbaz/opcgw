@@ -13,7 +13,7 @@ pub mod chirpstack_api {
 
 use crate::chirpstack_test::test_chirpstack;
 use chirpstack::ChirpstackClient;
-use config::AppConfig;
+use config::Config;
 use log::{debug, error, info, warn};
 use opc_ua::OpcUaServer;
 use storage::Storage;
@@ -26,16 +26,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Charger la configuration
     //debug!("Load configuration");
-    let config = AppConfig::new().expect("Failed to load configuration");
+    let config = Config::new().expect("Failed to load configuration");
 
-    info!("ChirpStack to OPC UA Gateway");
-    info!("ChirpStack server: {}", config.chirpstack.server_address);
     //info!("OPC UA server: {}", config.opcua.server_url); TODO: uncoment
     //info!("OPC UA server name: {}", config.opcua.server_name); TODO: uncoment
 
     // Initialize components
     let mut chirpstack_client = ChirpstackClient::new(config.chirpstack).await?;
-    test_chirpstack(&mut chirpstack_client).await; //TODO: Remove: for testing only
+    //test_chirpstack(&mut chirpstack_client).await; //TODO: Remove: for testing only
 
     //chirpstack::print_list(&applications); //TODO: remove: for debugging purpose
     //let opc_ua_server = OpcUaServer::new(config.opcua); TODO: uncoment
