@@ -34,7 +34,7 @@ async fn test_list_devices(chirpstack_client: &mut ChirpstackClient) {
                 }
             }
         }
-        Err(e) => error!("Error when collecting devices: {}", e),
+        Err(e) => error!("Error when collecting deviceslist: {}", e),
     }
 }
 
@@ -45,7 +45,7 @@ async fn test_list_application(chirpstack_client: &mut ChirpstackClient) {
             debug!("Print list of applications");
             print_app_list(&applications)
         }
-        Err(e) => error!("Error when collecting applications: {}", e),
+        Err(e) => error!("Error when collecting applications list: {}", e),
     }
 }
 

@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 use figment::{Figment, providers::{Format, Toml, Env}};
-use log::{debug, error, info, warn};
+use log::{debug, error, info, warn, trace};
 use std::collections::HashMap;
 use crate::utils::OpcGwError;
 use crate::utils::OpcGwError::ConfigurationError;
@@ -75,7 +75,7 @@ impl Config {
     pub fn new() -> Result<Self, OpcGwError> {
         debug!("Creating new AppConfig");
         let config_path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config/default.toml".to_string());
-        debug!("Config path: {}", config_path);
+        trace!("with config path: {}", config_path);
         let config: Config = Figment::new()
             .merge(Toml::file(&config_path))
             .merge(Env::prefixed("OPCGW_").global())
@@ -83,7 +83,7 @@ impl Config {
             .map_err(|e| OpcGwError::ConfigurationError(format!("Connexion error: {}", e)))?;
 
         Ok({
-            debug!{"Configuration: {:#?}", config,}
+            //trace!{"Configuration: {:#?}", config,}
             config})
     }
 }

@@ -6,7 +6,7 @@
 
 use crate::config::ChirpstackConfig;
 use crate::utils::OpcGwError;
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
 use prost_types::Timestamp;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
@@ -57,8 +57,11 @@ pub struct ChirpstackClient {
 
 impl ChirpstackClient {
     pub fn config(&self) -> &ChirpstackConfig {
+        debug!("Return chirpstack config");
+        //trace!("Return chirpstack config: {:?}", self.config);
         &self.config
     }
+
     /// Creates a new instance of `ChirpstackClient`.
     ///
     /// # Arguments
@@ -69,8 +72,8 @@ impl ChirpstackClient {
     ///
     /// A `Result` containing either the created `ChirpstackClient` or an `AppError`.
     pub async fn new(config: ChirpstackConfig) -> Result<Self, OpcGwError> {
-        // Create a connexion to server
-        //debug!("new {:?}", config);
+        debug!("Create a new chirpstack connection");
+        //trace!("With: {:#?}", config);
         let channel = Channel::from_shared(config.server_address.clone())
             .unwrap()
             .connect()
@@ -81,10 +84,10 @@ impl ChirpstackClient {
             api_token: config.api_token.clone(),
         };
 
-        //let device_client = DeviceServiceClient::new(channel.clone());
-        //let application_client = ApplicationServiceClient::new(channel.clone());
+        trace!("Create DeviceServiceClient");
         let device_client =
             DeviceServiceClient::with_interceptor(channel.clone(), interceptor.clone());
+        trace!("Create ApplicationServiceClient");
         let application_client =
             ApplicationServiceClient::with_interceptor(channel, interceptor.clone());
 
@@ -106,16 +109,16 @@ impl ChirpstackClient {
     /// A `Result` containing either a vector of `Application`, or an `AppError`.
     pub async fn list_applications(&self) -> Result<Vec<ApplicationDetail>, OpcGwError> {
         debug!("Get list of applications");
-        debug!("Create request");
+        trace!("Create request");
         let request = Request::new(ListApplicationsRequest {
             limit: 100, // Vous pouvez ajuster cette valeur selon vos besoins
             offset: 0,
             search: String::new(),
             tenant_id: self.config.tenant_id.clone(), // We work on only one tenant defined in parameter file
         });
-        debug!("Request created with: {:?}", request);
+        trace!("Request created with: {:?}", request);
 
-        debug!("Send request");
+        trace!("Send request");
         let response = self
             .application_client
             .clone()
@@ -124,7 +127,7 @@ impl ChirpstackClient {
             .map_err(|e| {
                 OpcGwError::ChirpStackError(format!("Error when collecting application list: {}", e))
             })?;
-        debug!("Convert result");
+        trace!("Convert result");
         let applications = self.convert_to_applications(response.into_inner());
         Ok(applications)
     }
@@ -134,7 +137,8 @@ impl ChirpstackClient {
         application_id: String,
     ) -> Result<Vec<DeviceListDetail>, OpcGwError> {
         debug!("Get list of devices");
-        debug!("Create request");
+        trace!("for application: {:?}", application_id);
+        trace!("Create request");
 
         let request = Request::new(ListDevicesRequest {
             limit: 100,
@@ -143,9 +147,9 @@ impl ChirpstackClient {
             application_id: application_id,
             multicast_group_id: String::new(),
         });
-        debug!("Request created with: {:?}", request);
+        trace!("Request created with: {:?}", request);
 
-        debug!("Send request");
+        trace!("Send request");
         let response = self
             .device_client
             .clone()
@@ -154,13 +158,14 @@ impl ChirpstackClient {
             .map_err(|e: Status| {
                 OpcGwError::ChirpStackError(format!("Error when collecting devices list: {e}"))
             })?;
-        debug!("Convert result");
+        trace!("Convert result");
         let devices: Vec<DeviceListDetail> = self.convert_to_devices(response.into_inner());
         Ok(devices)
     }
 
     pub async fn get_device_details(&mut self, dev_eui: String) -> Result<DeviceDetails, OpcGwError> {
-        debug!("Get device details for device {dev_eui}");
+        debug!("Get device details");
+        //trace!("for device: {:?}", dev_eui);
         let request = Request::new(GetDeviceRequest { dev_eui });
 
         match self.device_client.get(request).await {
@@ -191,8 +196,9 @@ impl ChirpstackClient {
         duration: u64,
         aggregation: i32,
     ) -> Result<DeviceMetric, OpcGwError> {
-        debug!("Get device metrics for device {}", dev_eui);
-
+        debug!("Get device metrics for");
+        //trace!("for device: {:?}", dev_eui);
+        trace!("Create request");
         let request = Request::new(GetDeviceMetricsRequest {
             dev_eui: dev_eui.clone(),
             start: Some(Timestamp::from(SystemTime::now())),
@@ -202,6 +208,7 @@ impl ChirpstackClient {
             aggregation: aggregation,
         });
 
+        trace!("Format result");
         match self.device_client.get_metrics(request).await {
             Ok(response) => {
                 let inner_response = response.into_inner();

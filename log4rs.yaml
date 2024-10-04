@@ -4,9 +4,19 @@ appenders:
     kind: console
     encoder:
       pattern: "{d} - {l} - {t} - {m}{n}"
-  file:
+  opcgw_log:
     kind: file
     path: "log/opcgw.log"
+    encoder:
+      pattern: "{d} - {l} - {t} - {m}{n}"
+  chirpstack_log:
+    kind: file
+    path: "log/chirpstack.log"
+    encoder:
+      pattern: "{d} - {l} - {t} - {m}{n}"
+  audit:
+    kind: file
+    path: "log/audit.log"
     encoder:
       pattern: "{d} - {l} - {t} - {m}{n}"
 
@@ -14,10 +24,11 @@ root:
   level: trace
   appenders:
     - stdout
-    - file
-
+    - opcgw_log
 loggers:
-  testapi:
+
+  audit:
     level: trace
     appenders:
-      - file
+      - audit.log
+
