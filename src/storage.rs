@@ -8,51 +8,120 @@ use tokio::sync::mpsc;
 use crate::chirpstack::{ApplicationDetail, ChirpstackClient, DeviceDetails, DeviceListDetail};
 use crate::Config;
 
-pub struct Storage {
-    metrics: HashMap<String, String>,
-    applications: HashMap<String, String>,
-    devices: HashMap<String, String>,
+pub struct Device {
+    pub id: String,
+    pub application_id: String,
+    pub application_name: String,
+    pub name: String,
 }
 
-impl Storage {
-    //pub fn new() -> (Self, mpsc::Receiver<String>) {
-    pub fn new()  -> Storage {
-        debug!("Create a new Storage");
-        //let (tx, rx) = mpsc::channel(100);
+pub struct Application {
+    pub id: String,
+    pub name: String,
+}
+/// Structure for storing application data.
+pub struct Storage {
+    config: Config,
+    /// Mapping of metric names to their respective values.
+    metrics: HashMap<String, String>,
 
-            Storage {
-                metrics: HashMap::new(),
-                //command_queue: tx,
-                applications: HashMap::new(),
-                devices: HashMap::new(),
-            }
+    /// List of applications with their unique identifiers as keys.
+    applications: Vec<Application>,
+
+    /// List of devices with their unique identifiers as keys.
+    devices: Vec<Device>,
+
+    /// Instance of the Chirpstack client for interacting with the Chirpstack server.
+    chirpstack_client: ChirpstackClient,
+}
+
+
+impl Storage {
+    /// Creates and returns a new instance of `Storage`
+    ///
+    /// # Arguments
+    ///
+    /// * `app_config` - A reference to the `Config` structure which holds the application configurations
+    ///
+    /// # Returns
+    ///
+    /// * `Storage` - An instance of the `Storage` structure initialized with default values
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let config = Config::new();
+    /// let storage = new(&config).await;
+    /// ```
+    pub async fn new(app_config: &Config) -> Storage {
+        // Log a debug message indicating creation of a new Storage instance
+        debug!("Create a new Storage");
+
+
+        Storage {
+            config: app_config.clone(),
+            metrics: HashMap::new(),
+            applications: Vec::new(),
+            devices: Vec::new(),
+            chirpstack_client: ChirpstackClient::new(&app_config.chirpstack.clone()).await.unwrap(),
+        }
     }
 
 
-    pub fn load_applications_list(&mut self, applications_list: &Vec<ApplicationDetail>) {
+
+    pub fn load_applications_list(&mut self) {
         debug!("create_applications");
-        trace!("applications_list: {:?}", applications_list);
-        for application in applications_list {
-            self.applications.insert(
-                application.name.clone(),
-                application.id.clone(),
-            );
+        for application in &self.config.applications {
+            println!("Application {}", application.0.clone());
+            let app = Application {
+                name: application.0.clone(),
+                id: application.1.clone(),
+            };
+            self.applications.push(app);
         }
     }
 
     pub fn print_applications_list(&self) {
         debug!("List applications");
         for application in &self.applications {
-            trace!("Application: {:?}", application);
+            trace!("Application: {:?}", application.name);
         }
     }
 
-    pub fn load_devices_list(&mut self) {
+
+    pub async  fn load_devices_list(&mut self) {
         debug!("create_devices");
+        for device in &self.config.devices {
+            let dev_details = self.chirpstack_client
+                .get_device_details(device.1
+                    .clone())
+                .await
+                .unwrap();
+
+            let dev = Device {
+                id: device.1.clone(),
+                name: device.0.clone(),
+                application_id: dev_details.application_id.clone(),
+                application_name: self.get_application_name(&dev_details.application_id).clone(),
+            };
+            &self.devices.push(dev);
+        }
     }
 
     pub fn print_devices_list(&self) {
         debug!("List devices");
+        for device in &self.devices {
+            println!("Device {:#?}, linked application: {}", device.name, device.application_name);
+        }
+    }
+
+    fn get_application_name(&self, id: &String) -> String {
+        for app in self.applications.iter() {
+            if app.id == *id {
+                return app.name.clone();
+            }
+        }
+        "".to_string()
     }
 
     pub fn store_metric(&mut self, key: String, value: String) {
