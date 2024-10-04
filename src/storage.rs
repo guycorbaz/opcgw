@@ -102,7 +102,7 @@ impl Storage {
     ///
     /// This function does not explicitly panic, but be mindful of any potential panics induced
     /// by `clone` or `push` operations if the underlying implementation changes.
-    pub fn load_applications_list(&mut self) {
+    pub fn load_applications(&mut self) {
         debug!("Loading applications list");
         for application in &self.config.applications {
             println!("Application {}", application.0.clone());
@@ -141,7 +141,7 @@ impl Storage {
     /// Application: "App2"
     /// ```
     /// assuming the logging level is set to debug or lower.
-    pub fn print_applications_list(&self) {
+    pub fn list_applications(&self) {
         debug!("Listing applications");
         for application in &self.applications {
             trace!("Application: {:?}", application.name);
@@ -167,7 +167,7 @@ impl Storage {
     ///     instance.load_devices_list().await;
     /// }
     /// ```
-    pub async fn load_devices_list(&mut self) {
+    pub async fn load_devices(&mut self) {
         debug!("Loading devices list");
         for device in &self.config.devices {
             let dev_details = self.chirpstack_client
@@ -178,7 +178,7 @@ impl Storage {
                 id: device.1.clone(),
                 name: device.0.clone(),
                 application_id: dev_details.application_id.clone(),
-                application_name: self.get_application_name(&dev_details.application_id).clone(),
+                application_name: self.find_application_name(&dev_details.application_id).clone(),
             };
             self.devices.push(dev);
         }
@@ -206,7 +206,7 @@ impl Storage {
     ///
     /// This function does not return errors.
     ///
-    pub fn print_devices_list(&self) {
+    pub fn list_devices(&self) {
         debug!("Listing devices");
         for device in &self.devices {
             println!("Device {:#?}, linked application: {}", device.name, device.application_name);
@@ -222,7 +222,7 @@ impl Storage {
     /// # Returns
     ///
     /// The name of the application if found, or an empty string if not found.
-    fn get_application_name(&self, id: &String) -> String {
+    fn find_application_name(&self, id: &String) -> String {
         for app in self.applications.iter() {
             if app.id == *id {
                 return app.name.clone();

@@ -32,15 +32,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let application_config = Config::new()?;
 
     trace!("Create chirpstack client");
-    let chirpstack_client = ChirpstackClient::new(&application_config.chirpstack).await.expect("Failed to create chirpstack client");
+    //let chirpstack_client = ChirpstackClient::new(&application_config.chirpstack).await.expect("Failed to create chirpstack client");
     //let applications_list = chirpstack_client.list_applications().await?;
     //let devices_list = chirpstack_client.list_devices("ae2012c2-75a1-407d-98ab-1520fb511edf".to_string()).await?;
 
     trace!("Create storage");
     let mut storage:Storage = Storage::new(&application_config).await;
-    storage.load_applications_list();
-    storage.load_devices_list().await;
-    storage.print_devices_list();
+    storage.load_applications();
+    storage.load_devices().await;
+    storage.list_devices();
 
 
 
