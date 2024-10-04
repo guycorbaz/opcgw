@@ -32,14 +32,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let application_config = Config::new()?;
 
     trace!("Create chirpstack client");
-    let chirpstack_client = ChirpstackClient::new(application_config.chirpstack).await.expect("Failed to create chirpstack client");
-    let applications_list = chirpstack_client.list_applications().await?;
-    let devices_list = chirpstack_client.list_devices("ae2012c2-75a1-407d-98ab-1520fb511edf".to_string()).await?;
+    let chirpstack_client = ChirpstackClient::new(&application_config.chirpstack).await.expect("Failed to create chirpstack client");
+    //let applications_list = chirpstack_client.list_applications().await?;
+    //let devices_list = chirpstack_client.list_devices("ae2012c2-75a1-407d-98ab-1520fb511edf".to_string()).await?;
 
     trace!("Create storage");
-    let mut storage:Storage = Storage::new();
-    storage.load_applications_list(&applications_list);
-    storage.print_applications_list();
+    let mut storage:Storage = Storage::new(&application_config).await;
+    storage.load_applications_list();
+    storage.load_devices_list().await;
+    storage.print_devices_list();
+
+
 
     //trace!("Creating opc ua server");
     //let opc_ua = OpcUa::new(config.opcua);

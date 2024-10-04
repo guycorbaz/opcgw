@@ -79,6 +79,29 @@ impl Storage {
 
 
     /// Loads the list of applications from the configuration into the storage.
+    ///
+    /// This function iterates over the list of applications found in the configuration.
+    /// For each application, it creates an `Application` instance containing the application's
+    /// name and ID, and then it appends this instance to the internal `applications` storage.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// // Assuming `self` is an instance of a struct containing
+    /// // a `config` field with `applications` list and an `applications` storage.
+    ///
+    /// self.load_applications_list();
+    /// ```
+    ///
+    /// # Debug Information
+    ///
+    /// - The function logs a debug message "Loading applications list" at the start.
+    /// - It prints each application's name as it's being processed.
+    ///
+    /// # Panics
+    ///
+    /// This function does not explicitly panic, but be mindful of any potential panics induced
+    /// by `clone` or `push` operations if the underlying implementation changes.
     pub fn load_applications_list(&mut self) {
         debug!("Loading applications list");
         for application in &self.config.applications {
@@ -92,6 +115,32 @@ impl Storage {
     }
 
     /// Prints the list of applications to the console.
+    ///
+    /// This method iterates over the `applications` field of the struct and
+    /// prints the name of each application. The logging is done at the `debug`
+    /// and `trace` levels, which means that these messages will only be
+    /// shown if the logging is configured to display these levels.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let my_struct = MyStruct {
+    ///     applications: vec![
+    ///         Application { name: String::from("App1") },
+    ///         Application { name: String::from("App2") },
+    ///     ],
+    /// };
+    ///
+    /// my_struct.print_applications_list();
+    /// ```
+    ///
+    /// The above example will print:
+    /// ```
+    /// Listing applications
+    /// Application: "App1"
+    /// Application: "App2"
+    /// ```
+    /// assuming the logging level is set to debug or lower.
     pub fn print_applications_list(&self) {
         debug!("Listing applications");
         for application in &self.applications {
@@ -99,7 +148,25 @@ impl Storage {
         }
     }
 
-    /// Loads the list of devices from the configuration and ChirpStack into the storage.
+    /// Asynchronously loads the list of devices from the configuration and ChirpStack into the storage.
+    ///
+    /// This function performs the following steps:
+    /// 1. Logs a debug message indicating the start of the device loading process.
+    /// 2. Iterates over the devices specified in the configuration.
+    /// 3. Fetches detailed device information from ChirpStack using the device ID.
+    /// 4. Constructs a `Device` struct with the fetched details and additional information like
+    ///    application name and ID.
+    /// 5. Appends the constructed `Device` struct to the list of devices in the current storage.
+    ///
+    /// # Panics
+    /// This function will panic if the `get_device_details` call to ChirpStack fails.
+    ///
+    /// # Examples
+    /// ```rust
+    /// async {
+    ///     instance.load_devices_list().await;
+    /// }
+    /// ```
     pub async fn load_devices_list(&mut self) {
         debug!("Loading devices list");
         for device in &self.config.devices {
@@ -107,7 +174,6 @@ impl Storage {
                 .get_device_details(device.1.clone())
                 .await
                 .unwrap();
-
             let dev = Device {
                 id: device.1.clone(),
                 name: device.0.clone(),
@@ -119,6 +185,27 @@ impl Storage {
     }
 
     /// Prints the list of devices to the console.
+    /// Prints the list of devices and their linked applications.
+    ///
+    /// This function logs a debug message indicating that it is listing devices.
+    /// It then iterates over the devices in the `self.devices` vector and prints
+    /// each device's name along with the name of the linked application to the console.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// let manager = DeviceManager::new();
+    /// manager.print_devices_list();
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    ///
+    /// # Errors
+    ///
+    /// This function does not return errors.
+    ///
     pub fn print_devices_list(&self) {
         debug!("Listing devices");
         for device in &self.devices {

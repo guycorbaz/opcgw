@@ -22,6 +22,7 @@ use chirpstack_api::api::{
 };
 use chirpstack_api::api::{DeviceState, GetDeviceMetricsRequest};
 use chirpstack_api::common::{Aggregation, Metric, MetricDataset};
+use serde::Deserialize;
 use tokio::time::Instant;
 use tonic::codegen::InterceptedService;
 
@@ -46,6 +47,8 @@ impl Interceptor for AuthInterceptor {
 /// This structure encapsulates the configuration and the gRPC clients needed
 /// to interact with the ChirpStack API.
 /// Represents a client for interacting with the ChirpStack API.
+///
+#[derive(Debug, Clone)]
 pub struct ChirpstackClient {
     /// Configuration for the ChirpStack connection.
     config: ChirpstackConfig,
@@ -71,7 +74,7 @@ impl ChirpstackClient {
     /// # Returns
     ///
     /// A `Result` containing either the created `ChirpstackClient` or an `AppError`.
-    pub async fn new(config: ChirpstackConfig) -> Result<Self, OpcGwError> {
+    pub async fn new(config: &ChirpstackConfig) -> Result<Self, OpcGwError> {
         debug!("Create a new chirpstack connection");
         //trace!("With: {:#?}", config);
         let channel = Channel::from_shared(config.server_address.clone())
@@ -92,7 +95,7 @@ impl ChirpstackClient {
             ApplicationServiceClient::with_interceptor(channel, interceptor.clone());
 
         Ok(ChirpstackClient {
-            config,
+            config: config.clone(),
             device_client,
             application_client,
         })
@@ -289,7 +292,7 @@ impl ChirpstackClient {
 }
 
 /// Structure representing a chirpstack application.
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ApplicationDetail {
     /// Unique application identifier
     pub id: String,
@@ -299,7 +302,7 @@ pub struct ApplicationDetail {
     pub description: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Clone)]
 /// Represents details of a device in a list format.
 pub struct DeviceListDetail {
     /// The unique identifier for the device (DevEUI).
@@ -310,7 +313,7 @@ pub struct DeviceListDetail {
     pub description: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Clone)]
 /// Represents detailed information about a device.
 pub struct DeviceDetails {
     /// The unique identifier for the device (DevEUI).
@@ -334,6 +337,7 @@ pub struct DeviceDetails {
 }
 
 /// Represents metrics and states for a device.
+/// #[derive(Debug, Deserialize, Clone)]
 pub struct DeviceMetric {
     /// A map of metric names to their corresponding Metric objects.
     pub metrics: HashMap<String, Metric>,

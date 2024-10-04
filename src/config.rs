@@ -12,12 +12,12 @@ use crate::utils::OpcGwError::ConfigurationError;
 use crate::opc_ua::OpcUa;
 
 /// General configuration for the application
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Application {
     pub debug: bool,
 }
 /// Configuration for the ChirpStack connection.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ChirpstackConfig {
     /// ChirpStack server address.
     pub server_address: String,
@@ -28,7 +28,7 @@ pub struct ChirpstackConfig {
 }
 
 /// Configuration for the OPC UA server.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct OpcUaConfig {
     pub config_file: String,
     /// URL of the OPC UA server.
@@ -44,22 +44,22 @@ pub struct OpcUaConfig {
     pub private_key_file: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ChirpStackApplications {
     pub name: String,
     id: String,
 }
 
 /// Global application configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub application: Application,
     /// ChirpStack-specific configuration.
     pub chirpstack: ChirpstackConfig,
     /// OPC UA server-specific configuration.
     pub opcua: OpcUaConfig,
-    pub applications: HashMap<String, String>,
-    pub devices: HashMap<String, String>,
+    pub applications: HashMap<String, String>,  // Firs field is name, second, id
+    pub devices: HashMap<String, String>,       // firs field is name, second, id
 }
 
 impl Config {

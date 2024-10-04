@@ -8,6 +8,7 @@ use opcua::server::prelude::*;
 use log::{debug, error, info, warn, trace};
 use crate::config::OpcUaConfig;
 use opcua::sync::RwLock;
+use crate::utils::OpcGwError;
 
 
 pub struct OpcUa {
@@ -61,13 +62,16 @@ impl OpcUa {
         let server = Server::new(server_config.clone());
         let address_space = server.address_space();
         let mut address_space = address_space.write();
-        let ns = address_space.register_namespace("urn:opc-ua-gateway").unwrap(); // TODO: handle errors
+        let ns = address_space
+            .register_namespace("urn:opc-ua-gateway")
+            .unwrap(); // TODO: improve error management
 
-        OpcUa {
-            server_config: server_config,
-            server: server,
-            ns: ns
-        }
+            OpcUa {
+                server_config: server_config,
+                server: server,
+                ns: ns,
+            }
+
     }
 
 
