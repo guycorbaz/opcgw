@@ -32,8 +32,8 @@ use std::{path::PathBuf, sync::Arc};
 
 
 /// Start  opc_ua_chirpstack_gateway
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//#[tokio::main]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Configure logger
     log4rs::init_file("log4rs.yaml", Default::default()).unwrap();
     info!("starting");
@@ -41,14 +41,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     trace!("Create application configuration:");
     let application_config = Config::new()?;
 
-    // Create opc ua
+    trace!("Create opc ua server");
     let opc_ua = OpcUa::new(&application_config.opcua);
 
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
     trace!("Create storage");
-    let mut storage:Storage = Storage::new(&application_config).await;
-    storage.load_applications();
-    storage.load_devices().await;
-    storage.list_devices();
+    //let mut storage:Storage = Storage::new(&application_config).await;
+    //storage.load_applications();
+    //storage.load_devices().await;
+    //storage.list_devices();
+
+    trace!("Start opc ua server");
+    Server::run_server_on_runtime(
+        runtime,
+        Server::new_server_task(Arc::new(RwLock::new(opc_ua.server))),
+        true,
+    );
 
 
 
