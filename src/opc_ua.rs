@@ -1,6 +1,12 @@
-//! Module pour le serveur OPC UA.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) [2024] [Guy Corbaz]
+
+//! Manage opc ua server
 //!
-//! Ce module gère la création et le fonctionnement du serveur OPC UA.
+//!
+//!
+//! # Example:
+//! Add example code...
 
 use std::{path::PathBuf, sync::Arc};
 use opcua::sync::Mutex;
@@ -64,7 +70,8 @@ impl OpcUa {
         let mut address_space = address_space.write();
         let ns = address_space
             .register_namespace("urn:opc-ua-gateway")
-            .unwrap(); // TODO: improve error management
+            .unwrap();
+
 
             OpcUa {
                 server_config: server_config,

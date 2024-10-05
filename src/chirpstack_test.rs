@@ -1,3 +1,14 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) [2024] [Guy Corbaz]
+
+//! Test chirpsrack interface
+//!
+//! Provide functions to easily test chirpstack interface
+//! This is only used during development
+//!
+//! # Example:
+//! Add example code...
+
 use crate::chirpstack;
 use crate::chirpstack::{ApplicationDetail, ChirpstackClient, DeviceDetails, DeviceListDetail};
 use crate::config::ChirpstackConfig;

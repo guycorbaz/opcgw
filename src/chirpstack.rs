@@ -1,8 +1,12 @@
-//! Module for communication with ChirpStack.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) [2024] [Guy Corbaz]
+
+//! Manage communications with Chirpstack 4 server
 //!
-//! This module manages the connection and interaction with the ChirpStack server.
-//! It provides an interface to perform operations on applications
-//! and devices via the ChirpStack gRPC API.
+//!
+//!
+//! # Example:
+//! Add example code...
 
 use crate::config::ChirpstackConfig;
 use crate::utils::OpcGwError;

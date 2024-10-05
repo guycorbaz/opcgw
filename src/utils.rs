@@ -1,6 +1,12 @@
-//! Module pour les fonctions et structures utilitaires.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) [2024] [Guy Corbaz]
+
+//! Global utilities for the program
 //!
-//! Ce module contient des fonctions et des structures utilitaires communes à l'application.
+//!
+//!
+//! # Example:
+//! Add example code...
 
 
 use thiserror::Error;

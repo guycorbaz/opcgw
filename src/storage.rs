@@ -1,8 +1,12 @@
-//! Module for data storage.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) [2024] [Guy Corbaz]
+
+//! Manage storage
 //!
-//! This module manages in-memory storage of metrics and devices/applications data.
-//! It provides functionality to store and retrieve metrics, as well as manage
-//! information about devices and applications.
+//! Provide storage management for opc_ua_chirpstack_gateway
+//!
+//! # Example:
+//! Add example code...
 
 use log::{debug, error, info, trace, warn};
 use std::collections::HashMap;

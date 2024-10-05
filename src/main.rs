@@ -1,3 +1,11 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) [2024] [Guy Corbaz]
+
+//! Chirpstack to opc ua gateway
+//!
+//! Provide a Chirpstack 4 to opc ua server gateway.
+//!
+
 mod chirpstack;
 mod config;
 
@@ -22,6 +30,8 @@ use tokio::runtime::{Builder, Runtime};
 //use tokio::sync::RwLock;
 use std::{path::PathBuf, sync::Arc};
 
+
+/// Start  opc_ua_chirpstack_gateway
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Configure logger

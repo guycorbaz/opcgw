@@ -1,7 +1,12 @@
-//! Configuration module for the ChirpStack to OPC UA Gateway application.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) [2024] [Guy Corbaz]
+
+//! Manage configuration files
 //!
-//! This module handles loading and structuring the application configuration
-//! from TOML files and environment variables.
+//! Provides configuration file management for opc_ua_chirpstack_gateway
+//!
+//! # Example:
+//! Add example code...
 
 use serde::Deserialize;
 use figment::{Figment, providers::{Format, Toml, Env}};
