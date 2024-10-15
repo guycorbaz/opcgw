@@ -43,7 +43,6 @@ struct Args {
 }
 
 
-//#[tokio::main]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse arguments
@@ -57,8 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create chirpstack poller
     trace!("Create chirpstack poller");
-    let chirpstack_poller = ChirpstackPoller::new(&application_config.chirpstack)
-        .expect("Failed to create chirpstack client");
+    let chirpstack_poller = ChirpstackPoller::new(&application_config.chirpstack).await?;
 
     // Create OPC UA server
     trace!("Create OPC UA server");
@@ -66,11 +64,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Run chirpstack poller and OPC UA server in separate tasks
     let chirpstack_handle = tokio::spawn(async move {
-        chirpstack_poller.run().await;
+        if let Err(e) = chirpstack_poller.run().await {
+            error!("ChirpStack poller error: {:?}", e);
+        }
     });
 
     let opcua_handle = tokio::spawn(async move {
-        opc_ua.run().await;
+        if let Err(e) = opc_ua.run().await {
+            error!("OPC UA server error: {:?}", e);
+        }
     });
 
     // Wait for both tasks to complete

@@ -90,17 +90,29 @@ impl ChirpstackPoller {
     }
 
     /// Run the ChirpStack client process
-    pub async fn run(&self) {
+    pub async fn run(&self) -> Result<(), OpcGwError> {
         trace!("Running chirpstack client poller every {} s", self.config.polling_frequency);
         let duration = Duration::from_secs(self.config.polling_frequency);
         loop {
             debug!("Polling chirpstack");
-            // Implement your polling logic here
-            // For example:
-            // self.poll_devices().await;
-            // self.poll_applications().await;
+            if let Err(e) = self.poll_devices().await {
+                error!("Error polling devices: {:?}", e);
+            }
+            if let Err(e) = self.poll_applications().await {
+                error!("Error polling applications: {:?}", e);
+            }
             tokio::time::sleep(duration).await;
         }
+    }
+
+    async fn poll_devices(&self) -> Result<(), OpcGwError> {
+        // Implement device polling logic
+        Ok(())
+    }
+
+    async fn poll_applications(&self) -> Result<(), OpcGwError> {
+        // Implement application polling logic
+        Ok(())
     }
 
     /// Lists the applications available on the ChirpStack server.
