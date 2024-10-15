@@ -8,8 +8,6 @@
 
 mod chirpstack;
 mod config;
-
-mod chirpstack_test;
 mod opc_ua;
 mod storage;
 mod utils;
@@ -18,69 +16,83 @@ mod utils;
 pub mod chirpstack_api {
     //tonic::include_proto!("chirpstack");
 }
-use crate::chirpstack::{ApplicationDetail, ChirpstackClient, DeviceDetails, DeviceListDetail};
-use crate::chirpstack_test::test_chirpstack;
-use opcua::sync::RwLock;
+use crate::chirpstack::{ApplicationDetail, ChirpstackPoller, DeviceDetails, DeviceListDetail};
+use clap::Parser;
 use config::Config;
 use log::{debug, error, info, trace, warn};
-use opcua::server::server::Server;
 use opc_ua::OpcUa;
+use opcua::server::server::Server;
+use opcua::sync::RwLock;
+use std::{thread, path::PathBuf, sync::Arc};
+use std::time::Duration;
 use storage::Storage;
 use tokio::runtime::{Builder, Runtime};
-//use tokio::sync::RwLock;
-use std::{path::PathBuf, sync::Arc};
+
+// Manage arguments
+// Version (-V) is automatically derives from Cargo.toml
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Set custom config path
+    #[arg(short, long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// Turn debugging information on
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    debug: u8,
+}
 
 
-/// Start  opc_ua_chirpstack_gateway
 //#[tokio::main]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Parse arguments
+    let args = Args::parse();
     // Configure logger
     log4rs::init_file("log4rs.yaml", Default::default()).unwrap();
     info!("starting");
 
-    trace!("Create application configuration:");
+    // Create a new configuration
     let application_config = Config::new()?;
+
+    trace!("Create tokio runtime");
+    let opc_runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build() {
+        Ok(runtime) => runtime,
+        Err(e) =>panic!("Cannot create Tokio Runtime: {:?}", e),
+    };
+    let chirpstack_runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build() {
+        Ok(runtime) => runtime,
+        Err(e) =>panic!("Cannot create Tokio Runtime: {:?}", e),
+    };
+
+    trace!("Create chirpstack poller"); //TODO: Comment marche ce bousin avec tokio ?
+    let chirpstack_poller =
+        ChirpstackPoller::new(&application_config.chirpstack)
+            .expect("Failed to create chirpstack client");
+
+    trace!("Run chirpstach poller");
+    chirpstack_poller.run_on_runtime(chirpstack_runtime);
+
+
+
 
     trace!("Create opc ua server");
     let opc_ua = OpcUa::new(&application_config.opcua);
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-
-    trace!("Create storage");
-    //let mut storage:Storage = Storage::new(&application_config).await;
-    //storage.load_applications();
-    //storage.load_devices().await;
-    //storage.list_devices();
-
-    trace!("Start opc ua server");
-    Server::run_server_on_runtime(
-        runtime,
+    trace!("Create opcua server handler");
+    // Create a non blocking server running on tokio runtime define above
+    // It needs to be joined //TODO: add join for this server
+    let opcua_server_handler = Server::run_server_on_runtime(
+        opc_runtime,
         Server::new_server_task(Arc::new(RwLock::new(opc_ua.server))),
-        true,
-    );
+        false,
+    ).unwrap();
 
 
 
-
-    //trace!("Creating opc ua server");
-    //let opc_ua = OpcUa::new(config.opcua);
-    //opc_ua.add_folder();
-
-
-    // Add opc ua structure
-
-
-
-    //trace!("Run OPC UA server");
-    //Server::run_server_on_runtime(
-    //    runtime,
-    //    Server::new_server_task(Arc::new(RwLock::new(opc_ua.server))),
-    //    true
-    //);
     info!("Stopping");
-        Ok(())
-
+    Ok(())
 }
