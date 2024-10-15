@@ -59,50 +59,48 @@ pub struct ChirpstackPoller {
 }
 
 impl ChirpstackPoller {
-
-    /// Initialize a new empty Chirpstack client instance.
-    pub fn new(config: &ChirpstackConfig) -> Result<Self, OpcGwError> { //TODO: This should not run in asynchronous mode
+    /// Initialize a new Chirpstack client instance.
+    pub async fn new(config: &ChirpstackConfig) -> Result<Self, OpcGwError> {
         debug!("Create a new chirpstack connection");
-        // Create a connection to the server
-        //let channel = Channel::from_shared(config.server_address.clone())
-        //    .unwrap()
-        //    .connect()
-        //    .await
-        //    .map_err(|e| OpcGwError::ChirpStackError(format!("Connexion error: {}", e)))?;
+        let channel = Channel::from_shared(config.server_address.clone())
+            .unwrap()
+            .connect()
+            .await
+            .map_err(|e| OpcGwError::ChirpStackError(format!("Connection error: {}", e)))?;
 
-        //let interceptor = AuthInterceptor {
-        //    api_token: config.api_token.clone(),
-        //};
+        let interceptor = AuthInterceptor {
+            api_token: config.api_token.clone(),
+        };
 
         // Create API to manage Chirpstack devices
-        //trace!("Create DeviceServiceClient");
-        //let device_client =
-        //    DeviceServiceClient::with_interceptor(channel.clone(), interceptor.clone());
+        trace!("Create DeviceServiceClient");
+        let device_client =
+            DeviceServiceClient::with_interceptor(channel.clone(), interceptor.clone());
 
         // Create API to manage Chirpstack applications
-        //trace!("Create ApplicationServiceClient");
-        //let application_client =
-        //    ApplicationServiceClient::with_interceptor(channel, interceptor.clone());
+        trace!("Create ApplicationServiceClient");
+        let application_client =
+            ApplicationServiceClient::with_interceptor(channel, interceptor.clone());
 
         Ok(ChirpstackPoller {
             config: config.clone(),
-            device_client: None,
-            application_client: None,
+            device_client: Some(device_client),
+            application_client: Some(application_client),
         })
     }
 
-    /// Run a ChirpStack client process TODO: Implement
-    pub fn run_on_runtime(&self, runtime: Runtime) {
+    /// Run the ChirpStack client process
+    pub async fn run(&self) {
         trace!("Running chirpstack client poller every {} s", self.config.polling_frequency);
         let duration = Duration::from_secs(self.config.polling_frequency);
-        //todo!();
-        runtime.spawn(async move {
-            loop {
-                println!("polling chirpstack");
-                sleep(duration).await;
-            }
-        });
-
+        loop {
+            debug!("Polling chirpstack");
+            // Implement your polling logic here
+            // For example:
+            // self.poll_devices().await;
+            // self.poll_applications().await;
+            tokio::time::sleep(duration).await;
+        }
     }
 
     /// Lists the applications available on the ChirpStack server.

@@ -44,7 +44,8 @@ struct Args {
 
 
 //#[tokio::main]
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse arguments
     let args = Args::parse();
     // Configure logger
@@ -54,44 +55,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a new configuration
     let application_config = Config::new()?;
 
-    trace!("Create tokio runtime");
-    let opc_runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build() {
-        Ok(runtime) => runtime,
-        Err(e) =>panic!("Cannot create Tokio Runtime: {:?}", e),
-    };
-    let chirpstack_runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build() {
-        Ok(runtime) => runtime,
-        Err(e) =>panic!("Cannot create Tokio Runtime: {:?}", e),
-    };
+    // Create chirpstack poller
+    trace!("Create chirpstack poller");
+    let chirpstack_poller = ChirpstackPoller::new(&application_config.chirpstack)
+        .expect("Failed to create chirpstack client");
 
-    trace!("Create chirpstack poller"); //TODO: Comment marche ce bousin avec tokio ?
-    let chirpstack_poller =
-        ChirpstackPoller::new(&application_config.chirpstack)
-            .expect("Failed to create chirpstack client");
-
-    trace!("Run chirpstach poller");
-    chirpstack_poller.run_on_runtime(chirpstack_runtime);
-
-
-
-
-    trace!("Create opc ua server");
+    // Create OPC UA server
+    trace!("Create OPC UA server");
     let opc_ua = OpcUa::new(&application_config.opcua);
 
-    trace!("Create opcua server handler");
-    // Create a non blocking server running on tokio runtime define above
-    // It needs to be joined //TODO: add join for this server
-    let opcua_server_handler = Server::run_server_on_runtime(
-        opc_runtime,
-        Server::new_server_task(Arc::new(RwLock::new(opc_ua.server))),
-        false,
-    ).unwrap();
+    // Run chirpstack poller and OPC UA server in separate tasks
+    let chirpstack_handle = tokio::spawn(async move {
+        chirpstack_poller.run().await;
+    });
 
+    let opcua_handle = tokio::spawn(async move {
+        opc_ua.run().await;
+    });
 
+    // Wait for both tasks to complete
+    tokio::try_join!(chirpstack_handle, opcua_handle)?;
 
     info!("Stopping");
     Ok(())

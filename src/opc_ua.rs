@@ -54,4 +54,15 @@ impl OpcUa {
         debug!("Creating server");
         Server::new(server_config.clone())
     }
+
+    pub async fn run(&self) {
+        debug!("Running OPC UA server");
+        let server = Arc::new(RwLock::new(self.server.clone()));
+        let server_task = Server::new_server_task(server);
+        
+        // Run the server indefinitely
+        if let Err(e) = server_task.await {
+            error!("OPC UA server error: {:?}", e);
+        }
+    }
 }
