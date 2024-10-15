@@ -8,17 +8,20 @@
 //! # Example:
 //! Add example code...
 
-use serde::Deserialize;
-use figment::{Figment, providers::{Format, Toml, Env}};
-use log::{debug, error, info, warn, trace};
-use std::collections::HashMap;
 use crate::utils::OpcGwError;
 use crate::utils::OpcGwError::ConfigurationError;
-use crate::opc_ua::OpcUa;
+use figment::{
+    providers::{Env, Format, Toml},
+    Figment,
+};
+use log::{debug, trace};
+use serde::Deserialize;
+use std::collections::HashMap;
 
-/// General configuration for the application
+/// Global configuration for the application
 #[derive(Debug, Deserialize, Clone)]
-pub struct Application {
+pub struct Global {
+    /// set to true for detailed debug log
     pub debug: bool,
 }
 /// Configuration for the ChirpStack connection.
@@ -30,41 +33,43 @@ pub struct ChirpstackConfig {
     pub api_token: String,
     /// Tenant ID we are working with.
     pub tenant_id: String,
+    /// Server polling frequency
+    pub polling_frequency: u64,
 }
 
 /// Configuration for the OPC UA server.
+/// For the time being, the configuration is
+/// coming from a specific file
 #[derive(Debug, Deserialize, Clone)]
 pub struct OpcUaConfig {
+    /// Config file path for opc ua server
     pub config_file: String,
-    /// URL of the OPC UA server.
-    pub server_url: String,
-    pub policy: String,
-    pub mode: String,
-    pub uri: String,
-    /// Name of the OPC UA server.
-    pub server_name: String,
-    pub system_type: String,
-    pub discovery_urls: String, //TODO: change it to a vector to pass several URLs
-    pub cert_file: String,
-    pub private_key_file: String,
 }
 
+/// CHirpstack application description
+/// These informations are definbes in
+/// the Chirpstack server
 #[derive(Debug, Deserialize, Clone)]
 pub struct ChirpStackApplications {
+    /// Chirpstack pplication name
     pub name: String,
+    /// Chirpstack application ID
     id: String,
 }
 
-/// Global application configuration.
+/// Chirpstack to opc ua application configuration
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
-    pub application: Application,
+    /// Global application configuration
+    pub global: Global,
     /// ChirpStack-specific configuration.
     pub chirpstack: ChirpstackConfig,
     /// OPC UA server-specific configuration.
     pub opcua: OpcUaConfig,
-    pub applications: HashMap<String, String>,  // Firs field is name, second, id
-    pub devices: HashMap<String, String>,       // firs field is name, second, id
+    /// List of applications we are interested in
+    pub applications: HashMap<String, String>, // Firs field is name, second, id
+    /// List of devices we are interested in
+    pub devices: HashMap<String, String>,      // firs field is name, second, id
 }
 
 impl Config {
@@ -79,7 +84,13 @@ impl Config {
     /// Returns a `Result` containing either the loaded configuration or a configuration error.
     pub fn new() -> Result<Self, OpcGwError> {
         debug!("Creating new AppConfig");
-        let config_path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config/default.toml".to_string());
+
+        // Define config file path TODO: Add the possibility to pass it via command line parameter
+        let config_path =
+            std::env::var("CONFIG_PATH")
+                .unwrap_or_else(|_| "config/default.toml".to_string());
+
+        // Reading the configuration from 'config_path'
         trace!("with config path: {}", config_path);
         let config: Config = Figment::new()
             .merge(Toml::file(&config_path))
@@ -88,8 +99,8 @@ impl Config {
             .map_err(|e| OpcGwError::ConfigurationError(format!("Connexion error: {}", e)))?;
 
         Ok({
-            //trace!{"Configuration: {:#?}", config,}
-            config})
+            config
+        })
     }
 }
 
@@ -100,19 +111,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_load_config() {
-
-        let config_path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| "tests/config/default.toml".to_string());
+    fn test_application_config() {
+        let config_path = std::env::var("CONFIG_PATH")
+            .unwrap_or_else(|_| "tests/config/default.toml".to_string());
         let config: Config = Figment::new()
             .merge(Toml::file(&config_path))
             .extract()
             .expect("Failed to load configuration");
 
-        assert_eq!(config.application.debug, true);
+        assert_eq!(config.global.debug, true);
+    }
+
+    #[test]
+    fn test_chirpstack_config() {
+        let config_path = std::env::var("CONFIG_PATH")
+            .unwrap_or_else(|_| "tests/config/default.toml".to_string());
+        let config: Config = Figment::new()
+            .merge(Toml::file(&config_path))
+            .extract()
+            .expect("Failed to load configuration");
+
         assert_eq!(config.chirpstack.server_address, "localhost:8080");
         assert_eq!(config.chirpstack.api_token, "test_token");
         assert_eq!(config.chirpstack.tenant_id, "tenant_id");
-        assert_eq!(config.opcua.server_url, "opc.tcp://localhost:4840");
-        assert_eq!(config.opcua.server_name, "ChirpStack OPC UA Server");
+        assert_eq!(config.chirpstack.polling_frequency, 10);
+    }
+
+    #[test]
+    fn test_opcua_config() {
+        let config_path = std::env::var("CONFIG_PATH")
+            .unwrap_or_else(|_| "tests/config/default.toml".to_string());
+        let config: Config = Figment::new()
+            .merge(Toml::file(&config_path))
+            .extract()
+            .expect("Failed to load configuration");
+
+        assert_eq!(config.opcua.config_file, "server.conf");
+    }
+
+    #[test]
+    fn test_chirpstack_application_config() {
+        let config_path = std::env::var("CONFIG_PATH")
+            .unwrap_or_else(|_| "tests/config/default.toml".to_string());
+        let config: Config = Figment::new()
+            .merge(Toml::file(&config_path))
+            .extract()
+            .expect("Failed to load configuration");
     }
 }

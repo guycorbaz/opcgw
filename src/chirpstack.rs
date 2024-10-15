@@ -6,7 +6,7 @@
 
 use crate::config::ChirpstackConfig;
 use crate::utils::OpcGwError;
-use log::{debug, trace};
+use log::{debug, trace, error};
 use prost_types::Timestamp;
 use std::collections::HashMap;
 //use std::thread::sleep;

@@ -9,12 +9,12 @@
 //! # Example:
 //! Add example code...
 
-use crate::chirpstack;
-use crate::chirpstack::{ApplicationDetail, ChirpstackClient, DeviceDetails, DeviceListDetail};
-use crate::config::ChirpstackConfig;
-use log::{debug, error, info, warn};
+mod config;
+use crate::chirpstack::{ApplicationDetail, ChirpstackClient, DeviceListDetail};
+use log::{debug, error};
 
 /// Test function for ChirpStack operations
+
 pub async fn test_chirpstack(chirpstack_client: &mut ChirpstackClient) {
     test_list_application(chirpstack_client).await;
     test_list_devices(chirpstack_client).await;

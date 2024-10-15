@@ -1,5 +1,5 @@
 # Chirpstack server connection
-[application]
+[global]
 debug = true
 
 
@@ -16,29 +16,14 @@ server_address = "http://192.168.1.12:8080"
 api_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJjaGlycHN0YWNrIiwiaXNzIjoiY2hpcnBzdGFjayIsInN1YiI6ImY5MGIzNmM1LTNkMTAtNGY1YS05NTQ4LWZhNmFlMDllYzE5ZSIsInR5cCI6ImtleSJ9.j9sCvXaMhS1gzJBOhG0lYvN83NVTW6htQssHfQ79Mgo"
 # Tenant Id that will be used
 tenant_id = "52f14cd4-c6f1-4fbd-8f87-4025e1d49242"
+# Frequency to poll ChirpStack server in seconds
+polling_frequency = 2
 
 
 # OPC UA parameters
 [opcua]
 config_file = "config/server.conf"
-# Endpoints
-# OPC UA server url
-server_url = "opc.tcp://localhost:4840"
 
-policy = "http://opcfoundation.org/UA/SecurityPolicy#None"
-mode = "None"
-# Application
-uri = "urn:MyOPCUAServer"
-# OPC UA server name
-server_name = "ChirpStack OPC UA Server"
-system_type = "Server"
-discovery_urls = ""
-# PKI config
-# Use openssl to create key
-# Exemple:
-# - openssl req -newkey rsa:4096 -nodes -keyout server.pem -x509 -days 365 -out server.der -outform DER
-cert_file = "pki/own/certs/server.der"
-private_key_file = "pki/own/private/server.pem"
 
 
 # List of applications that have to be displayed in UPC UA

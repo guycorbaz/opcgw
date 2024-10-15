@@ -1,14 +1,14 @@
-[application]
+[global]
 debug = true
 
 [chirpstack]
 server_address = "localhost:8080"
 api_token = "test_token"
 tenant_id = "tenant_id"
+polling_frequency = 10
 
 [opcua]
-server_url = "opc.tcp://localhost:4840"
-server_name = "ChirpStack OPC UA Server"
+config_file = "server.conf"
 
 [applications]
 application_1 = "Application01"
