@@ -16,46 +16,44 @@ use tokio::sync::mpsc;
 
 /// Represents a device in the system.
 pub struct Device {
-    /// Unique identifier of the device.
-    pub id: String,
+    /// Unique identifier of the device, provided by Chirpstack.
+    pub device_id: String,
     /// ID of the application this device belongs to.
     pub application_id: String,
-    /// Name of the application this device belongs to.
-    pub application_name: String,
     /// Name of the device.
     pub name: String,
 }
 
-/// Represents an application in the system.
+/// Represents an application in the system, provided by Chirpstack.
 pub struct Application {
     /// Unique identifier of the application.
-    pub id: String,
+    pub application_id: String,
     /// Name of the application.
     pub name: String,
 }
+
 /// Main structure for storing application data, metrics, and managing devices and applications.
 pub struct Storage {
     config: Config,
-    /// Mapping of metric names to their respective values.
+    /// Mapping of metric names to their respective values. TODO: Change metrics...
     metrics: HashMap<String, String>,
     /// List of applications with their unique identifiers as keys.
-    applications: Vec<Application>,
+    application_list: Vec<Application>,
     /// List of devices with their unique identifiers as keys.
-    devices: Vec<Device>,
+    device_list: Vec<Device>,
 
 }
 
 impl Storage {
     /// Creates and returns a new instance of `Storage`
-    pub async fn new(app_config: &Config) -> Storage {
-        // Log a debug message indicating creation of a new Storage instance
+    pub fn new(app_config: &Config) -> Storage {
         debug!("Creating a new Storage instance");
 
         Storage {
             config: app_config.clone(),
             metrics: HashMap::new(),
-            applications: Vec::new(),
-            devices: Vec::new(),
+            application_list: Vec::new(),
+            device_list: Vec::new(),
         }
     }
 
@@ -66,62 +64,68 @@ impl Storage {
             println!("Application {}", application.0.clone());
             let app = Application {
                 name: application.0.clone(),
-                id: application.1.clone(),
+                application_id: application.1.clone(),
             };
-            self.applications.push(app);
+            self.application_list.push(app);
         }
     }
 
-    /// Prints the list of applications to the console.
-    pub fn list_applications(&self) {
-        debug!("Listing applications");
-        for application in &self.applications {
-            trace!("Application: {:?}", application.name);
-        }
-    }
-
-    /// Asynchronously loads the list of devices from the configuration and ChirpStack into the storage.
-    pub async fn load_devices(&mut self) {
-        debug!("Loading devices list");
-        todo!();
-        //for device in &self.config.devices {
-        //    let dev_details = self
-        //        .chirpstack_client
-        //        .get_device_details(device.1.clone())
-        //        .await
-        //        .unwrap();
-        //    let dev = Device {
-        //        id: device.1.clone(),
-        //        name: device.0.clone(),
-        //        application_id: dev_details.application_id.clone(),
-        //        application_name: self
-        //            .find_application_name(&dev_details.application_id)
-        //            .clone(),
-        //    };
-        //    self.devices.push(dev);
-        //}
-    }
-
-    /// Prints the list of devices to the console.
-    pub fn list_devices(&self) {
-        debug!("Listing devices");
-        for device in &self.devices {
-            println!(
-                "Device {:#?}, linked application: {}",
-                device.name, device.application_name
-            );
-        }
-    }
-
-    /// Retrieves the application name for a given application ID.
+    /// Retrieves the application name for a given application id.
     fn find_application_name(&self, id: &String) -> String {
-        for app in self.applications.iter() {
-            if app.id == *id {
+        for app in self.application_list.iter() {
+            if app.application_id == *id {
                 return app.name.clone();
             }
         }
         "".to_string()
     }
+
+    /// Prints the list of applications to the console.
+    pub fn list_applications(&self) {
+        debug!("Listing applications");
+        for application in &self.application_list {
+            trace!("Application: {:?}", application.name);
+        }
+    }
+
+
+    /// Load devices list from configuration
+    pub fn load_devices(&mut self) {
+        debug!("Loading devices list");
+        for device in &self.config.devices {
+            let device_id = device.1;
+            let device_name = device.0;
+            debug!("Device ID: {}, name {}", device_id, device_name);
+            self.device_list.push(Device {
+                device_id: device_id.clone(),
+                application_id: "".to_string(),     // TODO: implement that
+                name: device_name.clone(),
+            });
+        }
+    }
+
+    /// Find the device name from the device id
+    pub fn find_device_name(&mut self, device_id: &String) -> String {
+        for device in &self.device_list {
+            if device.device_id == *device_id {
+                return device.name.clone();
+            }
+        }
+        "".to_string()
+    }
+
+    /// Prints the list of devices to the console.
+    pub fn list_devices(&self) {
+        debug!("Listing devices");
+        for device in &self.device_list {
+            println!(
+                "Device {:#?}, linked application: {}",
+                device.name, self.find_application_name(&device.application_id)
+            );
+        }
+    }
+
+
 
     /// Stores a metric with the given key and value.
     pub fn store_metric(&mut self, key: String, value: String) {
@@ -135,7 +139,77 @@ impl Storage {
         self.metrics.get(key)
     }
 
-    //pub fn send_command(&self, command: String) -> Result<(), tokio::sync::mpsc::error::SendError<String>> {
-    //    self.command_queue.try_send(command)
-    //}
 }
+
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use figment::{
+        providers::{Env, Format, Toml},
+        Figment,
+    };
+    #[test]
+    fn test_load_applications() {
+        let config_path = std::env::var("CONFIG_PATH")
+            .unwrap_or_else(|_| "tests/config/default.toml".to_string());
+        let config: Config = Figment::new()
+            .merge(Toml::file(&config_path))
+            .extract()
+            .expect("Failed to load configuration");
+        let mut storage = Storage::new(&config);
+
+        storage.load_applications(); // What we are testing
+
+        assert_eq!(storage.find_application_name(&"Application01".to_string()), "application_1");
+    }
+
+    #[test]
+    fn test_list_applications() {
+        let config_path = std::env::var("CONFIG_PATH")
+            .unwrap_or_else(|_| "tests/config/default.toml".to_string());
+        let config: Config = Figment::new()
+            .merge(Toml::file(&config_path))
+            .extract()
+            .expect("Failed to load configuration");
+        let mut storage = Storage::new(&config);
+
+        storage.load_applications();
+
+        storage.list_applications(); // What we are testing
+    }
+
+    #[test]
+    fn test_load_devices() {
+        let config_path = std::env::var("CONFIG_PATH")
+            .unwrap_or_else(|_| "tests/config/default.toml".to_string());
+        let config: Config = Figment::new()
+            .merge(Toml::file(&config_path))
+            .extract()
+            .expect("Failed to load configuration");
+        let mut storage = Storage::new(&config);
+
+        storage.load_devices();
+
+        assert!(storage.device_list.len() > 0);
+    }
+
+    #[test]
+    fn test_find_device_name() {
+        let config_path = std::env::var("CONFIG_PATH")
+            .unwrap_or_else(|_| "tests/config/default.toml".to_string());
+        let config: Config = Figment::new()
+            .merge(Toml::file(&config_path))
+            .extract()
+            .expect("Failed to load configuration");
+        let mut storage = Storage::new(&config);
+
+        storage.load_devices();
+        assert_eq!(storage.find_device_name(&"Device01".to_string()), "device_1");
+    }
+
+}
+
+

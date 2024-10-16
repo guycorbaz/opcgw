@@ -3,11 +3,7 @@
 // Copyright (c) [2024] [Guy Corbaz]
 
 //! Manage opc ua server
-//!
-//!
-//!
-//! # Example:
-//! Add example code...
+
 
 use crate::config::OpcUaConfig;
 use crate::utils::OpcGwError;
