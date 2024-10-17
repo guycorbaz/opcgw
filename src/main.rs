@@ -45,38 +45,48 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+
     // Parse arguments
-    let args = Args::parse();
+    let args = Args::parse(); //TODO: add possibility to pass config file as argument
+
     // Configure logger
-    log4rs::init_file("log4rs.yaml", Default::default()).unwrap();
+    log4rs::init_file("log4rs.yaml", Default::default()).expect("Failed to initialize logger");
     info!("starting");
 
-    // Create a new configuration
-    let application_config = Config::new()?;
+    // Create a new configuration and load parameters
+    let application_config = match Config::new() {
+        Ok(config) => Arc::new(config),
+        Err(e) => panic!("Failed to load config: {}", e),
+    };
 
     // Create chirpstack poller
     trace!("Create chirpstack poller");
-    let chirpstack_poller = ChirpstackPoller::new(&application_config.chirpstack).await?;
+    let mut chirpstack_poller = match ChirpstackPoller::new(&application_config.chirpstack).await{
+        Ok(poller) => poller,
+        Err(e) => panic!("Failed to create chirpstack poller: {}", e),
+    };
 
     // Create OPC UA server
     trace!("Create OPC UA server");
-    let opc_ua = OpcUa::new(&application_config.opcua);
+    //let opc_ua = OpcUa::new(&application_config.opcua);
 
     // Run chirpstack poller and OPC UA server in separate tasks
-    let chirpstack_handle = tokio::spawn(async move {
+    let mut chirpstack_handle = tokio::spawn(async move {
         if let Err(e) = chirpstack_poller.run().await {
             error!("ChirpStack poller error: {:?}", e);
         }
     });
 
-    let opcua_handle = tokio::spawn(async move {
-        if let Err(e) = opc_ua.run().await {
-            error!("OPC UA server error: {:?}", e);
-        }
-    });
+    // Run opc ua server in separate task
+    //let opcua_handle = tokio::spawn(async move {
+    //    if let Err(e) = opc_ua.run().await {
+    //        error!("OPC UA server error: {:?}", e);
+    //    }
+    //});
 
-    // Wait for both tasks to complete
-    tokio::try_join!(chirpstack_handle, opcua_handle)?;
+    // Wait for all tasks to complete
+    tokio::try_join!(chirpstack_handle).expect("Failed to run chirpstack poller");
+    //tokio::try_join!(chirpstack_handle, opcua_handle)?;
 
     info!("Stopping");
     Ok(())
