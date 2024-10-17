@@ -14,7 +14,7 @@ appenders:
     path: "log/chirpstack.log"
     encoder:
       pattern: "{d} - {l} - {t} - {m}{n}"
-  audit:
+  audit_log:
     kind: file
     path: "log/audit.log"
     encoder:
@@ -30,5 +30,5 @@ loggers:
   audit:
     level: trace
     appenders:
-      - audit.log
+      - audit_log
 
