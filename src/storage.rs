@@ -93,12 +93,13 @@ impl Storage {
     pub fn load_devices(&mut self) {
         debug!("Loading devices list");
         for device in &self.config.devices {
-            let device_id = device.1;
+            let device_id = device.1.device_id.clone();
+            let application_id = device.1.application_id.clone();
             let device_name = device.0;
             debug!("Device ID: {}, name {}", device_id, device_name);
             self.device_list.push(Device {
                 device_id: device_id.clone(),
-                application_id: "".to_string(),     // TODO: implement that
+                application_id: application_id.to_string(),
                 name: device_name.clone(),
             });
         }
@@ -130,12 +131,14 @@ impl Storage {
     /// Stores a metric with the given key and value.
     pub fn store_metric(&mut self, key: String, value: String) {
         debug!("Storing metric: {} = {}", key, value);
+        todo!();
         self.metrics.insert(key, value);
     }
 
     /// Retrieves a metric value for the given key.
     pub fn get_metric(&self, key: &str) -> Option<&String> {
         debug!("Getting metric: {}", key);
+        todo!();
         self.metrics.get(key)
     }
 
@@ -194,6 +197,8 @@ mod tests {
         storage.load_devices();
 
         assert!(storage.device_list.len() > 0);
+        assert_eq!(storage.device_list[0].application_id, "Application01".to_string());
+        assert_eq!(storage.device_list[0].device_id, "Device01".to_string());
     }
 
     #[test]

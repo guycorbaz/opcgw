@@ -9,7 +9,7 @@
 //! Add example code...
 
 use crate::utils::OpcGwError;
-use crate::utils::OpcGwError::ConfigurationError;
+//use crate::utils::OpcGwError::ConfigurationError;
 use figment::{
     providers::{Env, Format, Toml},
     Figment,
@@ -51,7 +51,7 @@ pub struct OpcUaConfig {
 /// the Chirpstack server
 #[derive(Debug, Deserialize, Clone)]
 pub struct ChirpStackApplications {
-    /// Chirpstack pplication name
+    /// Chirpstack application name
     pub name: String,
     /// Chirpstack application ID
     id: String,
@@ -67,9 +67,17 @@ pub struct Config {
     /// OPC UA server-specific configuration.
     pub opcua: OpcUaConfig,
     /// List of applications we are interested in
-    pub applications: HashMap<String, String>, // Firs field is name, second, id
+    pub applications: HashMap<String, String>, // First field is name, second, id
     /// List of devices we are interested in
-    pub devices: HashMap<String, String>,      // firs field is name, second, id
+    pub devices: HashMap<String, Device>,      // First field is name, second, id
+
+}
+
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Device {
+    pub device_id: String,
+    pub application_id: String,
 }
 
 impl Config {
@@ -111,7 +119,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_application_config() {
+    fn test_application_global_config() {
         let config_path = std::env::var("CONFIG_PATH")
             .unwrap_or_else(|_| "tests/config/default.toml".to_string());
         let config: Config = Figment::new()
@@ -150,12 +158,30 @@ mod tests {
     }
 
     #[test]
-    fn test_chirpstack_application_config() {
+    fn test_application_config() {
         let config_path = std::env::var("CONFIG_PATH")
             .unwrap_or_else(|_| "tests/config/default.toml".to_string());
         let config: Config = Figment::new()
             .merge(Toml::file(&config_path))
             .extract()
             .expect("Failed to load configuration");
+
+        assert!(config.applications.len() > 0);
+        assert_eq!(config.applications.get("application_1").unwrap(), "Application01");
     }
+
+    #[test]
+    fn test_devices_config() {
+        let config_path = std::env::var("CONFIG_PATH")
+            .unwrap_or_else(|_| "tests/config/default.toml".to_string());
+        let config: Config = Figment::new()
+            .merge(Toml::file(&config_path))
+            .extract()
+            .expect("Failed to load configuration");
+
+        assert!(config.devices.len() > 0);
+        assert_eq!(config.devices.get("device_1").unwrap().device_id, "Device01");
+        assert_eq!(config.devices.get("device_1").unwrap().application_id, "Application01");
+    }
+
 }
