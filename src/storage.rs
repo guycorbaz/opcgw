@@ -151,7 +151,7 @@ impl Storage {
 mod tests {
     use super::*;
     use figment::{
-        providers::{Env, Format, Toml},
+        providers::{Format, Toml},
         Figment,
     };
     #[test]
