@@ -26,18 +26,19 @@ The main goal of the Chirpstack to OPC UA gateway is to allow connecting
 an SCADA to Chirpstack, in order to collect metrics and send commands
 that will be enqueues on the device.
 
-Some SCADA only understand Sparkplug specification. On the other hand,
-it's rather difficult to use, using tenant id, application id or
-device eui: they are not ver human friendly and can easily lead
-to mistakes which can be quite tricky to identify and solve.
+Some SCADA only understand Sparkplug mqtt specification.
+On the other hand chirpstack entities mainly relies on chirpstack generated ids,
+that are not really user friendly, which might lead to mistakes when configuring systems.
 
+I wanted to learn rust and decided to develop this gateway with this language.
+The program is certainly not designed with the best practices of rust language and
+certainly needs some improvements. That's why opc_ua_chirpstack_gateway is under heavy development.
 
 ## Features
 
 - Communication with ChirpStack server via gRPC API
 - Implementation of an OPC UA server
-- Management of device metrics
-- [Other main features]
+- Management of device metrics via configuration file
 
 
 ## Limitations
@@ -48,36 +49,53 @@ Chirpstack propose 5 metric types:
 - Absolute
 - Gauge
 - String
+
 At the time being, only gauge is supported.
 
 
 ## Prerequisites
 
-- Rust [version]
-- [Other dependencies]
+Prerequisites are describes in Cargo.toml file.
 
 
 ## Installation
 
-[Detailed installation instructions]
+Installation consists in:
+- creating a gateway configuration file
+- creating an opc ua configuration file
+- launching the program.
+Log files are under log folder just below opc_ua_chirpstack_gateway binary.
 
 
 ## Configuration
 
-At the moment, opc_ua_chirpstack_gateway is configured via two configuration files
+At the moment, opc_ua_chirpstack_gateway is configured via two configuration files.
+
 - One configuration file for the gateway
 - One configuration file for the opc ua server. This might change in the future.
 
+Default location of these files is config folder, located just below the root of the
+opc_ua_chirpstack_gateway binary file. It is possible to configure the path of
+the gateway configuration file via "CONFIG_PATH" environment variable. However, the path
+of the opc ua configuration file is defined in the gateway configuration file.
+This is not ideal and will certainly be changed in the future.
 
 ## Usage
  
-[Instructions on how to use the application]
+[Instructions on how to use the application][]()
 
 
 ## Project Structure
 
-[Description of folder structure and main files]
+The project is organized in the following way:
+- main.rs: the main rust file
+- config.rs: to manage configurations
+- chirpstack.rs: containing  structures and methods for communications with chirpstack server
+- opc_ua.rs: containing the code for the opc ua server
+- storage.rs: managing data storage
+- utils.rs: definition for the  whole project
 
+This organization might change in the future.
 
 ## Contributing
 
@@ -86,4 +104,4 @@ At the moment, opc_ua_chirpstack_gateway is configured via two configuration fil
 
 ## License
 
-[License information]
+MIT OR Apache-2.0.
