@@ -8,6 +8,7 @@
 //! # Example:
 //! Add example code...
 
+//TODO: add possibility to config path for log files
 use crate::utils::OpcGwError;
 //use crate::utils::OpcGwError::ConfigurationError;
 use figment::{
@@ -93,7 +94,7 @@ impl Config {
 
         // Define config file path TODO: Add the possibility to pass it via command line parameter
         let config_path =
-            std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config/default.toml".to_string());
+            std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config/default.toml".to_string()); //TODO: Test config path via environment variable
 
         // Reading the configuration from 'config_path'
         trace!("with config path: {}", config_path);
