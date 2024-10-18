@@ -1,3 +1,5 @@
+![build and test](https://github.com/guycorbaz/opcgw/actions/workflows/ci.yml/badge.svg)
+
 # ChirpStack to OPC UA Gateway
 
 This is a gateway between ChirpStack and OPC UA,
