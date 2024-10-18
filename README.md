@@ -57,7 +57,7 @@ At the time being, only gauge is supported.
 
 ## Prerequisites
 
-Prerequisites are describes in Cargo.toml file.
+At the time being, the application works only on linux.
 
 
 ## Installation
