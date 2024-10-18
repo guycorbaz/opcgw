@@ -5,18 +5,18 @@
 
 use crate::config::ChirpstackConfig;
 use crate::utils::OpcGwError;
-use log::{debug, trace, error};
-use std::collections::HashMap;
-use std::time::{SystemTime};
-use tokio::time::{ Duration, sleep};
-use tokio::runtime::{Builder, Runtime};
-use tonic::service::Interceptor;
-use tonic::{transport::Channel, Request, Status};
 use chirpstack_api::api::{DeviceState, GetDeviceMetricsRequest};
 use chirpstack_api::common::Metric;
-use serde::Deserialize;
-use tonic::codegen::InterceptedService;
+use log::{debug, error, trace};
 use prost_types::Timestamp;
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::time::SystemTime;
+use tokio::runtime::{Builder, Runtime};
+use tokio::time::{sleep, Duration};
+use tonic::codegen::InterceptedService;
+use tonic::service::Interceptor;
+use tonic::{transport::Channel, Request, Status};
 
 // Import generated types
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
@@ -73,7 +73,8 @@ pub struct DeviceDetails {
 
 /// Represents metrics and states for a device.
 #[derive(Debug, Deserialize, Clone)]
-pub struct DeviceMetric { //FIXME
+pub struct DeviceMetric {
+    //FIXME
     /// A map of metric names to their corresponding Metric objects.
     pub metrics: HashMap<String, Metric>,
     // A map of state names to their corresponding DeviceState objects.
@@ -107,7 +108,8 @@ pub struct ChirpstackPoller {
     /// Client for interacting with device-related endpoints.
     device_client: Option<DeviceServiceClient<InterceptedService<Channel, AuthInterceptor>>>,
     /// Client for interacting with application-related endpoints.
-    application_client: Option<ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>>,
+    application_client:
+        Option<ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>>,
 }
 
 impl ChirpstackPoller {
@@ -158,8 +160,12 @@ impl ChirpstackPoller {
     ///             error!("ChirpStack poller error: {:?}", e);
     ///         }
     ///
-    pub async fn run(&mut self) -> Result<(), OpcGwError> { //TODO: Implement
-        trace!("Running chirpstack client poller every {} s", self.config.polling_frequency);
+    pub async fn run(&mut self) -> Result<(), OpcGwError> {
+        //TODO: Implement
+        trace!(
+            "Running chirpstack client poller every {} s",
+            self.config.polling_frequency
+        );
         let duration = Duration::from_secs(self.config.polling_frequency);
         loop {
             debug!("Polling metrics");
@@ -174,8 +180,10 @@ impl ChirpstackPoller {
         // Implement device polling logic
         let app_list = self.get_applications_list_from_server().await?;
         for app in app_list {
-            let dev_list = self.get_devices_list_from_server(
-                app.application_id.clone()).await.unwrap();
+            let dev_list = self
+                .get_devices_list_from_server(app.application_id.clone())
+                .await
+                .unwrap();
             debug!("Devices list: {:#?}", dev_list);
         }
 
@@ -190,26 +198,34 @@ impl ChirpstackPoller {
     }
 
     /// Poll metrics for each device
-    async fn poll_metrics(&mut self)
-        -> Result<(), OpcGwError> {
+    async fn poll_metrics(&mut self) -> Result<(), OpcGwError> {
         debug!("Polling metrics");
         let app_list = self.get_applications_list_from_server().await?;
         for app in app_list {
-            let dev_list = self.get_devices_list_from_server(
-                app.application_id.clone()).await.unwrap();
+            let dev_list = self
+                .get_devices_list_from_server(app.application_id.clone())
+                .await
+                .unwrap();
             for dev in dev_list {
-                let dev_metrics = &self.get_device_metrics_from_server(dev.dev_eui.clone(), self.config.polling_frequency, 1).await?;
+                let dev_metrics = &self
+                    .get_device_metrics_from_server(
+                        dev.dev_eui.clone(),
+                        self.config.polling_frequency,
+                        1,
+                    )
+                    .await?;
                 for metric in dev_metrics.metrics.clone() {
                     println!("{:#?}", metric);
                 }
             }
-
         }
         Ok(())
     }
 
     /// Lists the applications available on the ChirpStack server.
-    pub async fn get_applications_list_from_server(&self) -> Result<Vec<ApplicationDetail>, OpcGwError> {
+    pub async fn get_applications_list_from_server(
+        &self,
+    ) -> Result<Vec<ApplicationDetail>, OpcGwError> {
         debug!("Get list of applications");
         trace!("Create request");
         let request = Request::new(ListApplicationsRequest {
@@ -238,8 +254,6 @@ impl ChirpstackPoller {
         let applications = self.convert_to_applications(response.into_inner());
         Ok(applications)
     }
-
-
 
     /// Get device list from Chirpstack server
     pub async fn get_devices_list_from_server(
@@ -281,29 +295,29 @@ impl ChirpstackPoller {
     ) -> Result<DeviceDetails, OpcGwError> {
         debug!("Get device details");
         todo!();
-    //    trace!("for device: {:?}", dev_eui);
-    //    let request = Request::new(GetDeviceRequest { dev_eui });
+        //    trace!("for device: {:?}", dev_eui);
+        //    let request = Request::new(GetDeviceRequest { dev_eui });
 
-    //    match self.device_client.get(request).await {
-    //        Ok(response) => {
-    //            let device = response.into_inner();
-    //            Ok(DeviceDetails {
-    //                dev_eui: device.device.clone().unwrap().dev_eui,
-    //                name: device.device.clone().unwrap().name,
-    //                application_id: device.device.clone().unwrap().application_id,
-    //                is_disabled: device.device.clone().unwrap().is_disabled,
-    //                description: device.device.clone().unwrap().description,
-    //                battery_level: device.device_status.unwrap().battery_level,
-    //                margin: device.device_status.unwrap().margin,
-    //                variables: device.device.clone().unwrap().variables,
-    //                tags: device.device.clone().unwrap().tags,
-    //            })
-    //        }
-    //        Err(e) => Err(OpcGwError::ChirpStackError(format!(
-    //            "Error getting device metrics: {}",
-    //            e
-    //        ))),
-    //    }
+        //    match self.device_client.get(request).await {
+        //        Ok(response) => {
+        //            let device = response.into_inner();
+        //            Ok(DeviceDetails {
+        //                dev_eui: device.device.clone().unwrap().dev_eui,
+        //                name: device.device.clone().unwrap().name,
+        //                application_id: device.device.clone().unwrap().application_id,
+        //                is_disabled: device.device.clone().unwrap().is_disabled,
+        //                description: device.device.clone().unwrap().description,
+        //                battery_level: device.device_status.unwrap().battery_level,
+        //                margin: device.device_status.unwrap().margin,
+        //                variables: device.device.clone().unwrap().variables,
+        //                tags: device.device.clone().unwrap().tags,
+        //            })
+        //        }
+        //        Err(e) => Err(OpcGwError::ChirpStackError(format!(
+        //            "Error getting device metrics: {}",
+        //            e
+        //        ))),
+        //    }
     }
 
     /// Get device metrics from Chirpèstack server
@@ -345,7 +359,7 @@ impl ChirpstackPoller {
                         .map(|(key, value)| (key, value))
                         .collect();
 
-                    Ok(DeviceMetric { metrics})
+                    Ok(DeviceMetric { metrics })
                 }
                 Err(e) => Err(OpcGwError::ChirpStackError(format!(
                     "Error getting device metrics: {}",
@@ -353,7 +367,9 @@ impl ChirpstackPoller {
                 ))),
             }
         } else {
-            Err(OpcGwError::ChirpStackError(String::from("Device client is not initialized")))
+            Err(OpcGwError::ChirpStackError(String::from(
+                "Device client is not initialized",
+            )))
         }
     }
 
@@ -391,7 +407,6 @@ impl ChirpstackPoller {
             })
             .collect()
     }
-
 }
 
 /// Print the list of applications on screen
@@ -404,8 +419,9 @@ pub fn print_application_list(list: &Vec<ApplicationDetail>) {
 
 pub fn print_device_list(list: &Vec<DeviceListDetail>) {
     for device in list {
-        println!("Device EUI: {}, Name: {}, Description: {}",
-                 device.dev_eui, device.name, device.description);
+        println!(
+            "Device EUI: {}, Name: {}, Description: {}",
+            device.dev_eui, device.name, device.description
+        );
     }
 }
-

@@ -1,9 +1,7 @@
-
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) [2024] [Guy Corbaz]
 
 //! Manage opc ua server
-
 
 use crate::config::OpcUaConfig;
 use crate::utils::OpcGwError;

@@ -69,10 +69,8 @@ pub struct Config {
     /// List of applications we are interested in
     pub applications: HashMap<String, String>, // First field is name, second, id
     /// List of devices we are interested in
-    pub devices: HashMap<String, Device>,      // First field is name, second, id
-
+    pub devices: HashMap<String, Device>, // First field is name, second, id
 }
-
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Device {
@@ -95,8 +93,7 @@ impl Config {
 
         // Define config file path TODO: Add the possibility to pass it via command line parameter
         let config_path =
-            std::env::var("CONFIG_PATH")
-                .unwrap_or_else(|_| "config/default.toml".to_string());
+            std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config/default.toml".to_string());
 
         // Reading the configuration from 'config_path'
         trace!("with config path: {}", config_path);
@@ -106,9 +103,7 @@ impl Config {
             .extract()
             .map_err(|e| OpcGwError::ConfigurationError(format!("Connexion error: {}", e)))?;
 
-        Ok({
-            config
-        })
+        Ok({ config })
     }
 }
 
@@ -167,7 +162,10 @@ mod tests {
             .expect("Failed to load configuration");
 
         assert!(config.applications.len() > 0);
-        assert_eq!(config.applications.get("application_1").unwrap(), "Application01");
+        assert_eq!(
+            config.applications.get("application_1").unwrap(),
+            "Application01"
+        );
     }
 
     #[test]
@@ -180,8 +178,13 @@ mod tests {
             .expect("Failed to load configuration");
 
         assert!(config.devices.len() > 0);
-        assert_eq!(config.devices.get("device_1").unwrap().device_id, "Device01");
-        assert_eq!(config.devices.get("device_1").unwrap().application_id, "Application01");
+        assert_eq!(
+            config.devices.get("device_1").unwrap().device_id,
+            "Device01"
+        );
+        assert_eq!(
+            config.devices.get("device_1").unwrap().application_id,
+            "Application01"
+        );
     }
-
 }

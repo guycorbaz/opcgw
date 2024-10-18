@@ -73,23 +73,6 @@ async fn test_get_device_metrics(chirpstack_client: &mut ChirpstackClient) {
     }
 }
 
-/// Prints the list of applications to the console
-///
-/// # Arguments
-///
-/// `list` - The list of applications to print
-///
-/// # Returns
-///
-/// .
-pub fn print_app_list(list: &Vec<ApplicationDetail>) {
-    for app in list {
-        println!(
-            "ID: {}, Nom: {}, Description: {}",
-            app.id, app.name, app.description
-        );
-    }
-}
 
 /// Prints the list of deices to the console
 ///

@@ -23,8 +23,8 @@ use log::{debug, error, info, trace, warn};
 use opc_ua::OpcUa;
 use opcua::server::server::Server;
 use opcua::sync::RwLock;
-use std::{thread, path::PathBuf, sync::Arc};
 use std::time::Duration;
+use std::{path::PathBuf, sync::Arc, thread};
 use storage::Storage;
 use tokio::runtime::{Builder, Runtime};
 
@@ -42,10 +42,8 @@ struct Args {
     debug: u8,
 }
 
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-
     // Parse arguments
     let args = Args::parse(); //TODO: add possibility to pass config file as argument
 
@@ -61,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create chirpstack poller
     trace!("Create chirpstack poller");
-    let mut chirpstack_poller = match ChirpstackPoller::new(&application_config.chirpstack).await{
+    let mut chirpstack_poller = match ChirpstackPoller::new(&application_config.chirpstack).await {
         Ok(poller) => poller,
         Err(e) => panic!("Failed to create chirpstack poller: {}", e),
     };

@@ -41,7 +41,6 @@ pub struct Storage {
     application_list: Vec<Application>,
     /// List of devices with their unique identifiers as keys.
     device_list: Vec<Device>,
-
 }
 
 impl Storage {
@@ -88,7 +87,6 @@ impl Storage {
         }
     }
 
-
     /// Load devices list from configuration
     pub fn load_devices(&mut self) {
         debug!("Loading devices list");
@@ -121,12 +119,11 @@ impl Storage {
         for device in &self.device_list {
             println!(
                 "Device {:#?}, linked application: {}",
-                device.name, self.find_application_name(&device.application_id)
+                device.name,
+                self.find_application_name(&device.application_id)
             );
         }
     }
-
-
 
     /// Stores a metric with the given key and value.
     pub fn store_metric(&mut self, key: String, value: String) {
@@ -141,11 +138,7 @@ impl Storage {
         todo!();
         self.metrics.get(key)
     }
-
 }
-
-
-
 
 #[cfg(test)]
 mod tests {
@@ -166,7 +159,10 @@ mod tests {
 
         storage.load_applications(); // What we are testing
 
-        assert_eq!(storage.find_application_name(&"Application01".to_string()), "application_1");
+        assert_eq!(
+            storage.find_application_name(&"Application01".to_string()),
+            "application_1"
+        );
     }
 
     #[test]
@@ -197,7 +193,10 @@ mod tests {
         storage.load_devices();
 
         assert!(storage.device_list.len() > 0);
-        assert_eq!(storage.device_list[0].application_id, "Application01".to_string());
+        assert_eq!(
+            storage.device_list[0].application_id,
+            "Application01".to_string()
+        );
         assert_eq!(storage.device_list[0].device_id, "Device01".to_string());
     }
 
@@ -212,9 +211,9 @@ mod tests {
         let mut storage = Storage::new(&config);
 
         storage.load_devices();
-        assert_eq!(storage.find_device_name(&"Device01".to_string()), "device_1");
+        assert_eq!(
+            storage.find_device_name(&"Device01".to_string()),
+            "device_1"
+        );
     }
-
 }
-
-
