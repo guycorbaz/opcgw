@@ -14,6 +14,11 @@ use log::{debug, error, info, trace, warn};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
+/// Store device metrics
+pub struct DeviceMetric {
+    metric_name: String,
+}
+
 /// Represents a device in the system.
 pub struct Device {
     /// Unique identifier of the device, provided by Chirpstack.
