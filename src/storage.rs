@@ -13,10 +13,16 @@ use crate::Config;
 use log::{debug, error, info, trace, warn};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
+use serde::{Deserialize, Serialize};
 
-/// Store device metrics
-pub struct DeviceMetric {
-    metric_name: String,
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeviceMetrics {
+    pub dev_eui: String,
+    pub timestamp: i64,
+    pub rx_packets: i32,
+    pub gw_rssi: f32,
+    pub gw_snr: f32,
+    // Ajoutez d'autres champs selon les besoins
 }
 
 /// Represents a device in the system.
@@ -40,8 +46,8 @@ pub struct Application {
 /// Main structure for storing application data, metrics, and managing devices and applications.
 pub struct Storage {
     config: Config,
-    /// Mapping of metric names to their respective values. TODO: Change metrics...
-    metrics: HashMap<String, String>,
+    /// Mapping of device EUIs to their respective metrics.
+    device_metrics: HashMap<String, DeviceMetrics>,
     /// List of applications with their unique identifiers as keys.
     application_list: Vec<Application>,
     /// List of devices with their unique identifiers as keys.
@@ -55,7 +61,7 @@ impl Storage {
 
         Storage {
             config: app_config.clone(),
-            metrics: HashMap::new(),
+            device_metrics: HashMap::new(),
             application_list: Vec::new(),
             device_list: Vec::new(),
         }
@@ -142,6 +148,18 @@ impl Storage {
         debug!("Getting metric: {}", key);
         todo!();
         self.metrics.get(key)
+    }
+
+    /// Stores device metrics for a given device EUI.
+    pub fn store_device_metrics(&mut self, dev_eui: String, metrics: DeviceMetrics) {
+        debug!("Storing metrics for device: {}", dev_eui);
+        self.device_metrics.insert(dev_eui, metrics);
+    }
+
+    /// Retrieves device metrics for a given device EUI.
+    pub fn get_device_metrics(&self, dev_eui: &str) -> Option<&DeviceMetrics> {
+        debug!("Getting metrics for device: {}", dev_eui);
+        self.device_metrics.get(dev_eui)
     }
 }
 
