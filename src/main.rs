@@ -27,6 +27,7 @@ use std::time::Duration;
 use std::{path::PathBuf, sync::Arc, thread};
 use storage::Storage;
 use tokio::runtime::{Builder, Runtime};
+use tokio::time;
 
 // Manage arguments
 // Version (-V) is automatically derives from Cargo.toml
@@ -69,22 +70,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //let opc_ua = OpcUa::new(&application_config.opcua);
 
     // Run chirpstack poller and OPC UA server in separate tasks
-    let mut chirpstack_handle = tokio::spawn(async move {
+    let chirpstack_handle = tokio::spawn(async move {
         if let Err(e) = chirpstack_poller.run().await {
             error!("ChirpStack poller error: {:?}", e);
         }
     });
 
-    // Run opc ua server in separate task
-    //let opcua_handle = tokio::spawn(async move {
-    //    if let Err(e) = opc_ua.run().await {
-    //        error!("OPC UA server error: {:?}", e);
-    //    }
-    //});
+    // Create OPC UA server
+    let opc_ua = OpcUa::new(&application_config.opcua);
+
+    // Run OPC UA server and periodic metrics reading in separate tasks
+    let opcua_handle = tokio::spawn(async move {
+        if let Err(e) = opc_ua.run().await {
+            error!("OPC UA server error: {:?}", e);
+        }
+    });
+
+    let read_metrics_task = tokio::spawn(async move {
+        loop {
+            if let Err(e) = opc_ua.read_device_metrics().await {
+                error!("Error reading device metrics: {:?}", e);
+            }
+            time::sleep(Duration::from_secs(10)).await;
+        }
+    });
 
     // Wait for all tasks to complete
-    tokio::try_join!(chirpstack_handle).expect("Failed to run chirpstack poller");
-    //tokio::try_join!(chirpstack_handle, opcua_handle)?;
+    tokio::try_join!(chirpstack_handle, opcua_handle, read_metrics_task).expect("Failed to run tasks");
 
     info!("Stopping");
     Ok(())
