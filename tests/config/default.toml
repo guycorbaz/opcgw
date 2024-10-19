@@ -13,6 +13,8 @@ polling_frequency = 10
 [opcua]
 config_file = "server.conf"
 
+# List of applications that have to be displayed in UPC UA
+# The name of the application will appear in opc ua server
 [applications]
 application_1 = "Application01"
 application_2 = "Application02"
@@ -20,4 +22,10 @@ application_2 = "Application02"
 [devices]
 device_1 = ["Device01", "Application01"]
 device_2 = ["Device02", "Application02"]
+
+[[metrics]]
+device_id = "Device01"
+metric_name ="Metric01"
+
+
 

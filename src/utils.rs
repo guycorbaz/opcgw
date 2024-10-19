@@ -3,10 +3,9 @@
 
 //! Global utilities for the program
 //!
-//!
-//!
-//! # Example:
-//! Add example code...
+
+
+#![allow(unused)]
 
 use thiserror::Error;
 

@@ -6,6 +6,8 @@
 //! Provide a Chirpstack 4 to opc ua server gateway.
 //!
 
+#![allow(unused)]
+
 mod chirpstack;
 mod config;
 mod opc_ua;
@@ -16,7 +18,8 @@ mod utils;
 pub mod chirpstack_api {
     //tonic::include_proto!("chirpstack");
 }
-use crate::chirpstack::{ApplicationDetail, ChirpstackPoller, DeviceDetails, DeviceListDetail};
+use crate::chirpstack::{ApplicationDetail, ChirpstackPoller, DeviceListDetail};
+use crate::storage::{Storage};
 use clap::Parser;
 use config::Config;
 use log::{debug, error, info, trace, warn};
@@ -25,7 +28,6 @@ use opcua::server::server::Server;
 use opcua::sync::RwLock;
 use std::time::Duration;
 use std::{path::PathBuf, sync::Arc, thread};
-use storage::Storage;
 use tokio::runtime::{Builder, Runtime};
 use tokio::time;
 
@@ -58,6 +60,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => panic!("Failed to load config: {}", e),
     };
 
+    // Create common storage for Chirpstack poller and opc ua server
+    trace!("Create storage");
+    let storage = Storage::new(&application_config);
+
     // Create chirpstack poller
     trace!("Create chirpstack poller");
     let mut chirpstack_poller = match ChirpstackPoller::new(&application_config.chirpstack).await {
@@ -77,26 +83,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Create OPC UA server
-    let opc_ua = OpcUa::new(&application_config.opcua);
+    //let opc_ua = OpcUa::new(&application_config.opcua);
 
     // Run OPC UA server and periodic metrics reading in separate tasks
-    let opcua_handle = tokio::spawn(async move {
-        if let Err(e) = opc_ua.run().await {
-            error!("OPC UA server error: {:?}", e);
-        }
-    });
-
-    let read_metrics_task = tokio::spawn(async move {
-        loop {
-            if let Err(e) = opc_ua.read_device_metrics().await {
-                error!("Error reading device metrics: {:?}", e);
-            }
-            time::sleep(Duration::from_secs(10)).await;
-        }
-    });
+    //let opcua_handle = tokio::spawn(async move {
+    //    if let Err(e) = opc_ua.run().await {
+    //        error!("OPC UA server error: {:?}", e);
+    //    }
+    //});
 
     // Wait for all tasks to complete
-    tokio::try_join!(chirpstack_handle, opcua_handle, read_metrics_task).expect("Failed to run tasks");
+    //tokio::try_join!(chirpstack_handle, opcua_handle).expect("Failed to run tasks");
+    tokio::try_join!(chirpstack_handle).expect("Failed to run tasks");
 
     info!("Stopping");
     Ok(())

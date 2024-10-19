@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) [2024] [Guy Corbaz]
-
 //! Manage communications with Chirpstack 4 server
 
-use crate::config::ChirpstackConfig;
+#![allow(unused)]
+
+use crate::config::ChirpstackPollerConfig;
 use crate::utils::OpcGwError;
+//use crate::storage::{DeviceMetric, DeviceMetrics};
 use chirpstack_api::api::{DeviceState, GetDeviceMetricsRequest};
 use chirpstack_api::common::Metric;
 use log::{debug, error, trace};
@@ -26,6 +28,7 @@ use chirpstack_api::api::{
     ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse,
 };
 
+
 /// Structure representing a chirpstack application.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ApplicationDetail {
@@ -36,6 +39,7 @@ pub struct ApplicationDetail {
     /// Application description
     pub application_description: String,
 }
+
 
 /// Represents details of a device in a list format.
 #[derive(Debug, Deserialize, Clone)]
@@ -48,28 +52,6 @@ pub struct DeviceListDetail {
     pub description: String,
 }
 
-/// Represents detailed information about a device.
-#[derive(Debug, Deserialize, Clone)]
-pub struct DeviceDetails {
-    /// The unique identifier for the device (DevEUI).
-    pub dev_eui: String,
-    /// The name of the device.
-    pub name: String,
-    /// A description of the device.
-    pub description: String,
-    /// The ID of the application this device belongs to.
-    pub application_id: String,
-    /// Indicates whether the device is disabled.
-    pub is_disabled: bool,
-    /// The current battery level of the device.
-    pub battery_level: f32,
-    /// The signal margin of the device.
-    pub margin: i32,
-    /// Custom variables associated with the device.
-    pub variables: HashMap<String, String>,
-    /// Tags associated with the device.
-    pub tags: HashMap<String, String>,
-}
 
 /// Represents metrics and states for a device.
 #[derive(Debug, Deserialize, Clone)]
@@ -81,6 +63,7 @@ pub struct DeviceMetric {
     //pub states: HashMap<String, DeviceState>,
 }
 
+
 /// Definition of the interceptor for passing
 /// authentication token to Chirpstack server
 #[derive(Clone)]
@@ -88,6 +71,7 @@ struct AuthInterceptor {
     /// Chirpstack API token
     api_token: String,
 }
+
 
 /// Interceptor that allow to pass api token to chirpstack server
 impl Interceptor for AuthInterceptor {
@@ -100,11 +84,12 @@ impl Interceptor for AuthInterceptor {
     }
 }
 
+
 /// Chirpstack poller
 #[derive(Debug, Clone)]
 pub struct ChirpstackPoller {
     /// Configuration for the ChirpStack connection.
-    config: ChirpstackConfig,
+    config: ChirpstackPollerConfig,
     /// Client for interacting with device-related endpoints.
     device_client: Option<DeviceServiceClient<InterceptedService<Channel, AuthInterceptor>>>,
     /// Client for interacting with application-related endpoints.
@@ -112,9 +97,11 @@ pub struct ChirpstackPoller {
         Option<ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>>,
 }
 
+
 impl ChirpstackPoller {
-    /// Initialize a new Chirpstack poller instance.
-    /// The chirpstacl poller has to be instatiated in
+    /// Create and initialize a new Chirpstack poller instance.
+    /// for one tenant which id is loaded in configuration
+    /// The chirpstacl poller has to be instantiated in
     /// a tokio runtime
     ///
     /// Example
@@ -123,7 +110,7 @@ impl ChirpstackPoller {
     ///         Err(e) => panic!("Failed to create chirpstack poller: {}", e),
     ///     };
     ///
-    pub async fn new(config: &ChirpstackConfig) -> Result<Self, OpcGwError> {
+    pub async fn new(config: &ChirpstackPollerConfig) -> Result<Self, OpcGwError> {
         debug!("Create a new chirpstack connection");
         let channel = Channel::from_shared(config.server_address.clone())
             .unwrap()
@@ -169,33 +156,14 @@ impl ChirpstackPoller {
         let duration = Duration::from_secs(self.config.polling_frequency);
         loop {
             debug!("Polling metrics");
-            if let Err(e) = self.poll_metrics().await {
-                error!("Error polling devices: {:?}", e);
-            }
+            //if let Err(e) = self.poll_metrics().await {
+            //    error!("Error polling devices: {:?}", e);
+            //}
             tokio::time::sleep(duration).await;
         }
     }
 
-    async fn poll_devices(&self) -> Result<(), OpcGwError> {
-        // Implement device polling logic
-        let app_list = self.get_applications_list_from_server().await?;
-        for app in app_list {
-            let dev_list = self
-                .get_devices_list_from_server(app.application_id.clone())
-                .await
-                .unwrap();
-            debug!("Devices list: {:#?}", dev_list);
-        }
 
-        Ok(())
-    }
-
-    async fn poll_applications(&self) -> Result<(), OpcGwError> {
-        // Implement application polling logic
-        let app_list = self.get_applications_list_from_server().await?;
-        println!("Applications: {:?}", app_list);
-        Ok(())
-    }
 
     /// Poll metrics for each device
     async fn poll_metrics(&mut self) -> Result<(), OpcGwError> {
@@ -288,37 +256,6 @@ impl ChirpstackPoller {
         Ok(devices)
     }
 
-    /// Get device details from Chirpstack server
-    pub async fn get_device_details_from_server(
-        &mut self,
-        dev_eui: String,
-    ) -> Result<DeviceDetails, OpcGwError> {
-        debug!("Get device details");
-        todo!();
-        //    trace!("for device: {:?}", dev_eui);
-        //    let request = Request::new(GetDeviceRequest { dev_eui });
-
-        //    match self.device_client.get(request).await {
-        //        Ok(response) => {
-        //            let device = response.into_inner();
-        //            Ok(DeviceDetails {
-        //                dev_eui: device.device.clone().unwrap().dev_eui,
-        //                name: device.device.clone().unwrap().name,
-        //                application_id: device.device.clone().unwrap().application_id,
-        //                is_disabled: device.device.clone().unwrap().is_disabled,
-        //                description: device.device.clone().unwrap().description,
-        //                battery_level: device.device_status.unwrap().battery_level,
-        //                margin: device.device_status.unwrap().margin,
-        //                variables: device.device.clone().unwrap().variables,
-        //                tags: device.device.clone().unwrap().tags,
-        //            })
-        //        }
-        //        Err(e) => Err(OpcGwError::ChirpStackError(format!(
-        //            "Error getting device metrics: {}",
-        //            e
-        //        ))),
-        //    }
-    }
 
     /// Get device metrics from Chirpèstack server
     pub async fn get_device_metrics_from_server(

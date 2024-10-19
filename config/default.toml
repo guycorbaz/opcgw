@@ -17,7 +17,7 @@ api_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJjaGlycHN0YWNrIiwiaX
 # Tenant Id that will be used
 tenant_id = "52f14cd4-c6f1-4fbd-8f87-4025e1d49242"
 # Frequency to poll ChirpStack server in seconds
-polling_frequency = 2
+polling_frequency = 20
 
 
 # OPC UA parameters
@@ -27,6 +27,7 @@ config_file = "config/server.conf"
 
 
 # List of applications that have to be displayed in UPC UA
+# The name of the application will appear in opc ua server
 [applications]
 arrosage = "ae2012c2-75a1-407d-98ab-1520fb511edf"
 batiments = "194f12ab-d0ab-4389-a446-f1b3e7152b07"
@@ -35,6 +36,7 @@ meteo = "81d88d98-81eb-48b3-8d0d-48c82361e187"
 
 
 # Devices that have to be displayed in OPC UA
+# The name of the metric will appear in opc ua server
 # First field is device id, from Chirptack
 # second field is application id from Chirpstack as well
 [devices]
@@ -47,4 +49,22 @@ grange = ["a84041a44185f37d","194f12ab-d0ab-4389-a446-f1b3e7152b07"]
 verger02 = ["a8404159c1828ff0","194f12ab-d0ab-4389-a446-f1b3e7152b07"]
 tunnel01 = ["a84041878185f36d","194f12ab-d0ab-4389-a446-f1b3e7152b07"]
 meteo01 = ["2cf7f1c06130048a","81d88d98-81eb-48b3-8d0d-48c82361e187"]
+
+# Grange
+[[metrics]]
+device_id = "a84041a44185f37d"
+metric_name = "BatV"
+
+[[metrics]]
+device_id = "a84041a44185f37d"
+metric_name = "Hum_SHT"
+
+[[metrics]]
+device_id = "a84041a44185f37d"
+metric_name = "TempC_SHT"
+
+
+
+
+
 

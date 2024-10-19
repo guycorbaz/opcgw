@@ -3,6 +3,8 @@
 
 //! Manage opc ua server
 
+#![allow(unused)]
+
 use crate::config::OpcUaConfig;
 use crate::utils::OpcGwError;
 use log::{debug, error, info, trace, warn};

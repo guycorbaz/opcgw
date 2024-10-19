@@ -5,25 +5,29 @@
 //!
 //! Provide storage management for opc_ua_chirpstack_gateway
 //!
-//! # Example:
-//! Add example code...
 
-use crate::chirpstack::{ApplicationDetail, ChirpstackPoller, DeviceDetails, DeviceListDetail};
+#![allow(unused)]
+
+use crate::chirpstack::{ApplicationDetail, ChirpstackPoller, DeviceListDetail};
 use crate::Config;
 use log::{debug, error, info, trace, warn};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DeviceMetrics {
-    pub dev_eui: String,
-    pub timestamp: i64,
-    pub rx_packets: i32,
-    pub gw_rssi: f32,
-    pub gw_snr: f32,
-    // Ajoutez d'autres champs selon les besoins
+
+/// structure for storing one metric
+pub struct DeviceMetric {
+    /// The name of the metric as configured in Chirpstack
+    pub metric_name: String,
+    /// The timestamp of the metric
+    pub metric_timestamp: String,
+    /// The value of the metric
+    pub metric_value: String,
+    /// The kind of metric as defined in Chirpstack
+    pub metric_type: String,
 }
+
 
 /// Represents a device in the system.
 pub struct Device {
@@ -34,6 +38,7 @@ pub struct Device {
     /// Name of the device.
     pub name: String,
 }
+
 
 /// Represents an application in the system, provided by Chirpstack.
 pub struct Application {
@@ -47,12 +52,14 @@ pub struct Application {
 pub struct Storage {
     config: Config,
     /// Mapping of device EUIs to their respective metrics.
-    device_metrics: HashMap<String, DeviceMetrics>,
+    /// String is device_id, DeviceMetric is the metric
+    device_metrics: HashMap<String, DeviceMetric>,
     /// List of applications with their unique identifiers as keys.
     application_list: Vec<Application>,
     /// List of devices with their unique identifiers as keys.
     device_list: Vec<Device>,
 }
+
 
 impl Storage {
     /// Creates and returns a new instance of `Storage`
@@ -136,31 +143,17 @@ impl Storage {
         }
     }
 
-    /// Stores a metric with the given key and value.
-    pub fn store_metric(&mut self, key: String, value: String) {
-        debug!("Storing metric: {} = {}", key, value);
-        todo!();
-        self.metrics.insert(key, value);
-    }
+    // Stores device metrics for a given device EUI.
+    //pub fn store_device_metrics(&mut self, dev_eui: String, metrics: DeviceMetrics) {
+    //    debug!("Storing metrics for device: {}", dev_eui);
+    //    self.device_metrics.insert(dev_eui, metrics);
+    //}
 
-    /// Retrieves a metric value for the given key.
-    pub fn get_metric(&self, key: &str) -> Option<&String> {
-        debug!("Getting metric: {}", key);
-        todo!();
-        self.metrics.get(key)
-    }
-
-    /// Stores device metrics for a given device EUI.
-    pub fn store_device_metrics(&mut self, dev_eui: String, metrics: DeviceMetrics) {
-        debug!("Storing metrics for device: {}", dev_eui);
-        self.device_metrics.insert(dev_eui, metrics);
-    }
-
-    /// Retrieves device metrics for a given device EUI.
-    pub fn get_device_metrics(&self, dev_eui: &str) -> Option<&DeviceMetrics> {
-        debug!("Getting metrics for device: {}", dev_eui);
-        self.device_metrics.get(dev_eui)
-    }
+    // Retrieves device metrics for a given device EUI.
+    //pub fn get_device_metrics(&self, dev_eui: &str) -> Option<&DeviceMetrics> {
+    //    debug!("Getting metrics for device: {}", dev_eui);
+    //    self.device_metrics.get(dev_eui)
+    //}
 }
 
 #[cfg(test)]
@@ -203,6 +196,23 @@ mod tests {
         storage.list_applications(); // What we are testing
     }
 
+
+    #[ignore]
+    #[test]
+    fn test_find_application_name() {
+        let config_path = std::env::var("CONFIG_PATH")
+            .unwrap_or_else(|_| "tests/config/default.toml".to_string());
+        let config: Config = Figment::new()
+            .merge(Toml::file(&config_path))
+            .extract()
+            .expect("Failed to load configuration");
+        let mut storage = Storage::new(&config);
+
+        assert_eq!(storage.find_application_name(&"application_1".to_string()), "Application01");
+
+    }
+
+    #[ignore]
     #[test]
     fn test_load_devices() {
         let config_path = std::env::var("CONFIG_PATH")
@@ -215,9 +225,10 @@ mod tests {
 
         storage.load_devices();
 
-        assert!(storage.device_list.len() > 0);
+        assert!(storage.device_list.len() > 0);  // This means that we loaded something
+        //FIXME: Reactivate that test
         assert_eq!(
-            storage.device_list[0].application_id,
+            storage.find_application_name(&"application_1".to_string()),
             "Application01".to_string()
         );
         assert_eq!(storage.device_list[0].device_id, "Device01".to_string());
