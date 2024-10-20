@@ -13,19 +13,53 @@ polling_frequency = 10
 [opcua]
 config_file = "server.conf"
 
-# List of applications that have to be displayed in UPC UA
-# The name of the application will appear in opc ua server
-[applications]
-application_1 = "Application01"
-application_2 = "Application02"
 
-[devices]
-device_1 = ["Device01", "Application01"]
-device_2 = ["Device02", "Application02"]
+#
+# List of application that have to be displayed in OPC UA
+#
+# Application 1
+[[application]]
+application_name = "Application01" # The name that will apperar in opc ua
+application_id = "application_1" # The id defined in chirpstack
 
-[[metrics]]
-device_id = "Device01"
-metric_name ="Metric01"
+[[application.device]]
+device_name = "Device01" # The name that will apperar in opc ua
+device_id = "device_1" # The id defined in chirpstack
+
+[[application.device.metric]]
+metric_name ="Metric01" # The name that will appear in opc ua
+chirpstack_metric_name = "metric_1" # The name defined in Chirpstcak
+
+[[application.device.metric]]
+metric_name = "Metric02" # The name that will appear in opc ua
+chirpstack_metric_name = "metric_2" # The name defined in Chirpstcak
 
 
+# Application 2
+[[application]]
+application_name = "Application02" # The name that will apperar in opc ua
+application_id = "application_2" # The id defined in chirpstack
 
+[[application.device]]
+device_name = "Device02" # The name that will apperar in opc ua
+device_id = "device_2" # The id defined in chirpstack
+
+[[application.device.metric]]
+metric_name ="Metric03" # The name that will appear in opc ua
+chirpstack_metric_name = "metric_3" # The name defined in Chirpstcak
+
+[[application.device.metric]]
+metric_name = "Metric04" # The name that will appear in opc ua
+chirpstack_metric_name = "metric_4" # The name defined in Chirpstcak
+
+[[application.device]]
+device_name = "Device03" # The name that will apperar in opc ua
+device_id = "device_3" # The id defined in chirpstack
+
+[[application.device.metric]]
+metric_name ="Metric05" # The name that will appear in opc ua
+chirpstack_metric_name = "metric_5" # The name defined in Chirpstcak
+
+[[application.device.metric]]
+metric_name = "Metric06" # The name that will appear in opc ua
+chirpstack_metric_name = "metric_6" # The name defined in Chirpstcak

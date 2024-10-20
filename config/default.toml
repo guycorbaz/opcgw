@@ -26,42 +26,176 @@ config_file = "config/server.conf"
 
 
 
-# List of applications that have to be displayed in UPC UA
-# The name of the application will appear in opc ua server
-[applications]
-arrosage = "ae2012c2-75a1-407d-98ab-1520fb511edf"
-batiments = "194f12ab-d0ab-4389-a446-f1b3e7152b07"
-cultures = "fca74250-823b-4dcb-adaf-fa8b99563533"
-meteo = "81d88d98-81eb-48b3-8d0d-48c82361e187"
 
 
-# Devices that have to be displayed in OPC UA
-# The name of the metric will appear in opc ua server
-# First field is device id, from Chirptack
-# second field is application id from Chirpstack as well
-[devices]
-niveau_citerne = ["a840418371886840","ae2012c2-75a1-407d-98ab-1520fb511edf"]
-vanne01 = ["524d1e0a02243201","ae2012c2-75a1-407d-98ab-1520fb511edf"]
-vanne02 = ["3f8e3904c1523201","ae2012c2-75a1-407d-98ab-1520fb511edf"]
-vanne03 = ["999b3d04c1523201","ae2012c2-75a1-407d-98ab-1520fb511edf"]
-magasin = ["a840414bf185f365","194f12ab-d0ab-4389-a446-f1b3e7152b07"]
-grange = ["a84041a44185f37d","194f12ab-d0ab-4389-a446-f1b3e7152b07"]
-verger02 = ["a8404159c1828ff0","194f12ab-d0ab-4389-a446-f1b3e7152b07"]
-tunnel01 = ["a84041878185f36d","194f12ab-d0ab-4389-a446-f1b3e7152b07"]
-meteo01 = ["2cf7f1c06130048a","81d88d98-81eb-48b3-8d0d-48c82361e187"]
+###########################################################
+# Arrosage
+###########################################################
+[[application]]
+application_id = "ae2012c2-75a1-407d-98ab-1520fb511edf"
+application_name = "Arrosage"
 
-# Grange
-[[metrics]]
-device_id = "a84041a44185f37d"
-metric_name = "BatV"
+    [[application.device]]
+    device_name = "Niveau_citerne"
+    device_id = "a840418371886840"
 
-[[metrics]]
-device_id = "a84041a44185f37d"
-metric_name = "Hum_SHT"
+        [[application.device.metric]]
+        metric_name ="Niveau"
+        chirpstack_metric_name = "Water_deep_cm"
 
-[[metrics]]
-device_id = "a84041a44185f37d"
-metric_name = "TempC_SHT"
+        [[application.device.metric]]
+        metric_name ="Batterie"
+        chirpstack_metric_name = "Bat_V"
+
+    [[application.device]]
+    device_name = "Vanne01"
+    device_id = "524d1e0a02243201"
+
+        [[application.device.metric]]
+        metric_name ="Position"
+        chirpstack_metric_name = "ValveStatus"
+
+    [[application.device]]
+    device_name = "Vanne02"
+    device_id = "3f8e3904c1523201"
+
+        [[application.device.metric]]
+        metric_name ="Position"
+        chirpstack_metric_name = "ValveStatus"
+
+    [[application.device]]
+    device_name = "Vanne03"
+    device_id = "999b3d04c1523201"
+
+        [[application.device.metric]]
+        metric_name ="Position"
+        chirpstack_metric_name = "ValveStatus"
+
+
+###########################################################
+# Bâtiments
+###########################################################
+[[application]]
+application_id = "194f12ab-d0ab-4389-a446-f1b3e7152b07"
+application_name ="Bâtiments"
+
+    [[application.device]]
+    device_name = "Magasin"
+    device_id = "a840414bf185f365"
+
+        [[application.device.metric]]
+        metric_name ="Batterie"
+        chirpstack_metric_name = "BatV"
+
+        [[application.device.metric]]
+        metric_name ="Humidité"
+        chirpstack_metric_name = "Hum_SHT"
+
+        [[application.device.metric]]
+        metric_name ="Température"
+        chirpstack_metric_name = "TempC_SHT"
+
+
+    [[application.device]]
+    device_name = "Grange"
+    device_id = "a84041a44185f37d"
+
+        [[application.device.metric]]
+        metric_name ="Batterie"
+        chirpstack_metric_name = "BatV"
+
+        [[application.device.metric]]
+        metric_name ="Humidité"
+        chirpstack_metric_name = "Hum_SHT"
+
+        [[application.device.metric]]
+        metric_name ="Température"
+        chirpstack_metric_name = "TempC_SHT"
+
+
+###########################################################
+# Cultures
+###########################################################
+[[application]]
+application_id = "fca74250-823b-4dcb-adaf-fa8b99563533"
+application_name = "Cultures"
+
+    [[application.device]]
+    device_name = "Verger2"
+    device_id = "a8404159c1828ff0"
+
+        [[application.device.metric]]
+        metric_name ="Batterie"
+        chirpstack_metric_name = "Batterie"
+
+        [[application.device.metric]]
+        metric_name ="Conductivité"
+        chirpstack_metric_name = "Conductivité"
+
+        [[application.device.metric]]
+        metric_name ="Température"
+        chirpstack_metric_name = "Température"
+
+        [[application.device.metric]]
+        metric_name ="Humidité"
+        chirpstack_metric_name = "Humidité"
+
+
+    [[application.device]]
+    device_name = "Tunnel1"
+    device_id = "a84041878185f36d"
+
+        [[application.device.metric]]
+        metric_name ="Batterie"
+        chirpstack_metric_name = "BatV"
+
+        [[application.device.metric]]
+        metric_name ="Humidité"
+        chirpstack_metric_name = "Hum_SHT"
+
+        [[application.device.metric]]
+        metric_name ="Température"
+        chirpstack_metric_name = "TempC_SHT"
+
+
+###########################################################
+# Meteo
+###########################################################
+[[application]]
+application_id = "81d88d98-81eb-48b3-8d0d-48c82361e187"
+application_name = "Meteo"
+
+    [[application.device]]
+    device_name = "Station_meteo_01"
+    device_id = "2cf7f1c06130048a"
+
+        [[application.device.metric]]
+        metric_name ="Température"
+        chirpstack_metric_name = "Temp"
+
+        [[application.device.metric]]
+        metric_name ="Humidité"
+        chirpstack_metric_name = "airHumidity"
+
+        [[application.device.metric]]
+        metric_name ="Pression"
+        chirpstack_metric_name = "barometricPressure"
+
+        [[application.device.metric]]
+        metric_name ="Vitesse_vent"
+        chirpstack_metric_name = "windSpeed"
+
+        [[application.device.metric]]
+        metric_name ="Direction_vent"
+        chirpstack_metric_name = "windDirection"
+
+        [[application.device.metric]]
+        metric_name ="UVIndex"
+        chirpstack_metric_name = "UVIndex"
+
+        [[application.device.metric]]
+        metric_name ="Intensité_lumineuse"
+        chirpstack_metric_name = "lightIntensity"
 
 
 
