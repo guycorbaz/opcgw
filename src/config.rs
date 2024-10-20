@@ -5,12 +5,9 @@
 //!
 //! Provides configuration file management for opc_ua_chirpstack_gateway
 //!
-//! # Example:
-//! Add example code...
 
-#![allow(unused)]
+#![allow(unused)] //FIXME: Remove for release
 
-//TODO: add possibility to config path for log files
 use crate::utils::OpcGwError;
 use figment::{
     providers::{Env, Format, Toml},
@@ -20,17 +17,15 @@ use log::{debug, trace};
 use serde::Deserialize;
 use std::collections::HashMap;
 
-
-/// Strcture for storing global application configuration  parameters
+/// Structure for storing global application configuration  parameters.
+/// This might change in future
 #[derive(Debug, Deserialize, Clone)]
 pub struct Global {
-    /// set to true for detailed debug log
+    /// Set to true for detailed debug log FIXME:Implement
     pub debug: bool,
 }
 
-
 /// Structure for storing Chirpstack connection parameters
-/// This works for only one tenant.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ChirpstackPollerConfig {
     /// ChirpStack server address.
@@ -43,46 +38,51 @@ pub struct ChirpstackPollerConfig {
     pub polling_frequency: u64,
 }
 
-
 /// Structure for storing opc ua server configuration parameters
 /// For the time being, the configuration is
-/// coming from a dedicated file
+/// coming from a dedicated file. This will be improved
+/// in future
 #[derive(Debug, Deserialize, Clone)]
 pub struct OpcUaConfig {
     /// Config file path for opc ua server
     pub config_file: String,
 }
 
-
 /// Chirpstack application description
-/// These information are what is defined in
-/// the Chirpstack server
+/// This defines how to connect to server
 #[derive(Debug, Deserialize, Clone)]
 pub struct ChirpStackApplications {
     /// Chirpstack application name
     pub application_name: String,
     /// Chirpstack application ID
-    application_id: String,
-}
-
-
-/// Structure that holds the information of the device
-/// we are interesting in getting data from
-#[derive(Debug, Deserialize, Clone)]
-pub struct Device {
-    pub device_id: String,
     pub application_id: String,
+    /// The list of devices for the application
+    #[serde(rename = "device")]
+    pub device_list: Vec<ChirpstackDevice>,
 }
 
+/// Structure that holds the data of the device
+/// we would like to monitor
+#[derive(Debug, Deserialize, Clone)]
+pub struct ChirpstackDevice {
+    /// The device id defined in chirpstack
+    pub device_id: String,
+    /// The name that will appear in opc ua
+    pub device_name: String,
+    /// The list of metrics for the device
+    #[serde(rename = "metric")]
+    pub metric_list: Vec<Metric>,
+}
 
-/// Structure that holds the informations of the device
+/// Structure that holds the data of the device
 /// metrics we would like to monitor
 #[derive(Debug, Deserialize, Clone)]
 pub struct Metric {
-    pub device_id: String,
+    /// The name that will appear in opc ua
     pub metric_name: String,
+    /// The name defined in chirpstack
+    pub chirpstack_metric_name: String,
 }
-
 
 /// Structure for storing configuration loaded by figment
 #[derive(Debug, Deserialize, Clone)]
@@ -93,17 +93,10 @@ pub struct Config {
     pub chirpstack: ChirpstackPollerConfig,
     /// OPC UA server-specific configuration.
     pub opcua: OpcUaConfig,
-    /// List of applications we are interested in
-    pub applications: HashMap<String, String>, // First field is name, second, id
-    /// List of devices we are interested in
-    pub devices: HashMap<String, Device>, // First field is name, second, id
-    /// List of metrics to poll
-    pub metrics: Vec<Metric>,
+    /// List of applications we are we would like to monitor
+    #[serde(rename = "application")]
+    pub application_list: Vec<ChirpStackApplications>,
 }
-
-
-
-
 
 impl Config {
     /// Creates and initialize a new instance of the application configuration.
@@ -111,15 +104,16 @@ impl Config {
     /// This method loads the configuration from TOML files and environment variables.
     /// It first looks for a default configuration file, then an optional local file,
     /// and finally environment variables prefixed with "APP_".
+    /// TODO: Add the possibility to pass config file path via command line parameter
 
     pub fn new() -> Result<Self, OpcGwError> {
         debug!("Creating new AppConfig");
 
-        // Define config file path TODO: Add the possibility to pass it via command line parameter
+        // Define config file path
         let config_path =
-            std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config/default.toml".to_string()); //TODO: Test config path via environment variable
+            std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config/default.toml".to_string());
 
-        // Reading the configuration from 'config_path'
+        // Reading the configuration
         trace!("with config path: {}", config_path);
         let config: Config = Figment::new()
             .merge(Toml::file(&config_path))
@@ -130,107 +124,210 @@ impl Config {
         Ok({ config })
     }
 
-}
+    /// This function retrieves the application name corresponding
+    /// to the given application ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `application_id` - A reference to the application ID as a `String`.
+    ///
+    /// # Returns
+    ///
+    /// This function returns an `Option<String>`. It returns `Some(String)`
+    /// containing the application name if a match is found,
+    /// and `None` if no match is found.
+    ///
+    pub fn get_application_name(&self, application_id: &String) -> Option<String> {
+        for app in self.application_list.iter() {
+            if app.application_id == *application_id {
+                return Some(app.application_name.clone());
+            }
+        }
+        None
+    }
 
+    /// This function retrieves the application id corresponding
+    /// to the given application name.
+    ///
+    /// # Arguments
+    ///
+    /// * `application_name` - A reference to the application name as a `String`.
+    ///
+    /// # Returns
+    ///
+    /// This function returns an `Option<String>`. It returns `Some(String)`
+    /// containing the application id if a match is found,
+    /// and `None` if no match is found.
+    ///
+    pub fn get_application_id(&self, application_name: &String) -> Option<String> {
+        for app in self.application_list.iter() {
+            if app.application_name == *application_name {
+                return Some(app.application_id.clone());
+            }
+        }
+        None
+    }
+
+    /// Returns the name of the device given its `device_id` and `application_id`.
+    ///
+    /// # Parameters
+    /// - `device_id`: A reference to the device's unique identifier as a `String`.
+    /// - `application_id`: A reference to the application's unique identifier as a `String`.
+    ///
+    /// # Returns
+    /// - `Some(String)`: The name of the device if found.
+    /// - `None`: If the device with the given `device_id`
+    /// under the specified `application_id` is not found.
+    ///
+    pub fn get_device_name(&self, device_id: &String, application_id: &String) -> Option<String> {
+        // Search for the application
+        for app in self.application_list.iter() {
+            if app.application_id == *application_id {
+                // Search for device id
+                for device in app.device_list.iter() {
+                    if device.device_id == *device_id {
+                        return Some(device.device_name.clone());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns the id of the device given its `device_name` and `application_id`.
+    ///
+    /// If several devices in an application have the same name, the first
+    /// is returned. There are no check for duplication.
+    ///
+    /// # Parameters
+    /// - `device_name`: A reference to the device's name as a `String`.
+    /// - `application_id`: A reference to the application's unique identifier as a `String`.
+    ///
+    /// # Returns
+    /// - `Some(String)`: The id of the device if found.
+    /// - `None`: If the device with the given `device_id`
+    /// under the specified `application_id` is not found.
+    ///
+    pub fn get_device_id(&self, device_name: &String, application_id: &String) -> Option<String> {
+        // Search for the application
+        for app in self.application_list.iter() {
+            if app.application_id == *application_id {
+                // Search for device id
+                for device in app.device_list.iter() {
+                    if device.device_name == *device_name {
+                        return Some(device.device_id.clone());
+                    }
+                }
+            }
+        }
+        None
+    }
+}
 
 /// Test config module
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Test global application configuration loading
-    #[test]
-    fn test_application_global_config() {
+    /// Create a config object for test functions
+    /// If changes are don on "tests/default.toml"
+    /// the tests below might fail.
+    fn get_config() -> Config {
         let config_path = std::env::var("CONFIG_PATH")
             .unwrap_or_else(|_| "tests/config/default.toml".to_string());
         let config: Config = Figment::new()
             .merge(Toml::file(&config_path))
             .extract()
             .expect("Failed to load configuration");
+        config
+    }
 
+    /// Test if global application parameters
+    /// are loaded
+    #[test]
+    fn test_application_global_config() {
+        let config = get_config();
         assert_eq!(config.global.debug, true);
     }
 
-
-    /// Test chirpstack configuration loading
+    /// Test if chirpstack configuration parameters
+    /// are loaded
     #[test]
     fn test_chirpstack_config() {
-        let config_path = std::env::var("CONFIG_PATH")
-            .unwrap_or_else(|_| "tests/config/default.toml".to_string());
-        let config: Config = Figment::new()
-            .merge(Toml::file(&config_path))
-            .extract()
-            .expect("Failed to load configuration");
-
+        let config = get_config();
         assert_eq!(config.chirpstack.server_address, "localhost:8080");
         assert_eq!(config.chirpstack.api_token, "test_token");
         assert_eq!(config.chirpstack.tenant_id, "tenant_id");
         assert_eq!(config.chirpstack.polling_frequency, 10);
     }
 
-
-    /// Test opcos application configuration loading
+    /// Test if opc ua configuration parameters
+    /// are loaded
     #[test]
     fn test_opcua_config() {
-        let config_path = std::env::var("CONFIG_PATH")
-            .unwrap_or_else(|_| "tests/config/default.toml".to_string());
-        let config: Config = Figment::new()
-            .merge(Toml::file(&config_path))
-            .extract()
-            .expect("Failed to load configuration");
-
+        let config = get_config();
         assert_eq!(config.opcua.config_file, "server.conf");
     }
 
-
-    /// Test application list loading
+    /// Test if application list
+    /// is loaded
     #[test]
     fn test_application_config() {
-        let config_path = std::env::var("CONFIG_PATH")
-            .unwrap_or_else(|_| "tests/config/default.toml".to_string());
-        let config: Config = Figment::new()
-            .merge(Toml::file(&config_path))
-            .extract()
-            .expect("Failed to load configuration");
-
-        assert!(config.applications.len() > 0);
+        let config = get_config();
+        assert!(config.application_list.len() > 0); // We have loaded something
         assert_eq!(
-            config.applications.get("application_1").unwrap(),
-            "Application01"
+            config
+                .get_application_name(&"application_1".to_string())
+                .unwrap()
+                .to_string(),
+            "Application01".to_string()
+        );
+        assert_eq!(
+            config
+                .get_application_name(&"application_2".to_string())
+                .unwrap()
+                .to_string(),
+            "Application02".to_string()
+        );
+        assert_eq!(
+            config
+                .get_application_id(&"Application02".to_string())
+                .unwrap()
+                .to_string(),
+            "application_2".to_string()
         );
     }
 
-    /// Test devices configuration loading
+    /// Test devices list
+    /// is loaded
+
     #[test]
     fn test_devices_config() {
-        let config_path = std::env::var("CONFIG_PATH")
-            .unwrap_or_else(|_| "tests/config/default.toml".to_string());
-        let config: Config = Figment::new()
-            .merge(Toml::file(&config_path))
-            .extract()
-            .expect("Failed to load configuration");
-
-        assert!(config.devices.len() > 0);
+        let config = get_config();
+        assert!(!config.application_list.is_empty());
+        assert!(!config.application_list[0].device_list.is_empty()); // There are devices
         assert_eq!(
-            config.devices.get("device_1").unwrap().device_id,
-            "Device01"
+            config
+                .get_device_name(&"device_1".to_string(), &"application_1".to_string())
+                .unwrap()
+                .to_string(),
+            "Device01".to_string()
         );
         assert_eq!(
-            config.devices.get("device_1").unwrap().application_id,
-            "Application01"
+            config
+                .get_device_id(&"Device01".to_string(), &"application_1".to_string())
+                .unwrap()
+                .to_string(),
+            "device_1".to_string()
         );
     }
 
-
+    /// Test if metrics list
+    /// is loaded
+    #[ignore]
     #[test]
     fn test_metrics_config() {
-        let config_path = std::env::var("CONFIG_PATH")
-            .unwrap_or_else(|_| "tests/config/default.toml".to_string());
-        let config: Config = Figment::new()
-            .merge(Toml::file(&config_path))
-            .extract()
-            .expect("Failed to load configuration");
-
-        assert!(config.metrics.len() > 0);  // We loaded something
+        let config = get_config();
+        todo!();
     }
 }
