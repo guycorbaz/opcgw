@@ -19,7 +19,7 @@ pub mod chirpstack_api {
     //tonic::include_proto!("chirpstack");
 }
 use crate::chirpstack::{ApplicationDetail, ChirpstackPoller, DeviceListDetail};
-use crate::storage::{Storage};
+use crate::storage::Storage;
 use clap::Parser;
 use config::Config;
 use log::{debug, error, info, trace, warn};
@@ -48,7 +48,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse arguments
-    let args = Args::parse(); //TODO: add possibility to pass config file as argument
+    let args = Args::parse();
 
     // Configure logger
     log4rs::init_file("log4rs.yaml", Default::default()).expect("Failed to initialize logger");
