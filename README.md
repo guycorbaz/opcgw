@@ -55,6 +55,8 @@ Chirpstack propose 5 metric types:
 
 At the time being, only gauge is supported.
 
+The gateway has been tested only with [fuxa](https://github.com/frangoteam/FUXA) scada for the moment.
+
 
 ## Prerequisites
 
