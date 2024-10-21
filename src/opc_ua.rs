@@ -154,10 +154,21 @@ impl OpcUa {
         Ok(())
     }
 
-    /// Populate the address space with parameters from config
+    /// Populates the address space with applications and their devices.
+    ///
+    /// This method reads the server state and accesses the server's address space.
+    /// It then iterates over the list of applications from the configuration, adding each application
+    /// as a folder in the address space. For each application, it adds its devices as subfolders
+    /// and attaches the respective variables to each device.
+    ///
+    /// # Panics
+    /// This method will panic if there is a failure in adding folders or variables to the address space.
     pub fn populate_address_space(&self) {
+        // Read the server state
         let server = self.server.read();
+        // Access the server's address space
         let address_space = server.address_space();
+        // Obtain writable reference to the address space
         let mut address_space = address_space.write();
         let app = self.config.application_list.clone();
         for application in app {
@@ -168,13 +179,14 @@ impl OpcUa {
                             &NodeId::objects_folder_id())
                 .unwrap();
             for device in application.device_list {
-                // Adding devices in applications
+                // Adding device under the application folder
                 let device_id = address_space
                     .add_folder(device.device_name.clone(),
                                 device.device_name.clone(),
                                 &folder_id)
                     .unwrap();
                 address_space.add_variables(
+                    // Add variables to the device in address space
                     self.create_variables(&device), &device_id
                 );
             }
@@ -182,19 +194,35 @@ impl OpcUa {
     }
 
 
-    /// Create a vector of variables for adding them to
-    /// device folder
+    /// Creates OPC UA variables from a given ChirpstackDevice.
+    ///
+    /// This function initializes an empty vector to store `Variable` instances,
+    /// iterates over each metric in the device's metric list, clones the metric name,
+    /// creates a new `NodeId` for the variable, and pushes the new `Variable` into the vector.
+    ///
+    /// # Parameters
+    /// - `device`: A reference to a `ChirpstackDevice` containing the metrics from which
+    ///             the OPC UA variables will be created.
+    ///
+    /// # Returns
+    /// A vector of `Variable` instances created from the device's metrics.
     fn create_variables(&self, device: &ChirpstackDevice) -> Vec<Variable> {
         trace!("Creating opc ua variables");
+
+        // Initialize an empty vector to store the generated variables
         let mut variables = Vec::<Variable>::new();
+
+        // Iterate over each metric in the device's metric list
         for metric in device.metric_list.clone() {
             let metric_name = metric.metric_name.clone();
             let variable_node = NodeId::new(self.ns, metric_name.clone());
+
+            // Create a new Variable with the node, name, and an initial value
             variables.push(Variable::new(
                 &variable_node,
                 metric_name.clone(),
                 metric_name,
-                0_i32
+                0_i32 //FIXME: Add the corresponding type from config
             ));
         }
         variables
