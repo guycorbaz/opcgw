@@ -175,8 +175,12 @@ impl OpcUa {
                                 &folder_id)
                     .unwrap();
                 for metric in device.metric_list {
-
-                    println!("{}, {}. {}", application.application_name, device.device_name, metric.metric_name);
+                    // Metric folder
+                    let metric_id = address_space
+                        .add_folder(metric.metric_name.clone(),
+                                    metric.metric_name.clone(),
+                                    &device_id)
+                        .unwrap();
                 }
             }
         }
