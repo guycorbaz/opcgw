@@ -4,7 +4,7 @@
 
 #![allow(unused)]
 
-use crate::config::ChirpstackPollerConfig;
+use crate::config::{ChirpstackPollerConfig, AppConfig};
 use crate::utils::OpcGwError;
 //use crate::storage::{DeviceMetric, DeviceMetrics};
 use chirpstack_api::api::{DeviceState, GetDeviceMetricsRequest};
@@ -28,7 +28,6 @@ use chirpstack_api::api::{
     ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse,
 };
 
-
 /// Structure representing a chirpstack application.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ApplicationDetail {
@@ -39,7 +38,6 @@ pub struct ApplicationDetail {
     /// Application description
     pub application_description: String,
 }
-
 
 /// Represents details of a device in a list format.
 #[derive(Debug, Deserialize, Clone)]
@@ -52,7 +50,6 @@ pub struct DeviceListDetail {
     pub description: String,
 }
 
-
 /// Represents metrics and states for a device.
 #[derive(Debug, Deserialize, Clone)]
 pub struct DeviceMetric {
@@ -63,7 +60,6 @@ pub struct DeviceMetric {
     //pub states: HashMap<String, DeviceState>,
 }
 
-
 /// Definition of the interceptor for passing
 /// authentication token to Chirpstack server
 #[derive(Clone)]
@@ -71,7 +67,6 @@ struct AuthInterceptor {
     /// Chirpstack API token
     api_token: String,
 }
-
 
 /// Interceptor that allow to pass api token to chirpstack server
 impl Interceptor for AuthInterceptor {
@@ -84,19 +79,17 @@ impl Interceptor for AuthInterceptor {
     }
 }
 
-
 /// Chirpstack poller
 #[derive(Debug, Clone)]
 pub struct ChirpstackPoller {
     /// Configuration for the ChirpStack connection.
-    config: ChirpstackPollerConfig,
+    config: AppConfig,
     /// Client for interacting with device-related endpoints.
     device_client: Option<DeviceServiceClient<InterceptedService<Channel, AuthInterceptor>>>,
     /// Client for interacting with application-related endpoints.
     application_client:
         Option<ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>>,
 }
-
 
 impl ChirpstackPoller {
     /// Create and initialize a new Chirpstack poller instance.
@@ -110,16 +103,16 @@ impl ChirpstackPoller {
     ///         Err(e) => panic!("Failed to create chirpstack poller: {}", e),
     ///     };
     ///
-    pub async fn new(config: &ChirpstackPollerConfig) -> Result<Self, OpcGwError> {
+    pub async fn new(config: &AppConfig) -> Result<Self, OpcGwError> {
         debug!("Create a new chirpstack connection");
-        let channel = Channel::from_shared(config.server_address.clone())
+        let channel = Channel::from_shared(config.chirpstack.server_address.clone())
             .unwrap()
             .connect()
             .await
             .map_err(|e| OpcGwError::ChirpStackError(format!("Connection error: {}", e)))?;
 
         let interceptor = AuthInterceptor {
-            api_token: config.api_token.clone(),
+            api_token: config.chirpstack.api_token.clone(),
         };
 
         // Create Chirpstack devices interface
@@ -151,9 +144,9 @@ impl ChirpstackPoller {
         //TODO: Implement
         trace!(
             "Running chirpstack client poller every {} s",
-            self.config.polling_frequency
+            self.config.chirpstack.polling_frequency
         );
-        let duration = Duration::from_secs(self.config.polling_frequency);
+        let duration = Duration::from_secs(self.config.chirpstack.polling_frequency);
         loop {
             debug!("Polling metrics");
             //if let Err(e) = self.poll_metrics().await {
@@ -162,8 +155,6 @@ impl ChirpstackPoller {
             tokio::time::sleep(duration).await;
         }
     }
-
-
 
     /// Poll metrics for each device
     async fn poll_metrics(&mut self) -> Result<(), OpcGwError> {
@@ -178,7 +169,7 @@ impl ChirpstackPoller {
                 let dev_metrics = &self
                     .get_device_metrics_from_server(
                         dev.dev_eui.clone(),
-                        self.config.polling_frequency,
+                        self.config.chirpstack.polling_frequency,
                         1,
                     )
                     .await?;
@@ -200,7 +191,7 @@ impl ChirpstackPoller {
             limit: 100, // Vous pouvez ajuster cette valeur selon vos besoins
             offset: 0,
             search: String::new(),
-            tenant_id: self.config.tenant_id.clone(), // We work on only one tenant defined in parameter file
+            tenant_id: self.config.chirpstack.tenant_id.clone(), // We work on only one tenant defined in parameter file
         });
         trace!("Request created with: {:#?}", request);
 
@@ -256,7 +247,6 @@ impl ChirpstackPoller {
         Ok(devices)
     }
 
-
     /// Get device metrics from Chirpèstack server
     pub async fn get_device_metrics_from_server(
         &mut self,
@@ -274,7 +264,7 @@ impl ChirpstackPoller {
             end: Some(Timestamp::from(
                 SystemTime::now() + Duration::from_secs(duration),
             )),
-            aggregation: aggregation,
+            aggregation,
         });
 
         trace!("Format result");

@@ -21,7 +21,8 @@ use std::collections::HashMap;
 /// This might change in future
 #[derive(Debug, Deserialize, Clone)]
 pub struct Global {
-    /// Set to true for detailed debug log FIXME:Implement
+    /// Set to true for detailed debug log
+    /// Not used now
     pub debug: bool,
 }
 
@@ -86,7 +87,7 @@ pub struct Metric {
 
 /// Structure for storing configuration loaded by figment
 #[derive(Debug, Deserialize, Clone)]
-pub struct Config {
+pub struct AppConfig {
     /// Global application configuration
     pub global: Global,
     /// ChirpStack-specific configuration.
@@ -98,13 +99,13 @@ pub struct Config {
     pub application_list: Vec<ChirpStackApplications>,
 }
 
-impl Config {
+impl AppConfig {
     /// Creates and initialize a new instance of the application configuration.
     ///
     /// This method loads the configuration from TOML files and environment variables.
     /// It first looks for a default configuration file, then an optional local file,
     /// and finally environment variables prefixed with "APP_".
-    /// TODO: Add the possibility to pass config file path via command line parameter
+    ///
 
     pub fn new() -> Result<Self, OpcGwError> {
         debug!("Creating new AppConfig");
@@ -115,12 +116,12 @@ impl Config {
 
         // Reading the configuration
         trace!("with config path: {}", config_path);
-        let config: Config = Figment::new()
+        let config: AppConfig = Figment::new()
             .merge(Toml::file(&config_path))
             .merge(Env::prefixed("OPCGW_").global())
             .extract()
             .map_err(|e| OpcGwError::ConfigurationError(format!("Connexion error: {}", e)))?;
-        trace!("config: {:#?}", config);
+        //trace!("config: {:#?}", config);
         Ok({ config })
     }
 
@@ -177,7 +178,7 @@ impl Config {
     /// # Returns
     /// - `Some(String)`: The name of the device if found.
     /// - `None`: If the device with the given `device_id`
-    /// under the specified `application_id` is not found.
+    ///    under the specified `application_id` is not found.
     ///
     pub fn get_device_name(&self, device_id: &String, application_id: &String) -> Option<String> {
         // Search for the application
@@ -206,7 +207,7 @@ impl Config {
     /// # Returns
     /// - `Some(String)`: The id of the device if found.
     /// - `None`: If the device with the given `device_id`
-    /// under the specified `application_id` is not found.
+    ///    under the specified `application_id` is not found.
     ///
     pub fn get_device_id(&self, device_name: &String, application_id: &String) -> Option<String> {
         // Search for the application
@@ -232,10 +233,10 @@ mod tests {
     /// Create a config object for test functions
     /// If changes are don on "tests/default.toml"
     /// the tests below might fail.
-    fn get_config() -> Config {
+    fn get_config() -> AppConfig {
         let config_path = std::env::var("CONFIG_PATH")
             .unwrap_or_else(|_| "tests/config/default.toml".to_string());
-        let config: Config = Figment::new()
+        let config: AppConfig = Figment::new()
             .merge(Toml::file(&config_path))
             .extract()
             .expect("Failed to load configuration");

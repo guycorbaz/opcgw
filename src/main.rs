@@ -21,7 +21,7 @@ pub mod chirpstack_api {
 use crate::chirpstack::{ApplicationDetail, ChirpstackPoller, DeviceListDetail};
 use crate::storage::Storage;
 use clap::Parser;
-use config::Config;
+use config::AppConfig;
 use log::{debug, error, info, trace, warn};
 use opc_ua::OpcUa;
 use opcua::server::server::Server;
@@ -54,8 +54,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log4rs::init_file("log4rs.yaml", Default::default()).expect("Failed to initialize logger");
     info!("starting");
 
-    // Create a new configuration and load parameters
-    let application_config = match Config::new() {
+    // Create a new configuration and load its parameters
+    let application_config = match AppConfig::new() {
         Ok(config) => Arc::new(config),
         Err(e) => panic!("Failed to load config: {}", e),
     };
@@ -66,14 +66,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create chirpstack poller
     trace!("Create chirpstack poller");
-    let mut chirpstack_poller = match ChirpstackPoller::new(&application_config.chirpstack).await {
+    let mut chirpstack_poller = match ChirpstackPoller::new(&application_config).await {
         Ok(poller) => poller,
         Err(e) => panic!("Failed to create chirpstack poller: {}", e),
     };
 
     // Create OPC UA server
     trace!("Create OPC UA server");
-    //let opc_ua = OpcUa::new(&application_config.opcua);
+    let opc_ua = OpcUa::new(&application_config);
 
     // Run chirpstack poller and OPC UA server in separate tasks
     let chirpstack_handle = tokio::spawn(async move {
@@ -82,19 +82,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Create OPC UA server
-    //let opc_ua = OpcUa::new(&application_config.opcua);
 
     // Run OPC UA server and periodic metrics reading in separate tasks
-    //let opcua_handle = tokio::spawn(async move {
-    //    if let Err(e) = opc_ua.run().await {
-    //        error!("OPC UA server error: {:?}", e);
-    //    }
-    //});
+    let opcua_handle = tokio::spawn(async move {
+        if let Err(e) = opc_ua.run().await {
+            error!("OPC UA server error: {:?}", e);
+        }
+    });
 
     // Wait for all tasks to complete
-    //tokio::try_join!(chirpstack_handle, opcua_handle).expect("Failed to run tasks");
-    tokio::try_join!(chirpstack_handle).expect("Failed to run tasks");
+    tokio::try_join!(chirpstack_handle, opcua_handle).expect("Failed to run tasks");
+    //tokio::try_join!(chirpstack_handle).expect("Failed to run tasks");
 
     info!("Stopping");
     Ok(())
