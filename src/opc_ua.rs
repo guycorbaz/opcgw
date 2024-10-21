@@ -5,7 +5,7 @@
 
 #![allow(unused)]
 
-use crate::config::{OpcUaConfig, AppConfig};
+use crate::config::{OpcUaConfig, AppConfig, ChirpstackDevice};
 use crate::utils::{OpcGwError,OPCUA_ADDRESS_SPACE};
 use log::{debug, error, info, trace, warn};
 use opcua::server::prelude::*;
@@ -174,15 +174,29 @@ impl OpcUa {
                                 device.device_name.clone(),
                                 &folder_id)
                     .unwrap();
-                for metric in device.metric_list {
-                    // Metric folder
-                    let metric_id = address_space
-                        .add_folder(metric.metric_name.clone(),
-                                    metric.metric_name.clone(),
-                                    &device_id)
-                        .unwrap();
-                }
+                address_space.add_variables(
+                    self.create_variables(&device), &device_id
+                );
             }
         }
+    }
+
+
+    /// Create a vector of variables for adding them to
+    /// device folder
+    fn create_variables(&self, device: &ChirpstackDevice) -> Vec<Variable> {
+        trace!("Creating opc ua variables");
+        let mut variables = Vec::<Variable>::new();
+        for metric in device.metric_list.clone() {
+            let metric_name = metric.metric_name.clone();
+            let variable_node = NodeId::new(self.ns, metric_name.clone());
+            variables.push(Variable::new(
+                &variable_node,
+                metric_name.clone(),
+                metric_name,
+                0_i32
+            ));
+        }
+        variables
     }
 }
