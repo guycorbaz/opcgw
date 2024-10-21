@@ -75,6 +75,15 @@ pub struct ChirpstackDevice {
     pub metric_list: Vec<Metric>,
 }
 
+/// Type of metrics
+#[derive(Debug, Deserialize, Clone)]
+pub enum MetricType {
+    Bool,
+    Int,
+    Float,
+    String
+}
+
 /// Structure that holds the data of the device
 /// metrics we would like to monitor
 #[derive(Debug, Deserialize, Clone)]
@@ -83,6 +92,10 @@ pub struct Metric {
     pub metric_name: String,
     /// The name defined in chirpstack
     pub chirpstack_metric_name: String,
+    /// The type of metric
+    pub metric_type: MetricType,
+    /// Unit of the metric
+    pub metric_unit: Option<String>,
 }
 
 /// Structure for storing configuration loaded by figment

@@ -42,10 +42,12 @@ application_name = "Arrosage"
         [[application.device.metric]]
         metric_name ="Niveau"
         chirpstack_metric_name = "Water_deep_cm"
+        metric_type = "Float"
 
         [[application.device.metric]]
         metric_name ="Batterie"
         chirpstack_metric_name = "Bat_V"
+        metric_type = "Float"
 
     [[application.device]]
     device_name = "Vanne01"
@@ -54,6 +56,7 @@ application_name = "Arrosage"
         [[application.device.metric]]
         metric_name ="Position"
         chirpstack_metric_name = "ValveStatus"
+        metric_type = "Float"
 
     [[application.device]]
     device_name = "Vanne02"
@@ -62,6 +65,7 @@ application_name = "Arrosage"
         [[application.device.metric]]
         metric_name ="Position"
         chirpstack_metric_name = "ValveStatus"
+        metric_type = "Float"
 
     [[application.device]]
     device_name = "Vanne03"
@@ -70,6 +74,7 @@ application_name = "Arrosage"
         [[application.device.metric]]
         metric_name ="Position"
         chirpstack_metric_name = "ValveStatus"
+        metric_type = "Float"
 
 
 ###########################################################
@@ -86,14 +91,17 @@ application_name ="Bâtiments"
         [[application.device.metric]]
         metric_name ="Batterie"
         chirpstack_metric_name = "BatV"
+        metric_type = "Float"
 
         [[application.device.metric]]
         metric_name ="Humidité"
         chirpstack_metric_name = "Hum_SHT"
+        metric_type = "Float"
 
         [[application.device.metric]]
         metric_name ="Température"
         chirpstack_metric_name = "TempC_SHT"
+        metric_type = "Float"
 
 
     [[application.device]]
@@ -103,14 +111,17 @@ application_name ="Bâtiments"
         [[application.device.metric]]
         metric_name ="Batterie"
         chirpstack_metric_name = "BatV"
+        metric_type = "Float"
 
         [[application.device.metric]]
         metric_name ="Humidité"
         chirpstack_metric_name = "Hum_SHT"
+        metric_type = "Float"
 
         [[application.device.metric]]
         metric_name ="Température"
         chirpstack_metric_name = "TempC_SHT"
+        metric_type = "Float"
 
 
 ###########################################################
@@ -127,18 +138,22 @@ application_name = "Cultures"
         [[application.device.metric]]
         metric_name ="Batterie"
         chirpstack_metric_name = "Batterie"
+        metric_type = "Float"
 
         [[application.device.metric]]
         metric_name ="Conductivité"
         chirpstack_metric_name = "Conductivité"
+        metric_type = "Float"
 
         [[application.device.metric]]
         metric_name ="Température"
         chirpstack_metric_name = "Température"
+        metric_type = "Float"
 
         [[application.device.metric]]
         metric_name ="Humidité"
         chirpstack_metric_name = "Humidité"
+        metric_type = "Float"
 
 
     [[application.device]]
@@ -148,14 +163,17 @@ application_name = "Cultures"
         [[application.device.metric]]
         metric_name ="Batterie"
         chirpstack_metric_name = "BatV"
+        metric_type = "Float"
 
         [[application.device.metric]]
         metric_name ="Humidité"
         chirpstack_metric_name = "Hum_SHT"
+        metric_type = "Float"
 
         [[application.device.metric]]
         metric_name ="Température"
         chirpstack_metric_name = "TempC_SHT"
+        metric_type = "Float"
 
 
 ###########################################################
@@ -172,30 +190,40 @@ application_name = "Meteo"
         [[application.device.metric]]
         metric_name ="Température"
         chirpstack_metric_name = "Temp"
+        metric_type = "Float"
 
         [[application.device.metric]]
         metric_name ="Humidité"
         chirpstack_metric_name = "airHumidity"
+        metric_type = "Float"
 
         [[application.device.metric]]
         metric_name ="Pression"
         chirpstack_metric_name = "barometricPressure"
+        metric_type = "Float"
 
         [[application.device.metric]]
         metric_name ="Vitesse_vent"
         chirpstack_metric_name = "windSpeed"
+        metric_type = "Float"
+        metric_unit = "m/s"
 
         [[application.device.metric]]
         metric_name ="Direction_vent"
         chirpstack_metric_name = "windDirection"
+        metric_type = "Float"
+        metric_unit = "Deg"
 
         [[application.device.metric]]
         metric_name ="UVIndex"
         chirpstack_metric_name = "UVIndex"
+        metric_type = "Float"
 
         [[application.device.metric]]
         metric_name ="Intensité_lumineuse"
         chirpstack_metric_name = "lightIntensity"
+        metric_type = "Float"
+        metric_unit = "w/m2"
 
 
 

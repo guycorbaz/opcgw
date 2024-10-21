@@ -6,7 +6,6 @@
 
 use crate::config::{ChirpstackPollerConfig, AppConfig};
 use crate::utils::OpcGwError;
-//use crate::storage::{DeviceMetric, DeviceMetrics};
 use chirpstack_api::api::{DeviceState, GetDeviceMetricsRequest};
 use chirpstack_api::common::Metric;
 use log::{debug, error, trace};
