@@ -25,7 +25,36 @@ polling_frequency = 20
 config_file = "config/server.conf"
 
 
-
+###########################################################
+# Applications
+# application are listed below. There are no limits on the
+# application nombre
+# Eadch applicatgion can slso have an unlimited amount
+# of device, and each device can have an unlimited amount
+# of metrics.
+# The hierarchy Application -> Device -> Metric is
+# reproduced in the opc ua address space.
+#
+# Example of configuration
+#
+# [[Aplication]]
+# application_name = "Application Name" # name displayed in opc ua
+# application_is = "application_is" # Chirpstack application id
+#
+# [[application.device]]
+# device_name = "Device Name" # name displayed in opc ua
+# device_id = "device_id" # Chirpstack device id
+#
+# [[application.device.metric]]
+# metric_name = "metric_name" # name displayed in opc ua
+# chirpstack_metric_name = "chirpstack_name" # metric name in chirpstack
+# metric_type = "Float" # Type of metric: either Bool, Int, Float, String
+# metric_unit = "W" # the optional metric unit
+#
+# All fields are mandatory, except the metric unit
+# There must be at least one application
+# An application must have at least one device
+# A device must have at least one metric
 
 
 ###########################################################
