@@ -4,19 +4,14 @@ appenders:
     kind: console
     encoder:
       pattern: "{d} - {l} - {t} - {m}{n}"
-  opcgw_log:
+  opcua_server_log:
     kind: file
-    path: "log/opcgw.log"
+    path: "log/opcua_server.log"
     encoder:
       pattern: "{d} - {l} - {t} - {m}{n}"
-  chirpstack_log:
+  opcuagw_log:
     kind: file
-    path: "log/chirpstack.log"
-    encoder:
-      pattern: "{d} - {l} - {t} - {m}{n}"
-  audit_log:
-    kind: file
-    path: "log/audit.log"
+    path: "log/opcuagw.log"
     encoder:
       pattern: "{d} - {l} - {t} - {m}{n}"
 
@@ -26,9 +21,12 @@ root:
     - stdout
     - opcgw_log
 loggers:
-
-  audit:
+  opc_ua_chirpstack_gateway:
     level: trace
     appenders:
-      - audit_log
+      - opcuagw_log
+  opcua:
+    level: info
+    appenders:
+      - opcua_server_log
 
