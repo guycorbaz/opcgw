@@ -77,11 +77,11 @@ pub struct ChirpstackDevice {
 
 /// Type of metrics
 #[derive(Debug, Deserialize, Clone)]
-pub enum MetricType {
+pub enum MetricTypeConfig {
     Bool,
     Int,
     Float,
-    String
+    String,
 }
 
 /// Structure that holds the data of the device
@@ -93,7 +93,7 @@ pub struct Metric {
     /// The name defined in chirpstack
     pub chirpstack_metric_name: String,
     /// The type of metric
-    pub metric_type: MetricType,
+    pub metric_type: MetricTypeConfig,
     /// Unit of the metric
     pub metric_unit: Option<String>,
 }
