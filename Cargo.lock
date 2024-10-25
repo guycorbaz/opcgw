@@ -974,10 +974,10 @@ dependencies = [
 
 [[package]]
 name = "opcua"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6df8d714e27ba497815bf1d41f79b7652804d54ef5132ef1fc553fbd03598c81"
+version = "0.13.0"
+source = "git+https://github.com/locka99/opcua.git#fcc89d8f8b93b5a0943ec8086706e883900faa3c"
 dependencies = [
+ "arc-swap",
  "base64 0.21.7",
  "bitflags",
  "byteorder",

@@ -69,12 +69,12 @@ application_name = "Arrosage"
     device_id = "a840418371886840"
 
         [[application.device.metric]]
-        metric_name ="Niveau"
+        metric_name ="Niveau_cit"
         chirpstack_metric_name = "Water_deep_cm"
         metric_type = "Float"
 
         [[application.device.metric]]
-        metric_name ="Batterie"
+        metric_name ="Batterie_cit"
         chirpstack_metric_name = "Bat_V"
         metric_type = "Float"
 
@@ -83,7 +83,7 @@ application_name = "Arrosage"
     device_id = "524d1e0a02243201"
 
         [[application.device.metric]]
-        metric_name ="Position"
+        metric_name ="Position_v01"
         chirpstack_metric_name = "ValveStatus"
         metric_type = "Float"
 
@@ -92,7 +92,7 @@ application_name = "Arrosage"
     device_id = "3f8e3904c1523201"
 
         [[application.device.metric]]
-        metric_name ="Position"
+        metric_name ="Position_v02"
         chirpstack_metric_name = "ValveStatus"
         metric_type = "Float"
 
@@ -101,7 +101,7 @@ application_name = "Arrosage"
     device_id = "999b3d04c1523201"
 
         [[application.device.metric]]
-        metric_name ="Position"
+        metric_name ="Position_v03"
         chirpstack_metric_name = "ValveStatus"
         metric_type = "Float"
 
@@ -118,17 +118,17 @@ application_name ="Bâtiments"
     device_id = "a840414bf185f365"
 
         [[application.device.metric]]
-        metric_name ="Batterie"
+        metric_name ="Batterie_mag"
         chirpstack_metric_name = "BatV"
         metric_type = "Float"
 
         [[application.device.metric]]
-        metric_name ="Humidité"
+        metric_name ="Humidite_mag"
         chirpstack_metric_name = "Hum_SHT"
         metric_type = "Float"
 
         [[application.device.metric]]
-        metric_name ="Température"
+        metric_name ="Temperature_mag"
         chirpstack_metric_name = "TempC_SHT"
         metric_type = "Float"
 
@@ -138,17 +138,17 @@ application_name ="Bâtiments"
     device_id = "a84041a44185f37d"
 
         [[application.device.metric]]
-        metric_name ="Batterie"
+        metric_name ="Batterie_gr"
         chirpstack_metric_name = "BatV"
         metric_type = "Float"
 
         [[application.device.metric]]
-        metric_name ="Humidité"
+        metric_name ="Humidite_gr"
         chirpstack_metric_name = "Hum_SHT"
         metric_type = "Float"
 
         [[application.device.metric]]
-        metric_name ="Température"
+        metric_name ="Temperature_gr"
         chirpstack_metric_name = "TempC_SHT"
         metric_type = "Float"
 
@@ -165,22 +165,22 @@ application_name = "Cultures"
     device_id = "a8404159c1828ff0"
 
         [[application.device.metric]]
-        metric_name ="Batterie"
+        metric_name ="Batterie_ver2"
         chirpstack_metric_name = "Batterie"
         metric_type = "Float"
 
         [[application.device.metric]]
-        metric_name ="Conductivité"
+        metric_name ="Conductivite_ver2"
         chirpstack_metric_name = "Conductivité"
         metric_type = "Float"
 
         [[application.device.metric]]
-        metric_name ="Température"
+        metric_name ="Temperature_ver2"
         chirpstack_metric_name = "Température"
         metric_type = "Float"
 
         [[application.device.metric]]
-        metric_name ="Humidité"
+        metric_name ="Humidite_ver2"
         chirpstack_metric_name = "Humidité"
         metric_type = "Float"
 
@@ -190,17 +190,17 @@ application_name = "Cultures"
     device_id = "a84041878185f36d"
 
         [[application.device.metric]]
-        metric_name ="Batterie"
+        metric_name ="Batterie_t1"
         chirpstack_metric_name = "BatV"
         metric_type = "Float"
 
         [[application.device.metric]]
-        metric_name ="Humidité"
+        metric_name ="Humidite_t1"
         chirpstack_metric_name = "Hum_SHT"
         metric_type = "Float"
 
         [[application.device.metric]]
-        metric_name ="Température"
+        metric_name ="Temperature_t1"
         chirpstack_metric_name = "TempC_SHT"
         metric_type = "Float"
 

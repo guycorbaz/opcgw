@@ -12,6 +12,7 @@ use opcua::server::prelude::*;
 use opcua::sync::Mutex;
 use opcua::sync::RwLock;
 use opcua::types::VariableId::OperationLimitsType_MaxNodesPerTranslateBrowsePathsToNodeIds;
+use opcua::types::variant::Variant::{Float};
 use std::option::Option;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -47,6 +48,7 @@ impl OpcUa {
     pub fn new(config: &AppConfig) -> Self {
         trace!("New OPC UA structure");
         // Create de server configuration using the provided config file path
+        //trace!("opcua config file is {:?}", config.opcua.config_file);
         let server_config = Self::create_server_config(&config
             .opcua.config_file
             .clone());
@@ -100,7 +102,7 @@ impl OpcUa {
     /// ```
     fn create_server_config(config_file_name: &String) -> ServerConfig {
         debug!("Creating server config");
-
+        trace!("opcua config file is {:?}", config_file_name);
         // Attempt to load the server configuration from the given file name
         match ServerConfig::load(&PathBuf::from(config_file_name)) {
             // If successful, return the loaded configuration
@@ -215,16 +217,32 @@ impl OpcUa {
         // Iterate over each metric in the device's metric list
         for metric in device.metric_list.clone() {
             let metric_name = metric.metric_name.clone();
-            let variable_node = NodeId::new(self.ns, metric_name.clone());
-
+            trace!("Creating variable for metric {:?}", &metric_name);
+            // Create the variable node id for the metric
+            let metric_node_id = NodeId::new(self.ns, metric_name.clone());
             // Create a new Variable with the node, name, and an initial value
-            variables.push(Variable::new(
-                &variable_node,
+            let mut metric_variable = Variable::new(
+                &metric_node_id,
                 metric_name.clone(),
                 metric_name,
-                0_i32 //FIXME: Add the corresponding type from config
-            ));
+                Float(0.0));
+            // Crete getter
+            let getter = AttrFnGetter::new(
+                move | _, _, _, _, _, _, | -> Result<Option<DataValue>, StatusCode> {
+                    trace!("Get variable value");
+                    let value = 11.0;
+                    //let value = self.get_metric_value(&metric_node_id.clone());
+                    Ok(Some((DataValue::new_now(value))))
+                }
+            );
+            metric_variable.set_value_getter(Arc::new(Mutex::new(getter)));
+            // Add variable to variables list
+            variables.push(metric_variable);
         }
         variables
+    }
+
+    fn get_metric_value(&self, metric_nod_id: &NodeId) {
+        trace!("Getting metric value");
     }
 }
