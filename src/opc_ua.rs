@@ -218,31 +218,44 @@ impl OpcUa {
         for metric in device.metric_list.clone() {
             let metric_name = metric.metric_name.clone();
             trace!("Creating variable for metric {:?}", &metric_name);
+
             // Create the variable node id for the metric
             let metric_node_id = NodeId::new(self.ns, metric_name.clone());
+
+            // Move self and metric_node_id into the closure
+            let self_arc = Arc::new(self);
+            let metric_node_id_arc = Arc::new(metric_node_id.clone());
+
             // Create a new Variable with the node, name, and an initial value
             let mut metric_variable = Variable::new(
                 &metric_node_id,
                 metric_name.clone(),
                 metric_name,
                 Float(0.0));
+
             // Crete getter
             let getter = AttrFnGetter::new(
                 move | _, _, _, _, _, _, | -> Result<Option<DataValue>, StatusCode> {
-                    trace!("Get variable value");
-                    let value = 11.0;
-                    //let value = self.get_metric_value(&metric_node_id.clone());
+                    //trace!("Get variable value");
+                    //let value = 11.0;
+                    let id = metric_node_id_arc.clone();
+                    let value = get_metric_value(&id.clone());
                     Ok(Some((DataValue::new_now(value))))
                 }
             );
+
             metric_variable.set_value_getter(Arc::new(Mutex::new(getter)));
             // Add variable to variables list
+
             variables.push(metric_variable);
         }
         variables
     }
 
-    fn get_metric_value(&self, metric_nod_id: &NodeId) {
-        trace!("Getting metric value");
-    }
+
+}
+
+fn get_metric_value(metric_nod_id: &NodeId) -> f32 {
+    trace!("Get metric value");
+    123.0
 }
