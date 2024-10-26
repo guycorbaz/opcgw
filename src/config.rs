@@ -336,12 +336,4 @@ mod tests {
         );
     }
 
-    /// Test if metrics list
-    /// is loaded
-    #[ignore]
-    #[test]
-    fn test_metrics_config() {
-        let config = get_config();
-        todo!();
-    }
 }
