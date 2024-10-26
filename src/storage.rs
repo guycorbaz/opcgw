@@ -12,29 +12,34 @@
 
 use crate::chirpstack::{ApplicationDetail, ChirpstackPoller, DeviceListDetail};
 use crate::AppConfig;
+use crate::config::MetricTypeConfig;
 use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
+/// Type of metric returned by Chirpstack server
+pub enum MetricType {
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(String),
+}
+
 /// structure for storing one metric
 pub struct DeviceMetric {
-    /// The name of the metric as configured in Chirpstack
-    pub metric_name: String,
-    /// The timestamp of the metric
-    pub metric_timestamp: String,
+    // The timestamp of the metric
+    //pub metric_timestamp: String,
     /// The value of the metric
-    pub metric_value: String,
-    /// The kind of metric as defined in Chirpstack
-    pub metric_type: String,
+    pub metric_value: MetricType,
+
 }
 
 /// Main structure for storing application data, metrics, and managing devices and applications.
 pub struct Storage {
     config: AppConfig,
-    /// Mapping of device EUIs to their respective metrics.
-    /// String is device_id, DeviceMetric is the metric
-    device_metrics: HashMap<String, DeviceMetric>,
+    /// String is metric name, DeviceMetric is the metric
+    device_metrics: HashMap<String, MetricType>,
 }
 
 impl Storage {
@@ -42,37 +47,32 @@ impl Storage {
     pub fn new(app_config: &AppConfig) -> Storage {
         debug!("Creating a new Storage instance");
 
+        // Build and initialize the device metric storage
+        let mut device_metrics = HashMap::new();
+
+        // Parse applications
+        for application in app_config.application_list.iter() {
+            // Parse device
+            for device in application.device_list.iter() {
+                // Parse metrics
+                for metric in device.metric_list.iter() {
+                    let metric_type = match metric.metric_type {
+                        MetricTypeConfig::Bool => MetricType::Bool(false),
+                        MetricTypeConfig::Int => MetricType::Int(0),
+                        MetricTypeConfig::Float => MetricType::Float(0.0),
+                        MetricTypeConfig::String => MetricType::String("".to_string()),
+                    };
+                    device_metrics.insert(
+                        metric.metric_name.clone(), MetricType::Float(0.0)
+                    );
+                }
+            }
+        }
         Storage {
             config: app_config.clone(),
-            device_metrics: HashMap::new(),
+            device_metrics, // HashMap is empty:
         }
     }
-
-    /// Loads the list of applications from the configuration into the storage.
-    pub fn load_applications(&mut self) {
-        debug!("Loading applications list");
-        todo!();
-        //for application in &self.config.applications {
-        //    println!("Application {}", application.0.clone());
-        //    let app = Application {
-        //        name: application.0.clone(),
-        //        application_id: application.1.clone(),
-        //    };
-        //    self.application_list.push(app);
-        //}
-    }
-
-    // Stores device metrics for a given device EUI.
-    //pub fn store_device_metrics(&mut self, dev_eui: String, metrics: DeviceMetrics) {
-    //    debug!("Storing metrics for device: {}", dev_eui);
-    //    self.device_metrics.insert(dev_eui, metrics);
-    //}
-
-    // Retrieves device metrics for a given device EUI.
-    //pub fn get_device_metrics(&self, dev_eui: &str) -> Option<&DeviceMetrics> {
-    //    debug!("Getting metrics for device: {}", dev_eui);
-    //    self.device_metrics.get(dev_eui)
-    //}
 }
 
 #[cfg(test)]
@@ -84,7 +84,7 @@ mod tests {
     };
 
     /// Create a config object for test functions
-    /// If changes are don on "tests/default.toml"
+    /// If changes are done on "tests/default.toml"
     /// the tests below might fail.
     fn get_config() -> AppConfig {
         let config_path = std::env::var("CONFIG_PATH")
@@ -95,23 +95,21 @@ mod tests {
             .expect("Failed to load configuration");
         config
     }
-    #[ignore]
-    #[test]
-    fn test_load_applications() {}
 
-    #[ignore]
+    /// Test if metrics list is loaded
     #[test]
-    fn test_list_applications() {}
+    fn test_load_metrics() {
+        let app_config = get_config();
+        let storage = Storage::new(&app_config);
+        assert!(storage.config.application_list.len() > 0); // We loaded something
+    }
 
-    #[ignore]
+    /// Test if one loaded metric is present
     #[test]
-    fn test_find_application_name() {}
-
-    #[ignore]
-    #[test]
-    fn test_load_devices() {}
-
-    #[ignore]
-    #[test]
-    fn test_find_device_name() {}
+    fn test_get_metric() {
+        let app_config = get_config();
+        let storage = Storage::new(&app_config);
+        let metric = storage.device_metrics.get(&String::from("Metric01"));
+        assert!(metric.is_some()); // Metric is loaded
+    }
 }

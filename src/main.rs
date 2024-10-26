@@ -27,6 +27,7 @@ use opc_ua::OpcUa;
 use opcua::server::server::Server;
 use opcua::sync::RwLock;
 use std::time::Duration;
+use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc, thread};
 use tokio::runtime::{Builder, Runtime};
 use tokio::time;
@@ -60,9 +61,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => panic!("Failed to load config: {}", e),
     };
 
-    // Create common storage for Chirpstack poller and opc ua server
+    // Create shared storage for Chirpstack poller and opc ua server threads
     trace!("Create storage");
-    let storage = Storage::new(&application_config);
+    let storage = Arc::new(Mutex::new(Storage::new(&application_config)));
 
     // Create chirpstack poller
     trace!("Create chirpstack poller");
