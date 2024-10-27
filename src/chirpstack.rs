@@ -12,6 +12,8 @@ use log::{debug, error, trace};
 use prost_types::Timestamp;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::SystemTime;
 use tokio::runtime::{Builder, Runtime};
 use tokio::time::{sleep, Duration};
@@ -26,6 +28,7 @@ use chirpstack_api::api::{
     ApplicationListItem, DeviceListItem, GetDeviceRequest, ListApplicationsRequest,
     ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse,
 };
+use crate::storage::Storage;
 
 /// Structure representing a chirpstack application.
 #[derive(Debug, Deserialize, Clone)]
@@ -79,7 +82,7 @@ impl Interceptor for AuthInterceptor {
 }
 
 /// Chirpstack poller
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ChirpstackPoller {
     /// Configuration for the ChirpStack connection.
     config: AppConfig,
@@ -88,6 +91,8 @@ pub struct ChirpstackPoller {
     /// Client for interacting with application-related endpoints.
     application_client:
         Option<ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>>,
+    /// Metrics list
+    pub storage: Arc<std::sync::Mutex<Storage>>,
 }
 
 impl ChirpstackPoller {
@@ -102,7 +107,7 @@ impl ChirpstackPoller {
     ///         Err(e) => panic!("Failed to create chirpstack poller: {}", e),
     ///     };
     ///
-    pub async fn new(config: &AppConfig) -> Result<Self, OpcGwError> {
+    pub async fn new(config: &AppConfig, storage: Arc<Mutex<Storage>>) -> Result<Self, OpcGwError> {
         debug!("Create a new chirpstack connection");
         let channel = Channel::from_shared(config.chirpstack.server_address.clone())
             .unwrap()
@@ -128,6 +133,7 @@ impl ChirpstackPoller {
             config: config.clone(),
             device_client: Some(device_client),
             application_client: Some(application_client),
+            storage,
         })
     }
 

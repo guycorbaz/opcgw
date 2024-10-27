@@ -67,14 +67,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create chirpstack poller
     trace!("Create chirpstack poller");
-    let mut chirpstack_poller = match ChirpstackPoller::new(&application_config).await {
+    let mut chirpstack_poller = match ChirpstackPoller::new(&application_config, storage.clone()).await {
         Ok(poller) => poller,
         Err(e) => panic!("Failed to create chirpstack poller: {}", e),
     };
 
     // Create OPC UA server
     trace!("Create OPC UA server");
-    let opc_ua = OpcUa::new(&application_config);
+    let opc_ua = OpcUa::new(&application_config, storage.clone());
 
     // Run chirpstack poller and OPC UA server in separate tasks
     let chirpstack_handle = tokio::spawn(async move {

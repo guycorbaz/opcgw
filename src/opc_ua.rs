@@ -7,9 +7,11 @@
 
 use crate::config::{OpcUaConfig, AppConfig, ChirpstackDevice};
 use crate::utils::{OpcGwError,OPCUA_ADDRESS_SPACE};
+use crate::storage::Storage;
 use log::{debug, error, info, trace, warn};
 use opcua::server::prelude::*;
 use opcua::sync::Mutex;
+//use std::sync::Mutex;
 use opcua::sync::RwLock;
 use opcua::types::VariableId::OperationLimitsType_MaxNodesPerTranslateBrowsePathsToNodeIds;
 use opcua::types::variant::Variant::{Float};
@@ -27,6 +29,8 @@ pub struct OpcUa {
     pub server: Arc<RwLock<Server>>,
     /// Index of the opc ua address space
     pub ns: u16,
+    /// Metrics list
+    pub storage: Arc<std::sync::Mutex<Storage>>,
 }
 
 impl OpcUa {
@@ -45,7 +49,7 @@ impl OpcUa {
     /// # Returns
     ///
     /// A new instance of `Self`.
-    pub fn new(config: &AppConfig) -> Self {
+    pub fn new(config: &AppConfig, storage: Arc<std::sync::Mutex<Storage>>) -> Self {
         trace!("New OPC UA structure");
         // Create de server configuration using the provided config file path
         //trace!("opcua config file is {:?}", config.opcua.config_file);
@@ -77,6 +81,7 @@ impl OpcUa {
             server_config,
             server,
             ns,
+            storage,
         }
     }
 
@@ -225,6 +230,7 @@ impl OpcUa {
             // Move self and metric_node_id into the closure
             let self_arc = Arc::new(self);
             let metric_node_id_arc = Arc::new(metric_node_id.clone());
+            let metric_name_arc = Arc::new(metric_name.clone());
 
             // Create a new Variable with the node, name, and an initial value
             let mut metric_variable = Variable::new(
@@ -239,7 +245,8 @@ impl OpcUa {
                     //trace!("Get variable value");
                     //let value = 11.0;
                     let id = metric_node_id_arc.clone();
-                    let value = get_metric_value(&id.clone());
+                    let name = metric_name_arc.clone();
+                    let value = get_metric_value(&name.clone());
                     Ok(Some((DataValue::new_now(value))))
                 }
             );
@@ -255,7 +262,9 @@ impl OpcUa {
 
 }
 
-fn get_metric_value(metric_nod_id: &NodeId) -> f32 {
-    trace!("Get metric value");
+/// Get metric value from storage
+/// Maybe should be in storage module...
+fn get_metric_value(metric_name: &String) -> f32 {
+    trace!("Get metric value for {:?}", &metric_name);
     123.0
 }
