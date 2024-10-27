@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 /// Type of metric returned by Chirpstack server
+#[derive(Clone, Debug, PartialEq)]
 pub enum MetricType {
     Bool(bool),
     Int(i64),
@@ -73,6 +74,17 @@ impl Storage {
             device_metrics, // HashMap is empty:
         }
     }
+
+    ///Return a metric value for the metric name passed in parameters
+    pub fn get_metric_value(&self, metric_name: &str) -> Option<MetricType> {
+        trace!("Getting metric value for '{}'", metric_name);
+        self.device_metrics.get(metric_name).cloned()
+    }
+
+    /// Set value for metric name passed in  parameters
+    pub fn ser_metric_value(&self, metric_name: &str, value: MetricType) {
+        trace!("Serializing metric value for '{}'", metric_name);
+    }
 }
 
 #[cfg(test)]
@@ -111,5 +123,15 @@ mod tests {
         let storage = Storage::new(&app_config);
         let metric = storage.device_metrics.get(&String::from("Metric01"));
         assert!(metric.is_some()); // Metric is loaded
+    }
+
+    /// Test if one metric value is present
+    /// We test with the default value configured
+    /// when metric is initialized
+    #[test]
+    pub fn test_get_metric_value() {
+        let storage = Storage::new(&get_config());
+        let metric_value = storage.get_metric_value("Metric01");
+        assert_eq!(metric_value, Some(MetricType::Float(0.0)));
     }
 }
