@@ -214,14 +214,14 @@ impl ChirpstackPoller {
     /// * `device_id` - A reference to the ID of the device.
     /// * `metric` - A reference to the metric to be stored.
     pub fn store_metric(&self, device_id: &String, metric: &Metric) {
-        trace!("Store device metric in storage");
+        //trace!("Store device metric in storage");
         let metric_name = metric.name.clone();
         let value = metric.datasets[0].data[0].clone();
-        trace!("Value for {:?} is: {:#?}", metric_name, value);
+        //trace!("Value for {:?} is: {:#?}", metric_name, value);
 
         match self.config.get_metric_type(&metric_name) {
             Some(metric_type) => {
-                trace!("Metric type: {:?} for metric {:?}", metric_type, metric_name);
+                //trace!("Metric type: {:?} for metric {:?}", metric_type, metric_name);
                 match metric_type {
                     MetricTypeConfig::Bool => {},
                     MetricTypeConfig::Int => {},
@@ -365,8 +365,7 @@ impl ChirpstackPoller {
         duration: u64,
         aggregation: i32,
     ) -> Result<DeviceMetric, OpcGwError> {
-        debug!("Get device metrics for");
-
+        debug!("Get device metrics");
         trace!("for device: {:?}", dev_eui);
         trace!("Create request");
         let request = Request::new(GetDeviceMetricsRequest {

@@ -145,11 +145,11 @@ impl Storage {
     /// storage.set_metric_value(&"device123".to_string(), "temperature", MetricType::Float(23.5));
     /// ```
     pub fn set_metric_value(&mut self, device_id: &String, metric_name: &str, value: MetricType) {
-        trace!("Setting metric for device'{}', value: '{}'", device_id, metric_name);
+        //trace!("Setting metric for device'{}', value: '{}'", device_id, metric_name);
         let mut device: &mut Device = self.devices.get_mut(device_id)
             .expect(&format!("Can't get device with id '{}'", device_id.as_str()));
         device.device_metrics.insert(metric_name.to_string(), value);
-        self.dump_storage();
+        //self.dump_storage();
     }
 
     /// Dumps the storage metrics to the log.
