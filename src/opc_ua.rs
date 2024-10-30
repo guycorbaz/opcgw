@@ -266,8 +266,19 @@ impl OpcUa {
 
 }
 
-/// Get metric value from storage
-/// Maybe should be in storage module...
+
+/// Retrieves the value of a specified metric for a given device from the storage.
+///
+/// # Arguments
+///
+/// * `device_id` - A reference to a string that holds the ID of the device.
+/// * `chirpstack_metric_name` - A reference to a string that holds the name of the metric to retrieve.
+/// * `storage` - An `Arc` wrapped around a `Mutex` protected `Storage` object.
+///
+/// # Returns
+///
+/// * `f32` - The value of the metric as a floating point number. If the metric type is not `Float`, returns 0.0.
+///
 fn get_metric_value(device_id: &String, chirpstack_metric_name: &String, storage: Arc<std::sync::Mutex<Storage>>) -> f32 {
     trace!("Get metric value for {:?}", &chirpstack_metric_name);
     let storage = storage.clone();
