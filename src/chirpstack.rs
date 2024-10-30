@@ -160,7 +160,15 @@ impl ChirpstackPoller {
     }
 
 
-    /// Poll metrics for each device
+    /// Polls metrics from the configured applications and devices.
+    ///
+    /// This function polls the metrics for all devices listed in the configuration.
+    /// Initially, it collects all device IDs from the application list.
+    /// For each device in each application, it pushes the device ID into a vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `OpcGwError` if there is an issue during the polling process.
     async fn poll_metrics(&mut self) -> Result<(), OpcGwError> {
         debug!("Polling metrics");
         let app_list = self.config.application_list.clone();
@@ -194,7 +202,17 @@ impl ChirpstackPoller {
         Ok(())
     }
 
-    /// Store metric in storage
+    /// Stores a metric for a given device based on its metric type configuration.
+    ///
+    /// This function first logs the intention to store the metric and captures
+    /// the metric's name and its first data value. It then tries to retrieve the
+    /// metric type from the configuration. Based on the metric type, it processes
+    /// the metric and stores the value accordingly.
+    ///
+    /// # Arguments
+    ///
+    /// * `device_id` - A reference to the ID of the device.
+    /// * `metric` - A reference to the metric to be stored.
     pub fn store_metric(&self, device_id: &String, metric: &Metric) {
         trace!("Store device metric in storage");
         let metric_name = metric.name.clone();
@@ -224,7 +242,25 @@ impl ChirpstackPoller {
     }
 
 
-    /// Lists the applications available on the ChirpStack server.
+    /// Retrieves the list of applications from the server.
+    ///
+    /// This asynchronous function sends a request to the application server to obtain a list of applications
+    /// associated with a specific tenant. The request includes parameters for limiting the number of applications
+    /// retrieved (`limit`), and an offset value to specify the starting point in the list of applications. The `tenant_id`
+    /// is used to specify the tenant for which the applications are being requested.
+    ///
+    /// # Returns
+    /// A result containing a vector of `ApplicationDetail` on success, or an `OpcGwError` on failure.
+    ///
+    /// # Errors
+    /// Returns `OpcGwError::ChirpStackError` if there is an error while collecting the application list.
+    ///
+    /// # Example
+    /// ```rust
+    /// let applications = my_instance.get_applications_list_from_server().await?;
+    /// ```
+    ///
+    /// Note: Ensure that the application client is initialized before calling this function.
     pub async fn get_applications_list_from_server(
         &self,
     ) -> Result<Vec<ApplicationDetail>, OpcGwError> {
@@ -290,7 +326,39 @@ impl ChirpstackPoller {
         Ok(devices)
     }
 
-    /// Get device metrics from Chirpèstack server
+    /// Retrieves a list of devices from the server for a specified application.
+    ///
+    /// This asynchronous function communicates with the server to obtain a list of devices
+    /// associated with the given application ID. It constructs a request with specific parameters,
+    /// sends the request using the device client, and processes the server's response. The resulting
+    /// list of devices is then converted into a vector of `DeviceListDetail` objects and returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `application_id` - A `String` representing the application ID for which the device list
+    ///   is being requested.
+    ///
+    /// # Returns
+    ///
+    /// * `Result<Vec<DeviceListDetail>, OpcGwError>` - On success, returns a vector of `DeviceListDetail`
+    ///   objects. On failure, returns an `OpcGwError` indicating the type of error encountered.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an `OpcGwError` if:
+    /// * The device client is not initialized.
+    /// * There is an error when communicating with the server.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let application_id = "some_application_id".to_string();
+    /// let devices = some_instance.get_devices_list_from_server(application_id).await;
+    /// match devices {
+    ///     Ok(device_list) => println!("Devices: {:?}", device_list),
+    ///     Err(error) => eprintln!("Error: {:?}", error),
+    /// }
+    /// ```
     pub async fn get_device_metrics_from_server(
         &mut self,
         dev_eui: String,
@@ -362,7 +430,19 @@ impl ChirpstackPoller {
             .collect()
     }
 
-    /// Converts the API response into a vector of `DeviceListDetail`.
+    /// Converts a ListApplicationsResponse into a vector of ApplicationDetail.
+    ///
+    /// This function takes a ListApplicationsResponse, which contains a list of ApplicationListItem,
+    /// and converts it into a vector of ApplicationDetail. Each ApplicationListItem is mapped to
+    /// an ApplicationDetail with corresponding fields.
+    ///
+    /// # Arguments
+    ///
+    /// * `response` - The ListApplicationsResponse containing application details to convert.
+    ///
+    /// # Returns
+    ///
+    /// * `Vec<ApplicationDetail>` - A vector of ApplicationDetail containing the converted application details.
     fn convert_to_devices(&self, response: ListDevicesResponse) -> Vec<DeviceListDetail> {
         debug!("convert_to_devices");
 
@@ -379,14 +459,60 @@ impl ChirpstackPoller {
     }
 }
 
-/// Print the list of applications on screen
-/// At the time being, this is just for debugging
+/// Prints the details of applications in a formatted manner.
+///
+/// This function takes a reference to a vector of `ApplicationDetail`
+/// instances and prints each application's details in a pretty-printed
+/// format using the `println!` macro.
+///
+/// # Arguments
+///
+/// * `list` - A reference to a vector containing application details.
+///
+/// # Examples
+///
+/// ```
+/// let applications = vec![
+///     ApplicationDetail { /* fields */ },
+///     ApplicationDetail { /* fields */ },
+/// ];
+/// print_application_list(&applications);
+/// ```
 pub fn print_application_list(list: &Vec<ApplicationDetail>) {
     for app in list {
         println!("{:#?}", app);
     }
 }
 
+/// Prints the details of each device in the provided device list.
+///
+/// # Arguments
+///
+/// * `list` - A reference to a vector of `DeviceListDetail` containing device information.
+///
+/// # Example
+///
+/// ```
+/// let device_list = vec![
+///     DeviceListDetail {
+///         dev_eui: "0018B20000001122".to_string(),
+///         name: "Device1".to_string(),
+///         description: "Temperature Sensor".to_string(),
+///     },
+///     DeviceListDetail {
+///         dev_eui: "0018B20000003344".to_string(),
+///         name: "Device2".to_string(),
+///         description: "Humidity Sensor".to_string(),
+///     },
+/// ];
+/// print_device_list(&device_list);
+/// ```
+///
+/// This will print:
+/// ```shell
+/// Device EUI: 0018B20000001122, Name: Device1, Description: Temperature Sensor
+/// Device EUI: 0018B20000003344, Name: Device2, Description: Humidity Sensor
+/// ```
 pub fn print_device_list(list: &Vec<DeviceListDetail>) {
     for device in list {
         println!(
