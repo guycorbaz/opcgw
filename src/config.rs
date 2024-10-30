@@ -238,7 +238,19 @@ impl AppConfig {
     }
 
 
-    /// Return the type of a metric given the chirpstack metric name
+    /// Retrieves the metric type configuration based on the ChirpStack metric name.
+    ///
+    /// This method searches through the application list, then each application's device list,
+    /// and within each device, it searches the metric list to find the metric corresponding to the
+    /// provided ChirpStack metric name. If found, it returns the metric type configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `chirpstack_metric_name` - A reference to a String containing the name of the ChirpStack metric.
+    ///
+    /// # Returns
+    ///
+    /// * `Option<MetricTypeConfig>` - An Option containing the metric
     pub fn get_metric_type(&self, chirpstack_metric_name: &String) -> Option<MetricTypeConfig> {
         self.application_list.iter()
             .flat_map(|app| app.device_list.iter())
