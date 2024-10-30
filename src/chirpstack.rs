@@ -4,7 +4,7 @@
 
 #![allow(unused)]
 
-use crate::config::{ChirpstackPollerConfig, AppConfig};
+use crate::config::{ChirpstackPollerConfig, AppConfig, MetricTypeConfig};
 use crate::utils::OpcGwError;
 use chirpstack_api::api::{DeviceState, GetDeviceMetricsRequest};
 use chirpstack_api::common::Metric;
@@ -28,7 +28,7 @@ use chirpstack_api::api::{
     ApplicationListItem, DeviceListItem, GetDeviceRequest, ListApplicationsRequest,
     ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse,
 };
-use crate::storage::Storage;
+use crate::storage::{MetricType, Storage};
 
 /// Structure representing a chirpstack application.
 #[derive(Debug, Deserialize, Clone)]
@@ -55,7 +55,6 @@ pub struct DeviceListDetail {
 /// Represents metrics and states for a device.
 #[derive(Debug, Deserialize, Clone)]
 pub struct DeviceMetric {
-    //FIXME
     /// A map of metric names to their corresponding Metric objects.
     pub metrics: HashMap<String, Metric>,
     // A map of state names to their corresponding DeviceState objects.
@@ -98,7 +97,7 @@ pub struct ChirpstackPoller {
 impl ChirpstackPoller {
     /// Create and initialize a new Chirpstack poller instance.
     /// for one tenant which id is loaded in configuration
-    /// The chirpstacl poller has to be instantiated in
+    /// The chirpstack poller has to be instantiated in
     /// a tokio runtime
     ///
     /// Example
@@ -146,45 +145,84 @@ impl ChirpstackPoller {
     ///         }
     ///
     pub async fn run(&mut self) -> Result<(), OpcGwError> {
-        //TODO: Implement
         trace!(
             "Running chirpstack client poller every {} s",
             self.config.chirpstack.polling_frequency
         );
         let duration = Duration::from_secs(self.config.chirpstack.polling_frequency);
+        // Start the poller
         loop {
-            debug!("Polling metrics");
-            //if let Err(e) = self.poll_metrics().await {
-            //    error!("Error polling devices: {:?}", e);
-            //}
+            if let Err(e) = self.poll_metrics().await {
+                error!("Error polling devices: {:?}", e);
+            }
             tokio::time::sleep(duration).await;
         }
     }
 
+
     /// Poll metrics for each device
     async fn poll_metrics(&mut self) -> Result<(), OpcGwError> {
         debug!("Polling metrics");
-        let app_list = self.get_applications_list_from_server().await?;
-        for app in app_list {
-            let dev_list = self
-                .get_devices_list_from_server(app.application_id.clone())
-                .await
-                .unwrap();
-            for dev in dev_list {
-                let dev_metrics = &self
-                    .get_device_metrics_from_server(
-                        dev.dev_eui.clone(),
-                        self.config.chirpstack.polling_frequency,
-                        1,
-                    )
-                    .await?;
-                for metric in dev_metrics.metrics.clone() {
-                    println!("{:#?}", metric);
+        let app_list = self.config.application_list.clone();
+        //trace!("app_list: {:#?}", app_list);
+        // Collect device IDs first
+        let mut device_ids = Vec::new();
+        for app in &self.config.application_list {
+            for dev in &app.device_list {
+                device_ids.push(dev.device_id.clone());
+            }
+            //trace!("device_ids: {:#?}", device_ids);
+        }
+
+        // Now, fetch metrics using mutable borrow
+        for dev_id in device_ids {
+            let dev_metrics = self
+                .get_device_metrics_from_server(
+                    dev_id.clone(),
+                    self.config.chirpstack.polling_frequency,
+                    1,
+                )
+                .await?;
+            for metric in &dev_metrics.metrics.clone() {
+                //trace!("------Got metrics:");
+                //trace!("{:#?}", metric);
+                for (key, metric) in &dev_metrics.metrics {
+                    self.store_metric(&dev_id.clone(), &metric.clone());
                 }
             }
         }
         Ok(())
     }
+
+    /// Store metric in storage
+    pub fn store_metric(&self, device_id: &String, metric: &Metric) {
+        trace!("Store device metric in storage");
+        let metric_name = metric.name.clone();
+        let value = metric.datasets[0].data[0].clone();
+        trace!("Value for {:?} is: {:#?}", metric_name, value);
+
+        match self.config.get_metric_type(&metric_name) {
+            Some(metric_type) => {
+                trace!("Metric type: {:?} for metric {:?}", metric_type, metric_name);
+                match metric_type {
+                    MetricTypeConfig::Bool => {},
+                    MetricTypeConfig::Int => {},
+                    MetricTypeConfig::Float => {
+                        let storage = self.storage.clone();
+                        let mut storage = storage.lock().expect("Can't lock storage"); // Should we wait if already locked ?
+                        storage.set_metric_value(device_id,&metric_name,  MetricType::Float(value.into()));
+                    },
+                    MetricTypeConfig::String => {},
+                }
+            },
+            None => {
+                // Log or handle the None case according to your needs.
+                trace!("No metric type found for metric: {:?}", metric_name);
+            },
+        };
+
+    }
+
 
     /// Lists the applications available on the ChirpStack server.
     pub async fn get_applications_list_from_server(
@@ -193,7 +231,7 @@ impl ChirpstackPoller {
         debug!("Get list of applications");
         trace!("Create request");
         let request = Request::new(ListApplicationsRequest {
-            limit: 100, // Vous pouvez ajuster cette valeur selon vos besoins
+            limit: 100, // Can be adjusted according to needs, but what does it means ?
             offset: 0,
             search: String::new(),
             tenant_id: self.config.chirpstack.tenant_id.clone(), // We work on only one tenant defined in parameter file

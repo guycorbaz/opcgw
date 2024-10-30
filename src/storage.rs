@@ -12,7 +12,7 @@
 
 use crate::chirpstack::{ApplicationDetail, ChirpstackPoller, DeviceListDetail};
 use crate::AppConfig;
-use crate::config::MetricTypeConfig;
+use crate::config::{MetricTypeConfig};
 use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -27,35 +27,39 @@ pub enum MetricType {
     String(String),
 }
 
-/// structure for storing one metric
-pub struct DeviceMetric {
-    // The timestamp of the metric
-    //pub metric_timestamp: String,
-    /// The value of the metric
-    pub metric_value: MetricType,
 
+/// Structure for storing metrics
+/// It is necessary to store device as well to identify the different metrics as
+/// metric name are not unique in chirpstack. However, device_id is unique.
+pub struct Device {
+    /// The chirpstack name of the device
+    pub device_name: String,
+    /// The list of metrics. First field is chirpstack metric name, second field is the value
+    pub device_metrics: HashMap<String, MetricType>,
 }
 
 /// Main structure for storing application data, metrics, and managing devices and applications.
 pub struct Storage {
-    config: AppConfig,
-    /// String is metric name, DeviceMetric is the metric
-    device_metrics: HashMap<String, MetricType>,
+    pub config: AppConfig,
+    /// Device. First field is device id, second field is device
+    pub devices: HashMap<String, Device>,
 }
 
 impl Storage {
     /// Creates and returns a new instance of `Storage`
     pub fn new(app_config: &AppConfig) -> Storage {
         debug!("Creating a new Storage instance");
-
-        // Build and initialize the device metric storage
-        let mut device_metrics = HashMap::new();
-
+        let mut devices:HashMap<String, Device> = HashMap::new();
         // Parse applications
         for application in app_config.application_list.iter() {
             // Parse device
             for device in application.device_list.iter() {
-                // Parse metrics
+                let new_device = Device {
+                    device_name: device.device_name.clone(),
+                    device_metrics: HashMap::new(),
+                };
+                let device_id = device.device_id.clone();
+                let mut device_metrics = HashMap::new();
                 for metric in device.metric_list.iter() {
                     let metric_type = match metric.metric_type {
                         MetricTypeConfig::Bool => MetricType::Bool(false),
@@ -67,23 +71,61 @@ impl Storage {
                         metric.metric_name.clone(), MetricType::Float(0.0)
                     );
                 }
+              devices.insert(device_id, new_device);
             }
+
         }
         Storage {
             config: app_config.clone(),
-            device_metrics, // HashMap is empty:
+            devices,
         }
     }
 
-    ///Return a metric value for the metric name passed in parameters
-    pub fn get_metric_value(&self, metric_name: &str) -> Option<MetricType> {
-        trace!("Getting metric value for '{}'", metric_name);
-        self.device_metrics.get(metric_name).cloned()
+    ///Return a metric value for the device and metric name passed in parameters
+    pub fn get_metric_value(&self, device_id: &str, metric_name: &str) -> MetricType {
+        trace!("Getting metric value for device '{}': '{}'", device_id, metric_name);
+        // Get device according to its device id
+        let device = self.devices.get(device_id)
+            .expect(format!("Device '{}' not found", device_id).as_str());
+        // Get metric value according to metric name
+        let value = device.device_metrics.get(metric_name)
+            .expect(format!("Metric '{}' not found", metric_name).as_str());
+        trace!("Getting metric value for device '{}': '{:?}'", device_id, value);
+        value.clone()
     }
 
     /// Set value for metric name passed in  parameters
-    pub fn ser_metric_value(&self, metric_name: &str, value: MetricType) {
-        trace!("Serializing metric value for '{}'", metric_name);
+    pub fn set_metric_value(&mut self, device_id: &String, metric_name: &str, value: MetricType) {
+        trace!("Setting metric for device'{}', value: '{}'", device_id, metric_name);
+        let mut device: &mut Device = self.devices.get_mut(device_id)
+            .expect(&format!("Can't get device with id '{}'", device_id.as_str()));
+        device.device_metrics.insert(metric_name.to_string(), value);
+        self.dump_storage();
+    }
+
+    pub fn dump_storage(&mut self) {
+        trace!("Dumping metrics from storage");
+        for (device_id, device) in &self.devices {
+            trace!("Device name '{}', id: '{}'", device.device_name, device_id);
+            for (metric_name, metric) in device.device_metrics.iter() {
+                match metric {
+                    MetricType::Bool(value) => {}
+                    MetricType::Int(value) => {}
+                    MetricType::Float(value) => {
+                        trace!("    Metric {:?}: {:#?}", metric_name, value);
+                    }
+                    MetricType::String(value) => {}
+                }
+
+            }
+        }
+    }
+
+    /// Return the name of device with device_id
+    pub fn get_device_name(&self, device_id: &String) -> String {
+        let device = self.devices.get(device_id)
+            .expect(format!("Device '{}' not found", device_id).as_str());
+        device.device_name.clone()
     }
 }
 

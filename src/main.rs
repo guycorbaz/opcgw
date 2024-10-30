@@ -91,6 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+
     // Wait for all tasks to complete
     tokio::try_join!(chirpstack_handle, opcua_handle).expect("Failed to run tasks");
     //tokio::try_join!(chirpstack_handle).expect("Failed to run tasks");

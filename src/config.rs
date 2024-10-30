@@ -236,6 +236,16 @@ impl AppConfig {
         }
         None
     }
+
+
+    /// Return the type of a metric given the chirpstack metric name
+    pub fn get_metric_type(&self, chirpstack_metric_name: &String) -> Option<MetricTypeConfig> {
+        self.application_list.iter()
+            .flat_map(|app| app.device_list.iter())
+            .flat_map(|device| device.metric_list.iter())
+            .find(|metric| metric.chirpstack_metric_name == *chirpstack_metric_name)
+            .map(|metric| metric.metric_type.clone())
+    }
 }
 
 /// Test config module

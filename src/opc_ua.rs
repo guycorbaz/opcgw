@@ -7,7 +7,7 @@
 
 use crate::config::{OpcUaConfig, AppConfig, ChirpstackDevice};
 use crate::utils::{OpcGwError,OPCUA_ADDRESS_SPACE};
-use crate::storage::Storage;
+use crate::storage::{MetricType, Storage};
 use log::{debug, error, info, trace, warn};
 use opcua::server::prelude::*;
 use opcua::sync::Mutex;
@@ -18,6 +18,7 @@ use opcua::types::variant::Variant::{Float};
 use std::option::Option;
 use std::path::PathBuf;
 use std::sync::Arc;
+use opcua::types::DataTypeId::Integer;
 
 /// Structure for storing OpcUa server parameters
 pub struct OpcUa {
@@ -222,15 +223,18 @@ impl OpcUa {
         // Iterate over each metric in the device's metric list
         for metric in device.metric_list.clone() {
             let metric_name = metric.metric_name.clone();
+            let chirpstack_metric_name = metric.chirpstack_metric_name.clone();
             trace!("Creating variable for metric {:?}", &metric_name);
 
             // Create the variable node id for the metric
             let metric_node_id = NodeId::new(self.ns, metric_name.clone());
 
             // Move self and metric_node_id into the closure
+            let device_id = device.device_id.clone();
             let self_arc = Arc::new(self);
             let metric_node_id_arc = Arc::new(metric_node_id.clone());
-            let metric_name_arc = Arc::new(metric_name.clone());
+            let chirpstack_metric_name_arc = Arc::new(chirpstack_metric_name.clone());
+            let storage = self.storage.clone();
 
             // Create a new Variable with the node, name, and an initial value
             let mut metric_variable = Variable::new(
@@ -243,10 +247,10 @@ impl OpcUa {
             let getter = AttrFnGetter::new(
                 move | _, _, _, _, _, _, | -> Result<Option<DataValue>, StatusCode> {
                     //trace!("Get variable value");
-                    //let value = 11.0;
+                    let dev_id = device_id.clone();
                     let id = metric_node_id_arc.clone();
-                    let name = metric_name_arc.clone();
-                    let value = get_metric_value(&name.clone());
+                    let name = chirpstack_metric_name_arc.clone();
+                    let value = get_metric_value(&device_id.clone(), &name.clone(), storage.clone());
                     Ok(Some((DataValue::new_now(value))))
                 }
             );
@@ -264,7 +268,18 @@ impl OpcUa {
 
 /// Get metric value from storage
 /// Maybe should be in storage module...
-fn get_metric_value(metric_name: &String) -> f32 {
-    trace!("Get metric value for {:?}", &metric_name);
-    123.0
+fn get_metric_value(device_id: &String, chirpstack_metric_name: &String, storage: Arc<std::sync::Mutex<Storage>>) -> f32 {
+    trace!("Get metric value for {:?}", &chirpstack_metric_name);
+    let storage = storage.clone();
+    let storage = storage.lock()
+        .expect(format!("Mutex for storage is poisoned").as_str());
+    let device = storage.devices.get(device_id).unwrap();
+    let value = storage.get_metric_value(device_id, chirpstack_metric_name);
+
+    trace!("Value of metric is: {:?}", value);
+    let metric_value = match value {
+        MetricType::Float(v) => v,
+        _ => 0.0,
+    };
+    metric_value as f32
 }
