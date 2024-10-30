@@ -26,6 +26,21 @@ pub enum OpcGwError {
     StorageError(String),
 }
 
+/// Prints the type name of the provided reference.
+///
+/// # Arguments
+///
+/// * `_` - A reference to any type
+///
+/// # Examples
+///
+/// ```
+/// let x = 42;
+/// print_type_of(&x); // This will print "i32"
+/// ```
+///
+/// This function uses Rust's `std::any::type_name` to determine the type name
+/// of the referenced value and prints it to the standard output.
 pub fn print_type_of<T>(_: &T) {
     println!("{}", std::any::type_name::<T>())
 }
