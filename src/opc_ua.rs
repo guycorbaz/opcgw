@@ -19,6 +19,7 @@ use std::option::Option;
 use std::path::PathBuf;
 use std::sync::Arc;
 use opcua::types::DataTypeId::Integer;
+use local_ip_address::local_ip;
 
 /// Structure for storing OpcUa server parameters
 pub struct OpcUa {
@@ -54,9 +55,14 @@ impl OpcUa {
         trace!("New OPC UA structure");
         // Create de server configuration using the provided config file path
         //trace!("opcua config file is {:?}", config.opcua.config_file);
-        let server_config = Self::create_server_config(&config
+        let mut server_config = Self::create_server_config(&config
             .opcua.config_file
             .clone());
+
+        let my_ip_address = local_ip().unwrap();
+        //trace!("Server IP address: {}", my_ip_address);
+        server_config.tcp_config.host = my_ip_address.to_string();
+        //trace!("OPC UA server configuration: {:#?}", server_config);
 
         // Create a server instance and wrap it in an Arc and RwLock for safe shared access
         let server = Arc::new(RwLock::new(Self::create_server(server_config.clone())));
