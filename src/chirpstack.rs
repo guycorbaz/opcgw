@@ -192,8 +192,8 @@ impl ChirpstackPoller {
                 )
                 .await?;
             for metric in &dev_metrics.metrics.clone() {
-                //trace!("------Got metrics:");
-                //trace!("{:#?}", metric);
+                trace!("------Got metrics:");
+                trace!("{:#?}", metric);
                 for (key, metric) in &dev_metrics.metrics {
                     self.store_metric(&dev_id.clone(), &metric.clone());
                 }
@@ -214,7 +214,8 @@ impl ChirpstackPoller {
     /// * `device_id` - A reference to the ID of the device.
     /// * `metric` - A reference to the metric to be stored.
     pub fn store_metric(&self, device_id: &String, metric: &Metric) {
-        //trace!("Store device metric in storage");
+        trace!("Store device metric in storage");
+        let device_name = self.config.get_device_name(device_id).unwrap();
         let metric_name = metric.name.clone();
         let value = metric.datasets[0].data[0].clone();
         //trace!("Value for {:?} is: {:#?}", metric_name, value);
@@ -229,13 +230,15 @@ impl ChirpstackPoller {
                         let storage = self.storage.clone();
                         let mut storage = storage.lock().expect("Can't lock storage"); // Should we wait if already locked ?
                         storage.set_metric_value(device_id,&metric_name,  MetricType::Float(value.into()));
+                        trace!("------------Dumping storage-----------------");
+                        storage.dump_storage();
                     },
                     MetricTypeConfig::String => {},
                 }
             },
             None => {
                 // Log or handle the None case according to your needs.
-                trace!("No metric type found for metric: {:?}", metric_name);
+                trace!("No metric type found for metric: {:?} of device {:?}", metric_name, device_name);
             },
         };
 
