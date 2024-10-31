@@ -193,17 +193,17 @@ impl AppConfig {
     /// - `None`: If the device with the given `device_id`
     ///    under the specified `application_id` is not found.
     ///
-    pub fn get_device_name(&self, device_id: &String, application_id: &String) -> Option<String> {
+    pub fn get_device_name(&self, device_id: &String) -> Option<String> {
         // Search for the application
         for app in self.application_list.iter() {
-            if app.application_id == *application_id {
+
                 // Search for device id
                 for device in app.device_list.iter() {
                     if device.device_id == *device_id {
                         return Some(device.device_name.clone());
                     }
                 }
-            }
+
         }
         None
     }
