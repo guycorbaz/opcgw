@@ -1,0 +1,15 @@
+# Docker compose file for chirpstack opcua gateway
+
+version: '3.3'
+
+services:
+  opcgw:
+    container_name: opcgw
+    image: opcgw
+    restart: always
+    ports:
+      - "4855:4855"
+    volumes:
+      - ./log:/usr/local/opcgw/log
+      - ./config:/usr/local/opcgw/config
+      - ./pki:/usr/local/opcgw/pki
