@@ -13,7 +13,7 @@ debug = true
 #
 server_address = "http://192.168.1.12:8080"
 # API token defined on the chirpstack server
-api_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJjaGlycHN0YWNrIiwiaXNzIjoiY2hpcnBzdGFjayIsInN1YiI6ImY5MGIzNmM1LTNkMTAtNGY1YS05NTQ4LWZhNmFlMDllYzE5ZSIsInR5cCI6ImtleSJ9.j9sCvXaMhS1gzJBOhG0lYvN83NVTW6htQssHfQ79Mgo"
+api_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJjaGlycHN0YWNrIiwiaXNzIjoiY2hpcnBzdGFjayIsInN1YiI6ImIxMTBlMzg3LTNmZDYtNDUyOC1iNjJlLTFiMzI5NGNkMjQ0MiIsInR5cCI6ImtleSJ9.lGlnMUTdMxKA5rwfKToCjfk_mqUTqGMSsdF3BHktH40"
 # Tenant Id that will be used
 tenant_id = "52f14cd4-c6f1-4fbd-8f87-4025e1d49242"
 # Frequency to poll ChirpStack server in seconds
@@ -218,7 +218,7 @@ application_name = "Meteo"
 
         [[application.device.metric]]
         metric_name ="Température"
-        chirpstack_metric_name = "Temp"
+        chirpstack_metric_name = "temperature"
         metric_type = "Float"
 
         [[application.device.metric]]
@@ -253,6 +253,12 @@ application_name = "Meteo"
         chirpstack_metric_name = "lightIntensity"
         metric_type = "Float"
         metric_unit = "w/m2"
+
+        [[application.device.metric]]
+        metric_name ="Pourcent_batterie"
+        chirpstack_metric_name = "batteryPercent"
+        metric_type = "Float"
+        metric_unit = "%"
 
 
 
