@@ -104,7 +104,12 @@ This organization might change in the future.
 
 ## Contributing
 
-[Instructions for contributing to the project]
+Any contributions you make are greatly appreciated. If you identify any errors,
+or have an idea for an improvement, please open an [issue](https://github.com/guycorbaz/opcgw/issues).
+But before filing a new issue, please look through already existing issues. Search open and closed issues first.
+
+Non-code contributions are also highly appreciated, such as improving the documentation
+or promoting opcgw on social media.
 
 
 ## License
