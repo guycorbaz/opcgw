@@ -27,6 +27,7 @@ use opc_ua::OpcUa;
 use opcua::server::server::Server;
 use opcua::sync::RwLock;
 use std::time::Duration;
+use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc, thread};
 use tokio::runtime::{Builder, Runtime};
 use tokio::time;
@@ -60,20 +61,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => panic!("Failed to load config: {}", e),
     };
 
-    // Create common storage for Chirpstack poller and opc ua server
+    // Create shared storage for Chirpstack poller and opc ua server threads
     trace!("Create storage");
-    let storage = Storage::new(&application_config);
+    let storage = Arc::new(Mutex::new(Storage::new(&application_config)));
 
     // Create chirpstack poller
     trace!("Create chirpstack poller");
-    let mut chirpstack_poller = match ChirpstackPoller::new(&application_config).await {
+    let mut chirpstack_poller = match ChirpstackPoller::new(&application_config, storage.clone()).await {
         Ok(poller) => poller,
         Err(e) => panic!("Failed to create chirpstack poller: {}", e),
     };
 
     // Create OPC UA server
     trace!("Create OPC UA server");
-    let opc_ua = OpcUa::new(&application_config);
+    let opc_ua = OpcUa::new(&application_config, storage.clone());
 
     // Run chirpstack poller and OPC UA server in separate tasks
     let chirpstack_handle = tokio::spawn(async move {
@@ -89,6 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             error!("OPC UA server error: {:?}", e);
         }
     });
+
 
     // Wait for all tasks to complete
     tokio::try_join!(chirpstack_handle, opcua_handle).expect("Failed to run tasks");

@@ -77,11 +77,11 @@ pub struct ChirpstackDevice {
 
 /// Type of metrics
 #[derive(Debug, Deserialize, Clone)]
-pub enum MetricType {
+pub enum MetricTypeConfig {
     Bool,
     Int,
     Float,
-    String
+    String,
 }
 
 /// Structure that holds the data of the device
@@ -93,7 +93,7 @@ pub struct Metric {
     /// The name defined in chirpstack
     pub chirpstack_metric_name: String,
     /// The type of metric
-    pub metric_type: MetricType,
+    pub metric_type: MetricTypeConfig,
     /// Unit of the metric
     pub metric_unit: Option<String>,
 }
@@ -193,17 +193,17 @@ impl AppConfig {
     /// - `None`: If the device with the given `device_id`
     ///    under the specified `application_id` is not found.
     ///
-    pub fn get_device_name(&self, device_id: &String, application_id: &String) -> Option<String> {
+    pub fn get_device_name(&self, device_id: &String) -> Option<String> {
         // Search for the application
         for app in self.application_list.iter() {
-            if app.application_id == *application_id {
+
                 // Search for device id
                 for device in app.device_list.iter() {
                     if device.device_id == *device_id {
                         return Some(device.device_name.clone());
                     }
                 }
-            }
+
         }
         None
     }
@@ -235,6 +235,28 @@ impl AppConfig {
             }
         }
         None
+    }
+
+
+    /// Retrieves the metric type configuration based on the ChirpStack metric name.
+    ///
+    /// This method searches through the application list, then each application's device list,
+    /// and within each device, it searches the metric list to find the metric corresponding to the
+    /// provided ChirpStack metric name. If found, it returns the metric type configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `chirpstack_metric_name` - A reference to a String containing the name of the ChirpStack metric.
+    ///
+    /// # Returns
+    ///
+    /// * `Option<MetricTypeConfig>` - An Option containing the metric
+    pub fn get_metric_type(&self, chirpstack_metric_name: &String) -> Option<MetricTypeConfig> {
+        self.application_list.iter()
+            .flat_map(|app| app.device_list.iter())
+            .flat_map(|device| device.metric_list.iter())
+            .find(|metric| metric.chirpstack_metric_name == *chirpstack_metric_name)
+            .map(|metric| metric.metric_type.clone())
     }
 }
 
@@ -336,12 +358,4 @@ mod tests {
         );
     }
 
-    /// Test if metrics list
-    /// is loaded
-    #[ignore]
-    #[test]
-    fn test_metrics_config() {
-        let config = get_config();
-        todo!();
-    }
 }

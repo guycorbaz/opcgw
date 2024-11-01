@@ -4,7 +4,7 @@
 
 #![allow(unused)]
 
-use crate::config::{ChirpstackPollerConfig, AppConfig};
+use crate::config::{ChirpstackPollerConfig, AppConfig, MetricTypeConfig};
 use crate::utils::OpcGwError;
 use chirpstack_api::api::{DeviceState, GetDeviceMetricsRequest};
 use chirpstack_api::common::Metric;
@@ -12,6 +12,8 @@ use log::{debug, error, trace};
 use prost_types::Timestamp;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::SystemTime;
 use tokio::runtime::{Builder, Runtime};
 use tokio::time::{sleep, Duration};
@@ -26,6 +28,7 @@ use chirpstack_api::api::{
     ApplicationListItem, DeviceListItem, GetDeviceRequest, ListApplicationsRequest,
     ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse,
 };
+use crate::storage::{MetricType, Storage};
 
 /// Structure representing a chirpstack application.
 #[derive(Debug, Deserialize, Clone)]
@@ -52,7 +55,6 @@ pub struct DeviceListDetail {
 /// Represents metrics and states for a device.
 #[derive(Debug, Deserialize, Clone)]
 pub struct DeviceMetric {
-    //FIXME
     /// A map of metric names to their corresponding Metric objects.
     pub metrics: HashMap<String, Metric>,
     // A map of state names to their corresponding DeviceState objects.
@@ -79,7 +81,7 @@ impl Interceptor for AuthInterceptor {
 }
 
 /// Chirpstack poller
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ChirpstackPoller {
     /// Configuration for the ChirpStack connection.
     config: AppConfig,
@@ -88,12 +90,14 @@ pub struct ChirpstackPoller {
     /// Client for interacting with application-related endpoints.
     application_client:
         Option<ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>>,
+    /// Metrics list
+    pub storage: Arc<std::sync::Mutex<Storage>>,
 }
 
 impl ChirpstackPoller {
     /// Create and initialize a new Chirpstack poller instance.
     /// for one tenant which id is loaded in configuration
-    /// The chirpstacl poller has to be instantiated in
+    /// The chirpstack poller has to be instantiated in
     /// a tokio runtime
     ///
     /// Example
@@ -102,7 +106,7 @@ impl ChirpstackPoller {
     ///         Err(e) => panic!("Failed to create chirpstack poller: {}", e),
     ///     };
     ///
-    pub async fn new(config: &AppConfig) -> Result<Self, OpcGwError> {
+    pub async fn new(config: &AppConfig, storage: Arc<Mutex<Storage>>) -> Result<Self, OpcGwError> {
         debug!("Create a new chirpstack connection");
         let channel = Channel::from_shared(config.chirpstack.server_address.clone())
             .unwrap()
@@ -128,6 +132,7 @@ impl ChirpstackPoller {
             config: config.clone(),
             device_client: Some(device_client),
             application_client: Some(application_client),
+            storage,
         })
     }
 
@@ -140,54 +145,132 @@ impl ChirpstackPoller {
     ///         }
     ///
     pub async fn run(&mut self) -> Result<(), OpcGwError> {
-        //TODO: Implement
         trace!(
             "Running chirpstack client poller every {} s",
             self.config.chirpstack.polling_frequency
         );
         let duration = Duration::from_secs(self.config.chirpstack.polling_frequency);
+        // Start the poller
         loop {
-            debug!("Polling metrics");
-            //if let Err(e) = self.poll_metrics().await {
-            //    error!("Error polling devices: {:?}", e);
-            //}
+            if let Err(e) = self.poll_metrics().await {
+                error!("Error polling devices: {:?}", e);
+            }
             tokio::time::sleep(duration).await;
         }
     }
 
-    /// Poll metrics for each device
+
+    /// Polls metrics from the configured applications and devices.
+    ///
+    /// This function polls the metrics for all devices listed in the configuration.
+    /// Initially, it collects all device IDs from the application list.
+    /// For each device in each application, it pushes the device ID into a vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `OpcGwError` if there is an issue during the polling process.
     async fn poll_metrics(&mut self) -> Result<(), OpcGwError> {
         debug!("Polling metrics");
-        let app_list = self.get_applications_list_from_server().await?;
-        for app in app_list {
-            let dev_list = self
-                .get_devices_list_from_server(app.application_id.clone())
-                .await
-                .unwrap();
-            for dev in dev_list {
-                let dev_metrics = &self
-                    .get_device_metrics_from_server(
-                        dev.dev_eui.clone(),
-                        self.config.chirpstack.polling_frequency,
-                        1,
-                    )
-                    .await?;
-                for metric in dev_metrics.metrics.clone() {
-                    println!("{:#?}", metric);
+        let app_list = self.config.application_list.clone();
+        //trace!("app_list: {:#?}", app_list);
+        // Collect device IDs first
+        let mut device_ids = Vec::new();
+        for app in &self.config.application_list {
+            for dev in &app.device_list {
+                device_ids.push(dev.device_id.clone());
+            }
+            //trace!("device_ids: {:#?}", device_ids);
+        }
+
+        // Now, fetch metrics using mutable borrow
+        for dev_id in device_ids {
+            let dev_metrics = self
+                .get_device_metrics_from_server(
+                    dev_id.clone(),
+                    self.config.chirpstack.polling_frequency,
+                    1,
+                )
+                .await?;
+            for metric in &dev_metrics.metrics.clone() {
+                trace!("------Got metrics:");
+                trace!("{:#?}", metric);
+                for (key, metric) in &dev_metrics.metrics {
+                    self.store_metric(&dev_id.clone(), &metric.clone());
                 }
             }
         }
         Ok(())
     }
 
-    /// Lists the applications available on the ChirpStack server.
+    /// Stores a metric for a given device based on its metric type configuration.
+    ///
+    /// This function first logs the intention to store the metric and captures
+    /// the metric's name and its first data value. It then tries to retrieve the
+    /// metric type from the configuration. Based on the metric type, it processes
+    /// the metric and stores the value accordingly.
+    ///
+    /// # Arguments
+    ///
+    /// * `device_id` - A reference to the ID of the device.
+    /// * `metric` - A reference to the metric to be stored.
+    pub fn store_metric(&self, device_id: &String, metric: &Metric) {
+        trace!("Store device metric in storage");
+        let device_name = self.config.get_device_name(device_id).unwrap();
+        let metric_name = metric.name.clone();
+        let value = metric.datasets[0].data[0].clone();
+        //trace!("Value for {:?} is: {:#?}", metric_name, value);
+
+        match self.config.get_metric_type(&metric_name) {
+            Some(metric_type) => {
+                //trace!("Metric type: {:?} for metric {:?}", metric_type, metric_name);
+                match metric_type {
+                    MetricTypeConfig::Bool => {},
+                    MetricTypeConfig::Int => {},
+                    MetricTypeConfig::Float => {
+                        let storage = self.storage.clone();
+                        let mut storage = storage.lock().expect("Can't lock storage"); // Should we wait if already locked ?
+                        storage.set_metric_value(device_id,&metric_name,  MetricType::Float(value.into()));
+                        trace!("------------Dumping storage-----------------");
+                        storage.dump_storage();
+                    },
+                    MetricTypeConfig::String => {},
+                }
+            },
+            None => {
+                // Log or handle the None case according to your needs.
+                trace!("No metric type found for metric: {:?} of device {:?}", metric_name, device_name);
+            },
+        };
+
+    }
+
+
+    /// Retrieves the list of applications from the server.
+    ///
+    /// This asynchronous function sends a request to the application server to obtain a list of applications
+    /// associated with a specific tenant. The request includes parameters for limiting the number of applications
+    /// retrieved (`limit`), and an offset value to specify the starting point in the list of applications. The `tenant_id`
+    /// is used to specify the tenant for which the applications are being requested.
+    ///
+    /// # Returns
+    /// A result containing a vector of `ApplicationDetail` on success, or an `OpcGwError` on failure.
+    ///
+    /// # Errors
+    /// Returns `OpcGwError::ChirpStackError` if there is an error while collecting the application list.
+    ///
+    /// # Example
+    /// ```rust
+    /// let applications = my_instance.get_applications_list_from_server().await?;
+    /// ```
+    ///
+    /// Note: Ensure that the application client is initialized before calling this function.
     pub async fn get_applications_list_from_server(
         &self,
     ) -> Result<Vec<ApplicationDetail>, OpcGwError> {
         debug!("Get list of applications");
         trace!("Create request");
         let request = Request::new(ListApplicationsRequest {
-            limit: 100, // Vous pouvez ajuster cette valeur selon vos besoins
+            limit: 100, // Can be adjusted according to needs, but what does it means ?
             offset: 0,
             search: String::new(),
             tenant_id: self.config.chirpstack.tenant_id.clone(), // We work on only one tenant defined in parameter file
@@ -246,15 +329,46 @@ impl ChirpstackPoller {
         Ok(devices)
     }
 
-    /// Get device metrics from Chirpèstack server
+    /// Retrieves a list of devices from the server for a specified application.
+    ///
+    /// This asynchronous function communicates with the server to obtain a list of devices
+    /// associated with the given application ID. It constructs a request with specific parameters,
+    /// sends the request using the device client, and processes the server's response. The resulting
+    /// list of devices is then converted into a vector of `DeviceListDetail` objects and returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `application_id` - A `String` representing the application ID for which the device list
+    ///   is being requested.
+    ///
+    /// # Returns
+    ///
+    /// * `Result<Vec<DeviceListDetail>, OpcGwError>` - On success, returns a vector of `DeviceListDetail`
+    ///   objects. On failure, returns an `OpcGwError` indicating the type of error encountered.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an `OpcGwError` if:
+    /// * The device client is not initialized.
+    /// * There is an error when communicating with the server.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let application_id = "some_application_id".to_string();
+    /// let devices = some_instance.get_devices_list_from_server(application_id).await;
+    /// match devices {
+    ///     Ok(device_list) => println!("Devices: {:?}", device_list),
+    ///     Err(error) => eprintln!("Error: {:?}", error),
+    /// }
+    /// ```
     pub async fn get_device_metrics_from_server(
         &mut self,
         dev_eui: String,
         duration: u64,
         aggregation: i32,
     ) -> Result<DeviceMetric, OpcGwError> {
-        debug!("Get device metrics for");
-
+        debug!("Get device metrics");
         trace!("for device: {:?}", dev_eui);
         trace!("Create request");
         let request = Request::new(GetDeviceMetricsRequest {
@@ -318,7 +432,19 @@ impl ChirpstackPoller {
             .collect()
     }
 
-    /// Converts the API response into a vector of `DeviceListDetail`.
+    /// Converts a ListApplicationsResponse into a vector of ApplicationDetail.
+    ///
+    /// This function takes a ListApplicationsResponse, which contains a list of ApplicationListItem,
+    /// and converts it into a vector of ApplicationDetail. Each ApplicationListItem is mapped to
+    /// an ApplicationDetail with corresponding fields.
+    ///
+    /// # Arguments
+    ///
+    /// * `response` - The ListApplicationsResponse containing application details to convert.
+    ///
+    /// # Returns
+    ///
+    /// * `Vec<ApplicationDetail>` - A vector of ApplicationDetail containing the converted application details.
     fn convert_to_devices(&self, response: ListDevicesResponse) -> Vec<DeviceListDetail> {
         debug!("convert_to_devices");
 
@@ -335,14 +461,60 @@ impl ChirpstackPoller {
     }
 }
 
-/// Print the list of applications on screen
-/// At the time being, this is just for debugging
+/// Prints the details of applications in a formatted manner.
+///
+/// This function takes a reference to a vector of `ApplicationDetail`
+/// instances and prints each application's details in a pretty-printed
+/// format using the `println!` macro.
+///
+/// # Arguments
+///
+/// * `list` - A reference to a vector containing application details.
+///
+/// # Examples
+///
+/// ```
+/// let applications = vec![
+///     ApplicationDetail { /* fields */ },
+///     ApplicationDetail { /* fields */ },
+/// ];
+/// print_application_list(&applications);
+/// ```
 pub fn print_application_list(list: &Vec<ApplicationDetail>) {
     for app in list {
         println!("{:#?}", app);
     }
 }
 
+/// Prints the details of each device in the provided device list.
+///
+/// # Arguments
+///
+/// * `list` - A reference to a vector of `DeviceListDetail` containing device information.
+///
+/// # Example
+///
+/// ```
+/// let device_list = vec![
+///     DeviceListDetail {
+///         dev_eui: "0018B20000001122".to_string(),
+///         name: "Device1".to_string(),
+///         description: "Temperature Sensor".to_string(),
+///     },
+///     DeviceListDetail {
+///         dev_eui: "0018B20000003344".to_string(),
+///         name: "Device2".to_string(),
+///         description: "Humidity Sensor".to_string(),
+///     },
+/// ];
+/// print_device_list(&device_list);
+/// ```
+///
+/// This will print:
+/// ```shell
+/// Device EUI: 0018B20000001122, Name: Device1, Description: Temperature Sensor
+/// Device EUI: 0018B20000003344, Name: Device2, Description: Humidity Sensor
+/// ```
 pub fn print_device_list(list: &Vec<DeviceListDetail>) {
     for device in list {
         println!(
