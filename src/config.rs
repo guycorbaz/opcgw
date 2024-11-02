@@ -113,13 +113,19 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    /// Creates and initialize a new instance of the application configuration.
+    /// Creates a new instance of `AppConfig` by reading the configuration from a TOML file and environment variables.
     ///
-    /// This method loads the configuration from TOML files and environment variables.
-    /// It first looks for a default configuration file, then an optional local file,
-    /// and finally environment variables prefixed with "APP_".
+    /// This function performs the following steps:
+    /// 1. Retrieves the configuration file path from the `CONFIG_PATH` environment variable, or defaults to "config/default.toml" if not set.
+    /// 2. Uses the `Figment` library to read the configuration from the TOML file and merge it with environment variables prefixed with `OPCGW_`.
+    /// 3. Extracts the configuration and handles any errors that may occur during this process.
     ///
-
+    /// # Returns
+    /// * `Ok(Self)` - if the configuration is successfully read and parsed.
+    /// * `Err(OpcGwError)` - if there is an error reading or parsing the configuration.
+    ///
+    /// # Errors
+    /// This function will return an `OpcGwError::ConfigurationError` if there is an error reading the configuration file or merging environment variables.
     pub fn new() -> Result<Self, OpcGwError> {
         debug!("Creating new AppConfig");
 
@@ -196,14 +202,12 @@ impl AppConfig {
     pub fn get_device_name(&self, device_id: &String) -> Option<String> {
         // Search for the application
         for app in self.application_list.iter() {
-
-                // Search for device id
-                for device in app.device_list.iter() {
-                    if device.device_id == *device_id {
-                        return Some(device.device_name.clone());
-                    }
+            // Search for device id
+            for device in app.device_list.iter() {
+                if device.device_id == *device_id {
+                    return Some(device.device_name.clone());
                 }
-
+            }
         }
         None
     }
@@ -237,7 +241,6 @@ impl AppConfig {
         None
     }
 
-
     /// Retrieves the metric type configuration based on the ChirpStack metric name.
     ///
     /// This method searches through the application list, then each application's device list,
@@ -252,7 +255,8 @@ impl AppConfig {
     ///
     /// * `Option<MetricTypeConfig>` - An Option containing the metric
     pub fn get_metric_type(&self, chirpstack_metric_name: &String) -> Option<MetricTypeConfig> {
-        self.application_list.iter()
+        self.application_list
+            .iter()
             .flat_map(|app| app.device_list.iter())
             .flat_map(|device| device.metric_list.iter())
             .find(|metric| metric.chirpstack_metric_name == *chirpstack_metric_name)
@@ -265,9 +269,18 @@ impl AppConfig {
 mod tests {
     use super::*;
 
-    /// Create a config object for test functions
-    /// If changes are don on "tests/default.toml"
-    /// the tests below might fail.
+    /// Loads the application configuration from a TOML file.
+    ///
+    /// The configuration file path is determined by the `CONFIG_PATH` environment variable.
+    /// If this environment variable is not set, it defaults to "tests/config/default.toml".
+    ///
+    /// # Returns
+    ///
+    /// * `AppConfig` - The application configuration extracted from the TOML file.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the configuration file cannot be loaded or parsed.
     fn get_config() -> AppConfig {
         let config_path = std::env::var("CONFIG_PATH")
             .unwrap_or_else(|_| "tests/config/default.toml".to_string());
@@ -278,16 +291,21 @@ mod tests {
         config
     }
 
-    /// Test if global application parameters
-    /// are loaded
+    /// This test verifies that the global configuration for the application
+    /// is correctly set to enable debug mode.
     #[test]
     fn test_application_global_config() {
         let config = get_config();
         assert_eq!(config.global.debug, true);
     }
 
-    /// Test if chirpstack configuration parameters
-    /// are loaded
+    /// Tests ChirpStack configuration to ensure default values are correctly set.
+    ///
+    /// This test retrieves the configuration by calling `get_config()` and verifies that:
+    /// - The server address is "localhost:8080"
+    /// - The API token is "test_token"
+    /// - The tenant ID is "tenant_id"
+    /// - The polling frequency is 10 seconds
     #[test]
     fn test_chirpstack_config() {
         let config = get_config();
@@ -297,16 +315,29 @@ mod tests {
         assert_eq!(config.chirpstack.polling_frequency, 10);
     }
 
-    /// Test if opc ua configuration parameters
-    /// are loaded
+    /// This test verifies that the OPC UA configuration file is correctly set.
+    ///
+    /// The test retrieves the current configuration using the `get_config()` function.
+    /// It then asserts that the `opcua.config_file` field in the configuration
+    /// is equal to the expected value "server.conf".
+    ///
+    /// # Example
+    /// ```
+    /// let config = get_config();
+    /// assert_eq!(config.opcua.config_file, "server.conf");
+    /// ```
     #[test]
     fn test_opcua_config() {
         let config = get_config();
         assert_eq!(config.opcua.config_file, "server.conf");
     }
 
-    /// Test if application list
-    /// is loaded
+    /// This test ensures the integrity of the application configuration.
+    /// The test performs the following checks:
+    /// 1. Verifies that the configuration loads at least one application.
+    /// 2. Checks if the application name retrieved for 'application_1' matches "Application01".
+    /// 3. Checks if the application name retrieved for 'application_2' matches "Application02".
+    /// 4. Verifies that the application ID for "Application02" is correctly retrieved as 'application_2'.
     #[test]
     fn test_application_config() {
         let config = get_config();
@@ -334,9 +365,12 @@ mod tests {
         );
     }
 
-    /// Test devices list
-    /// is loaded
-
+    /// This test ensures that the device configuration is loaded correctly.
+    /// It checks that:
+    /// 1. The application list is not empty.
+    /// 2. The first application in the list has a non-empty device list.
+    /// 3. The device name for a device with ID "device_1" matches "Device01".
+    /// 4. The device ID for a device named "Device01" in the application "application_1" matches "device_1".
     #[test]
     fn test_devices_config() {
         let config = get_config();
@@ -344,7 +378,7 @@ mod tests {
         assert!(!config.application_list[0].device_list.is_empty()); // There are devices
         assert_eq!(
             config
-                .get_device_name(&"device_1".to_string(), &"application_1".to_string())
+                .get_device_name(&"device_1".to_string())
                 .unwrap()
                 .to_string(),
             "Device01".to_string()
@@ -357,5 +391,4 @@ mod tests {
             "device_1".to_string()
         );
     }
-
 }
