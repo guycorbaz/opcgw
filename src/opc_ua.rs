@@ -5,21 +5,21 @@
 
 #![allow(unused)]
 
-use crate::config::{OpcUaConfig, AppConfig, ChirpstackDevice};
-use crate::utils::{OpcGwError,OPCUA_ADDRESS_SPACE};
+use crate::config::{AppConfig, ChirpstackDevice, OpcUaConfig};
 use crate::storage::{MetricType, Storage};
+use crate::utils::{OpcGwError, OPCUA_ADDRESS_SPACE};
 use log::{debug, error, info, trace, warn};
 use opcua::server::prelude::*;
 use opcua::sync::Mutex;
 //use std::sync::Mutex;
+use local_ip_address::local_ip;
 use opcua::sync::RwLock;
+use opcua::types::variant::Variant::Float;
+use opcua::types::DataTypeId::Integer;
 use opcua::types::VariableId::OperationLimitsType_MaxNodesPerTranslateBrowsePathsToNodeIds;
-use opcua::types::variant::Variant::{Float};
 use std::option::Option;
 use std::path::PathBuf;
 use std::sync::Arc;
-use opcua::types::DataTypeId::Integer;
-use local_ip_address::local_ip;
 
 /// Structure for storing OpcUa server parameters
 pub struct OpcUa {
@@ -36,7 +36,6 @@ pub struct OpcUa {
 }
 
 impl OpcUa {
-
     /// Creates a new instance of the OPC UA structure using the provided configuration.
     ///
     /// This function performs the following steps:
@@ -55,9 +54,7 @@ impl OpcUa {
         trace!("New OPC UA structure");
         // Create de server configuration using the provided config file path
         //trace!("opcua config file is {:?}", config.opcua.config_file);
-        let mut server_config = Self::create_server_config(&config
-            .opcua.config_file
-            .clone());
+        let mut server_config = Self::create_server_config(&config.opcua.config_file.clone());
 
         let my_ip_address = local_ip().unwrap();
         //trace!("Server IP address: {}", my_ip_address);
@@ -91,7 +88,6 @@ impl OpcUa {
             storage,
         }
     }
-
 
     /// Creates the server configuration from the specified configuration file.
     ///
@@ -128,7 +124,6 @@ impl OpcUa {
         }
     }
 
-
     /// Creates a new server instance with the given configuration.
     ///
     /// # Arguments
@@ -149,7 +144,6 @@ impl OpcUa {
         debug!("Creating server");
         Server::new(server_config.clone())
     }
-
 
     /// Runs the OPC UA server asynchronously.
     ///
@@ -188,25 +182,29 @@ impl OpcUa {
         for application in app {
             // Adding application level folder
             let folder_id = address_space
-                .add_folder(application.application_name.clone(),
-                            application.application_name.clone(),
-                            &NodeId::objects_folder_id())
+                .add_folder(
+                    application.application_name.clone(),
+                    application.application_name.clone(),
+                    &NodeId::objects_folder_id(),
+                )
                 .unwrap();
             for device in application.device_list {
                 // Adding device under the application folder
                 let device_id = address_space
-                    .add_folder(device.device_name.clone(),
-                                device.device_name.clone(),
-                                &folder_id)
+                    .add_folder(
+                        device.device_name.clone(),
+                        device.device_name.clone(),
+                        &folder_id,
+                    )
                     .unwrap();
                 address_space.add_variables(
                     // Add variables to the device in address space
-                    self.create_variables(&device), &device_id
+                    self.create_variables(&device),
+                    &device_id,
                 );
             }
         }
     }
-
 
     /// Creates OPC UA variables from a given ChirpstackDevice.
     ///
@@ -247,18 +245,20 @@ impl OpcUa {
                 &metric_node_id,
                 metric_name.clone(),
                 metric_name,
-                Float(0.0));
+                Float(0.0),
+            );
 
             // Crete getter
             let getter = AttrFnGetter::new(
-                move | _, _, _, _, _, _, | -> Result<Option<DataValue>, StatusCode> {
+                move |_, _, _, _, _, _| -> Result<Option<DataValue>, StatusCode> {
                     //trace!("Get variable value");
                     let dev_id = device_id.clone();
                     let id = metric_node_id_arc.clone();
                     let name = chirpstack_metric_name_arc.clone();
-                    let value = get_metric_value(&device_id.clone(), &name.clone(), storage.clone());
+                    let value =
+                        get_metric_value(&device_id.clone(), &name.clone(), storage.clone());
                     Ok(Some((DataValue::new_now(value))))
-                }
+                },
             );
 
             metric_variable.set_value_getter(Arc::new(Mutex::new(getter)));
@@ -268,10 +268,7 @@ impl OpcUa {
         }
         variables
     }
-
-
 }
-
 
 /// Retrieves the value of a specified metric for a given device from the storage.
 ///
@@ -285,12 +282,17 @@ impl OpcUa {
 ///
 /// * `f32` - The value of the metric as a floating point number. If the metric type is not `Float`, returns 0.0.
 ///
-fn get_metric_value(device_id: &String, chirpstack_metric_name: &String, storage: Arc<std::sync::Mutex<Storage>>) -> f32 {
+fn get_metric_value(
+    device_id: &String,
+    chirpstack_metric_name: &String,
+    storage: Arc<std::sync::Mutex<Storage>>,
+) -> f32 {
     trace!("Get metric value for {:?}", &chirpstack_metric_name);
     let storage = storage.clone();
-    let storage = storage.lock()
+    let storage = storage
+        .lock()
         .expect(format!("Mutex for storage is poisoned").as_str());
-    let device = storage.devices.get(device_id).unwrap();
+    let device = storage.get_device(device_id).unwrap();
     let value = storage.get_metric_value(device_id, chirpstack_metric_name);
 
     trace!("Value of metric is: {:?}", value);
