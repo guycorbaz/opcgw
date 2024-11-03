@@ -289,7 +289,7 @@ fn get_metric_value(
 ) -> f32 {
     trace!("Get metric value for {:?}", &chirpstack_metric_name);
     let storage = storage.clone();
-    let storage = storage
+    let mut storage = storage
         .lock()
         .expect(format!("Mutex for storage is poisoned").as_str());
     let device = storage.get_device(device_id).unwrap();
@@ -297,7 +297,7 @@ fn get_metric_value(
 
     trace!("Value of metric is: {:?}", value);
     let metric_value = match value {
-        MetricType::Float(v) => v,
+        Some(MetricType::Float(v)) => v,
         _ => 0.0,
     };
     metric_value as f32

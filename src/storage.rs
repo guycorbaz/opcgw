@@ -12,7 +12,7 @@
 
 use crate::chirpstack::{ApplicationDetail, ChirpstackPoller, DeviceListDetail};
 use crate::config::MetricTypeConfig;
-use crate::AppConfig;
+use crate::{storage, AppConfig};
 use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -110,71 +110,84 @@ impl Storage {
     ///     println!("Device not found.");
     /// }
     /// ```
-    pub fn get_device(&self, device_id: &String) -> Option<&Device> {
+    pub fn get_device(&mut self, device_id: &String) -> Option<&mut Device> {
         trace!("Getting device {}", device_id);
-        self.devices.get(device_id)
+        self.devices.get_mut(device_id)
     }
 
-    /// Retrieves the name of a device given its device ID.
+    /// Retrieves the name of a device given its ID.
     ///
     /// # Arguments
     ///
-    /// * `device_id` - A reference to a String that holds the ID of the device.
+    /// * `self` - A reference to the object instance.
+    /// * `device_id` - A reference to the device ID as a `String`.
     ///
     /// # Returns
     ///
-    /// * A String representing the device's name.
+    /// * `Option<String>` - An `Option` containing the device name if the ID is found; otherwise, `None`.
     ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let device_name = my_object.get_device_name(&"12345".to_string());
+    /// match device_name {
+    ///     Some(name) => println!("Device name: {}", name),
+    ///     None => println!("Device not found"),
+    /// }
+    /// ```
     /// # Panics
-    ///
-    /// This function will panic if the device with the specified ID is not found
-    /// within `self.devices`.
-    pub fn get_device_name(&self, device_id: &String) -> String {
-        let device = self
-            .devices
-            .get(device_id)
-            .expect(format!("Device '{}' not found", device_id).as_str());
-        device.device_name.clone()
+    /// This function does not panic.
+    pub fn get_device_name(&self, device_id: &String) -> Option<String> {
+        match self.devices.get(device_id) {
+            Some(device) => Some(device.device_name.clone()),
+            None => None,
+        }
     }
 
-    /// Retrieves the metric value for a specified device and metric name.
+    /// Retrieves the metric value for a specific device by its ID and the ChirpStack metric name.
     ///
-    /// # Arguments
+    /// This function takes a device ID and a ChirpStack metric name as input parameters. It first logs
+    /// a trace message indicating that it is attempting to retrieve the metric value for the specified device.
+    /// Then, it fetches the device using the provided device ID. If the device is not found, it returns `None`.
+    /// If the device is found, it attempts to retrieve the metric value corresponding to the provided ChirpStack
+    /// metric name from the device's metrics. If the metric is not found, it returns `None`. Otherwise, it returns
+    /// the found metric value.
     ///
-    /// * `device_id` - A string slice that holds the unique identifier of the device.
-    /// * `chirpstack_metric_name` - A string slice that holds the name of the metric to retrieve.
+    /// # Parameters
+    /// - `device_id`: A reference to a string slice representing the unique identifier of the device.
+    /// - `chirpstack_metric_name`: A reference to a string slice representing the name of the ChirpStack metric to retrieve.
     ///
     /// # Returns
+    /// This function returns an `Option<MetricType>`, where `Some(MetricType)` contains the metric value
+    /// if found, and `None` if the device or the metric value is not found.
     ///
-    /// * `MetricType` - The value of the specified metric for the given device.
+    /// # Example
+    /// ```
+    /// let metric_value = metrics.get_metric_value("device123", "uplink_count");
+    /// match metric_value {
+    ///     Some(value) => println!("Metric Value: {:?}", value),
+    ///     None => println!("Metric not found for the given device."),
+    /// }
+    /// ```
     ///
     /// # Panics
-    ///
-    /// This function will panic if:
-    /// * The device with the given `device_id` is not found in the devices list.
-    /// * The metric with the given `chirpstack_metric_name` is not found in the device's metrics.
-    pub fn get_metric_value(&self, device_id: &str, chirpstack_metric_name: &str) -> MetricType {
+    /// This function does not panic.
+    pub fn get_metric_value(&mut self, device_id: &str, chirpstack_metric_name: &str) -> Option<MetricType> {
         trace!(
             "Getting metric value for device '{}': '{}'",
             device_id,
             chirpstack_metric_name
         );
-        // Get device according to its device id
-        let device = self
-            .devices
-            .get(device_id)
-            .expect(format!("Device '{}' not found", device_id).as_str());
-        // Get metric value according to metric name
-        let value = device
-            .device_metrics
-            .get(chirpstack_metric_name)
-            .expect(format!("Metric '{}' not found", chirpstack_metric_name).as_str());
-        trace!(
-            "Getting metric value for device '{}': '{:?}'",
-            device_id,
-            value
-        );
-        value.clone()
+
+        match self.get_device(&device_id.to_string()) {
+            None => None,
+            Some(device) => {
+                match device.device_metrics.get(chirpstack_metric_name) {
+                    None => None,
+                    Some(metric_type) => Some(metric_type.clone()),
+                }
+            }
+        }
     }
 
     /// Sets the metric value for a specific device.
@@ -206,13 +219,22 @@ impl Storage {
         value: MetricType,
     ) {
         //trace!("Setting metric for device'{}', value: '{}'", device_id, metric_name);
-        let mut device: &mut Device = self.devices.get_mut(device_id).expect(&format!(
-            "Can't get device with id '{}'",
-            device_id.as_str()
-        ));
-        device
-            .device_metrics
-            .insert(chirpstack_metric_name.to_string(), value);
+        //let mut device: &mut Device = self.devices.get_mut(device_id).expect(&format!(
+        //    "Can't get device with id '{}'",
+        //    device_id.as_str()
+        //));
+        match self.get_device(&device_id.to_string()) {
+            Some(device) => {
+
+                device
+                    .device_metrics
+                    .insert(chirpstack_metric_name.to_string(), value);
+            },
+            None => panic!("Cannot set metric value for device '{}'", device_id),
+        }
+        //device
+        //    .device_metrics
+        //    .insert(chirpstack_metric_name.to_string(), value);
         //self.dump_storage();
     }
 
@@ -317,7 +339,7 @@ mod tests {
     fn get_device_name() {
         let storage = Storage::new(&get_config());
         let device_id = String::from("device_1");
-        let device_name = storage.get_device_name(&device_id);
+        let device_name = storage.get_device_name(&device_id).unwrap();
         assert_eq!(device_name, "Device01");
     }
 
