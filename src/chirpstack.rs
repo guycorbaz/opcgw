@@ -95,17 +95,32 @@ pub struct ChirpstackPoller {
 }
 
 impl ChirpstackPoller {
-    /// Create and initialize a new Chirpstack poller instance.
-    /// for one tenant which id is loaded in configuration
-    /// The chirpstack poller has to be instantiated in
-    /// a tokio runtime
+    /// Asynchronously creates a new Chirpstack connection using the provided configuration and storage.
     ///
-    /// Example
-    ///     let chirpstack_poller = match ChirpstackPoller::new(&application_config.chirpstack).await{
-    ///         Ok(poller) => poller,
-    ///         Err(e) => panic!("Failed to create chirpstack poller: {}", e),
-    ///     };
+    /// This function establishes a connection to the Chirpstack server and prepares clients for
+    /// interacting with Chirpstack devices and applications. It utilizes an authentication interceptor
+    /// for securing the API communications.
     ///
+    /// # Arguments
+    ///
+    /// * `config` - A reference to the application configuration.
+    /// * `storage` - A shared reference-counted, thread-safe storage.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Self, OpcGwError>` - Returns an instance of `ChirpstackPoller` on success, or an `OpcGwError` on failure.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an `OpcGwError` if it fails to connect to the Chirpstack server.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// let config = AppConfig::new();
+    /// let storage = Arc::new(Mutex::new(Storage::new()));
+    /// let poller = ChirpstackPoller::new(&config, storage.clone()).await?;
+    /// ```
     pub async fn new(config: &AppConfig, storage: Arc<Mutex<Storage>>) -> Result<Self, OpcGwError> {
         debug!("Create a new chirpstack connection");
         let channel = Channel::from_shared(config.chirpstack.server_address.clone())
@@ -136,14 +151,22 @@ impl ChirpstackPoller {
         })
     }
 
-    /// Run the ChirpStack client process
-    /// This has to be launched by tokio
-    /// Example
-    ///     let chirpstack_handle = tokio::spawn(async move {
-    ///         if let Err(e) = chirpstack_poller.run().await {
-    ///             error!("ChirpStack poller error: {:?}", e);
-    ///         }
+    /// Runs the ChirpStack client poller at a specified interval defined in the configuration.
     ///
+    /// The poller continuously invokes the `poll_metrics` function to fetch device metrics.
+    /// If an error occurs during polling, it logs an error message but continues retrying
+    /// after waiting for the specified duration.
+    ///
+    /// # Errors
+    /// Returns an `OpcGwError` if an error occurs during polling.
+    ///
+    /// # Examples
+    /// ```rust
+    /// use your_crate::YourStruct;
+    /// // Assumes you have appropriate initializations as per your implementation.
+    /// let mut your_instance = YourStruct::new();
+    /// your_instance.run().await?;
+    /// ```
     pub async fn run(&mut self) -> Result<(), OpcGwError> {
         trace!(
             "Running chirpstack client poller every {} s",
@@ -160,15 +183,29 @@ impl ChirpstackPoller {
     }
 
 
-    /// Polls metrics from the configured applications and devices.
+    /// Asynchronously polls metrics for all devices in the configured application list.
     ///
-    /// This function polls the metrics for all devices listed in the configuration.
-    /// Initially, it collects all device IDs from the application list.
-    /// For each device in each application, it pushes the device ID into a vector.
+    /// This function first collects all device IDs from the applications specified
+    /// in the configuration. It then fetches metrics for each device by calling
+    /// `get_device_metrics_from_server` and stores the received metrics using
+    /// `store_metric`.
     ///
     /// # Errors
+    /// Returns `OpcGwError` if there is an error in fetching the device metrics.
     ///
-    /// Returns an `OpcGwError` if there is an issue during the polling process.
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let mut metrics_poller = MyMetricsPoller::new(config);
+    /// metrics_poller.poll_metrics().await?;
+    /// ```
+    ///
+    /// # Async
+    /// This function is asynchronous and should be awaited.
+    ///
+    /// # Logging
+    /// - Logs a debug message at the start of the function.
+    /// - Logs the fetched metrics at trace level.
     async fn poll_metrics(&mut self) -> Result<(), OpcGwError> {
         debug!("Polling metrics");
         let app_list = self.config.application_list.clone();
@@ -202,17 +239,22 @@ impl ChirpstackPoller {
         Ok(())
     }
 
-    /// Stores a metric for a given device based on its metric type configuration.
+    /// Runs the ChirpStack client poller at a specified interval defined in the configuration.
     ///
-    /// This function first logs the intention to store the metric and captures
-    /// the metric's name and its first data value. It then tries to retrieve the
-    /// metric type from the configuration. Based on the metric type, it processes
-    /// the metric and stores the value accordingly.
+    /// The poller continuously invokes the `poll_metrics` function to fetch device metrics.
+    /// If an error occurs during polling, it logs an error message but continues retrying
+    /// after waiting for the specified duration.
     ///
-    /// # Arguments
+    /// # Errors
+    /// Returns an `OpcGwError` if an error occurs during polling.
     ///
-    /// * `device_id` - A reference to the ID of the device.
-    /// * `metric` - A reference to the metric to be stored.
+    /// # Examples
+    /// ```rust
+    /// use your_crate::YourStruct;
+    /// // Assumes you have appropriate initializations as per your implementation.
+    /// let mut your_instance = YourStruct::new();
+    /// your_instance.run().await?;
+    /// ```
     pub fn store_metric(&self, device_id: &String, metric: &Metric) {
         trace!("Store device metric in storage");
         let device_name = self.config.get_device_name(device_id).unwrap();
@@ -413,7 +455,29 @@ impl ChirpstackPoller {
         }
     }
 
-    /// Converts the API response into a vector of `Application`.
+    /// Converts a `ListApplicationsResponse` into a vector of `ApplicationDetail`.
+    ///
+    /// This method takes a `ListApplicationsResponse` and iterates over its
+    /// `result` field, mapping each `ApplicationListItem` to an `ApplicationDetail`.
+    ///
+    /// # Parameters
+    /// - `response`: The `ListApplicationsResponse` object containing the list
+    ///   of application items to be converted.
+    ///
+    /// # Returns
+    /// A vector of `ApplicationDetail` objects.
+    ///
+    /// # Example
+    /// ```
+    /// let response = ListApplicationsResponse {
+    ///     result: vec![
+    ///         ApplicationListItem { id: 1, name: String::from("App1"), description: String::from("Description1") },
+    ///         ApplicationListItem { id: 2, name: String::from("App2"), description: String::from("Description2") }
+    ///     ]
+    /// };
+    /// let app_details = convert_to_applications(response);
+    /// assert_eq!(app_details.len(), 2);
+    /// ```
     fn convert_to_applications(
         &self,
         response: ListApplicationsResponse,
