@@ -36,20 +36,23 @@ pub struct OpcUa {
 }
 
 impl OpcUa {
-    /// Creates a new instance of the OPC UA structure using the provided configuration.
+    /// Creates a new OPC UA structure with the given configuration and storage.
     ///
-    /// This function performs the following steps:
-    /// 1. Creates the server configuration using the provided config file path.
-    /// 2. Creates a server instance and wraps it in an `Arc` and `RwLock` for safe shared access.
-    /// 3. Registers the namespace in the OPC UA server.
+    /// This function initializes the OPC UA server configuration using the provided
+    /// configuration file path. It retrieves the local IP address to configure the TCP
+    /// settings of the OPC UA server. The function then creates an OPC UA server instance,
+    /// registers a namespace, and returns an `OpcUa` structure encapsulating the server and other
+    /// necessary components.
     ///
     /// # Arguments
     ///
-    /// * `config` - A reference to the `AppConfig` struct which holds the configuration data.
+    /// * `config` - A reference to the `AppConfig` structure containing the application configuration.
+    /// * `storage` - An `Arc` wrapped `Mutex` for thread-safe access to the storage.
     ///
     /// # Returns
     ///
-    /// A new instance of `Self`.
+    /// Returns an instance of the `OpcUa` structure initialized with the provided configuration and storage.
+    ///
     pub fn new(config: &AppConfig, storage: Arc<std::sync::Mutex<Storage>>) -> Self {
         trace!("New OPC UA structure");
         // Create de server configuration using the provided config file path
@@ -89,25 +92,24 @@ impl OpcUa {
         }
     }
 
-    /// Creates the server configuration from the specified configuration file.
+    /// Creates a server configuration from the given file name.
+    ///
+    /// This function attempts to load a server configuration from the specified file name.
+    /// If the configuration is loaded successfully, it returns the server configuration.
+    /// In the event of an error, it will panic and provide a detailed error message.
     ///
     /// # Arguments
     ///
-    /// * `config_file_name` - A string slice that holds the name of the configuration file.
+    /// * `config_file_name` - A reference to the name of the configuration file.
     ///
     /// # Returns
     ///
-    /// * `ServerConfig` - The created server configuration.
+    /// * `ServerConfig` - The loaded server configuration.
     ///
     /// # Panics
     ///
-    /// The function will panic if the server configuration cannot be created due to an error.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// let config = create_server_config(&"config.yaml".to_string());
-    /// ```
+    /// This function will panic if it cannot load the server configuration from the given file name.
+    /// The error message will be wrapped in `OpcGwError::OpcUaError`.
     fn create_server_config(config_file_name: &String) -> ServerConfig {
         debug!("Creating server config");
         trace!("opcua config file is {:?}", config_file_name);
@@ -147,12 +149,35 @@ impl OpcUa {
 
     /// Runs the OPC UA server asynchronously.
     ///
-    /// This function initializes and runs an OPC UA server task. The server runs
-    /// indefinitely until it receives a termination signal.
+    /// This function performs the following actions:
+    /// 1. Logs a debug message indicating that the OPC UA server is running.
+    /// 2. Populates the address space for the server.
+    /// 3. Creates and awaits the server task to run indefinitely.
     ///
-    /// # Returns
+    /// # Errors
     ///
-    /// * `Result<(), OpcGwError>` - Returns `Ok(())` if the server
+    /// Returns an `OpcGwError` if any operation within the function fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Assuming `opc_gw` is an instance of a struct that has the `run` method
+    /// opc_gw.run().await?;
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// The function does not explicitly handle any panics. It is expected that any
+    /// panics that occur within the function should be handled by the caller.
+    ///
+    /// # Notes
+    ///
+    /// Ensure that the server is properly configured and the address space is
+    /// correctly populated before calling this function.
+    ///
+    /// # async
+    ///
+    /// This function is asynchronous and should be awaited.
     pub async fn run(&self) -> Result<(), OpcGwError> {
         debug!("Running OPC UA server");
         self.populate_address_space();
@@ -162,15 +187,32 @@ impl OpcUa {
         Ok(())
     }
 
-    /// Populates the address space with applications and their devices.
+    /// Populates the server's address space with applications and their devices.
     ///
-    /// This method reads the server state and accesses the server's address space.
-    /// It then iterates over the list of applications from the configuration, adding each application
-    /// as a folder in the address space. For each application, it adds its devices as subfolders
-    /// and attaches the respective variables to each device.
+    /// This method first reads the current server state and accesses the server's address space.
+    /// It then iterates over the list of applications specified in the configuration, adding each
+    /// application and its associated devices to the address space as folders and variables respectively.
     ///
-    /// # Panics
-    /// This method will panic if there is a failure in adding folders or variables to the address space.
+    /// # Steps:
+    /// 1. Read the server state.
+    /// 2. Access the server's address space.
+    /// 3. Obtain a writable reference to the address space.
+    /// 4. Iterate through the application's list:
+    ///     a. Add a folder for each application.
+    ///     b. For each device in the application, add a folder under the application's folder.
+    ///     c. Add variables for each device in the address space.
+    ///
+    /// # Panics:
+    /// The function will panic if any `unwrap` calls fail, indicating an error in adding folders or variables.
+    ///
+    /// # Example:
+    /// ```rust
+    /// // Assuming `server` is an instance of your server type and `config` is properly set up
+    /// server.populate_address_space();
+    /// ```
+    ///
+    /// # Note:
+    /// This function assumes that the server, configuration, and address space are logically and syntactically correct.
     pub fn populate_address_space(&self) {
         // Read the server state
         let server = self.server.read();
@@ -206,18 +248,41 @@ impl OpcUa {
         }
     }
 
-    /// Creates OPC UA variables from a given ChirpstackDevice.
+    /// Creates OPC UA variables for each metric in the given ChirpstackDevice.
     ///
-    /// This function initializes an empty vector to store `Variable` instances,
-    /// iterates over each metric in the device's metric list, clones the metric name,
-    /// creates a new `NodeId` for the variable, and pushes the new `Variable` into the vector.
+    /// This method iterates over the list of metrics from the provided `ChirpstackDevice`
+    /// and creates corresponding OPC UA variables for each metric. Each variable is assigned
+    /// a unique `NodeId` and an initial value of `Float(0.0)`. A getter function is also created
+    /// for each variable to fetch its value from the storage.
     ///
     /// # Parameters
-    /// - `device`: A reference to a `ChirpstackDevice` containing the metrics from which
-    ///             the OPC UA variables will be created.
+    ///
+    /// * `&self`: A reference to the current instance of the struct.
+    /// * `device`: A reference to a `ChirpstackDevice` that contains the metrics to be converted into OPC UA variables.
     ///
     /// # Returns
-    /// A vector of `Variable` instances created from the device's metrics.
+    ///
+    /// * `Vec<Variable>`: A vector containing the generated OPC UA variables.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// let device = ChirpstackDevice::new(...);
+    /// let variables = self.create_variables(&device);
+    /// for variable in variables {
+    ///     println!("Created variable: {:?}", variable);
+    /// }
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// This function does not explicitly panic, but the caller is responsible for ensuring
+    /// that the provided `ChirpstackDevice` is properly constructed and contains valid metrics.
+    ///
+    /// # Notes
+    ///
+    /// * The `self` reference is cloned and moved into a closure to handle asynchronous value fetching.
+    /// * Each metric and its corresponding node ID are wrapped in `Arc` and `Mutex` for thread-safe access within the getter closure.
     fn create_variables(&self, device: &ChirpstackDevice) -> Vec<Variable> {
         trace!("Creating opc ua variables");
 
@@ -270,18 +335,28 @@ impl OpcUa {
     }
 }
 
-/// Retrieves the value of a specified metric for a given device from the storage.
+/// Retrieves the value of a specified metric for a given device from storage.
 ///
 /// # Arguments
 ///
-/// * `device_id` - A reference to a string that holds the ID of the device.
-/// * `chirpstack_metric_name` - A reference to a string that holds the name of the metric to retrieve.
-/// * `storage` - An `Arc` wrapped around a `Mutex` protected `Storage` object.
+/// * `device_id` - A reference to a `String` that holds the identifier of the device.
+/// * `chirpstack_metric_name` - A reference to a `String` that contains the name of the metric to retrieve.
+/// * `storage` - An `Arc` wrapped around a `Mutex` that allows shared access to the `Storage` structure.
 ///
 /// # Returns
 ///
-/// * `f32` - The value of the metric as a floating point number. If the metric type is not `Float`, returns 0.0.
+/// The value of the specified metric as an `f32`. If the metric value is not found or not of type `Float`, it returns `0.0`.
 ///
+/// # Panics
+///
+/// This function will panic if it fails to lock the `Mutex` for storage.
+///
+/// # Examples
+///
+/// ```rust
+/// let value = get_metric_value(&device_id, &metric_name, storage);
+/// println!("Metric value: {}", value);
+/// ```
 fn get_metric_value(
     device_id: &String,
     chirpstack_metric_name: &String,
