@@ -325,7 +325,7 @@ mod tests {
     /// a device with the identifier "device_1" exists in the storage.
     #[test]
     fn test_get_device() {
-        let storage = Storage::new(&get_config());
+        let mut storage = Storage::new(&get_config());
         let device = storage.get_device(&String::from("device_1"));
         assert!(device.is_some()); // device has bee found
     }
@@ -366,6 +366,6 @@ mod tests {
             storage::MetricType::Float(10.0),
         );
         let metric = storage.get_metric_value(&"device_1".to_string(), &"metric_1".to_string());
-        assert_eq!(metric, MetricType::Float(10.0));
+        assert_eq!(metric, Some(MetricType::Float(10.0)));
     }
 }
