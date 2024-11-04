@@ -1,5 +1,5 @@
 [package]
-name = "opc_ua_chirpstack_gateway"
+name = "opcgw"
 version = "0.1.0"
 authors = ["Guy Corbaz <guy@corbaz.org>"]
 description = "A Chirpstack to opc ua gateway"
