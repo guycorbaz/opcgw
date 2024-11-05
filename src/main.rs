@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // Configure logger
-    log4rs::init_file("log4rs.yaml", Default::default()).expect("Failed to initialize logger");
+    log4rs::init_file("./config/log4rs.yaml", Default::default()).expect("Failed to initialize logger");
     info!("starting");
 
     // Create a new configuration and load its parameters

@@ -1,6 +1,6 @@
 # Docker compose file for chirpstack opcua gateway
 
-version: '3.3'
+#version: '3.3'
 
 services:
   opcgw:
@@ -10,6 +10,6 @@ services:
     ports:
       - "4855:4855"
     volumes:
-      - ./log:/usr/local/opcgw/log
-      - ./config:/usr/local/opcgw/config
-      - ./pki:/usr/local/opcgw/pki
+      - ./log:/usr/local/bin/log
+      - ./config:/usr/local/bin/config
+      - ./pki:/usr/local/bin/pki
