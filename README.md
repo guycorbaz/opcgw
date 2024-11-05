@@ -1,5 +1,4 @@
 ![build and test](https://github.com/guycorbaz/opcgw/actions/workflows/ci.yml/badge.svg)
-![clippy](https://github.com/guycorbaz/opcgw/actions/workflows/clippy.yml/badge.svg)
 
 # ChirpStack to OPC UA Gateway
 
