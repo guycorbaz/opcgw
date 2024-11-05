@@ -9,13 +9,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Install protoc
-        run: sudo apt-get install protobuf-compiler-grpc
-      - name: Install Rust
-        run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
+      #- name: Install protoc
+      #  run: sudo apt-get install protobuf-compiler-grpc
+      #- name: Install Rust
+      #  run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
       - uses: actions/checkout@v4
-      - name: Build application
-        run: cargo build --verbose --release
+      #- name: Build application
+      #  run: cargo build --verbose --release
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
