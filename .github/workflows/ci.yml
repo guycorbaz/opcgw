@@ -2,9 +2,13 @@ name: Cargo Build & Test
 
 on:
   push:
-    branches: [ $default-branch]
+    branches:
+      - main
+      - devel
   pull_request:
-    branches: [ $default-branch]
+    branches:
+      - main
+      - devel
 
 env:
   CARGO_TERM_COLOR: always
