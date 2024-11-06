@@ -1,6 +1,7 @@
 /target
 .aider*
 .env
+.idea
 /log
 /pki
 .tmp
