@@ -8,7 +8,7 @@
 
 #![allow(unused)] //FIXME: Remove for release
 
-use crate::utils::OpcGwError;
+use crate::utils::{OpcGwError, OPCGW_CONFIG_PATH};
 use figment::{
     providers::{Env, Format, Toml},
     Figment,
@@ -131,7 +131,7 @@ impl AppConfig {
 
         // Define config file path
         let config_path =
-            std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config/default.toml".to_string());
+            std::env::var("CONFIG_PATH").unwrap_or_else(|_| format!("{}/default.toml", OPCGW_CONFIG_PATH).to_string());
 
         // Reading the configuration
         trace!("with config path: {}", config_path);

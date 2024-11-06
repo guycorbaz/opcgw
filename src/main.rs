@@ -31,6 +31,7 @@ use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc, thread};
 use tokio::runtime::{Builder, Runtime};
 use tokio::time;
+use utils::OPCGW_CONFIG_PATH;
 
 // Manage arguments
 // Version (-V) is automatically derives from Cargo.toml
@@ -52,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // Configure logger
-    log4rs::init_file("./config/log4rs.yaml", Default::default()).expect("Failed to initialize logger");
+    log4rs::init_file(format!("{}/log4rs.yaml", OPCGW_CONFIG_PATH), Default::default()).expect("Failed to initialize logger");
     info!("starting");
 
     // Create a new configuration and load its parameters
