@@ -11,6 +11,9 @@
 /// are registered in
 pub const OPCUA_ADDRESS_SPACE: &str = "urn:chirpstack_opcua";
 
+/// Configuration files are stored in the following folder
+pub const OPCGW_CONFIG_PATH: &str = "config";
+
 use std::string::ToString;
 use thiserror::Error;
 
