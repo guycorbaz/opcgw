@@ -76,7 +76,7 @@ pub struct ChirpstackDevice {
 }
 
 /// Type of metrics
-#[derive(Debug, Deserialize, Clone,PartialEq)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub enum OpcMetricTypeConfig {
     Bool,
     Int,
@@ -130,8 +130,8 @@ impl AppConfig {
         debug!("Creating new AppConfig");
 
         // Define config file path
-        let config_path =
-            std::env::var("CONFIG_PATH").unwrap_or_else(|_| format!("{}/default.toml", OPCGW_CONFIG_PATH).to_string());
+        let config_path = std::env::var("CONFIG_PATH")
+            .unwrap_or_else(|_| format!("{}/default.toml", OPCGW_CONFIG_PATH).to_string());
 
         // Reading the configuration
         trace!("with config path: {}", config_path);
@@ -304,7 +304,11 @@ impl AppConfig {
     ///     println!("Metric type not found.");
     /// }
     /// ```
-    pub fn get_metric_type(&self, chirpstack_metric_name: &String, device_id: &String) -> Option<OpcMetricTypeConfig> {
+    pub fn get_metric_type(
+        &self,
+        chirpstack_metric_name: &String,
+        device_id: &String,
+    ) -> Option<OpcMetricTypeConfig> {
         debug!("Getting metric type");
         let metric_list = match self.get_metric_list(device_id) {
             Some(metrics) => metrics,
@@ -315,7 +319,7 @@ impl AppConfig {
             if metric.chirpstack_metric_name == *chirpstack_metric_name {
                 return Some(metric.metric_type.clone());
             }
-        };
+        }
         None
     }
 }
@@ -323,8 +327,8 @@ impl AppConfig {
 /// Test config module
 #[cfg(test)]
 mod tests {
-    use opcua::types::process_decode_io_result;
     use super::*;
+    use opcua::types::process_decode_io_result;
 
     /// Loads the application configuration from a TOML file.
     ///
@@ -354,7 +358,10 @@ mod tests {
         let application_id = String::from("application_1");
         let no_application_id = String::from("no_application");
         let expected_name = String::from("Application01");
-        assert_eq!(config.get_application_name(&application_id), Some(expected_name));
+        assert_eq!(
+            config.get_application_name(&application_id),
+            Some(expected_name)
+        );
         assert_eq!(config.get_application_name(&no_application_id), None);
     }
 
@@ -364,7 +371,10 @@ mod tests {
         let application_name = String::from("Application01");
         let no_application_name = String::from("no_Application");
         let expected_application_id = String::from("application_1");
-        assert_eq!(config.get_application_id(&application_name), Some(expected_application_id));
+        assert_eq!(
+            config.get_application_id(&application_name),
+            Some(expected_application_id)
+        );
         assert_eq!(config.get_application_id(&no_application_name), None);
     }
 
@@ -374,7 +384,10 @@ mod tests {
         let device_id = String::from("device_1");
         let no_device_name = String::from("no_device");
         let expected_device_name = String::from("Device01");
-        assert_eq!(config.get_device_name(&device_id), Some(expected_device_name));
+        assert_eq!(
+            config.get_device_name(&device_id),
+            Some(expected_device_name)
+        );
         assert_eq!(config.get_device_name(&no_device_name), None);
     }
 
@@ -385,12 +398,15 @@ mod tests {
         let device_name = String::from("Device01");
         let no_device_name = String::from("no_Device");
         let expected_device_id = String::from("device_1");
-        assert_eq!(config.get_device_id(&device_name, &application_id), Some(expected_device_id));
+        assert_eq!(
+            config.get_device_id(&device_name, &application_id),
+            Some(expected_device_id)
+        );
         assert_eq!(config.get_device_id(&no_device_name, &application_id), None);
     }
 
     #[test]
-    fn test_get_metric_list(){
+    fn test_get_metric_list() {
         let config = get_config();
         let device_id = String::from("device_1");
         let no_device_id = String::from("no_device");
@@ -408,9 +424,18 @@ mod tests {
         let chirpstack_metric_name = String::from("metric_1");
         let no_chirpstack_metric_name = String::from("no_metric");
         let expected_metric_type = OpcMetricTypeConfig::Float;
-        assert_eq!(config.get_metric_type(&chirpstack_metric_name, &device_id), Some(expected_metric_type));
-        assert_eq!(config.get_metric_type(&no_chirpstack_metric_name, &device_id), None);
-        assert_eq!(config.get_metric_type(&chirpstack_metric_name, &no_device_id), None);
+        assert_eq!(
+            config.get_metric_type(&chirpstack_metric_name, &device_id),
+            Some(expected_metric_type)
+        );
+        assert_eq!(
+            config.get_metric_type(&no_chirpstack_metric_name, &device_id),
+            None
+        );
+        assert_eq!(
+            config.get_metric_type(&chirpstack_metric_name, &no_device_id),
+            None
+        );
     }
     /// This test verifies that the global configuration for the application
     /// is correctly set to enable debug mode.
@@ -486,8 +511,7 @@ mod tests {
         );
 
         assert_eq!(
-            config
-                .get_application_id(&"noapplication".to_string()),
+            config.get_application_id(&"noapplication".to_string()),
             None
         );
     }

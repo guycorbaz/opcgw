@@ -6,7 +6,7 @@ use crate::config::{AppConfig, ChirpstackPollerConfig, OpcMetricTypeConfig};
 use crate::utils::OpcGwError;
 use chirpstack_api::api::{DeviceState, GetDeviceMetricsRequest};
 use chirpstack_api::common::Metric;
-use log::{debug, error, trace};
+use log::{debug, error, trace, warn};
 use prost_types::Timestamp;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -144,7 +144,7 @@ impl ChirpstackPoller {
             .await
             .map_err(|e| OpcGwError::ChirpStackError(format!("Connection error: {}", e)))?;
 
-        // Create interceptor for authentification key
+        // Create interceptor for authentication key
         trace!("Create authenticator");
         let interceptor = AuthInterceptor {
             api_token: config.chirpstack.api_token.clone(),
@@ -227,16 +227,21 @@ impl ChirpstackPoller {
     /// - Logs the fetched metrics at trace level.
     async fn poll_metrics(&mut self) -> Result<(), OpcGwError> {
         debug!("Polling metrics");
+
+        // Get list of applications
         let app_list = self.config.application_list.clone();
+
         // Collect device IDs first
         let mut device_ids = Vec::new();
+
+        // Now, parse all devices
         for app in &self.config.application_list {
             for dev in &app.device_list {
                 device_ids.push(dev.device_id.clone());
             }
         }
 
-        // Now, fetch metrics using mutable borrow
+        // Get metrics from server for each device
         for dev_id in device_ids {
             let dev_metrics = self
                 .get_device_metrics_from_server(
@@ -245,8 +250,9 @@ impl ChirpstackPoller {
                     1,
                 )
                 .await?;
+            // Parse metrics received from server
             for metric in &dev_metrics.metrics.clone() {
-                trace!("------Got metrics:");
+                trace!("Got metrics:");
                 trace!("{:#?}", metric);
                 for (key, metric) in &dev_metrics.metrics {
                     self.store_metric(&dev_id.clone(), &metric.clone());
@@ -279,14 +285,36 @@ impl ChirpstackPoller {
             .get_device_name(device_id)
             .expect(&OpcGwError::ChirpStackError(format!("Failed to get device name")).to_string());
         let metric_name = metric.name.clone();
-        let value = metric.datasets[0].data[0].clone();
-
+        // We are collecting only the first returned metric
+        let storage = self.storage.clone();
         match self.config.get_metric_type(&metric_name, device_id) {
             Some(metric_type) => match metric_type {
-                OpcMetricTypeConfig::Bool => {}
-                OpcMetricTypeConfig::Int => {}
+                OpcMetricTypeConfig::Bool => {
+                    // Convert to right boolean value
+                    let mut storage = storage.lock().expect(
+                        &OpcGwError::ChirpStackError(format!("Can't lock storage")).to_string(),
+                    );
+                    let value = metric.datasets[0].data[0].clone();
+                    let mut bool_value = false;
+                    match value {
+                        0.0 => bool_value = false,
+                        1.0 => bool_value = true,
+                        _ => error!(
+                            "{}",
+                            OpcGwError::ChirpStackError(format!("Not a bolean value").to_string())
+                        ),
+                    }
+                    storage.set_metric_value(device_id, &metric_name, MetricType::Bool(bool_value));
+                }
+                OpcMetricTypeConfig::Int => {
+                    let int_value = metric.datasets[0].data[0].clone() as i64;
+                    let mut storage = storage.lock().expect(
+                        &OpcGwError::ChirpStackError(format!("Can't lock storage")).to_string(),
+                    );
+                    storage.set_metric_value(device_id, &metric_name, MetricType::Int(int_value));
+                }
                 OpcMetricTypeConfig::Float => {
-                    let storage = self.storage.clone();
+                    let value = metric.datasets[0].data[0].clone();
                     let mut storage = storage.lock().expect(
                         &OpcGwError::ChirpStackError(format!("Can't lock storage")).to_string(),
                     );
@@ -295,10 +323,20 @@ impl ChirpstackPoller {
                         &metric_name,
                         MetricType::Float(value.into()),
                     );
-                    trace!("------------Dumping storage-----------------");
-                    storage.dump_storage();
                 }
-                OpcMetricTypeConfig::String => {}
+                OpcMetricTypeConfig::String => {
+                    warn!(
+                        "{}",
+                        OpcGwError::ChirpStackError(format!("String conversion not implemented"))
+                            .to_string()
+                    );
+                }
+                _ => {
+                    warn!(
+                        "{}",
+                        OpcGwError::ChirpStackError(format!("Wrong metric name")).to_string()
+                    );
+                }
             },
             None => {
                 error!(
@@ -608,7 +646,9 @@ pub fn print_device_list(list: &Vec<DeviceListDetail>) {
     for device in list {
         trace!(
             "Device EUI: {}, Name: {}, Description: {}",
-            device.dev_eui, device.name, device.description
+            device.dev_eui,
+            device.name,
+            device.description
         );
     }
 }
