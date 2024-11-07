@@ -2,7 +2,7 @@
 // Copyright (c) [2024] [Guy Corbaz]
 //! Manage communications with Chirpstack 4 server
 
-use crate::config::{AppConfig, ChirpstackPollerConfig, MetricTypeConfig};
+use crate::config::{AppConfig, ChirpstackPollerConfig, OpcMetricTypeConfig};
 use crate::utils::OpcGwError;
 use chirpstack_api::api::{DeviceState, GetDeviceMetricsRequest};
 use chirpstack_api::common::Metric;
@@ -281,11 +281,11 @@ impl ChirpstackPoller {
         let metric_name = metric.name.clone();
         let value = metric.datasets[0].data[0].clone();
 
-        match self.config.get_metric_type(&metric_name) {
+        match self.config.get_metric_type(&metric_name, device_id) {
             Some(metric_type) => match metric_type {
-                MetricTypeConfig::Bool => {}
-                MetricTypeConfig::Int => {}
-                MetricTypeConfig::Float => {
+                OpcMetricTypeConfig::Bool => {}
+                OpcMetricTypeConfig::Int => {}
+                OpcMetricTypeConfig::Float => {
                     let storage = self.storage.clone();
                     let mut storage = storage.lock().expect(
                         &OpcGwError::ChirpStackError(format!("Can't lock storage")).to_string(),
@@ -298,7 +298,7 @@ impl ChirpstackPoller {
                     trace!("------------Dumping storage-----------------");
                     storage.dump_storage();
                 }
-                MetricTypeConfig::String => {}
+                OpcMetricTypeConfig::String => {}
             },
             None => {
                 error!(

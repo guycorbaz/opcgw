@@ -11,7 +11,7 @@
 #![allow(unused)]
 
 use crate::chirpstack::{ApplicationDetail, ChirpstackPoller, DeviceListDetail};
-use crate::config::MetricTypeConfig;
+use crate::config::OpcMetricTypeConfig;
 use crate::{storage, AppConfig};
 use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
@@ -73,10 +73,10 @@ impl Storage {
                 let mut device_metrics = HashMap::new();
                 for metric in device.metric_list.iter() {
                     let metric_type = match metric.metric_type {
-                        MetricTypeConfig::Bool => MetricType::Bool(false),
-                        MetricTypeConfig::Int => MetricType::Int(0),
-                        MetricTypeConfig::Float => MetricType::Float(0.0),
-                        MetricTypeConfig::String => MetricType::String("".to_string()),
+                        OpcMetricTypeConfig::Bool => MetricType::Bool(false),
+                        OpcMetricTypeConfig::Int => MetricType::Int(0),
+                        OpcMetricTypeConfig::Float => MetricType::Float(0.0),
+                        OpcMetricTypeConfig::String => MetricType::String("".to_string()),
                     };
                     device_metrics.insert(metric.metric_name.clone(), MetricType::Float(0.0));
                 }
