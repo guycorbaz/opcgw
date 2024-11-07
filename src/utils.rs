@@ -21,7 +21,7 @@ use thiserror::Error;
 pub enum OpcGwError {
     #[error("Configuration error: {0}")]
     ConfigurationError(String),
-    #[error("ChirpStack error: {0}")]
+    #[error("ChirpStack poller error: {0}")]
     ChirpStackError(String),
     #[error("OPC UA error: {0}")]
     OpcUaError(String),

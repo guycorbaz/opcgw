@@ -2,9 +2,7 @@
 // Copyright (c) [2024] [Guy Corbaz]
 //! Manage communications with Chirpstack 4 server
 
-#![allow(unused)]
-
-use crate::config::{ChirpstackPollerConfig, AppConfig, MetricTypeConfig};
+use crate::config::{AppConfig, ChirpstackPollerConfig, MetricTypeConfig};
 use crate::utils::OpcGwError;
 use chirpstack_api::api::{DeviceState, GetDeviceMetricsRequest};
 use chirpstack_api::common::Metric;
@@ -22,13 +20,13 @@ use tonic::service::Interceptor;
 use tonic::{transport::Channel, Request, Status};
 
 // Import generated types
+use crate::storage::{MetricType, Storage};
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
 use chirpstack_api::api::{
     ApplicationListItem, DeviceListItem, GetDeviceRequest, ListApplicationsRequest,
     ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse,
 };
-use crate::storage::{MetricType, Storage};
 
 /// Structure representing a chirpstack application.
 #[derive(Debug, Deserialize, Clone)]
@@ -69,12 +67,29 @@ struct AuthInterceptor {
     api_token: String,
 }
 
-/// Interceptor that allow to pass api token to chirpstack server
+/// This method is called to intercept a gRPC request and injects an authorization token into the request's metadata.
+///
+/// # Arguments
+///
+/// * `request` - The incoming gRPC request that will be intercepted.
+///
+/// # Returns
+///
+/// * `Result<Request<()>, Status>` - Returns the modified request with the authorization token added to its metadata,
+/// or an error status if the token insertion fails.
+///
+/// # Errors
+///
+/// This method will panic if the authorization token cannot be parsed.
 impl Interceptor for AuthInterceptor {
     fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
+        debug!("Interceptor::call");
         request.metadata_mut().insert(
             "authorization",
-            format!("Bearer {}", self.api_token).parse().unwrap(),
+            format!("Bearer {}", self.api_token).parse().expect(
+                &OpcGwError::ChirpStackError(format!("Failed to parse authorization token"))
+                    .to_string(),
+            ),
         );
         Ok(request)
     }
@@ -124,11 +139,13 @@ impl ChirpstackPoller {
     pub async fn new(config: &AppConfig, storage: Arc<Mutex<Storage>>) -> Result<Self, OpcGwError> {
         debug!("Create a new chirpstack connection");
         let channel = Channel::from_shared(config.chirpstack.server_address.clone())
-            .unwrap()
+            .expect(&OpcGwError::ChirpStackError(format!("Failed to create channel")).to_string())
             .connect()
             .await
             .map_err(|e| OpcGwError::ChirpStackError(format!("Connection error: {}", e)))?;
 
+        // Create interceptor for authentification key
+        trace!("Create authenticator");
         let interceptor = AuthInterceptor {
             api_token: config.chirpstack.api_token.clone(),
         };
@@ -168,7 +185,7 @@ impl ChirpstackPoller {
     /// your_instance.run().await?;
     /// ```
     pub async fn run(&mut self) -> Result<(), OpcGwError> {
-        trace!(
+        debug!(
             "Running chirpstack client poller every {} s",
             self.config.chirpstack.polling_frequency
         );
@@ -176,12 +193,14 @@ impl ChirpstackPoller {
         // Start the poller
         loop {
             if let Err(e) = self.poll_metrics().await {
-                error!("Error polling devices: {:?}", e);
+                error!(
+                    "{}",
+                    &OpcGwError::ChirpStackError(format!("Error polling devices: {:?}", e))
+                );
             }
             tokio::time::sleep(duration).await;
         }
     }
-
 
     /// Asynchronously polls metrics for all devices in the configured application list.
     ///
@@ -209,14 +228,12 @@ impl ChirpstackPoller {
     async fn poll_metrics(&mut self) -> Result<(), OpcGwError> {
         debug!("Polling metrics");
         let app_list = self.config.application_list.clone();
-        //trace!("app_list: {:#?}", app_list);
         // Collect device IDs first
         let mut device_ids = Vec::new();
         for app in &self.config.application_list {
             for dev in &app.device_list {
                 device_ids.push(dev.device_id.clone());
             }
-            //trace!("device_ids: {:#?}", device_ids);
         }
 
         // Now, fetch metrics using mutable borrow
@@ -256,36 +273,44 @@ impl ChirpstackPoller {
     /// your_instance.run().await?;
     /// ```
     pub fn store_metric(&self, device_id: &String, metric: &Metric) {
-        trace!("Store device metric in storage");
-        let device_name = self.config.get_device_name(device_id).unwrap();
+        debug!("Store device metric in storage");
+        let device_name = self
+            .config
+            .get_device_name(device_id)
+            .expect(&OpcGwError::ChirpStackError(format!("Failed to get device name")).to_string());
         let metric_name = metric.name.clone();
         let value = metric.datasets[0].data[0].clone();
-        //trace!("Value for {:?} is: {:#?}", metric_name, value);
 
         match self.config.get_metric_type(&metric_name) {
-            Some(metric_type) => {
-                //trace!("Metric type: {:?} for metric {:?}", metric_type, metric_name);
-                match metric_type {
-                    MetricTypeConfig::Bool => {},
-                    MetricTypeConfig::Int => {},
-                    MetricTypeConfig::Float => {
-                        let storage = self.storage.clone();
-                        let mut storage = storage.lock().expect("Can't lock storage"); // Should we wait if already locked ?
-                        storage.set_metric_value(device_id,&metric_name,  MetricType::Float(value.into()));
-                        trace!("------------Dumping storage-----------------");
-                        storage.dump_storage();
-                    },
-                    MetricTypeConfig::String => {},
+            Some(metric_type) => match metric_type {
+                MetricTypeConfig::Bool => {}
+                MetricTypeConfig::Int => {}
+                MetricTypeConfig::Float => {
+                    let storage = self.storage.clone();
+                    let mut storage = storage.lock().expect(
+                        &OpcGwError::ChirpStackError(format!("Can't lock storage")).to_string(),
+                    );
+                    storage.set_metric_value(
+                        device_id,
+                        &metric_name,
+                        MetricType::Float(value.into()),
+                    );
+                    trace!("------------Dumping storage-----------------");
+                    storage.dump_storage();
                 }
+                MetricTypeConfig::String => {}
             },
             None => {
-                // Log or handle the None case according to your needs.
-                trace!("No metric type found for metric: {:?} of device {:?}", metric_name, device_name);
-            },
+                error!(
+                    "{}",
+                    &OpcGwError::ChirpStackError(format!(
+                        "No metric type found for metric: {:?} of device {:?}",
+                        metric_name, device_name
+                    ))
+                );
+            }
         };
-
     }
-
 
     /// Retrieves the list of applications from the server.
     ///
@@ -546,7 +571,7 @@ impl ChirpstackPoller {
 /// ```
 pub fn print_application_list(list: &Vec<ApplicationDetail>) {
     for app in list {
-        println!("{:#?}", app);
+        trace!("{:#?}", app);
     }
 }
 
@@ -581,7 +606,7 @@ pub fn print_application_list(list: &Vec<ApplicationDetail>) {
 /// ```
 pub fn print_device_list(list: &Vec<DeviceListDetail>) {
     for device in list {
-        println!(
+        trace!(
             "Device EUI: {}, Name: {}, Description: {}",
             device.dev_eui, device.name, device.description
         );
