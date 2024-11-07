@@ -76,8 +76,8 @@ pub struct ChirpstackDevice {
 }
 
 /// Type of metrics
-#[derive(Debug, Deserialize, Clone)]
-pub enum MetricTypeConfig {
+#[derive(Debug, Deserialize, Clone,PartialEq)]
+pub enum OpcMetricTypeConfig {
     Bool,
     Int,
     Float,
@@ -93,7 +93,7 @@ pub struct Metric {
     /// The name defined in chirpstack
     pub chirpstack_metric_name: String,
     /// The type of metric
-    pub metric_type: MetricTypeConfig,
+    pub metric_type: OpcMetricTypeConfig,
     /// Unit of the metric
     pub metric_unit: Option<String>,
 }
@@ -200,6 +200,7 @@ impl AppConfig {
     ///    under the specified `application_id` is not found.
     ///
     pub fn get_device_name(&self, device_id: &String) -> Option<String> {
+        debug!("Getting device name");
         // Search for the application
         for app in self.application_list.iter() {
             // Search for device id
@@ -241,32 +242,88 @@ impl AppConfig {
         None
     }
 
-    /// Retrieves the metric type configuration based on the ChirpStack metric name.
+    /// Retrieves the list of metrics for a given device ID.
     ///
-    /// This method searches through the application list, then each application's device list,
-    /// and within each device, it searches the metric list to find the metric corresponding to the
-    /// provided ChirpStack metric name. If found, it returns the metric type configuration.
+    /// This function iterates through the list of applications and their corresponding devices.
+    /// If a matching device ID is found, the list of metrics for that device is returned.
+    /// If no matching device ID is found, it returns `None`.
     ///
     /// # Arguments
     ///
-    /// * `chirpstack_metric_name` - A reference to a String containing the name of the ChirpStack metric.
+    /// * `self` - A reference to the current struct instance.
+    /// * `device_id` - A reference to the device ID for which the metrics list is required.
     ///
     /// # Returns
     ///
-    /// * `Option<MetricTypeConfig>` - An Option containing the metric
-    pub fn get_metric_type(&self, chirpstack_metric_name: &String) -> Option<MetricTypeConfig> {
-        self.application_list
-            .iter()
-            .flat_map(|app| app.device_list.iter())
-            .flat_map(|device| device.metric_list.iter())
-            .find(|metric| metric.chirpstack_metric_name == *chirpstack_metric_name)
-            .map(|metric| metric.metric_type.clone())
+    /// * `Option<Vec<Metric>>` - Returns `Some(Vec<Metric>)` if a matching device ID is found,
+    /// otherwise returns `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// let metrics = instance.get_metric_list(&device_id);
+    /// match metrics {
+    ///     Some(metrics_list) => println!("Found metrics: {:?}", metrics_list),
+    ///     None => println!("No metrics found for the given device ID"),
+    /// }
+    /// ```
+    pub fn get_metric_list(&self, device_id: &String) -> Option<Vec<Metric>> {
+        debug!("Getting metric list");
+        // Search in applications
+        for app in self.application_list.iter() {
+            // Search for device
+            for device in app.device_list.iter() {
+                if device.device_id == *device_id {
+                    return Some(device.metric_list.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// Retrieves the `OpcMetricTypeConfig` associated with a given ChirpStack metric name for a specified device.
+    ///
+    /// # Arguments
+    ///
+    /// * `chirpstack_metric_name` - A reference to a `String` representing the name of the ChirpStack metric.
+    /// * `device_id` - A reference to a `String` representing the unique identifier of the device.
+    ///
+    /// # Returns
+    ///
+    /// * `Option<OpcMetricTypeConfig>` - Returns `Some(OpcMetricTypeConfig)` if the metric type is found for the given
+    ///   ChirpStack metric name and device, otherwise returns `None`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let chirpstack_metric_name = String::from("some_metric_name");
+    /// let device_id = String::from("device123");
+    /// if let Some(metric_type) = get_metric_type(&chirpstack_metric_name, &device_id) {
+    ///     println!("Metric type found: {:?}", metric_type);
+    /// } else {
+    ///     println!("Metric type not found.");
+    /// }
+    /// ```
+    pub fn get_metric_type(&self, chirpstack_metric_name: &String, device_id: &String) -> Option<OpcMetricTypeConfig> {
+        debug!("Getting metric type");
+        let metric_list = match self.get_metric_list(device_id) {
+            Some(metrics) => metrics,
+            None => return None,
+        };
+        trace!("metric list: {:?}", metric_list);
+        for metric in metric_list.iter() {
+            if metric.chirpstack_metric_name == *chirpstack_metric_name {
+                return Some(metric.metric_type.clone());
+            }
+        };
+        None
     }
 }
 
 /// Test config module
 #[cfg(test)]
 mod tests {
+    use opcua::types::process_decode_io_result;
     use super::*;
 
     /// Loads the application configuration from a TOML file.
@@ -291,6 +348,70 @@ mod tests {
         config
     }
 
+    #[test]
+    fn test_get_application_name() {
+        let config = get_config();
+        let application_id = String::from("application_1");
+        let no_application_id = String::from("no_application");
+        let expected_name = String::from("Application01");
+        assert_eq!(config.get_application_name(&application_id), Some(expected_name));
+        assert_eq!(config.get_application_name(&no_application_id), None);
+    }
+
+    #[test]
+    fn test_get_application_id() {
+        let config = get_config();
+        let application_name = String::from("Application01");
+        let no_application_name = String::from("no_Application");
+        let expected_application_id = String::from("application_1");
+        assert_eq!(config.get_application_id(&application_name), Some(expected_application_id));
+        assert_eq!(config.get_application_id(&no_application_name), None);
+    }
+
+    #[test]
+    fn test_get_device_name() {
+        let config = get_config();
+        let device_id = String::from("device_1");
+        let no_device_name = String::from("no_device");
+        let expected_device_name = String::from("Device01");
+        assert_eq!(config.get_device_name(&device_id), Some(expected_device_name));
+        assert_eq!(config.get_device_name(&no_device_name), None);
+    }
+
+    #[test]
+    fn test_get_device_id() {
+        let config = get_config();
+        let application_id = String::from("application_1");
+        let device_name = String::from("Device01");
+        let no_device_name = String::from("no_Device");
+        let expected_device_id = String::from("device_1");
+        assert_eq!(config.get_device_id(&device_name, &application_id), Some(expected_device_id));
+        assert_eq!(config.get_device_id(&no_device_name, &application_id), None);
+    }
+
+    #[test]
+    fn test_get_metric_list(){
+        let config = get_config();
+        let device_id = String::from("device_1");
+        let no_device_id = String::from("no_device");
+        let metric_list = config.get_metric_list(&device_id);
+        let no_metric_list = config.get_metric_list(&no_device_id);
+        println!("metric list: {:?}", metric_list);
+        assert!(metric_list.is_some());
+        assert!(metric_list.unwrap().len() == 2);
+    }
+    #[test]
+    fn test_get_metric_type() {
+        let config = get_config();
+        let device_id = String::from("device_1");
+        let no_device_id = String::from("no_device");
+        let chirpstack_metric_name = String::from("metric_1");
+        let no_chirpstack_metric_name = String::from("no_metric");
+        let expected_metric_type = OpcMetricTypeConfig::Float;
+        assert_eq!(config.get_metric_type(&chirpstack_metric_name, &device_id), Some(expected_metric_type));
+        assert_eq!(config.get_metric_type(&no_chirpstack_metric_name, &device_id), None);
+        assert_eq!(config.get_metric_type(&chirpstack_metric_name, &no_device_id), None);
+    }
     /// This test verifies that the global configuration for the application
     /// is correctly set to enable debug mode.
     #[test]
@@ -362,6 +483,12 @@ mod tests {
                 .unwrap()
                 .to_string(),
             "application_2".to_string()
+        );
+
+        assert_eq!(
+            config
+                .get_application_id(&"noapplication".to_string()),
+            None
         );
     }
 
