@@ -6,7 +6,6 @@
 
 #![allow(unused)]
 
-
 /// opc ua address space in which chirpstack variables
 /// are registered in
 pub const OPCUA_ADDRESS_SPACE: &str = "urn:chirpstack_opcua";

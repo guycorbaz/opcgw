@@ -26,8 +26,8 @@ use log::{debug, error, info, trace, warn};
 use opc_ua::OpcUa;
 use opcua::server::server::Server;
 use opcua::sync::RwLock;
-use std::time::Duration;
 use std::sync::Mutex;
+use std::time::Duration;
 use std::{path::PathBuf, sync::Arc, thread};
 use tokio::runtime::{Builder, Runtime};
 use tokio::time;
@@ -53,7 +53,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // Configure logger
-    log4rs::init_file(format!("{}/log4rs.yaml", OPCGW_CONFIG_PATH), Default::default()).expect("Failed to initialize logger");
+    log4rs::init_file(
+        format!("{}/log4rs.yaml", OPCGW_CONFIG_PATH),
+        Default::default(),
+    )
+    .expect("Failed to initialize logger");
     info!("starting");
 
     // Create a new configuration and load its parameters
@@ -68,10 +72,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create chirpstack poller
     trace!("Create chirpstack poller");
-    let mut chirpstack_poller = match ChirpstackPoller::new(&application_config, storage.clone()).await {
-        Ok(poller) => poller,
-        Err(e) => panic!("Failed to create chirpstack poller: {}", e),
-    };
+    let mut chirpstack_poller =
+        match ChirpstackPoller::new(&application_config, storage.clone()).await {
+            Ok(poller) => poller,
+            Err(e) => panic!("Failed to create chirpstack poller: {}", e),
+        };
 
     // Create OPC UA server
     trace!("Create OPC UA server");
@@ -84,14 +89,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-
     // Run OPC UA server and periodic metrics reading in separate tasks
     let opcua_handle = tokio::spawn(async move {
         if let Err(e) = opc_ua.run().await {
             error!("OPC UA server error: {:?}", e);
         }
     });
-
 
     // Wait for all tasks to complete
     tokio::try_join!(chirpstack_handle, opcua_handle).expect("Failed to run tasks");

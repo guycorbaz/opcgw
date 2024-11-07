@@ -220,7 +220,10 @@ impl Storage {
         chirpstack_metric_name: &str,
         value: MetricType,
     ) {
-        debug!("setting metric value for device '{}': '{}'", device_id, chirpstack_metric_name);
+        debug!(
+            "setting metric value for device '{}': '{}'",
+            device_id, chirpstack_metric_name
+        );
         match self.get_device(&device_id.to_string()) {
             Some(device) => {
                 device
