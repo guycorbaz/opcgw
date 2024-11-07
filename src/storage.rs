@@ -111,7 +111,7 @@ impl Storage {
     /// }
     /// ```
     pub fn get_device(&mut self, device_id: &String) -> Option<&mut Device> {
-        trace!("Getting device {}", device_id);
+        debug!("Getting device {}", device_id);
         self.devices.get_mut(device_id)
     }
 
@@ -138,6 +138,7 @@ impl Storage {
     /// # Panics
     /// This function does not panic.
     pub fn get_device_name(&self, device_id: &String) -> Option<String> {
+        debug!("Getting device name {}", device_id);
         match self.devices.get(device_id) {
             Some(device) => Some(device.device_name.clone()),
             None => None,
@@ -172,21 +173,22 @@ impl Storage {
     ///
     /// # Panics
     /// This function does not panic.
-    pub fn get_metric_value(&mut self, device_id: &str, chirpstack_metric_name: &str) -> Option<MetricType> {
-        trace!(
+    pub fn get_metric_value(
+        &mut self,
+        device_id: &str,
+        chirpstack_metric_name: &str,
+    ) -> Option<MetricType> {
+        debug!(
             "Getting metric value for device '{}': '{}'",
-            device_id,
-            chirpstack_metric_name
+            device_id, chirpstack_metric_name
         );
 
         match self.get_device(&device_id.to_string()) {
             None => None,
-            Some(device) => {
-                match device.device_metrics.get(chirpstack_metric_name) {
-                    None => None,
-                    Some(metric_type) => Some(metric_type.clone()),
-                }
-            }
+            Some(device) => match device.device_metrics.get(chirpstack_metric_name) {
+                None => None,
+                Some(metric_type) => Some(metric_type.clone()),
+            },
         }
     }
 
@@ -218,24 +220,15 @@ impl Storage {
         chirpstack_metric_name: &str,
         value: MetricType,
     ) {
-        //trace!("Setting metric for device'{}', value: '{}'", device_id, metric_name);
-        //let mut device: &mut Device = self.devices.get_mut(device_id).expect(&format!(
-        //    "Can't get device with id '{}'",
-        //    device_id.as_str()
-        //));
+        debug!("setting metric value for device '{}': '{}'", device_id, chirpstack_metric_name);
         match self.get_device(&device_id.to_string()) {
             Some(device) => {
-
                 device
                     .device_metrics
                     .insert(chirpstack_metric_name.to_string(), value);
-            },
+            }
             None => panic!("Cannot set metric value for device '{}'", device_id),
         }
-        //device
-        //    .device_metrics
-        //    .insert(chirpstack_metric_name.to_string(), value);
-        //self.dump_storage();
     }
 
     /// Dumps the storage metrics to the log.
@@ -254,7 +247,7 @@ impl Storage {
     /// self.dump_storage();
     /// ```
     pub fn dump_storage(&mut self) {
-        trace!("Dumping metrics from storage");
+        debug!("Dumping metrics from storage");
         for (device_id, device) in &self.devices {
             trace!("Device name '{}', id: '{}'", device.device_name, device_id);
             for (metric_name, metric) in device.device_metrics.iter() {
@@ -339,10 +332,24 @@ mod tests {
     fn get_device_name() {
         let storage = Storage::new(&get_config());
         let device_id = String::from("device_1");
-        let device_name = storage.get_device_name(&device_id).unwrap();
-        assert_eq!(device_name, "Device01");
+        let no_device_id = String::from("no_device");
+        let device_name = storage.get_device_name(&device_id);
+        assert_eq!(
+            storage.get_device_name(&device_id),
+            Some("Device01".to_string())
+        );
+        assert_eq!(storage.get_device_name(&no_device_id), None);
     }
 
+    #[test]
+    #[should_panic]
+    fn test_set_metric_value() {
+        let mut storage = Storage::new(&get_config());
+        let no_device_id = String::from("no_device");
+        let no_metric = String::from("no_metric");
+        let mut value = 10.0;
+        storage.set_metric_value(&no_device_id, &no_metric, storage::MetricType::Float(value));
+    }
     /// This test function verifies the functionality of setting and retrieving a metric value
     /// in the `Storage` struct.
     ///
@@ -360,12 +367,17 @@ mod tests {
     fn test_metric() {
         let app_config = get_config();
         let mut storage = Storage::new(&app_config);
-        storage.set_metric_value(
-            &"device_1".to_string(),
-            &"metric_1".to_string(),
-            storage::MetricType::Float(10.0),
+        let device_id = String::from("device_1");
+        let no_device_id = String::from("no_device");
+        let metric = String::from("metric_1");
+        let no_metric = String::from("no_metric");
+        let mut value = 10.0;
+        storage.set_metric_value(&device_id, &metric, storage::MetricType::Float(value));
+        assert_eq!(
+            storage.get_metric_value(&device_id, &metric),
+            Some(MetricType::Float(value))
         );
-        let metric = storage.get_metric_value(&"device_1".to_string(), &"metric_1".to_string());
-        assert_eq!(metric, Some(MetricType::Float(10.0)));
+        assert_eq!(storage.get_metric_value(&no_device_id, &metric), None);
+        assert_eq!(storage.get_metric_value(&device_id, &no_metric), None);
     }
 }
