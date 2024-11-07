@@ -1,0 +1,22 @@
+[tasks.clean]
+command = "cargo"
+args = ["clean"]
+
+[tasks.tests]
+command = "cargo"
+args = ["test"]
+dependencies = ["clean"]
+
+[tasks.my-flow]
+dependencies = ["tests"]
+
+[tasks.gen_cover]
+script = ''' CARGO_INCREMENTAL=0 RUSTFLAGS='-Cinstrument-coverage' LLVM_PROFILE_FILE='cargo-test-%p-%m.profraw' cargo test '''
+dependencies = ["clean"]
+
+[tasks.grcov]
+script = ''' grcov . --binary-path ./target/debug/deps/ -s . -t html --branch --ignore-not-existing --ignore '../*' --ignore "/*" -o target/coverage/html '''
+dependencies = ["gen_cover"]
+
+[tasks.coverage]
+dependencies = ["grcov"]
