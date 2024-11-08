@@ -11,7 +11,8 @@ on:
 
 jobs:
   build_docker_images:
-    runs-on: ubuntu-latest
+    name: Build Docker Image to Dockerhub
+    runs-on: [ubuntu-latest]
 
     steps:
       - name: Code checkout
@@ -19,6 +20,7 @@ jobs:
 
       - name: Extract Metadata
         uses: docker/metadata-action@v5
+        id: meta
         with:
           images: gcorbaz/opcgw
 
