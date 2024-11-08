@@ -20,7 +20,7 @@ jobs:
       - name: Extract Metadata
         uses: docker/metadata-action@v5
         with:
-          images: name/app
+          images: gcorbaz/opcgw
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
