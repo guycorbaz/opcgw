@@ -211,7 +211,13 @@ impl ChirpstackPoller {
         &self,
     ) -> Result<ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>, OpcGwError>
     {
-        let channel = self.create_channel().await?; //TODO Handle error
+        let channel = match self.create_channel().await {
+            Ok(channel) => channel,
+            Err(e) => {
+                trace!("Error when creating channel : {:?}", e);
+                return Err(e);
+            }
+        };
         let interceptor = self.create_interceptor();
         let application_client = ApplicationServiceClient::with_interceptor(channel, interceptor);
         Ok(application_client)
@@ -244,7 +250,13 @@ impl ChirpstackPoller {
         &self,
     ) -> Result<DeviceServiceClient<InterceptedService<Channel, AuthInterceptor>>, OpcGwError> {
         debug!("Create device client");
-        let channel = self.create_channel().await?; //TODO Handle error
+        let channel = match self.create_channel().await {
+            Ok(channel) => channel,
+            Err(e) => {
+                trace!("Error when creating channel : {:?}", e);
+                return Err(e);
+            }
+        };
         let interceptor = self.create_interceptor();
         let application_client = DeviceServiceClient::with_interceptor(channel, interceptor);
         Ok(application_client)
@@ -662,7 +674,6 @@ impl ChirpstackPoller {
         let delay = Duration::from_secs(self.config.chirpstack.delay);
         loop {
             if count == retry {
-                //TODO: should be configurable through configuration file
                 panic!("Timeout: cannot reach Chirpstack server");
             }
             match self.check_server_availability() {
@@ -674,7 +685,7 @@ impl ChirpstackPoller {
                     );
                     trace!("Count = {}", count);
                     count += 1;
-                    tokio::time::sleep(delay).await; // TODO: Add timeout in configuration file
+                    tokio::time::sleep(delay).await;
                 }
             }
         }
