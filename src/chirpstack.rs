@@ -7,9 +7,11 @@ use crate::utils::OpcGwError;
 use chirpstack_api::api::{DeviceState, GetDeviceMetricsRequest};
 use chirpstack_api::common::Metric;
 use log::{debug, error, trace, warn};
+use ping;
 use prost_types::Timestamp;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -18,6 +20,7 @@ use tokio::time::{sleep, Duration};
 use tonic::codegen::InterceptedService;
 use tonic::service::Interceptor;
 use tonic::{transport::Channel, Request, Status};
+use url::Url;
 
 // Import generated types
 use crate::storage::{MetricType, Storage};
@@ -100,11 +103,6 @@ impl Interceptor for AuthInterceptor {
 pub struct ChirpstackPoller {
     /// Configuration for the ChirpStack connection.
     config: AppConfig,
-    /// Client for interacting with device-related endpoints.
-    device_client: Option<DeviceServiceClient<InterceptedService<Channel, AuthInterceptor>>>,
-    /// Client for interacting with application-related endpoints.
-    application_client:
-        Option<ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>>,
     /// Metrics list
     pub storage: Arc<std::sync::Mutex<Storage>>,
 }
@@ -137,35 +135,104 @@ impl ChirpstackPoller {
     /// let poller = ChirpstackPoller::new(&config, storage.clone()).await?;
     /// ```
     pub async fn new(config: &AppConfig, storage: Arc<Mutex<Storage>>) -> Result<Self, OpcGwError> {
-        debug!("Create a new chirpstack connection");
-        let channel = Channel::from_shared(config.chirpstack.server_address.clone())
-            .expect(&OpcGwError::ChirpStackError(format!("Failed to create channel")).to_string())
-            .connect()
-            .await
-            .map_err(|e| OpcGwError::ChirpStackError(format!("Connection error: {}", e)))?;
-
-        // Create interceptor for authentication key
-        trace!("Create authenticator");
-        let interceptor = AuthInterceptor {
-            api_token: config.chirpstack.api_token.clone(),
-        };
-
-        // Create Chirpstack devices interface
-        trace!("Create DeviceServiceClient");
-        let device_client =
-            DeviceServiceClient::with_interceptor(channel.clone(), interceptor.clone());
-
-        // Create Chirpstack applications interface
-        trace!("Create ApplicationServiceClient");
-        let application_client =
-            ApplicationServiceClient::with_interceptor(channel, interceptor.clone());
+        debug!("Create a new Chirpstack connection");
 
         Ok(ChirpstackPoller {
             config: config.clone(),
-            device_client: Some(device_client),
-            application_client: Some(application_client),
             storage,
         })
+    }
+
+    async fn create_channel(&self) -> Result<tonic::transport::Channel, OpcGwError> {
+        debug!("Create channel");
+        let channel = Channel::from_shared(self.config.chirpstack.server_address.clone())
+            .map_err(|e| {
+                OpcGwError::ConfigurationError(format!("Failed to create channel: {}", e))
+            })?
+            .connect()
+            .await
+            .map_err(|e| {
+                OpcGwError::ConfigurationError(format!("Failed to intercept channel: {}", e))
+            })?;
+        Ok(channel)
+    }
+
+    fn create_interceptor(&self) -> AuthInterceptor {
+        debug!("Create interceptor");
+        let interceptor = AuthInterceptor {
+            api_token: self.config.chirpstack.api_token.clone(),
+        };
+        interceptor
+    }
+
+    async fn create_application_client(
+        &self,
+    ) -> Result<ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>, OpcGwError>
+    {
+        let channel = self.create_channel().await?; //TODO Handle error
+        let interceptor = self.create_interceptor();
+        let application_client = ApplicationServiceClient::with_interceptor(channel, interceptor);
+        Ok(application_client)
+    }
+
+    async fn create_device_client(
+        &self,
+    ) -> Result<DeviceServiceClient<InterceptedService<Channel, AuthInterceptor>>, OpcGwError> {
+        debug!("Create device client");
+        let channel = self.create_channel().await?; //TODO Handle error
+        let interceptor = self.create_interceptor();
+        let application_client = DeviceServiceClient::with_interceptor(channel, interceptor);
+        Ok(application_client)
+    }
+
+    fn check_server_availability(&self) -> Result<(), OpcGwError> {
+        debug!("Check server availability");
+        let addr = self
+            .extract_ip_address()
+            .expect("Cannoit extract ip address");
+        trace!("Server ip address is {:?}", addr);
+        let timeout = Duration::from_secs(1);
+        trace!("Ping {}", addr);
+        let result = ping::rawsock::ping(addr, None, None, None, None, None);
+        trace!("Ping has been sent");
+        trace!("result is: {:?}", result);
+        match result {
+            Ok(_) => {
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(OpcGwError::ChirpStackError("Ping failed".to_string()));
+            }
+        }
+    }
+
+    fn extract_ip_address(&self) -> Result<IpAddr, OpcGwError> {
+        debug!(
+            "Extract ip address from {}",
+            self.config.chirpstack.server_address.clone()
+        );
+        let server_address = self.config.chirpstack.server_address.clone();
+
+        trace!("Parse URL for ip address");
+        let url = Url::parse(&server_address).map_err(|e| {
+            OpcGwError::ConfigurationError(format!("Failed to parse server address: {}", e))
+        })?;
+
+        if let Some(host_str) = url.host_str() {
+            if let Ok(ip_addr) = host_str.parse::<IpAddr>() {
+                trace!("Extracted ip address is: {}", ip_addr.clone());
+                return Ok(ip_addr.clone());
+            } else {
+                return Err(OpcGwError::ConfigurationError(format!(
+                    "Failed to parse IP address from host: {}",
+                    host_str
+                )));
+            }
+        } else {
+            return Err(OpcGwError::ConfigurationError(
+                "No host found in server address".to_string(),
+            ));
+        }
     }
 
     /// Runs the ChirpStack client poller at a specified interval defined in the configuration.
@@ -189,7 +256,8 @@ impl ChirpstackPoller {
             "Running chirpstack client poller every {} s",
             self.config.chirpstack.polling_frequency
         );
-        let duration = Duration::from_secs(self.config.chirpstack.polling_frequency);
+        // Define wait time
+        let wait_time = Duration::from_secs(self.config.chirpstack.polling_frequency);
         // Start the poller
         loop {
             if let Err(e) = self.poll_metrics().await {
@@ -198,8 +266,10 @@ impl ChirpstackPoller {
                     &OpcGwError::ChirpStackError(format!("Error polling devices: {:?}", e))
                 );
             }
-            tokio::time::sleep(duration).await;
+            // Wait for "wait_time"
+            tokio::time::sleep(wait_time).await;
         }
+        panic!("Chirpstack client poller timed out");
     }
 
     /// Asynchronously polls metrics for all devices in the configured application list.
@@ -228,13 +298,13 @@ impl ChirpstackPoller {
     async fn poll_metrics(&mut self) -> Result<(), OpcGwError> {
         debug!("Polling metrics");
 
-        // Get list of applications
+        // Get list of applications from configuration
         let app_list = self.config.application_list.clone();
 
         // Collect device IDs first
         let mut device_ids = Vec::new();
 
-        // Now, parse all devices
+        // Now, parse all devices fro device id
         for app in &self.config.application_list {
             for dev in &app.device_list {
                 device_ids.push(dev.device_id.clone());
@@ -381,12 +451,11 @@ impl ChirpstackPoller {
             tenant_id: self.config.chirpstack.tenant_id.clone(), // We work on only one tenant defined in parameter file
         });
         trace!("Request created with: {:#?}", request);
-
+        let application_client = self.create_application_client().await?;
         trace!("Send request");
-        let response = self
-            .application_client
+        let response = application_client
             .clone()
-            .expect("Application client is not initialized")
+            //.expect("Application client is not initialized")
             .list(request)
             .await
             .map_err(|e| {
@@ -418,12 +487,11 @@ impl ChirpstackPoller {
             multicast_group_id: String::new(), // We don't need the multicast group for now
         });
         trace!("Request created with: {:?}", request);
-
+        let device_client = self.create_device_client().await?;
         trace!("Send request");
-        let response = self
-            .device_client
+        let response = device_client
             .clone()
-            .expect("Device client is not initialized")
+            //.expect("Device client is not initialized")
             .list(request)
             .await
             .map_err(|e: Status| {
@@ -485,36 +553,52 @@ impl ChirpstackPoller {
             aggregation,
         });
 
-        trace!("Format result");
+        // Check if chirpstack server is available with a ping
+        trace!("Check for Chirpstack server availability");
+        let mut count = 0;
+        let delay = Duration::from_secs(5);
+        loop {
 
-        if let Some(device_client) = &mut self.device_client {
-            match device_client.get_metrics(request).await {
-                Ok(response) => {
-                    let inner_response = response.into_inner();
-
-                    let metrics: HashMap<String, Metric> = inner_response
-                        .metrics
-                        .into_iter()
-                        .map(|(key, value)| (key, value))
-                        .collect();
-
-                    let states: HashMap<String, DeviceState> = inner_response
-                        .states
-                        .into_iter()
-                        .map(|(key, value)| (key, value))
-                        .collect();
-
-                    Ok(DeviceMetric { metrics })
-                }
-                Err(e) => Err(OpcGwError::ChirpStackError(format!(
-                    "Error getting device metrics: {}",
-                    e
-                ))),
+            if count == 5 { //TODO: should be configurable through configuration file
+                panic!("Timeout: cannot reach Chirpstack server");
             }
-        } else {
-            Err(OpcGwError::ChirpStackError(String::from(
-                "Device client is not initialized",
-            )))
+            match self.check_server_availability() {
+                Ok(()) => break,
+                _ => {
+                    warn!("{}", OpcGwError::ChirpStackError(format!("Waiting for Chirpstack server")));
+                    trace!("Count = {}", count);
+                    count +=1;
+                    tokio::time::sleep(delay).await; // TODO: Add timeout in configuration file
+                }
+            }
+        }
+
+        trace!("Create device service client for Chirpstack");
+        let mut device_client = self.create_device_client().await.unwrap();
+
+        trace!("Request created with: {:#?}", request);
+        match device_client.get_metrics(request).await {
+            Ok(response) => {
+                let inner_response = response.into_inner();
+
+                let metrics: HashMap<String, Metric> = inner_response
+                    .metrics
+                    .into_iter()
+                    .map(|(key, value)| (key, value))
+                    .collect();
+
+                let states: HashMap<String, DeviceState> = inner_response
+                    .states
+                    .into_iter()
+                    .map(|(key, value)| (key, value))
+                    .collect();
+
+                Ok(DeviceMetric { metrics })
+            }
+            Err(e) => Err(OpcGwError::ChirpStackError(format!(
+                "Error getting device metrics: {}",
+                e
+            ))),
         }
     }
 
