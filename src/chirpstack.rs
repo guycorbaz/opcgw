@@ -143,6 +143,21 @@ impl ChirpstackPoller {
         })
     }
 
+    /// Asynchronously creates a channel for communication with the ChirpStack server.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `OpcGwError` if the creation or connection of the channel fails.
+    ///
+    /// # Returns
+    ///
+    /// An `Ok` variant containing the `tonic::transport::Channel` if successful, else an error variant.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let channel = self.create_channel().await?;
+    /// ```
     async fn create_channel(&self) -> Result<tonic::transport::Channel, OpcGwError> {
         debug!("Create channel");
         let channel = Channel::from_shared(self.config.chirpstack.server_address.clone())
@@ -157,6 +172,13 @@ impl ChirpstackPoller {
         Ok(channel)
     }
 
+    /// Creates an authentication interceptor.
+    ///
+    /// This method initializes and returns an `AuthInterceptor`
+    /// instance configured with the API token from the chirpstack configuration.
+    ///
+    /// # Returns
+    /// An `AuthInterceptor` instance with the configured API token.
     fn create_interceptor(&self) -> AuthInterceptor {
         debug!("Create interceptor");
         let interceptor = AuthInterceptor {
@@ -165,6 +187,26 @@ impl ChirpstackPoller {
         interceptor
     }
 
+    /// Asynchronously creates a new ApplicationServiceClient with an interceptor.
+    ///
+    /// This function initializes a communication channel and attaches an authentication interceptor to it,
+    /// then creates and returns an ApplicationServiceClient. In case of any error during the creation of the
+    /// channel, it returns an `OpcGwError`.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>)` - On successful creation of the client.
+    /// * `Err(OpcGwError)` - If there is an error while creating the channel.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the `self.create_channel().await` step fails.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// let client = instance.create_application_client().await?;
+    /// ```
     async fn create_application_client(
         &self,
     ) -> Result<ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>, OpcGwError>
@@ -175,6 +217,29 @@ impl ChirpstackPoller {
         Ok(application_client)
     }
 
+    /// Asynchronously creates a client for interacting with the device service.
+    ///
+    /// This function initiates the creation of a DeviceServiceClient by
+    /// establishing a gRPC channel and attaching an authentication interceptor.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` which is:
+    /// - `Ok` containing `DeviceServiceClient<InterceptedService<Channel, AuthInterceptor>>`
+    ///   if the client was successfully created.
+    /// - `Err(OpcGwError)` if there was an error in creating the channel or any other failure.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if:
+    /// - The underlying `create_channel` function fails.
+    /// - Any other error occurs during client creation.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// let client = self.create_device_client().await?;
+    /// ```
     async fn create_device_client(
         &self,
     ) -> Result<DeviceServiceClient<InterceptedService<Channel, AuthInterceptor>>, OpcGwError> {
@@ -185,6 +250,33 @@ impl ChirpstackPoller {
         Ok(application_client)
     }
 
+    /// Checks the availability of the server by attempting to ping its IP address.
+    ///
+    /// This function extracts the IP address of the server and then pings it to check its availability.
+    /// It handles any errors that may occur during the extraction of the IP address or the ping operation.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` if the server is available and the ping operation is successful.
+    /// - `Err(OpcGwError)` if the IP address cannot be extracted or the ping operation fails.
+    ///
+    /// # Errors
+    ///
+    /// - Returns `OpcGwError::ChirpStackError` if the ping operation fails.
+    ///
+    /// # Panics
+    ///
+    /// - Panics if the IP address cannot be extracted from the server.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let opc_gw = OpcGateway::new();
+    /// match opc_gw.check_server_availability() {
+    ///     Ok(_) => println!("Server is available"),
+    ///     Err(e) => println!("Server is not available: {:?}", e),
+    /// }
+    /// ```
     fn check_server_availability(&self) -> Result<(), OpcGwError> {
         debug!("Check server availability");
         let addr = self
@@ -206,6 +298,16 @@ impl ChirpstackPoller {
         }
     }
 
+    /// Extracts the IP address from the Chirpstack server address provided in the configuration.
+    ///
+    /// This method attempts to parse the server address from the configuration as a URL,
+    /// and extracts the host part as an IP address. If successful, it returns the extracted
+    /// IP address. If the parsing fails or if the host is not an IP address, it returns an error.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(IpAddr)` - If the IP address is successfully extracted from the server address.
+    /// * `Err(OpcGwError)` - If there is an error in parsing the URL or the IP address.
     fn extract_ip_address(&self) -> Result<IpAddr, OpcGwError> {
         debug!(
             "Extract ip address from {}",
@@ -555,20 +657,23 @@ impl ChirpstackPoller {
 
         // Check if chirpstack server is available with a ping
         trace!("Check for Chirpstack server availability");
-        let  retry = self.config.chirpstack.retry;
+        let retry = self.config.chirpstack.retry;
         let mut count = 0;
         let delay = Duration::from_secs(self.config.chirpstack.delay);
         loop {
-
-            if count == retry { //TODO: should be configurable through configuration file
+            if count == retry {
+                //TODO: should be configurable through configuration file
                 panic!("Timeout: cannot reach Chirpstack server");
             }
             match self.check_server_availability() {
                 Ok(()) => break,
                 _ => {
-                    warn!("{}", OpcGwError::ChirpStackError(format!("Waiting for Chirpstack server")));
+                    warn!(
+                        "{}",
+                        OpcGwError::ChirpStackError(format!("Waiting for Chirpstack server"))
+                    );
                     trace!("Count = {}", count);
-                    count +=1;
+                    count += 1;
                     tokio::time::sleep(delay).await; // TODO: Add timeout in configuration file
                 }
             }
