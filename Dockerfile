@@ -27,13 +27,13 @@ WORKDIR /usr/local/bin
 
 # Create a non-privileged user that opcgw will run under
 ARG UID=10001
-RUN useradd \
-    --home "/nonexistant" \
-    --shell "/sbin/nologin" \
-    --no-create-home \
-    --uid "${UID}" \
-    opcgw
-USER opcgw
+#RUN useradd \
+#    --home "/nonexistant" \
+#    --shell "/sbin/nologin" \
+#    --no-create-home \
+#    --uid "${UID}" \
+#    opcgw
+# USER opcgw
 
 # Copy the executable from the build stage
 COPY --from=builder /usr/local/cargo/bin/opcgw /usr/local/bin/opcgw
