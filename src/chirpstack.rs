@@ -555,11 +555,12 @@ impl ChirpstackPoller {
 
         // Check if chirpstack server is available with a ping
         trace!("Check for Chirpstack server availability");
+        let  retry = self.config.chirpstack.retry;
         let mut count = 0;
-        let delay = Duration::from_secs(5);
+        let delay = Duration::from_secs(self.config.chirpstack.delay);
         loop {
 
-            if count == 5 { //TODO: should be configurable through configuration file
+            if count == retry { //TODO: should be configurable through configuration file
                 panic!("Timeout: cannot reach Chirpstack server");
             }
             match self.check_server_availability() {
