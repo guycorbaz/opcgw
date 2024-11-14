@@ -6,8 +6,6 @@
 //! Provides configuration file management for opc_ua_chirpstack_gateway
 //!
 
-#![allow(unused)] //FIXME: Remove for release
-
 use crate::utils::{OpcGwError, OPCGW_CONFIG_PATH};
 use figment::{
     providers::{Env, Format, Toml},
