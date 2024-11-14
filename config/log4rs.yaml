@@ -21,7 +21,7 @@ root:
     - stdout
     - opcgw_log
 loggers:
-  opc_ua_chirpstack_gateway:
+  opcgw:
     level: trace
     appenders:
       - opcuagw_log

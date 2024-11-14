@@ -9,6 +9,8 @@ server_address = "localhost:8080"
 api_token = "test_token"
 tenant_id = "tenant_id"
 polling_frequency = 10
+retry = 10
+delay = 10
 
 [opcua]
 config_file = "server.conf"

@@ -18,6 +18,10 @@ api_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJjaGlycHN0YWNrIiwiaX
 tenant_id = "52f14cd4-c6f1-4fbd-8f87-4025e1d49242"
 # Frequency to poll ChirpStack server in seconds
 polling_frequency = 10
+# Amount of connection retry when Chirpstack server is down
+retry = 10
+# Delay in sec between two retry
+delay = 10
 
 
 # OPC UA parameters

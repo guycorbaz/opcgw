@@ -6,8 +6,6 @@
 //! Provides configuration file management for opc_ua_chirpstack_gateway
 //!
 
-#![allow(unused)] //FIXME: Remove for release
-
 use crate::utils::{OpcGwError, OPCGW_CONFIG_PATH};
 use figment::{
     providers::{Env, Format, Toml},
@@ -37,6 +35,10 @@ pub struct ChirpstackPollerConfig {
     pub tenant_id: String,
     /// Server polling frequency
     pub polling_frequency: u64,
+    ///Amount of connection retry when Chirpstack server is down
+    pub retry: u32,
+    /// Delay in sec between two retry
+    pub delay: u64
 }
 
 /// Structure for storing opc ua server configuration parameters
