@@ -526,7 +526,7 @@ impl ChirpstackPoller {
                 }
             },
             None => {
-                error!(
+                warn!(
                     "{}",
                     &OpcGwError::ChirpStackError(format!(
                         "No metric type found for metric: {:?} of device {:?}",
