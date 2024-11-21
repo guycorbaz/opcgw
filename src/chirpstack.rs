@@ -386,7 +386,6 @@ impl ChirpstackPoller {
             // Wait for "wait_time"
             tokio::time::sleep(wait_time).await;
         }
-        panic!("Chirpstack client poller timed out");
     }
 
     /// Asynchronously polls metrics for all devices in the configured application list.
