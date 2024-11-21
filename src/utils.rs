@@ -13,6 +13,16 @@ pub const OPCUA_ADDRESS_SPACE: &str = "urn:chirpstack_opcua";
 /// Configuration files are stored in the following folder
 pub const OPCGW_CONFIG_PATH: &str = "config";
 
+/// Chirpstack metrics configuration
+/// opcgw chirpstack server name
+pub const OPCGW_CP_NAME: &str = "Chirpstack";
+/// opc ua variable name for chirpstack availability
+pub const OPCGW_CP_AVAILABILITY_NAME: &str = "Chirpstack_available";
+/// opc ua variable name for response time
+pub const OPCGW_CP_RESPONSE_TIME_NAME: &str = "ResponseTime";
+/// Chirpstack device id for opcgw internal use
+pub const OPCGW_CP_ID: &str = "cp0";
+
 use std::string::ToString;
 use thiserror::Error;
 
