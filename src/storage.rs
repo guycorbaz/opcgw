@@ -13,6 +13,7 @@
 use crate::chirpstack::{ApplicationDetail, ChirpstackPoller, DeviceListDetail};
 use crate::config::OpcMetricTypeConfig;
 use crate::{storage, AppConfig};
+use crate::utils::*;
 use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -40,6 +41,10 @@ pub struct Device {
 /// Main structure for storing application data, metrics, and managing devices and applications.
 pub struct Storage {
     config: AppConfig,
+    /// Availability of Chirpstack server
+    chirpstack_server_available: bool,
+    /// Response time of chirpstack server
+    chirpstack_response_time: f64,
     /// Device. First field is device id, second field is device
     devices: HashMap<String, Device>,
 }
@@ -85,6 +90,8 @@ impl Storage {
         }
         Storage {
             config: app_config.clone(),
+            chirpstack_server_available: true,
+            chirpstack_response_time: 0.0,
             devices,
         }
     }
