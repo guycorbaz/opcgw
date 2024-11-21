@@ -42,9 +42,9 @@ pub struct Device {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChirpstackStatus {
     /// Availability of Chirpstack server
-    server_available: bool,
+    pub server_available: bool,
     /// Response time of chirpstack server
-    response_time: f64,
+    pub response_time: f64,
 }
 /// Main structure for storing application data, metrics, and managing devices and applications.
 pub struct Storage {

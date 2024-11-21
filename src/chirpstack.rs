@@ -23,7 +23,7 @@ use tonic::{transport::Channel, Request, Status};
 use url::Url;
 
 // Import generated types
-use crate::storage::{MetricType, Storage};
+use crate::storage::{ChirpstackStatus, MetricType, Storage};
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
 use chirpstack_api::api::{
@@ -300,14 +300,23 @@ impl ChirpstackPoller {
         let start = Instant::now();
         let result = ping::rawsock::ping(addr, None, None, None, None, None);
         let elapsed = start.elapsed();
+        let elapsed_secs = elapsed.as_secs_f64();
         trace!("Ping {} took {:?}", addr, elapsed);
         trace!("Ping has been sent");
         trace!("result is: {:?}", result);
         match result {
             Ok(_) => {
+                let chirpstack_status = ChirpstackStatus{
+                    server_available: true,
+                    response_time: elapsed_secs,
+                };
                 return Ok(elapsed);
             }
             Err(error) => {
+                let chirpstack_status = ChirpstackStatus{
+                    server_available: false,
+                    response_time: 0.0,
+                };
                 return Err(OpcGwError::ChirpStackError("Ping failed".to_string()));
             }
         }
