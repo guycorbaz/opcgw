@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::SystemTime;
+use std::time::{SystemTime, Instant};
 use tokio::runtime::{Builder, Runtime};
 use tokio::time::{sleep, Duration};
 use tonic::codegen::InterceptedService;
@@ -289,7 +289,7 @@ impl ChirpstackPoller {
     ///     Err(e) => println!("Server is not available: {:?}", e),
     /// }
     /// ```
-    fn check_server_availability(&self) -> Result<(), OpcGwError> {
+    fn check_server_availability(&self) -> Result<Duration , OpcGwError> {
         debug!("Check server availability");
         let addr = self
             .extract_ip_address()
@@ -297,12 +297,15 @@ impl ChirpstackPoller {
         trace!("Server ip address is {:?}", addr);
         let timeout = Duration::from_secs(1);
         trace!("Ping {}", addr);
+        let start = Instant::now();
         let result = ping::rawsock::ping(addr, None, None, None, None, None);
+        let elapsed = start.elapsed();
+        trace!("Ping {} took {:?}", addr, elapsed);
         trace!("Ping has been sent");
         trace!("result is: {:?}", result);
         match result {
             Ok(_) => {
-                return Ok(());
+                return Ok(elapsed);
             }
             Err(error) => {
                 return Err(OpcGwError::ChirpStackError("Ping failed".to_string()));
@@ -677,7 +680,7 @@ impl ChirpstackPoller {
                 panic!("Timeout: cannot reach Chirpstack server");
             }
             match self.check_server_availability() {
-                Ok(()) => break,
+                Ok(t) => break,
                 _ => {
                     warn!(
                         "{}",
