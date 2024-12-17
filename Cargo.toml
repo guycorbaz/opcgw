@@ -1,6 +1,6 @@
 [package]
 name = "opcgw"
-version = "0.2.0"
+version = "0.2.2"
 authors = ["Guy Corbaz <guy@corbaz.org>"]
 description = "A Chirpstack to opc ua gateway"
 readme = "README.md"
@@ -15,7 +15,7 @@ publish = false # for now, until a running version is available
 [dependencies]
 figment = { version = "0.10.19", features = ["env", "toml"] }
 serde = { version = "1.0.210", features = ["derive"] }
-tokio = { version = "1.40.0", features = ["full", "rt-multi-thread"] }
+tokio = { version = "1.42.0", features = ["full", "rt-multi-thread"] }
 thiserror = "1.0.64"
 log = "0.4.22"
 log4rs = "1.3.0"
