@@ -27,7 +27,7 @@ chirpstack_api = "4.10.1"
 prost-types = "0.13.3"
 # opcua = "0.12.0"
 opcua = {git = "https://github.com/locka99/opcua.git" }
-clap = { version = "4.5.21", features = ["derive"] }
+clap = { version = "4.5.23", features = ["derive"] }
 local-ip-address = "0.6.3"
 ping = "0.5.2"
 url = "2.5.4"
