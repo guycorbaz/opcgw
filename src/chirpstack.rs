@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::SystemTime;
+use std::time::{SystemTime, Instant};
 use tokio::runtime::{Builder, Runtime};
 use tokio::time::{sleep, Duration};
 use tonic::codegen::InterceptedService;
@@ -23,7 +23,7 @@ use tonic::{transport::Channel, Request, Status};
 use url::Url;
 
 // Import generated types
-use crate::storage::{MetricType, Storage};
+use crate::storage::{ChirpstackStatus, MetricType, Storage};
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
 use chirpstack_api::api::{
@@ -289,7 +289,7 @@ impl ChirpstackPoller {
     ///     Err(e) => println!("Server is not available: {:?}", e),
     /// }
     /// ```
-    fn check_server_availability(&self) -> Result<(), OpcGwError> {
+    fn check_server_availability(&self) -> Result<Duration , OpcGwError> {
         debug!("Check server availability");
         let addr = self
             .extract_ip_address()
@@ -297,14 +297,26 @@ impl ChirpstackPoller {
         trace!("Server ip address is {:?}", addr);
         let timeout = Duration::from_secs(1);
         trace!("Ping {}", addr);
+        let start = Instant::now();
         let result = ping::rawsock::ping(addr, None, None, None, None, None);
+        let elapsed = start.elapsed();
+        let elapsed_secs = elapsed.as_secs_f64();
+        trace!("Ping {} took {:?}", addr, elapsed);
         trace!("Ping has been sent");
         trace!("result is: {:?}", result);
         match result {
             Ok(_) => {
-                return Ok(());
+                let chirpstack_status = ChirpstackStatus{
+                    server_available: true,
+                    response_time: elapsed_secs,
+                };
+                return Ok(elapsed);
             }
             Err(error) => {
+                let chirpstack_status = ChirpstackStatus{
+                    server_available: false,
+                    response_time: 0.0,
+                };
                 return Err(OpcGwError::ChirpStackError("Ping failed".to_string()));
             }
         }
@@ -383,7 +395,6 @@ impl ChirpstackPoller {
             // Wait for "wait_time"
             tokio::time::sleep(wait_time).await;
         }
-        panic!("Chirpstack client poller timed out");
     }
 
     /// Asynchronously polls metrics for all devices in the configured application list.
@@ -523,7 +534,7 @@ impl ChirpstackPoller {
                 }
             },
             None => {
-                error!(
+                warn!(
                     "{}",
                     &OpcGwError::ChirpStackError(format!(
                         "No metric type found for metric: {:?} of device {:?}",
@@ -677,7 +688,7 @@ impl ChirpstackPoller {
                 panic!("Timeout: cannot reach Chirpstack server");
             }
             match self.check_server_availability() {
-                Ok(()) => break,
+                Ok(t) => break,
                 _ => {
                     warn!(
                         "{}",

@@ -12,6 +12,7 @@
 
 use crate::chirpstack::{ApplicationDetail, ChirpstackPoller, DeviceListDetail};
 use crate::config::OpcMetricTypeConfig;
+use crate::utils::*;
 use crate::{storage, AppConfig};
 use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
@@ -37,9 +38,19 @@ pub struct Device {
     device_metrics: HashMap<String, MetricType>,
 }
 
+/// Structure for storing Chirpstzack server status
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChirpstackStatus {
+    /// Availability of Chirpstack server
+    pub server_available: bool,
+    /// Response time of chirpstack server
+    pub response_time: f64,
+}
 /// Main structure for storing application data, metrics, and managing devices and applications.
 pub struct Storage {
     config: AppConfig,
+    /// Chirpstack status
+    chirpstack_status: ChirpstackStatus,
     /// Device. First field is device id, second field is device
     devices: HashMap<String, Device>,
 }
@@ -85,6 +96,10 @@ impl Storage {
         }
         Storage {
             config: app_config.clone(),
+            chirpstack_status: ChirpstackStatus {
+                server_available: true,
+                response_time: 0.0,
+            },
             devices,
         }
     }
@@ -234,6 +249,86 @@ impl Storage {
         }
     }
 
+    /// Updates the Chirpstack status.
+    ///
+    /// This function updates the `chirpstack_status` field of the struct with the given `status`.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - A `ChirpstackStatus` object that contains the new status information.
+    ///   - `server_available`: Indicates if the Chirpstack server is available.
+    ///   - `response_time`: The response time of the Chirpstack server.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// let mut instance = YourStruct::new();
+    /// let status = ChirpstackStatus {
+    ///     server_available: true,
+    ///     response_time: 42,
+    /// };
+    /// instance.update_chirpstack_status(status);
+    /// ```
+    pub fn update_chirpstack_status(&mut self, status: ChirpstackStatus) {
+        self.chirpstack_status.server_available = status.server_available;
+        self.chirpstack_status.response_time = status.response_time;
+    }
+
+    /// Retrieves the current status of ChirpStack.
+    ///
+    /// # Returns
+    ///
+    /// This method returns a clone of the `ChirpstackStatus`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// let status = instance.get_chirpstack_status();
+    /// ```
+    pub fn get_chirpstack_status(&self) -> ChirpstackStatus {
+        self.chirpstack_status.clone()
+    }
+
+    /// Checks the availability of the ChirpStack server.
+    ///
+    /// This method returns a boolean value indicating whether the ChirpStack server
+    /// is available (`true`) or not (`false`).
+    ///
+    /// # Returns
+    ///
+    /// * `true` if the ChirpStack server is available.
+    /// * `false` if the ChirpStack server is not available.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let status = instance.get_chirpstack_available();
+    /// if status {
+    ///     println!("ChirpStack server is available.");
+    /// } else {
+    ///     println!("ChirpStack server is not available.");
+    /// }
+    /// ```
+    pub fn get_chirpstack_available(&self) -> bool {
+        self.chirpstack_status.server_available
+    }
+
+    /// Retrieves the response time from the ChirpStack status.
+    ///
+    /// # Returns
+    ///
+    /// A `f64` representing the response time.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// let response_time = obj.get_chirpstack_response_time();
+    /// println!("ChirpStack response time: {}", response_time);
+    /// ```
+    pub fn get_chirpstack_response_time(&self) -> f64 {
+        self.chirpstack_status.response_time
+    }
+
     /// Dumps the storage metrics to the log.
     ///
     /// This function iterates over all devices and their associated metrics,
@@ -303,6 +398,41 @@ mod tests {
             .extract()
             .expect("Failed to load configuration");
         config
+    }
+
+    /// This test verifies the behavior of the `Storage` struct's ChirpStack status handling.
+    ///
+    /// Specifically, it tests the following:
+    ///
+    /// 1. Initialization of the ChirpStack status in the `Storage` instance.
+    /// 2. Proper update of the ChirpStack status in the `Storage` instance.
+    /// 3. Accurate retrieval of the ChirpStack status after it has been updated.
+    ///
+    /// The test performs the following steps:
+    ///
+    /// - Creates a mock configuration object using `get_config`.
+    /// - Initializes a `Storage` instance with the provided configuration.
+    /// - Verifies the initial state of ChirpStack status within the `Storage` instance.
+    /// - Creates a `ChirpstackStatus` instance with a specified server availability (`status`) and response time (`response_time`).
+    /// - Updates the `Storage` instance's ChirpStack status with the new `ChirpstackStatus`.
+    /// - Verifies that the ChirpStack status stored in the `Storage` instance matches the updated values.
+    ///
+    #[test]
+    fn test_chirpstack_status() {
+        let response_time = 1.0;
+        let status = false;
+        let app_config = get_config();
+        let mut storage = Storage::new(&app_config);
+        assert_eq!(storage.chirpstack_status.server_available, true);
+        assert_eq!(storage.chirpstack_status.response_time, 0.0);
+        let chirpstack_status = ChirpstackStatus {
+            server_available: status,
+            response_time,
+        };
+        storage.update_chirpstack_status(chirpstack_status.clone());
+        assert_eq!(storage.get_chirpstack_status(), chirpstack_status);
+        assert_eq!(storage.get_chirpstack_available(), status);
+        assert_eq!(storage.get_chirpstack_response_time(), response_time);
     }
 
     /// This test function, `test_load_metrics`, verifies that the application configuration
