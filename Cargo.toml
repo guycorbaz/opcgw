@@ -14,7 +14,7 @@ publish = false # for now, until a running version is available
 
 [dependencies]
 figment = { version = "0.10.19", features = ["env", "toml"] }
-serde = { version = "1.0.210", features = ["derive"] }
+serde = { version = "1.0.216", features = ["derive"] }
 tokio = { version = "1.42.0", features = ["full", "rt-multi-thread"] }
 thiserror = "1.0.64"
 log = "0.4.22"
