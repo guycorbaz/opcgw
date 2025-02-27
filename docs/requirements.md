@@ -18,12 +18,14 @@ This document outlines the requirements for the ChirpStack to OPC UA Gateway app
 3. The OPC UA server must support standard OPC UA data types for representing device metrics.
 4. The OPC UA server must provide real-time updates of device metrics based on the polling frequency.
 5. The OPC UA server must be configurable with appropriate security settings.
+6. The OPC UA server must support writing values to writable nodes that correspond to ChirpStack device parameters.
 
 ### Data Storage and Management
 1. The application must maintain an in-memory storage of device metrics.
 2. The application must support mapping between ChirpStack metric names and OPC UA variable names.
 3. The application must handle different metric types (Float, Integer, Boolean, String).
 4. The application must provide methods to retrieve and update metric values.
+5. The application must track which metrics are read-only and which are writable.
 
 ### Configuration
 1. The application must support configuration via TOML files.
@@ -62,8 +64,15 @@ This document outlines the requirements for the ChirpStack to OPC UA Gateway app
 3. The application must comply with OPC UA specification standards.
 4. The application must be containerizable for deployment in Docker environments.
 
+### Bidirectional Communication
+1. The application must support writing data back to ChirpStack devices from the OPC UA interface.
+2. The application must allow sending commands to ChirpStack devices through OPC UA method calls.
+3. The application must validate write operations and command parameters before sending to ChirpStack.
+4. The application must provide feedback on the success or failure of write operations and commands.
+5. The application must support configurable access control for write operations.
+
 ## Future Considerations
-1. Support for bidirectional communication (writing values back to ChirpStack devices).
-2. Support for historical data access in the OPC UA server.
-3. Integration with additional IoT platforms beyond ChirpStack.
-4. Web-based administration interface for configuration management.
+1. Support for historical data access in the OPC UA server.
+2. Integration with additional IoT platforms beyond ChirpStack.
+3. Web-based administration interface for configuration management.
+4. Support for complex command sequences and batch operations.
