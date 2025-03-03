@@ -322,7 +322,7 @@ impl OpcUa {
                     let name = chirpstack_metric_name_arc.clone();
                     let value =
                         get_metric_value(&device_id.clone(), &name.clone(), storage.clone());
-                    Ok(Some((DataValue::new_now(value))))
+                    Ok(Some(DataValue::new_now(value)))
                 },
             );
 

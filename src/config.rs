@@ -258,7 +258,7 @@ impl AppConfig {
     /// # Returns
     ///
     /// * `Option<Vec<Metric>>` - Returns `Some(Vec<Metric>)` if a matching device ID is found,
-    /// otherwise returns `None`.
+    ///   otherwise returns `None`.
     ///
     /// # Examples
     ///

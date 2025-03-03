@@ -7,7 +7,6 @@ use crate::utils::OpcGwError;
 use chirpstack_api::api::{DeviceState, GetDeviceMetricsRequest};
 use chirpstack_api::common::Metric;
 use log::{debug, error, trace, warn};
-use ping;
 use prost_types::Timestamp;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -79,7 +78,7 @@ struct AuthInterceptor {
 /// # Returns
 ///
 /// * `Result<Request<()>, Status>` - Returns the modified request with the authorization token added to its metadata,
-/// or an error status if the token insertion fails.
+///   or an error status if the token insertion fails.
 ///
 /// # Errors
 ///
@@ -89,10 +88,8 @@ impl Interceptor for AuthInterceptor {
         debug!("Interceptor::call");
         request.metadata_mut().insert(
             "authorization",
-            format!("Bearer {}", self.api_token).parse().expect(
-                &OpcGwError::ChirpStackError(format!("Failed to parse authorization token"))
-                    .to_string(),
-            ),
+            format!("Bearer {}", self.api_token).parse().unwrap_or_else(|_| { panic!("{}", OpcGwError::ChirpStackError("Failed to parse authorization token".to_string())
+                .to_string()) }),
         );
         Ok(request)
     }
@@ -181,10 +178,9 @@ impl ChirpstackPoller {
     /// An `AuthInterceptor` instance with the configured API token.
     fn create_interceptor(&self) -> AuthInterceptor {
         debug!("Create interceptor");
-        let interceptor = AuthInterceptor {
+        AuthInterceptor {
             api_token: self.config.chirpstack.api_token.clone(),
-        };
-        interceptor
+        }
     }
 
     /// Asynchronously creates a new ApplicationServiceClient with an interceptor.
@@ -310,14 +306,14 @@ impl ChirpstackPoller {
                     server_available: true,
                     response_time: elapsed_secs,
                 };
-                return Ok(elapsed);
+                Ok(elapsed)
             }
             Err(error) => {
                 let chirpstack_status = ChirpstackStatus{
                     server_available: false,
                     response_time: 0.0,
                 };
-                return Err(OpcGwError::ChirpStackError("Ping failed".to_string()));
+                Err(OpcGwError::ChirpStackError("Ping failed".to_string()))
             }
         }
     }
@@ -347,17 +343,17 @@ impl ChirpstackPoller {
         if let Some(host_str) = url.host_str() {
             if let Ok(ip_addr) = host_str.parse::<IpAddr>() {
                 trace!("Extracted ip address is: {}", ip_addr.clone());
-                return Ok(ip_addr.clone());
+                Ok(ip_addr)
             } else {
-                return Err(OpcGwError::ConfigurationError(format!(
+                Err(OpcGwError::ConfigurationError(format!(
                     "Failed to parse IP address from host: {}",
                     host_str
-                )));
+                )))
             }
         } else {
-            return Err(OpcGwError::ConfigurationError(
+            Err(OpcGwError::ConfigurationError(
                 "No host found in server address".to_string(),
-            ));
+            ))
         }
     }
 
@@ -478,7 +474,7 @@ impl ChirpstackPoller {
         let device_name = self
             .config
             .get_device_name(device_id)
-            .expect(&OpcGwError::ChirpStackError(format!("Failed to get device name")).to_string());
+            .expect(&OpcGwError::ChirpStackError("Failed to get device name".to_string()).to_string());
         let metric_name = metric.name.clone();
         // We are collecting only the first returned metric
         let storage = self.storage.clone();
@@ -487,31 +483,31 @@ impl ChirpstackPoller {
                 OpcMetricTypeConfig::Bool => {
                     // Convert to right boolean value
                     let mut storage = storage.lock().expect(
-                        &OpcGwError::ChirpStackError(format!("Can't lock storage")).to_string(),
+                        &OpcGwError::ChirpStackError("Can't lock storage".to_string()).to_string(),
                     );
-                    let value = metric.datasets[0].data[0].clone();
+                    let value = metric.datasets[0].data[0];
                     let mut bool_value = false;
                     match value {
                         0.0 => bool_value = false,
                         1.0 => bool_value = true,
                         _ => error!(
                             "{}",
-                            OpcGwError::ChirpStackError(format!("Not a bolean value").to_string())
+                            OpcGwError::ChirpStackError("Not a bolean value".to_string())
                         ),
                     }
                     storage.set_metric_value(device_id, &metric_name, MetricType::Bool(bool_value));
                 }
                 OpcMetricTypeConfig::Int => {
-                    let int_value = metric.datasets[0].data[0].clone() as i64;
+                    let int_value = metric.datasets[0].data[0] as i64;
                     let mut storage = storage.lock().expect(
-                        &OpcGwError::ChirpStackError(format!("Can't lock storage")).to_string(),
+                        &OpcGwError::ChirpStackError("Can't lock storage".to_string()).to_string(),
                     );
                     storage.set_metric_value(device_id, &metric_name, MetricType::Int(int_value));
                 }
                 OpcMetricTypeConfig::Float => {
-                    let value = metric.datasets[0].data[0].clone();
+                    let value = metric.datasets[0].data[0];
                     let mut storage = storage.lock().expect(
-                        &OpcGwError::ChirpStackError(format!("Can't lock storage")).to_string(),
+                        &OpcGwError::ChirpStackError("Can't lock storage".to_string()).to_string(),
                     );
                     storage.set_metric_value(
                         device_id,
@@ -522,14 +518,14 @@ impl ChirpstackPoller {
                 OpcMetricTypeConfig::String => {
                     warn!(
                         "{}",
-                        OpcGwError::ChirpStackError(format!("String conversion not implemented"))
+                        OpcGwError::ChirpStackError("String conversion not implemented".to_string())
                             .to_string()
                     );
                 }
                 _ => {
                     warn!(
                         "{}",
-                        OpcGwError::ChirpStackError(format!("Wrong metric name")).to_string()
+                        OpcGwError::ChirpStackError("Wrong metric name".to_string()).to_string()
                     );
                 }
             },
@@ -692,7 +688,7 @@ impl ChirpstackPoller {
                 _ => {
                     warn!(
                         "{}",
-                        OpcGwError::ChirpStackError(format!("Waiting for Chirpstack server"))
+                        OpcGwError::ChirpStackError("Waiting for Chirpstack server".to_string())
                     );
                     trace!("Count = {}", count);
                     count += 1;
