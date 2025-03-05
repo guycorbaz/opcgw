@@ -29,13 +29,13 @@ an SCADA to Chirpstack, in order to collect metrics and send commands
 that will be enqueues on the device.
 
 Some SCADA only understand Sparkplug mqtt specification.
-On the other hand chirpstack entities mainly relies on chirpstack generated ids,
+On the other hand Chirpstack entities mainly relies on Chirpstack generated ids,
 that are not really user friendly, which might lead to mistakes when configuring systems.
 
 I wanted to control my LoRa watering valves, in my fruit tree orchards, via my SCADA, in order to optimize water use.
 I also wanted to learn rust. Therefore I decided to develop this gateway with this language.
 The program is certainly not designed with the best practices of rust language and
-certainly needs some improvements. That's why opc_ua_chirpstack_gateway is under heavy development.
+certainly needs some improvements. That's why *opc_ua_chirpstack_gateway* is under heavy development.
 
 ## Features
 
@@ -73,7 +73,7 @@ The software installation steps are:
 - launching the program.
 Log files are under log folder just below opc_ua_chirpstack_gateway binary.
 
-It also possible to run opcgw as a docker container.
+It also possible to run opcgw as a docker container.cargo clean
 
 ## Configuration
 
@@ -83,7 +83,7 @@ At the moment, opc_ua_chirpstack_gateway is configured via two configuration fil
 - One configuration file for the opc ua server. This might change in the future.
 
 Default location of these files is config folder, located just below the root of the
-opc_ua_chirpstack_gateway binary file. It is possible to configure the path of
+*opc_ua_chirpstack_gateway* binary file. It is possible to configure the path of
 the gateway configuration file via "CONFIG_PATH" environment variable. However, the path
 of the opc ua configuration file is defined in the gateway configuration file.
 This is not ideal and will certainly be changed in the future.
