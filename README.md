@@ -36,7 +36,7 @@ I wanted to control my LoRa watering valves, in my fruit tree orchards, via my [
 in order to optimize water use.
 I also wanted to learn rust. Therefore I decided to develop this gateway with this language.
 The program is certainly not designed with the best practices of rust language and
-certainly needs some improvements. That's why *opc_ua_chirpstack_gateway* is under heavy development.
+certainly needs some improvements. That's why *opcgw* is under heavy development.
 
 ## Features
 
