@@ -32,7 +32,8 @@ Some SCADA only understand Sparkplug mqtt specification.
 On the other hand Chirpstack entities mainly relies on Chirpstack generated ids,
 that are not really user friendly, which might lead to mistakes when configuring systems.
 
-I wanted to control my LoRa watering valves, in my fruit tree orchards, via my SCADA, in order to optimize water use.
+I wanted to control my LoRa watering valves, in my fruit tree orchards, via my [SCADA](https://en.wikipedia.org/wiki/SCADA),
+in order to optimize water use.
 I also wanted to learn rust. Therefore I decided to develop this gateway with this language.
 The program is certainly not designed with the best practices of rust language and
 certainly needs some improvements. That's why *opc_ua_chirpstack_gateway* is under heavy development.
