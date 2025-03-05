@@ -26,8 +26,8 @@ certainly needs some improvements. That's why *opc_ua_chirpstack_gateway* is und
 
 ## Features
 
-- Communication with ChirpStack server via gRPC API
-- Implementation of an OPC UA server
+- Communication with ChirpStack server via [gRPC](https://grpc.io/) API
+- Implementation of an [OPC UA](https://opcfoundation.org) server
 - Management of device metrics via configuration file
 
 
