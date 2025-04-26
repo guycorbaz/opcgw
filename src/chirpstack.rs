@@ -605,7 +605,11 @@ impl ChirpstackPoller {
             offset: 0,
             search: String::new(),
             application_id,
-            multicast_group_id: String::new(), // We don't need the multicast group for now
+            multicast_group_id: String::new(),
+            device_profile_id: String::new(),
+            order_by: 0,
+            order_by_desc: false,
+            tags: HashMap::new(),
         });
         trace!("Request created with: {:?}", request);
         let device_client = self.create_device_client().await?;
