@@ -177,8 +177,8 @@ First, update the dependencies in `Cargo.toml`:
 async-opcua = { version = "0.14.0", features = ["server"] }
 ```
 
-### 4. Complete Server Implementation
-After incremental steps are working:
+### 4. Final Steps
+After basic server works:
 
 The most significant changes are in the `src/opc_ua.rs` file:
 
@@ -369,84 +369,35 @@ async fn populate_address_space(&self) -> Result<(), OpcGwError> {
 }
 ```
 
-#### 2.7. Add Device Variables Method
-
-Create a new method to add device variables:
-
+#### 4.1 Add One Real Variable
 ```rust
-async fn add_device_variables(
-    &self, 
-    address_space: &AddressSpace, 
-    parent_node: &NodeId, 
-    device: &ChirpstackDevice
-) -> Result<(), OpcGwError> {
-    for metric in &device.metric_list {
-        let node_id = NodeId::new(self.ns, format!("{}_{}", device.device_id, metric.metric_name));
+async fn add_real_variable(&self) -> Result<(), OpcGwError> {
+    let node_id = NodeId::new(2, "real_var");
+    self.server.address_space()
+        .add_variable(&node_id, "RealValue", &NodeId::objects_folder(), 0.0)
+        .await?;
         
-        // Create a variable with an initial value
-        let initial_value = match metric.metric_type {
-            crate::config::OpcMetricTypeConfig::Bool => Variant::Boolean(false),
-            crate::config::OpcMetricTypeConfig::Int => Variant::Int32(0),
-            crate::config::OpcMetricTypeConfig::Float => Variant::Float(0.0),
-            crate::config::OpcMetricTypeConfig::String => Variant::String("".to_string()),
-        };
-        
-        // Add the variable to the address space
-        address_space.add_variable(
-            &node_id,
-            &metric.metric_name,
-            parent_node,
-            initial_value,
-        ).await.map_err(|e| {
-            OpcGwError::OpcUaError(format!("Failed to add variable: {}", e))
-        })?;
-        
-        // Set up a data source for this variable
-        let device_id = device.device_id.clone();
-        let metric_name = metric.chirpstack_metric_name.clone();
-        let storage = self.storage.clone();
-        
-        // Create a data source that will fetch values from storage
-        let data_source = move || {
-            let storage_guard = storage.lock().expect("Failed to lock storage");
-            let value = match storage_guard.get_metric_value(&device_id, &metric_name) {
-                Some(MetricType::Float(v)) => Variant::Float(v as f32),
-                Some(MetricType::Int(v)) => Variant::Int32(v as i32),
-                Some(MetricType::Bool(v)) => Variant::Boolean(v),
-                Some(MetricType::String(v)) => Variant::String(v),
-                None => Variant::Float(0.0),
-            };
-            
+    // Simple value getter
+    let storage = self.storage.clone();
+    self.server.address_space()
+        .set_variable_value_getter(&node_id, Box::new(move || {
+            let value = storage.lock().unwrap().get_some_value();
             DataValue::new(value)
-        };
-        
-        // Register the data source with the variable
-        address_space.set_variable_value_getter(&node_id, Box::new(data_source))
-            .await
-            .map_err(|e| {
-                OpcGwError::OpcUaError(format!("Failed to set variable data source: {}", e))
-            })?;
-    }
-    
+        }))
+        .await?;
     Ok(())
 }
 ```
 
-### 3. Simplified Error Handling
+### 3. Basic Error Handling
 
-For initial migration, keep error handling simple:
+Just use a simple string error initially:
 
 ```rust
-#[error("OPC UA error: {0}")]
-OpcUaError(String),
+.map_err(|e| OpcGwError::OpcUaError(e.to_string()))?;
 ```
 
-Usage example:
-```rust
-address_space.add_folder(...)
-    .await
-    .map_err(|e| OpcGwError::OpcUaError(format!("Folder creation failed: {}", e)))?;
-```
+No need for custom variants at first.
 
 2. Update custom error types in `src/utils.rs`:
 ```rust
@@ -592,35 +543,15 @@ When the migration is complete and tested, create a pull request to merge the `a
 2. Test coverage report
 3. Known limitations section
 
-## Future Improvements & Known Limitations
+## Next Steps
 
-After initial migration:
+After basic migration works:
 
-1. **Configuration Loading** (Priority: High):
-```rust
-// TODO: Implement config file loading
-// Current hardcoded values work but lack flexibility
-```
+1. Add config file support
+2. Enable security features
+3. Restore full variable setup
 
-2. **Security** (Priority: Medium):
-   - Add TLS support
-   - Implement user authentication
-
-3. **Performance Optimizations**:
-   - Variable update batching
-   - Cached reads for frequent accesses
-
-4. **Known Limitations**:
-   - First release lacks some advanced security features  
-   - Variable history not yet implemented
-   - Maximum 100 concurrent connections (adjustable in config)
-
-5. **Dependency Notes**:
-   - Requires Tokio 1.0+
-   - Check feature flags:
-```toml
-async-opcua = { version = "0.14.0", features = ["server", "encryption"] }
-```
+But first just get the simple version working!
 
 1. **Configuration Loading**: Implement loading server configuration from a file
 2. **Security**: Add proper security configuration
