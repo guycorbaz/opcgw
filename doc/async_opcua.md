@@ -10,6 +10,124 @@ The `opcua` crate is being replaced with `async-opcua` to take advantage of the 
 
 ### 0. Create a Dedicated Branch
 
+### 1. Incremental Migration Steps
+
+Follow these minimal steps, verifying compilation at each stage:
+
+#### Step 1: Dependency Update
+```bash
+# In Cargo.toml:
+[dependencies]
+# Remove/comment out:
+# opcua = "0.12.0"  
+async-opcua = { version = "0.14.0", features = ["server"] }
+
+cargo check # Will fail but shows needed changes
+```
+
+#### Step 2: Update Imports Only
+```rust
+// In src/opc_ua.rs:
+// Replace:
+use opcua::server::{Server, ServerBuilder};
+// With:
+use async_opcua::server::prelude::*;
+// Keep other imports for now
+
+cargo check # Verify compilation progresses
+```
+
+#### Step 3: Minimal Struct Changes
+```rust
+// Change:
+pub struct OpcUa {
+    pub server: Arc<RwLock<Server>>,
+    // ...
+}
+// To:
+pub struct OpcUa {
+    pub server: Server,
+    // ...
+}
+// Remove server_config field
+
+cargo check
+```
+
+#### Step 4: Basic Server Creation
+```rust
+let server = Server::new(server_config);
+let ns = 0; // Temporary dummy value
+
+cargo check
+```
+
+#### Step 5: Minimal Run Method
+```rust
+pub async fn run(&self) -> Result<(), OpcGwError> {
+    // Temporarily comment out populate_address_space()
+    self.server.run().await.map_err(|e| {
+        OpcGwError::OpcUaError(format!("Server run failed: {}", e))
+    })
+}
+
+cargo check
+```
+
+#### Step 6: Basic Address Space
+```rust
+async fn populate_address_space(&self) -> Result<(), OpcGwError> {
+    let address_space = self.server.address_space();
+    let objects_folder = NodeId::objects_folder();
+    Ok(())
+}
+
+cargo check
+```
+
+#### Step 7: Single Application Folder
+```rust
+let app_node_id = NodeId::new(self.ns, "test_app");
+address_space.add_folder(
+    &app_node_id,
+    "TestApp",
+    &objects_folder,
+).await?;
+
+cargo check
+```
+
+#### Step 8: Single Test Variable
+```rust
+async fn add_test_variable(&self) -> Result<(), OpcGwError> {
+    let node_id = NodeId::new(self.ns, "test_var");
+    self.server.address_space().add_variable(
+        &node_id,
+        "TestVariable",
+        &NodeId::objects_folder(),
+        Variant::Float(0.0),
+    ).await?;
+    Ok(())
+}
+
+cargo check
+```
+
+#### Step 9: Restore Full Functionality
+Now incrementally uncomment and update:
+1. Namespace registration
+2. Full application/device tree
+3. Variable data sources  
+4. Error handling
+
+Final verification:
+```bash
+cargo test
+cargo run
+```
+
+### 2. Create a Dedicated Branch
+
 Before making any changes, create a dedicated branch for the migration:
 
 ```bash
@@ -26,7 +144,7 @@ git branch
 
 All subsequent changes should be made on this `async-opcua` branch to keep the migration isolated until it's ready to be merged.
 
-### 1. Update Dependencies
+### 3. Update Dependencies (Detailed)
 
 First, update the dependencies in `Cargo.toml`:
 
@@ -40,7 +158,8 @@ First, update the dependencies in `Cargo.toml`:
 async-opcua = { version = "0.14.0", features = ["server"] }
 ```
 
-### 2. Update OPC UA Server Implementation
+### 4. Complete Server Implementation
+After incremental steps are working:
 
 The most significant changes are in the `src/opc_ua.rs` file:
 
