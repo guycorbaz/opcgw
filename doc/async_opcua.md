@@ -20,8 +20,10 @@ Follow these minimal steps, verifying compilation at each stage:
 [dependencies]
 # Remove/comment out:
 # opcua = "0.12.0"  
-async-opcua = { version = "0.14.0", features = ["server"] }
+async-opcua = { version = "^0.14", features = ["server"] }
 
+# Clean and verify
+cargo clean
 cargo check # Will fail but shows needed changes
 ```
 
@@ -57,7 +59,11 @@ cargo check
 #### Step 4: Basic Server Creation
 ```rust
 let server = Server::new(server_config);
-let ns = 0; // Temporary dummy value
+let ns = server.register_namespace("urn:chirpstack:opcua")
+    .expect("Namespace registration failed");
+
+// Temporary debug output
+println!("Server created with namespace index: {}", ns);
 
 cargo check
 ```
@@ -74,11 +80,20 @@ pub async fn run(&self) -> Result<(), OpcGwError> {
 cargo check
 ```
 
-#### Step 6: Basic Address Space
+#### Step 6: Basic Address Space Setup
 ```rust
-async fn populate_address_space(&self) -> Result<(), OpcGwError> {
+async fn init_address_space(&self) -> Result<(), OpcGwError> {
     let address_space = self.server.address_space();
-    let objects_folder = NodeId::objects_folder();
+    let objects = NodeId::objects_folder();
+    
+    // Test folder
+    let folder_id = NodeId::new(self.ns, "test_folder");
+    address_space.add_folder(&folder_id, "Test", &objects).await?;
+    
+    // Test variable 
+    let var_id = NodeId::new(self.ns, "test_var");
+    address_space.add_variable(&var_id, "TestVar", &folder_id, Variant::Float(0.0)).await?;
+    
     Ok(())
 }
 
@@ -113,17 +128,21 @@ async fn add_test_variable(&self) -> Result<(), OpcGwError> {
 cargo check
 ```
 
-#### Step 9: Restore Full Functionality
-Now incrementally uncomment and update:
-1. Namespace registration
-2. Full application/device tree
-3. Variable data sources  
-4. Error handling
-
-Final verification:
+#### Step 9: Final Verification
 ```bash
+# Basic smoke test
+cargo run &  # Start server in background
+sleep 2      # Wait for server startup
+opcua-client -u opc.tcp://localhost:4840  # Verify connection
+kill %1      # Stop server
+
+# Run tests
 cargo test
-cargo run
+
+# Cleanup old dependencies
+# Remove from Cargo.toml:
+# opcua = "0.12.0"
+cargo update
 ```
 
 ### 2. Create a Dedicated Branch
@@ -413,17 +432,20 @@ async fn add_device_variables(
 }
 ```
 
-### 3. Error Handling Updates
+### 3. Simplified Error Handling
 
-The error handling approach differs between the libraries. Update error handling to:
+For initial migration, keep error handling simple:
 
-1. Map old error types to new ones:
 ```rust
-// Old error
-opcua::StatusCode::BadInvalidArgument
+#[error("OPC UA error: {0}")]
+OpcUaError(String),
+```
 
-// New equivalent  
-async_opcua::types::StatusCode::BadInvalidArgument
+Usage example:
+```rust
+address_space.add_folder(...)
+    .await
+    .map_err(|e| OpcGwError::OpcUaError(format!("Folder creation failed: {}", e)))?;
 ```
 
 2. Update custom error types in `src/utils.rs`:
