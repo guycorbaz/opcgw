@@ -294,7 +294,38 @@ async fn add_device_variables(
 }
 ```
 
-### 3. Update Main Function
+### 3. Error Handling Updates
+
+The error handling approach differs between the libraries. Update error handling to:
+
+1. Map old error types to new ones:
+```rust
+// Old error
+opcua::StatusCode::BadInvalidArgument
+
+// New equivalent  
+async_opcua::types::StatusCode::BadInvalidArgument
+```
+
+2. Update custom error types in `src/utils.rs`:
+```rust
+#[error("OPC UA error: {0}")]
+OpcUaError(String),
+
+// Consider adding more specific variants:
+#[error("OPC UA connection error: {0}")]
+OpcUaConnectionError(String),
+
+#[error("OPC UA address space error: {0}")]  
+OpcUaAddressSpaceError(String),
+```
+
+3. Wrap async-opcua errors in our custom error type:
+```rust
+.map_err(|e| OpcUaError(format!("OPC UA operation failed: {}", e)))
+```
+
+### 4. Update Main Function
 
 The main function in `src/main.rs` doesn't need significant changes since it's already using async/await and Tokio:
 
@@ -328,9 +359,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### 4. Testing the Migration
+### 5. Testing the Migration
 
-After implementing these changes, test the application to ensure:
+After implementing these changes, thoroughly test:
+
+1. **Basic Functionality**:
+   - Server starts successfully
+   - Address space is populated correctly
+   - Variables update from storage
+
+2. **Client Connections**:
+   - Multiple clients can connect simultaneously  
+   - Variable reads return correct values
+   - Namespace handling works as expected
+
+3. **Error Cases**:
+   - Invalid variable access
+   - Server restart scenarios
+   - Network interruptions
+
+4. **Performance**:
+   - Benchmark with 10+ concurrent clients
+   - Measure variable update latency
+
+5. **Automated Tests**:
+```rust
+#[tokio::test]
+async fn test_server_startup() {
+    let server = create_test_server();
+    assert!(server.run().await.is_ok());
+}
+
+#[tokio::test] 
+async fn test_variable_updates() {
+    let server = create_test_server();
+    let value = server.get_variable("test_var").await;
+    assert_eq!(value, 0.0);
+    
+    server.update_variable("test_var", 42.0).await;
+    let value = server.get_variable("test_var").await;
+    assert_eq!(value, 42.0);
+}
+```
 
 1. The OPC UA server starts successfully
 2. The address space is populated correctly
@@ -352,13 +422,64 @@ git commit -m "Migrate from opcua to async-opcua"
 git push -u origin async-opcua
 ```
 
-### 6. Create a Pull Request
+### 6. Rollback Plan
 
-When the migration is complete and tested, create a pull request to merge the `async-opcua` branch into the main branch.
+If issues are found during testing:
 
-## Future Improvements
+1. **Immediate Rollback Steps**:
+```bash
+# Revert to main branch
+git checkout main
 
-After the initial migration is complete and working, consider these improvements:
+# Delete migration branch
+git branch -D async-opcua
+```
+
+2. **Known Issues Workarounds**:
+   - If async performance is problematic, adjust Tokio runtime configuration
+   - For variable update delays, implement batching
+
+3. **Partial Migration**:
+   - Consider migrating only non-critical components first
+   - Use feature flags to toggle between implementations
+
+### 7. Create a Pull Request
+
+When the migration is complete and tested, create a pull request to merge the `async-opcua` branch into the main branch with:
+
+1. Performance comparison metrics
+2. Test coverage report
+3. Known limitations section
+
+## Future Improvements & Known Limitations
+
+After initial migration:
+
+1. **Configuration Loading** (Priority: High):
+```rust
+// TODO: Implement config file loading
+// Current hardcoded values work but lack flexibility
+```
+
+2. **Security** (Priority: Medium):
+   - Add TLS support
+   - Implement user authentication
+
+3. **Performance Optimizations**:
+   - Variable update batching
+   - Cached reads for frequent accesses
+
+4. **Known Limitations**:
+   - First release lacks some advanced security features  
+   - Variable history not yet implemented
+   - Maximum 100 concurrent connections (adjustable in config)
+
+5. **Dependency Notes**:
+   - Requires Tokio 1.0+
+   - Check feature flags:
+```toml
+async-opcua = { version = "0.14.0", features = ["server", "encryption"] }
+```
 
 1. **Configuration Loading**: Implement loading server configuration from a file
 2. **Security**: Add proper security configuration
