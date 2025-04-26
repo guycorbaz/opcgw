@@ -1145,7 +1145,6 @@ dependencies = [
  "log4rs",
  "opcua",
  "ping",
- "prost",
  "prost-types",
  "serde",
  "thiserror 2.0.12",
