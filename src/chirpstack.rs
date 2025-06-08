@@ -20,6 +20,7 @@ use tonic::codegen::InterceptedService;
 use tonic::service::Interceptor;
 use tonic::{transport::Channel, Request, Status};
 use url::Url;
+use ping_rs;
 
 // Import generated types
 use crate::storage::{ChirpstackStatus, MetricType, Storage};
@@ -132,7 +133,7 @@ impl ChirpstackPoller {
     /// let poller = ChirpstackPoller::new(&config, storage.clone()).await?;
     /// ```
     pub async fn new(config: &AppConfig, storage: Arc<Mutex<Storage>>) -> Result<Self, OpcGwError> {
-        debug!("Create a new Chirpstack connection");
+        debug!("Create a new Chirpstack poller");
 
         Ok(ChirpstackPoller {
             config: config.clone(),
@@ -286,20 +287,23 @@ impl ChirpstackPoller {
     /// }
     /// ```
     fn check_server_availability(&self) -> Result<Duration , OpcGwError> {
-        debug!("Check server availability");
+        debug!("Check chirpstack server availability");
         let addr = self
             .extract_ip_address()
-            .expect("Cannoit extract ip address");
-        trace!("Server ip address is {:?}", addr);
+            .expect("Cannot extract chirpstack server ip address");
+        trace!("Chirpstack server ip address is {:?}", addr);
         let timeout = Duration::from_secs(1);
-        trace!("Ping {}", addr);
         let start = Instant::now();
-        let result = ping::rawsock::ping(addr, None, None, None, None, None);
+        // Warning: ping requires root privileges...
+        //let data = [1,2,3,4];
+        let data = [];
+        let timeout = Duration::from_secs(1);
+        let options = ping_rs::PingOptions{ttl: 128, dont_fragment: true};
+        let result = ping_rs::send_ping(&addr, timeout,&data, Some(&options));
         let elapsed = start.elapsed();
         let elapsed_secs = elapsed.as_secs_f64();
-        trace!("Ping {} took {:?}", addr, elapsed);
-        trace!("Ping has been sent");
-        trace!("result is: {:?}", result);
+        trace!("Ping chirpstack server {} took {:?}", addr, elapsed);
+        trace!("Result for chirpstack server ping is: {:?}", result);
         match result {
             Ok(_) => {
                 let chirpstack_status = ChirpstackStatus{
@@ -313,7 +317,7 @@ impl ChirpstackPoller {
                     server_available: false,
                     response_time: 0.0,
                 };
-                Err(OpcGwError::ChirpStackError("Ping failed".to_string()))
+                Err(OpcGwError::ChirpStackError("Ping chirpstack server failed".to_string()))
             }
         }
     }
@@ -330,19 +334,19 @@ impl ChirpstackPoller {
     /// * `Err(OpcGwError)` - If there is an error in parsing the URL or the IP address.
     fn extract_ip_address(&self) -> Result<IpAddr, OpcGwError> {
         debug!(
-            "Extract ip address from {}",
+            "Extract chirpstack server ip address from {}",
             self.config.chirpstack.server_address.clone()
         );
         let server_address = self.config.chirpstack.server_address.clone();
 
         trace!("Parse URL for ip address");
         let url = Url::parse(&server_address).map_err(|e| {
-            OpcGwError::ConfigurationError(format!("Failed to parse server address: {}", e))
+            OpcGwError::ConfigurationError(format!("Failed to parse chirpstack server address: {}", e))
         })?;
 
         if let Some(host_str) = url.host_str() {
             if let Ok(ip_addr) = host_str.parse::<IpAddr>() {
-                trace!("Extracted ip address is: {}", ip_addr.clone());
+                trace!("Extracted chirpstack server ip address is: {}", ip_addr.clone());
                 Ok(ip_addr)
             } else {
                 Err(OpcGwError::ConfigurationError(format!(
@@ -375,7 +379,7 @@ impl ChirpstackPoller {
     /// ```
     pub async fn run(&mut self) -> Result<(), OpcGwError> {
         debug!(
-            "Running chirpstack client poller every {} s",
+            "Running chirpstack poller every {} s",
             self.config.chirpstack.polling_frequency
         );
         // Define wait time
@@ -385,7 +389,7 @@ impl ChirpstackPoller {
             if let Err(e) = self.poll_metrics().await {
                 error!(
                     "{}",
-                    &OpcGwError::ChirpStackError(format!("Error polling devices: {:?}", e))
+                    &OpcGwError::ChirpStackError(format!("Error polling chirpstack devices: {:?}", e))
                 );
             }
             // Wait for "wait_time"
@@ -417,7 +421,7 @@ impl ChirpstackPoller {
     /// - Logs a debug message at the start of the function.
     /// - Logs the fetched metrics at trace level.
     async fn poll_metrics(&mut self) -> Result<(), OpcGwError> {
-        debug!("Polling metrics");
+        debug!("Polling chirpstack metrics");
 
         // Get list of applications from configuration
         let app_list = self.config.application_list.clone();
@@ -443,7 +447,7 @@ impl ChirpstackPoller {
                 .await?;
             // Parse metrics received from server
             for metric in &dev_metrics.metrics.clone() {
-                trace!("Got metrics:");
+                trace!("Got chirpstack metrics:");
                 trace!("{:#?}", metric);
                 for (key, metric) in &dev_metrics.metrics {
                     self.store_metric(&dev_id.clone(), &metric.clone());
@@ -470,11 +474,11 @@ impl ChirpstackPoller {
     /// your_instance.run().await?;
     /// ```
     pub fn store_metric(&self, device_id: &String, metric: &Metric) {
-        debug!("Store device metric in storage");
+        debug!("Store chirpstack device metric in storage");
         let device_name = self
             .config
             .get_device_name(device_id)
-            .expect(&OpcGwError::ChirpStackError("Failed to get device name".to_string()).to_string());
+            .expect(&OpcGwError::ChirpStackError("Failed to get chirpstack device name".to_string()).to_string());
         let metric_name = metric.name.clone();
         // We are collecting only the first returned metric
         let storage = self.storage.clone();
@@ -525,7 +529,7 @@ impl ChirpstackPoller {
                 _ => {
                     warn!(
                         "{}",
-                        OpcGwError::ChirpStackError("Wrong metric name".to_string()).to_string()
+                        OpcGwError::ChirpStackError("Wrong chirpstack metric name".to_string()).to_string()
                     );
                 }
             },
@@ -533,7 +537,7 @@ impl ChirpstackPoller {
                 warn!(
                     "{}",
                     &OpcGwError::ChirpStackError(format!(
-                        "No metric type found for metric: {:?} of device {:?}",
+                        "No metric type found for chirpstack metric: {:?} of device {:?}",
                         metric_name, device_name
                     ))
                 );
@@ -563,7 +567,7 @@ impl ChirpstackPoller {
     pub async fn get_applications_list_from_server(
         &self,
     ) -> Result<Vec<ApplicationDetail>, OpcGwError> {
-        debug!("Get list of applications");
+        debug!("Get list of chirpstack applications");
         trace!("Create request");
         let request = Request::new(ListApplicationsRequest {
             limit: 100, // Can be adjusted according to needs, but what does it means ?
@@ -581,7 +585,7 @@ impl ChirpstackPoller {
             .await
             .map_err(|e| {
                 OpcGwError::ChirpStackError(format!(
-                    "Error when collecting application list: {}",
+                    "Error when collecting chirpstack application list: {}",
                     e
                 ))
             })?;
@@ -596,8 +600,8 @@ impl ChirpstackPoller {
         &self,
         application_id: String,
     ) -> Result<Vec<DeviceListDetail>, OpcGwError> {
-        debug!("Get list of devices");
-        trace!("for application: {:?}", application_id);
+        debug!("Get list of chirpstack devices");
+        trace!("for chirpstack application: {:?}", application_id);
         trace!("Create request");
 
         let request = Request::new(ListDevicesRequest {
@@ -620,7 +624,7 @@ impl ChirpstackPoller {
             .list(request)
             .await
             .map_err(|e: Status| {
-                OpcGwError::ChirpStackError(format!("Error when collecting devices list: {e}"))
+                OpcGwError::ChirpStackError(format!("Error when collecting chirpstack devices list: {e}"))
             })?;
         trace!("Convert result");
         let devices: Vec<DeviceListDetail> = self.convert_to_devices(response.into_inner());
@@ -666,8 +670,8 @@ impl ChirpstackPoller {
         duration: u64,
         aggregation: i32,
     ) -> Result<DeviceMetric, OpcGwError> {
-        debug!("Get device metrics");
-        trace!("for device: {:?}", dev_eui);
+        debug!("Get chirpstack device metrics");
+        trace!("for chirpstack device: {:?}", dev_eui);
         trace!("Create request");
         let request = Request::new(GetDeviceMetricsRequest {
             dev_eui: dev_eui.clone(),
@@ -679,13 +683,14 @@ impl ChirpstackPoller {
         });
 
         // Check if chirpstack server is available with a ping
-        trace!("Check for Chirpstack server availability");
+        trace!("Check for chirpstack server availability");
         let retry = self.config.chirpstack.retry;
         let mut count = 0;
         let delay = Duration::from_secs(self.config.chirpstack.delay);
         loop {
             if count == retry {
-                panic!("Timeout: cannot reach Chirpstack server");
+                //panic!("Timeout: cannot reach Chirpstack server");
+                warn!("Timeout: cannot reach chirpstack server");
             }
             match self.check_server_availability() {
                 Ok(t) => break,
