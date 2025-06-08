@@ -26,7 +26,6 @@ async-opcua = { version = "^0.15.1", features = ["server"] }
 clap = { version = "4.5.39", features = ["derive"] }
 local-ip-address = "0.6.5"
 ping = "0.5.2"
-ping-rs = "0.1.2"
 url = "2.5.4"
 
 [build-dependencies]

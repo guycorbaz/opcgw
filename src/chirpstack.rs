@@ -10,7 +10,7 @@ use log::{debug, error, trace, warn};
 use prost_types::Timestamp;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, TcpStream, SocketAddr};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{SystemTime, Instant};
@@ -20,7 +20,6 @@ use tonic::codegen::InterceptedService;
 use tonic::service::Interceptor;
 use tonic::{transport::Channel, Request, Status};
 use url::Url;
-use ping_rs;
 
 // Import generated types
 use crate::storage::{ChirpstackStatus, MetricType, Storage};
