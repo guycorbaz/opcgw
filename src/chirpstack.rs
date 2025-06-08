@@ -10,6 +10,7 @@ use log::{debug, error, trace, warn};
 use prost_types::Timestamp;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::fmt::format;
 use std::net::{IpAddr, TcpStream, SocketAddr};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -286,39 +287,54 @@ impl ChirpstackPoller {
     /// }
     /// ```
     fn check_server_availability(&self) -> Result<Duration , OpcGwError> {
-        debug!("Check chirpstack server availability");
-        let addr = self
-            .extract_ip_address()
-            .expect("Cannot extract chirpstack server ip address");
-        trace!("Chirpstack server ip address is {:?}", addr);
+        debug!("Check for chirpstack server availability");
+
+        // Parse the server address to extract host and port                                                                                                             
+        let server_address = &self.config.chirpstack.server_address;
+        trace!("Checking connectivity to Chirpstack server: {}", server_address);
+
+        // Parse as URL to extract host and port                                                                                                                         
+        let url = Url::parse(&format!("{}", server_address))
+            .map_err(|e| OpcGwError::ConfigurationError(format!("Invalid Chirpstack server address: {}", e)))?;
+        
+        // Extrackt host and port from URL                                                                                                                                
+        let host = url.host_str().ok_or_else(||
+            OpcGwError::ConfigurationError("No Chirpstack host in server address".to_string()))?;
+        let port = url.port().unwrap_or(8080); // Default Chirpstack port
+        
+        // Create socket address                                                                                                                                     
+        let socket_addr: SocketAddr = format!("{}:{}", host, port)
+            .parse()
+            .map_err(|e| OpcGwError::ConfigurationError(format!("Invalid socket address: {}", e)))?;
+
+        trace!("Attempting TCP connection to Chirpstack server: {}", socket_addr);
         let timeout = Duration::from_secs(1);
         let start = Instant::now();
-        // Warning: ping requires root privileges...
-        //let data = [1,2,3,4];
-        let data = [];
-        let timeout = Duration::from_secs(1);
-        let options = ping_rs::PingOptions{ttl: 128, dont_fragment: true};
-        let result = ping_rs::send_ping(&addr, timeout,&data, Some(&options));
+        // Attempt TCP connection                                                                                                                                        
+        let result = TcpStream::connect_timeout(&socket_addr, timeout);
         let elapsed = start.elapsed();
         let elapsed_secs = elapsed.as_secs_f64();
-        trace!("Ping chirpstack server {} took {:?}", addr, elapsed);
-        trace!("Result for chirpstack server ping is: {:?}", result);
+
+        trace!("TCP connection to Chirpstack server {} took {:?}", socket_addr, elapsed);
+
         match result {
             Ok(_) => {
-                let chirpstack_status = ChirpstackStatus{
+                let chirpstack_status = ChirpstackStatus {
                     server_available: true,
                     response_time: elapsed_secs,
                 };
+                trace!("TCP connection to Chirpstack server successful");
                 Ok(elapsed)
             }
             Err(error) => {
-                let chirpstack_status = ChirpstackStatus{
+                let chirpstack_status = ChirpstackStatus {
                     server_available: false,
                     response_time: 0.0,
                 };
-                Err(OpcGwError::ChirpStackError("Ping chirpstack server failed".to_string()))
+                trace!("TCP connection to Chirpstack server failed: {}", error);
+                Err(OpcGwError::ChirpStackError(format!("TCP connection to Chirpstrack server failed: {}", error)))
             }
-        }
+        } 
     }
 
     /// Extracts the IP address from the Chirpstack server address provided in the configuration.
