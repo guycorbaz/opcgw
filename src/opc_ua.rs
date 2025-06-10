@@ -10,6 +10,7 @@ use crate::storage::{MetricType, Storage};
 use crate::utils::{OpcGwError, OPCUA_ADDRESS_SPACE};
 use log::{debug, error, info, trace, warn};
 use tonic::transport::Endpoint;
+use tokio_util::sync::CancellationToken;
 
 use local_ip_address::local_ip;
 use std::option::Option;
@@ -20,20 +21,15 @@ use std::collections::BTreeSet;
 
 // opcua modules
 use opcua::crypto::SecurityPolicy;
-use opcua::server::{
-    diagnostics::NamespaceMetadata,
-    node_manager::memory::{simple_node_manager, SimpleNodeManager},
-    ServerBuilder, ServerConfig, ServerEndpoint, ServerUserToken,
-    Limits, SubscriptionLimits, OperationalLimits,
-};
-use opcua::types::{MessageSecurityMode};
+use opcua::server::{Server, diagnostics::NamespaceMetadata, node_manager::memory::{simple_node_manager, SimpleNodeManager}, ServerBuilder, ServerConfig, ServerEndpoint, ServerUserToken, Limits, SubscriptionLimits, OperationalLimits, SubscriptionCache};
+use opcua::types::{MessageSecurityMode, NodeId};
+use opcua::server::address_space::{Variable};
 
 
 
 /// Structure for storing OpcUa server parameters
 pub struct OpcUa {
     // OPC UA server config
-    //pub server_builder: ServerBuilder,
 }
 
 impl OpcUa {
@@ -63,36 +59,94 @@ impl OpcUa {
         }
     }
 
-       fn create_server_builder() -> ServerBuilder {
-        debug!("Creating ServerBuilder");
+       fn create_server() -> Result<Server, OpcGwError> {
+        debug!("Configure Server");
 
         //TODO: configure server from opcua configuration file
-        let server_builder =ServerBuilder::new()
+           debug!("Creating server builder");
+        let server_builder = ServerBuilder::new()
             .application_name("Chirpstack OPC UA Gateway")
             .application_uri("urn:chirpstack:opcua:gateway")
             .product_uri("urn:chirpstack:opcua:gateway")
+
+            .locale_ids(vec!["en".to_string()])
+            .discovery_urls(vec!["opc.tcp://localhost:4840/".to_string()])
+            .default_endpoint("null".to_string())
+            .diagnostics_enabled(true)
+            .with_node_manager(
+                simple_node_manager(
+                    NamespaceMetadata {
+                        namespace_uri: "urn:UpcUaGw".to_owned(),
+                        ..Default::default()
+                    },
+                    "demo",
+                )
+            );
+
+           let server_builder = Self::configure_network(server_builder);
+           let server_builder = Self::configure_key(server_builder);
+           let server_builder = Self::configure_user_token(server_builder);
+           let server_builder = Self::configure_end_points(server_builder);
+
+           debug!("Creating server");
+           let (server, handle) = server_builder
+            .build()
+            .map_err(|e| OpcGwError::OpcUaError(e.to_string()))?;
+
+           debug!("Creating node manager");
+           let node_manager = handle
+               .node_managers()
+               .get_of_type::<SimpleNodeManager>()
+               .unwrap();
+           
+           debug!("Creating namespace");
+           let ns = handle
+               .get_namespace_index("urn:UpcUaGw")
+               .unwrap();
+
+           Self::add_variables(
+               ns,
+               node_manager,
+           );
+           
+        Ok(server)
+}
+
+    fn configure_network(mut server_builder: ServerBuilder) ->ServerBuilder{
+        debug!("Configure network");
+        server_builder
+            .hello_timeout(5)
+            .host("localhost")//TODO: Use local ip address
+            .port(4840)
+    }
+    fn configure_key(mut server_builder: ServerBuilder) ->ServerBuilder{
+        debug!("Configure key and pki");
+        server_builder
             .create_sample_keypair(true)
             .certificate_path("own/cert.der")
             .private_key_path("private/private.pem")
             .trust_client_certs(true)
             .check_cert_time(true)
             .pki_dir("./pki")
-            .hello_timeout(5)
-            .host("localhost")//TODO: Use local ip address
-            .port(4840)
-            .locale_ids(vec!["en".to_string()])
-            .discovery_urls(vec!["opc.tcp://localhost:4840/".to_string()])
-            .default_endpoint("null".to_string())
-            .add_user_token(
-                "user1",
-                ServerUserToken {
-                    user: "user1".to_string(),
-                    pass: Some("user1".to_string()),
-                    x509: None,
-                    thumbprint: None,
-                    read_diagnostics: true
-                }
-            )
+    }
+
+    fn configure_user_token(mut server_builder: ServerBuilder) ->ServerBuilder{
+        debug!("Configure user token");
+        server_builder.add_user_token(
+            "user1",
+            ServerUserToken {
+                user: "user1".to_string(),
+                pass: Some("user1".to_string()),
+                x509: None,
+                thumbprint: None,
+                read_diagnostics: true
+            }
+        )
+    }
+
+    fn configure_end_points(mut server_builder: ServerBuilder) ->ServerBuilder{
+        debug!("Configure end points");
+        server_builder
             .default_endpoint("null".to_string())// The name of this enpoint has to be registered with add_endpoint
             .add_endpoint(
                 "null", // This is the index of the default endpoint
@@ -133,19 +187,7 @@ impl OpcUa {
                     ])
                 }
             )
-
-            .diagnostics_enabled(true)
-            .with_node_manager(
-                simple_node_manager(
-                    NamespaceMetadata {
-                        namespace_uri: "urn:DemoServer".to_owned(),
-                        ..Default::default()
-                    },
-                    "demo",
-                )
-            );
-        server_builder
-}
+    }
 
 fn create_limits() -> Limits {
     todo!()
@@ -154,80 +196,50 @@ fn create_limits() -> Limits {
 
 
 
-
-
-    /// Runs the OPC UA server asynchronously.
-    ///
-    /// This function performs the following actions:
-    /// 1. Logs a debug message indicating that the OPC UA server is running.
-    /// 2. Populates the address space for the server.
-    /// 3. Creates and awaits the server task to run indefinitely.
-    ///
-    /// # Errors
-    ///
-    /// Returns an `OpcGwError` if any operation within the function fails.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// // Assuming `opc_gw` is an instance of a struct that has the `run` method
-    /// opc_gw.run().await?;
-    /// ```
-    ///
-    /// # Panics
-    ///
-    /// The function does not explicitly handle any panics. It is expected that any
-    /// panics that occur within the function should be handled by the caller.
-    ///
-    /// # Notes
-    ///
-    /// Ensure that the server is properly configured and the address space is
-    /// correctly populated before calling this function.
-    ///
-    /// # async
-    ///
-    /// This function is asynchronous and should be awaited.
     pub async fn run(mut self) -> Result<(), OpcGwError> {
         debug!("Running OPC UA server");
-        let (server, handle) = Self::create_server_builder()
-            .build()
-            .map_err(|e| OpcGwError::OpcUaError(e.to_string()))?;
+        //let (server, handle) = Self::create_server_builder()
+        //    .build()
+        //    .map_err(|e| OpcGwError::OpcUaError(e.to_string()))?;
+        let server = Self::create_server();
         debug!("Opc ua server is built");
         info!("OPC UA server started on opc.tcp:://localhost:4840/");
-        server.run().await.map_err(|e| OpcGwError::OpcUaError(e.to_string()));
-        info!("OPC UA server started on opc.tcp:://localhost:4840/");
+        server?.run().await.map_err(|e| OpcGwError::OpcUaError(e.to_string()));
+        info!("OPC UA server started on opc.tcp:://localhost:4840/"); //TODO: improve error handling
         Ok(())
     }
 
-    /// Populates the server's address space with applications and their devices.
-    ///
-    /// This method first reads the current server state and accesses the server's address space.
-    /// It then iterates over the list of applications specified in the configuration, adding each
-    /// application and its associated devices to the address space as folders and variables respectively.
-    ///
-    /// # Steps:
-    /// 1. Read the server state.
-    /// 2. Access the server's address space.
-    /// 3. Obtain a writable reference to the address space.
-    /// 4. Iterate through the application's list:
-    ///     a. Add a folder for each application.
-    ///     b. For each device in the application, add a folder under the application's folder.
-    ///     c. Add variables for each device in the address space.
-    ///
-    /// # Panics:
-    /// The function will panic if any `unwrap` calls fail, indicating an error in adding folders or variables.
-    ///
-    /// # Example:
-    /// ```rust
-    /// // Assuming `server` is an instance of your server type and `config` is properly set up
-    /// server.populate_address_space();
-    /// ```
-    ///
-    /// # Note:
-    /// This function assumes that the server, configuration, and address space are logically and syntactically correct.
-    pub fn populate_address_space(&self) {
-        trace!("Populating address space");
-        todo!();
+    pub fn add_variables(
+                         ns: u16,
+                         manager: Arc<SimpleNodeManager>
+    ) {
+        trace!("Add variables to OPC UA server");
+        let address_space = manager.address_space();
+        
+        // For testing
+        //TODO: load folders and variable from configuration
+        let v1_node = NodeId::new(ns, "v1");
+        let v2_node = NodeId::new(ns, "v2");
+        let v3_node = NodeId::new(ns, "v3");
+        let v4_node = NodeId::new(ns, "v4");
+        let v5_node = NodeId::new(ns, "v5");
+        
+        let mut address_space = address_space.write();
+        let sample_folder_id = NodeId::new(ns, "SampleFolder");
+        address_space.add_folder(
+            &sample_folder_id,
+            "SampleFolder",
+            "SampleFolder",
+            &NodeId::objects_folder_id(),
+        );
+        
+        let _ = address_space.add_variables(
+            vec![
+                Variable::new(&v1_node, "v1", "v1", 0_i32),
+                Variable::new(&v2_node, "v2", "v2", false),
+            ],
+            &sample_folder_id,
+        );
     }
 }
 

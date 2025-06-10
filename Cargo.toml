@@ -26,6 +26,7 @@ async-opcua = { version = "^0.15.1", features = ["server"] }
 clap = { version = "4.5.40", features = ["derive"] }
 local-ip-address = "0.6.5"
 url = "2.5.4"
+tokio-util = "0.7.15"
 
 [build-dependencies]
 tonic-build = "0.13.1"

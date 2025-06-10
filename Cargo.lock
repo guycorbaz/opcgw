@@ -1544,6 +1544,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.12",
  "tokio",
+ "tokio-util",
  "tonic",
  "tonic-build",
  "url",
