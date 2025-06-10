@@ -67,7 +67,6 @@ impl OpcUa {
         debug!("Creating ServerBuilder");
 
         //TODO: configure server from opcua configuration file
-           //TODO: add encrypted connections
         let server_builder =ServerBuilder::new()
             .application_name("Chirpstack OPC UA Gateway")
             .application_uri("urn:chirpstack:opcua:gateway")
@@ -230,46 +229,6 @@ fn create_limits() -> Limits {
         trace!("Populating address space");
         todo!();
     }
-
-    // Creates OPC UA variables for each metric in the given ChirpstackDevice.
-    //
-    // This method iterates over the list of metrics from the provided `ChirpstackDevice`
-    // and creates corresponding OPC UA variables for each metric. Each variable is assigned
-    // a unique `NodeId` and an initial value of `Float(0.0)`. A getter function is also created
-    // for each variable to fetch its value from the storage.
-    //
-    // # Parameters
-    //
-    // * `&self`: A reference to the current instance of the struct.
-    // * `device`: A reference to a `ChirpstackDevice` that contains the metrics to be converted into OPC UA variables.
-    //
-    // # Returns
-    //
-    // * `Vec<Variable>`: A vector containing the generated OPC UA variables.
-    //
-    // # Example
-    //
-    // ```
-    // let device = ChirpstackDevice::new(...);
-    // let variables = self.create_variables(&device);
-    // for variable in variables {
-    //     println!("Created variable: {:?}", variable);
-    // }
-    // ```
-    //
-    // # Panics
-    //
-    // This function does not explicitly panic, but the caller is responsible for ensuring
-    // that the provided `ChirpstackDevice` is properly constructed and contains valid metrics.
-    //
-    // # Notes
-    //
-    // * The `self` reference is cloned and moved into a closure to handle asynchronous value fetching.
-    // * Each metric and its corresponding node ID are wrapped in `Arc` and `Mutex` for thread-safe access within the getter closure.
-    //fn create_variables(&self, device: &ChirpstackDevice) -> Vec<Variable> {
-    //    trace!("Creating opc ua variables");
-    //    todo!();
-    //}
 }
 
 
