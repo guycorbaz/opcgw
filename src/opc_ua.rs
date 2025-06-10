@@ -1,38 +1,39 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) [2024] [Guy Corbaz]
 
-//! Manage opc ua server
-
+//TODO: Remove for production
 #![allow(unused)]
 
+use std::collections::BTreeMap;
 use crate::config::{AppConfig, ChirpstackDevice, OpcUaConfig};
 use crate::storage::{MetricType, Storage};
 use crate::utils::{OpcGwError, OPCUA_ADDRESS_SPACE};
 use log::{debug, error, info, trace, warn};
-use opcua::server::prelude::*;
-use opcua::sync::Mutex;
-//use std::sync::Mutex;
+use tonic::transport::Endpoint;
+
 use local_ip_address::local_ip;
-use opcua::sync::RwLock;
-use opcua::types::variant::Variant::Float;
-use opcua::types::DataTypeId::Integer;
-use opcua::types::VariableId::OperationLimitsType_MaxNodesPerTranslateBrowsePathsToNodeIds;
 use std::option::Option;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::collections::BTreeSet;
+
+
+// opcua modules
+use opcua::crypto::SecurityPolicy;
+use opcua::server::{
+    diagnostics::NamespaceMetadata,
+    node_manager::memory::{simple_node_manager, SimpleNodeManager},
+    ServerBuilder, ServerConfig, ServerEndpoint, ServerUserToken,
+    Limits, SubscriptionLimits, OperationalLimits,
+};
+use opcua::types::{MessageSecurityMode};
+
+
 
 /// Structure for storing OpcUa server parameters
 pub struct OpcUa {
-    /// Application configuration parameters
-    pub config: AppConfig,
-    /// OPC UA server config
-    pub server_config: ServerConfig,
-    /// opc ua server instance
-    pub server: Arc<RwLock<Server>>,
-    /// Index of the opc ua address space
-    pub ns: u16,
-    /// Metrics list
-    pub storage: Arc<std::sync::Mutex<Storage>>,
+    // OPC UA server config
+    //pub server_builder: ServerBuilder,
 }
 
 impl OpcUa {
@@ -54,98 +55,107 @@ impl OpcUa {
     /// Returns an instance of the `OpcUa` structure initialized with the provided configuration and storage.
     ///
     pub fn new(config: &AppConfig, storage: Arc<std::sync::Mutex<Storage>>) -> Self {
-        trace!("New OPC UA structure");
-        // Create de server configuration using the provided config file path
-        //trace!("opcua config file is {:?}", config.opcua.config_file);
-        let mut server_config = Self::create_server_config(&config.opcua.config_file.clone());
-
-        let my_ip_address = local_ip().unwrap();
-        //trace!("Server IP address: {}", my_ip_address);
-        server_config.tcp_config.host = my_ip_address.to_string();
-        //trace!("OPC UA server configuration: {:#?}", server_config);
-
-        // Create a server instance and wrap it in an Arc and RwLock for safe shared access
-        let server = Arc::new(RwLock::new(Self::create_server(server_config.clone())));
-
-        // Register the namespace in the OPC UA server
-        let ns = {
-            // Access the server's address space in read mode
-            let address_space = {
-                // Access the RwLock in read mode and then call the address_space method
-                let server = server.read();
-                server.address_space()
-            };
-            // Lock the address space for writing and register the namespace
-            let mut address_space = address_space.write();
-            address_space
-                .register_namespace(OPCUA_ADDRESS_SPACE)
-                .unwrap()
-        };
-
-        // Return the new OpcUa structure
+        trace!("Create new OPC UA structure");
+        //let server_builder = Self::create_server_builder();
+  
         OpcUa {
-            config: config.clone(),
-            server_config,
-            server,
-            ns,
-            storage,
+        //    server_builder,
         }
     }
 
-    /// Creates a server configuration from the given file name.
-    ///
-    /// This function attempts to load a server configuration from the specified file name.
-    /// If the configuration is loaded successfully, it returns the server configuration.
-    /// In the event of an error, it will panic and provide a detailed error message.
-    ///
-    /// # Arguments
-    ///
-    /// * `config_file_name` - A reference to the name of the configuration file.
-    ///
-    /// # Returns
-    ///
-    /// * `ServerConfig` - The loaded server configuration.
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if it cannot load the server configuration from the given file name.
-    /// The error message will be wrapped in `OpcGwError::OpcUaError`.
-    fn create_server_config(config_file_name: &String) -> ServerConfig {
-        debug!("Creating server config");
-        trace!("opcua config file is {:?}", config_file_name);
-        // Attempt to load the server configuration from the given file name
-        match ServerConfig::load(&PathBuf::from(config_file_name)) {
-            // If successful, return the loaded configuration
-            Ok(config) => config,
+       fn create_server_builder() -> ServerBuilder {
+        debug!("Creating ServerBuilder");
 
-            // If an error occurs, panic and provide a detailed error message
-            Err(e) => panic!(
-                "{}",
-                OpcGwError::OpcUaError(format!("Can not create server config {:?}", e))
-            ),
-        }
-    }
+        //TODO: configure server from opcua configuration file
+           //TODO: add encrypted connections
+        let server_builder =ServerBuilder::new()
+            .application_name("Chirpstack OPC UA Gateway")
+            .application_uri("urn:chirpstack:opcua:gateway")
+            .product_uri("urn:chirpstack:opcua:gateway")
+            .create_sample_keypair(true)
+            .certificate_path("own/cert.der")
+            .private_key_path("private/private.pem")
+            .trust_client_certs(true)
+            .check_cert_time(true)
+            .pki_dir("./pki")
+            .hello_timeout(5)
+            .host("localhost")//TODO: Use local ip address
+            .port(4840)
+            .locale_ids(vec!["en".to_string()])
+            .discovery_urls(vec!["opc.tcp://localhost:4840/".to_string()])
+            .default_endpoint("null".to_string())
+            .add_user_token(
+                "user1",
+                ServerUserToken {
+                    user: "user1".to_string(),
+                    pass: Some("user1".to_string()),
+                    x509: None,
+                    thumbprint: None,
+                    read_diagnostics: true
+                }
+            )
+            .default_endpoint("null".to_string())// The name of this enpoint has to be registered with add_endpoint
+            .add_endpoint(
+                "null", // This is the index of the default endpoint
+                ServerEndpoint{
+                    path: "/".to_string(),
+                    security_policy: "None".to_string(),
+                    security_mode: "None".to_string(),
+                    security_level: 0,
+                    password_security_policy: None,
+                    user_token_ids: BTreeSet::from([
+                        "user1".to_string()
+                    ])
+                }
+            )
+            .add_endpoint(
+                "basic256_sign",
+                ServerEndpoint{
+                    path: "/".to_string(),
+                    security_policy: "Basic256".to_string(),
+                    security_mode: "Sign".to_string(),
+                    security_level: 3,
+                    password_security_policy: None,
+                    user_token_ids: BTreeSet::from([
+                        "user1".to_string()
+                    ])
+                }
+            )
+            .add_endpoint(
+                "basic256_sign_encrypt",
+                ServerEndpoint{
+                    path: "/".to_string(),
+                    security_policy: "Basic256".to_string(),
+                    security_mode: "SignAndEncrypt".to_string(),
+                    security_level: 13,
+                    password_security_policy: None,
+                    user_token_ids: BTreeSet::from([
+                        "user1".to_string()
+                    ])
+                }
+            )
 
-    /// Creates a new server instance with the given configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `server_config` - Configuration settings for the server.
-    ///
-    /// # Returns
-    ///
-    /// * A newly created `Server` instance.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// let config = ServerConfig::new();
-    /// let server = create_server(config);
-    /// ```
-    fn create_server(server_config: ServerConfig) -> Server {
-        debug!("Creating server");
-        Server::new(server_config.clone())
-    }
+            .diagnostics_enabled(true)
+            .with_node_manager(
+                simple_node_manager(
+                    NamespaceMetadata {
+                        namespace_uri: "urn:DemoServer".to_owned(),
+                        ..Default::default()
+                    },
+                    "demo",
+                )
+            );
+        server_builder
+}
+
+fn create_limits() -> Limits {
+    todo!()
+}
+
+
+
+
+
 
     /// Runs the OPC UA server asynchronously.
     ///
@@ -178,12 +188,15 @@ impl OpcUa {
     /// # async
     ///
     /// This function is asynchronous and should be awaited.
-    pub async fn run(&self) -> Result<(), OpcGwError> {
+    pub async fn run(mut self) -> Result<(), OpcGwError> {
         debug!("Running OPC UA server");
-        self.populate_address_space();
-        let server_task = Server::new_server_task(self.server.clone());
-        // Run the server indefinitely
-        server_task.await;
+        let (server, handle) = Self::create_server_builder()
+            .build()
+            .map_err(|e| OpcGwError::OpcUaError(e.to_string()))?;
+        debug!("Opc ua server is built");
+        info!("OPC UA server started on opc.tcp:://localhost:4840/");
+        server.run().await.map_err(|e| OpcGwError::OpcUaError(e.to_string()));
+        info!("OPC UA server started on opc.tcp:://localhost:4840/");
         Ok(())
     }
 
@@ -214,166 +227,49 @@ impl OpcUa {
     /// # Note:
     /// This function assumes that the server, configuration, and address space are logically and syntactically correct.
     pub fn populate_address_space(&self) {
-        // Read the server state
-        let server = self.server.read();
-        // Access the server's address space
-        let address_space = server.address_space();
-        // Obtain writable reference to the address space
-        let mut address_space = address_space.write();
-        let app = self.config.application_list.clone();
-        for application in app {
-            // Adding application level folder
-            let folder_id = address_space
-                .add_folder(
-                    application.application_name.clone(),
-                    application.application_name.clone(),
-                    &NodeId::objects_folder_id(),
-                )
-                .unwrap();
-            for device in application.device_list {
-                // Adding device under the application folder
-                let device_id = address_space
-                    .add_folder(
-                        device.device_name.clone(),
-                        device.device_name.clone(),
-                        &folder_id,
-                    )
-                    .unwrap();
-                address_space.add_variables(
-                    // Add variables to the device in address space
-                    self.create_variables(&device),
-                    &device_id,
-                );
-            }
-        }
+        trace!("Populating address space");
+        todo!();
     }
 
-    /// Creates OPC UA variables for each metric in the given ChirpstackDevice.
-    ///
-    /// This method iterates over the list of metrics from the provided `ChirpstackDevice`
-    /// and creates corresponding OPC UA variables for each metric. Each variable is assigned
-    /// a unique `NodeId` and an initial value of `Float(0.0)`. A getter function is also created
-    /// for each variable to fetch its value from the storage.
-    ///
-    /// # Parameters
-    ///
-    /// * `&self`: A reference to the current instance of the struct.
-    /// * `device`: A reference to a `ChirpstackDevice` that contains the metrics to be converted into OPC UA variables.
-    ///
-    /// # Returns
-    ///
-    /// * `Vec<Variable>`: A vector containing the generated OPC UA variables.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// let device = ChirpstackDevice::new(...);
-    /// let variables = self.create_variables(&device);
-    /// for variable in variables {
-    ///     println!("Created variable: {:?}", variable);
-    /// }
-    /// ```
-    ///
-    /// # Panics
-    ///
-    /// This function does not explicitly panic, but the caller is responsible for ensuring
-    /// that the provided `ChirpstackDevice` is properly constructed and contains valid metrics.
-    ///
-    /// # Notes
-    ///
-    /// * The `self` reference is cloned and moved into a closure to handle asynchronous value fetching.
-    /// * Each metric and its corresponding node ID are wrapped in `Arc` and `Mutex` for thread-safe access within the getter closure.
-    fn create_variables(&self, device: &ChirpstackDevice) -> Vec<Variable> {
-        trace!("Creating opc ua variables");
-
-        // Initialize an empty vector to store the generated variables
-        let mut variables = Vec::<Variable>::new();
-
-        // Iterate over each metric in the device's metric list
-        for metric in device.metric_list.clone() {
-            let metric_name = metric.metric_name.clone();
-            let chirpstack_metric_name = metric.chirpstack_metric_name.clone();
-            trace!("Creating variable for metric {:?}", &metric_name);
-
-            // Create the variable node id for the metric
-            let metric_node_id = NodeId::new(self.ns, metric_name.clone());
-
-            // Move self and metric_node_id into the closure
-            let device_id = device.device_id.clone();
-            let self_arc = Arc::new(self);
-            let metric_node_id_arc = Arc::new(metric_node_id.clone());
-            let chirpstack_metric_name_arc = Arc::new(chirpstack_metric_name.clone());
-            let storage = self.storage.clone();
-
-            // Create a new Variable with the node, name, and an initial value
-            let mut metric_variable = Variable::new(
-                &metric_node_id,
-                metric_name.clone(),
-                metric_name,
-                Float(0.0),
-            );
-
-            // Crete getter
-            let getter = AttrFnGetter::new(
-                move |_, _, _, _, _, _| -> Result<Option<DataValue>, StatusCode> {
-                    //trace!("Get variable value");
-                    let dev_id = device_id.clone();
-                    let id = metric_node_id_arc.clone();
-                    let name = chirpstack_metric_name_arc.clone();
-                    let value =
-                        get_metric_value(&device_id.clone(), &name.clone(), storage.clone());
-                    Ok(Some(DataValue::new_now(value)))
-                },
-            );
-
-            metric_variable.set_value_getter(Arc::new(Mutex::new(getter)));
-            // Add variable to variables list
-
-            variables.push(metric_variable);
-        }
-        variables
-    }
+    // Creates OPC UA variables for each metric in the given ChirpstackDevice.
+    //
+    // This method iterates over the list of metrics from the provided `ChirpstackDevice`
+    // and creates corresponding OPC UA variables for each metric. Each variable is assigned
+    // a unique `NodeId` and an initial value of `Float(0.0)`. A getter function is also created
+    // for each variable to fetch its value from the storage.
+    //
+    // # Parameters
+    //
+    // * `&self`: A reference to the current instance of the struct.
+    // * `device`: A reference to a `ChirpstackDevice` that contains the metrics to be converted into OPC UA variables.
+    //
+    // # Returns
+    //
+    // * `Vec<Variable>`: A vector containing the generated OPC UA variables.
+    //
+    // # Example
+    //
+    // ```
+    // let device = ChirpstackDevice::new(...);
+    // let variables = self.create_variables(&device);
+    // for variable in variables {
+    //     println!("Created variable: {:?}", variable);
+    // }
+    // ```
+    //
+    // # Panics
+    //
+    // This function does not explicitly panic, but the caller is responsible for ensuring
+    // that the provided `ChirpstackDevice` is properly constructed and contains valid metrics.
+    //
+    // # Notes
+    //
+    // * The `self` reference is cloned and moved into a closure to handle asynchronous value fetching.
+    // * Each metric and its corresponding node ID are wrapped in `Arc` and `Mutex` for thread-safe access within the getter closure.
+    //fn create_variables(&self, device: &ChirpstackDevice) -> Vec<Variable> {
+    //    trace!("Creating opc ua variables");
+    //    todo!();
+    //}
 }
 
-/// Retrieves the value of a specified metric for a given device from storage.
-///
-/// # Arguments
-///
-/// * `device_id` - A reference to a `String` that holds the identifier of the device.
-/// * `chirpstack_metric_name` - A reference to a `String` that contains the name of the metric to retrieve.
-/// * `storage` - An `Arc` wrapped around a `Mutex` that allows shared access to the `Storage` structure.
-///
-/// # Returns
-///
-/// The value of the specified metric as an `f32`. If the metric value is not found or not of type `Float`, it returns `0.0`.
-///
-/// # Panics
-///
-/// This function will panic if it fails to lock the `Mutex` for storage.
-///
-/// # Examples
-///
-/// ```rust
-/// let value = get_metric_value(&device_id, &metric_name, storage);
-/// println!("Metric value: {}", value);
-/// ```
-fn get_metric_value(
-    device_id: &String,
-    chirpstack_metric_name: &String,
-    storage: Arc<std::sync::Mutex<Storage>>,
-) -> f32 {
-    trace!("Get metric value for {:?}", &chirpstack_metric_name);
-    let storage = storage.clone();
-    let mut storage = storage
-        .lock()
-        .expect(format!("Mutex for storage is poisoned").as_str());
-    let device = storage.get_device(device_id).unwrap();
-    let value = storage.get_metric_value(device_id, chirpstack_metric_name);
 
-    trace!("Value of metric is: {:?}", value);
-    let metric_value = match value {
-        Some(MetricType::Float(v)) => v,
-        _ => 0.0,
-    };
-    metric_value as f32
-}
