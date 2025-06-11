@@ -4,29 +4,31 @@
 //TODO: Remove for production
 #![allow(unused)]
 
-use std::collections::BTreeMap;
 use crate::config::{AppConfig, ChirpstackDevice, OpcUaConfig};
 use crate::storage::{MetricType, Storage};
 use crate::utils::{OpcGwError, OPCUA_ADDRESS_SPACE};
 use log::{debug, error, info, trace, warn};
-use tonic::transport::Endpoint;
-use tokio_util::sync::CancellationToken;
 use rand::prelude::*;
+use std::collections::BTreeMap;
+use tokio_util::sync::CancellationToken;
+use tonic::transport::Endpoint;
 
 use local_ip_address::local_ip;
+use std::collections::BTreeSet;
 use std::option::Option;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::collections::BTreeSet;
-
 
 // opcua modules
 use opcua::crypto::SecurityPolicy;
-use opcua::server::{Server, diagnostics::NamespaceMetadata, node_manager::memory::{simple_node_manager, SimpleNodeManager}, ServerBuilder, ServerConfig, ServerEndpoint, ServerUserToken, Limits, SubscriptionLimits, OperationalLimits, SubscriptionCache};
+use opcua::server::address_space::Variable;
+use opcua::server::{
+    diagnostics::NamespaceMetadata,
+    node_manager::memory::{simple_node_manager, SimpleNodeManager},
+    Limits, OperationalLimits, Server, ServerBuilder, ServerConfig, ServerEndpoint,
+    ServerUserToken, SubscriptionCache, SubscriptionLimits,
+};
 use opcua::types::{MessageSecurityMode, NodeId};
-use opcua::server::address_space::{Variable};
-
-
 
 /// Structure for storing OpcUa server parameters
 pub struct OpcUa {
@@ -56,74 +58,66 @@ impl OpcUa {
     ///
     pub fn new(config: &AppConfig, storage: Arc<std::sync::Mutex<Storage>>) -> Self {
         trace!("Create new OPC UA server structure");
-  
+
         OpcUa {
             config: config.clone(),
-            storage
+            storage,
         }
     }
 
-       fn create_server() -> Result<Server, OpcGwError> {
+    fn create_server() -> Result<Server, OpcGwError> {
         debug!("Configure Server");
 
         //TODO: configure server from opcua configuration file
-           debug!("Creating server builder");
+        debug!("Creating server builder");
         let server_builder = ServerBuilder::new()
             .application_name("Chirpstack OPC UA Gateway")
             .application_uri("urn:chirpstack:opcua:gateway")
             .product_uri("urn:chirpstack:opcua:gateway")
-
             .locale_ids(vec!["en".to_string()])
             .discovery_urls(vec!["opc.tcp://localhost:4840/".to_string()])
             .default_endpoint("null".to_string())
             .diagnostics_enabled(true)
-            .with_node_manager(
-                simple_node_manager(
-                    NamespaceMetadata {
-                        namespace_uri: "urn:UpcUaGw".to_owned(),
-                        ..Default::default()
-                    },
-                    "demo",
-                )
-            );
+            .with_node_manager(simple_node_manager(
+                NamespaceMetadata {
+                    namespace_uri: "urn:UpcUaGw".to_owned(),
+                    ..Default::default()
+                },
+                "demo",
+            ));
 
-           let server_builder = Self::configure_network(server_builder);
-           let server_builder = Self::configure_key(server_builder);
-           let server_builder = Self::configure_user_token(server_builder);
-           let server_builder = Self::configure_end_points(server_builder);
+        let server_builder = Self::configure_network(server_builder);
+        let server_builder = Self::configure_key(server_builder);
+        let server_builder = Self::configure_user_token(server_builder);
+        let server_builder = Self::configure_end_points(server_builder);
 
-           debug!("Creating server");
-           let (server, handle) = server_builder
+        debug!("Creating server");
+        let (server, handle) = server_builder
             .build()
             .map_err(|e| OpcGwError::OpcUaError(e.to_string()))?;
 
-           debug!("Creating node manager");
-           let node_manager = handle
-               .node_managers()
-               .get_of_type::<SimpleNodeManager>()
-               .unwrap();
-           
-           debug!("Creating namespace");
-           let ns = handle
-               .get_namespace_index("urn:UpcUaGw")
-               .unwrap();
+        debug!("Creating node manager");
+        let node_manager = handle
+            .node_managers()
+            .get_of_type::<SimpleNodeManager>()
+            .unwrap();
 
-           Self::add_nodes(
-               ns,
-               node_manager,
-           );
-           
+        debug!("Creating namespace");
+        let ns = handle.get_namespace_index("urn:UpcUaGw").unwrap();
+
+        Self::add_nodes(ns, node_manager);
+
         Ok(server)
-}
+    }
 
-    fn configure_network(mut server_builder: ServerBuilder) ->ServerBuilder{
+    fn configure_network(mut server_builder: ServerBuilder) -> ServerBuilder {
         debug!("Configure network");
         server_builder
             .hello_timeout(5)
-            .host("localhost")//TODO: Use local ip address
+            .host("localhost") //TODO: Use local ip address
             .port(4840)
     }
-    fn configure_key(mut server_builder: ServerBuilder) ->ServerBuilder{
+    fn configure_key(mut server_builder: ServerBuilder) -> ServerBuilder {
         debug!("Configure key and pki");
         server_builder
             .create_sample_keypair(true)
@@ -134,7 +128,7 @@ impl OpcUa {
             .pki_dir("./pki")
     }
 
-    fn configure_user_token(mut server_builder: ServerBuilder) ->ServerBuilder{
+    fn configure_user_token(mut server_builder: ServerBuilder) -> ServerBuilder {
         debug!("Configure user token");
         server_builder.add_user_token(
             "user1",
@@ -143,84 +137,75 @@ impl OpcUa {
                 pass: Some("user1".to_string()),
                 x509: None,
                 thumbprint: None,
-                read_diagnostics: true
-            }
+                read_diagnostics: true,
+            },
         )
     }
 
-    fn configure_end_points(mut server_builder: ServerBuilder) ->ServerBuilder{
+    fn configure_end_points(mut server_builder: ServerBuilder) -> ServerBuilder {
         debug!("Configure end points");
         server_builder
-            .default_endpoint("null".to_string())// The name of this enpoint has to be registered with add_endpoint
+            .default_endpoint("null".to_string()) // The name of this enpoint has to be registered with add_endpoint
             .add_endpoint(
                 "null", // This is the index of the default endpoint
-                ServerEndpoint{
+                ServerEndpoint {
                     path: "/".to_string(),
                     security_policy: "None".to_string(),
                     security_mode: "None".to_string(),
                     security_level: 0,
                     password_security_policy: None,
-                    user_token_ids: BTreeSet::from([
-                        "user1".to_string()
-                    ])
-                }
+                    user_token_ids: BTreeSet::from(["user1".to_string()]),
+                },
             )
             .add_endpoint(
                 "basic256_sign",
-                ServerEndpoint{
+                ServerEndpoint {
                     path: "/".to_string(),
                     security_policy: "Basic256".to_string(),
                     security_mode: "Sign".to_string(),
                     security_level: 3,
                     password_security_policy: None,
-                    user_token_ids: BTreeSet::from([
-                        "user1".to_string()
-                    ])
-                }
+                    user_token_ids: BTreeSet::from(["user1".to_string()]),
+                },
             )
             .add_endpoint(
                 "basic256_sign_encrypt",
-                ServerEndpoint{
+                ServerEndpoint {
                     path: "/".to_string(),
                     security_policy: "Basic256".to_string(),
                     security_mode: "SignAndEncrypt".to_string(),
                     security_level: 13,
                     password_security_policy: None,
-                    user_token_ids: BTreeSet::from([
-                        "user1".to_string()
-                    ])
-                }
+                    user_token_ids: BTreeSet::from(["user1".to_string()]),
+                },
             )
     }
 
-fn create_limits() -> Limits {
-    todo!()
-}
-
-
-
+    fn create_limits() -> Limits {
+        todo!()
+    }
 
     pub async fn run(mut self) -> Result<(), OpcGwError> {
         debug!("Running OPC UA server");
-        
+
         // Error management for server creation
         let server = match Self::create_server() {
             Ok(server) => {
                 debug!("OPC UA server built");
                 server
-            },
+            }
             Err(e) => {
                 error!("OPC UA server error: {}", e);
                 return Err(e);
             }
         };
-        
+
         info!("OPC UA server started on opc.tcp:://localhost:4840/"); //TODO: make sure message display the url from parameters
         match server.run().await {
             Ok(_) => {
                 info!("OPC UA server stopped");
                 Ok(())
-            },
+            }
             Err(e) => {
                 error!("Error w hile running OPC UA server {}", e);
                 Err(OpcGwError::OpcUaError(e.to_string()))
@@ -229,13 +214,10 @@ fn create_limits() -> Limits {
         Ok(())
     }
 
-    pub fn add_nodes( 
-                         ns: u16,
-                         manager: Arc<SimpleNodeManager>
-    ) {
+    pub fn add_nodes(ns: u16, manager: Arc<SimpleNodeManager>) {
         trace!("Add nodes to OPC UA server");
         let address_space = manager.address_space();
-        
+
         // For testing
         //TODO: load folders and variable from configuration
         let v1_node = NodeId::new(ns, "v1");
@@ -261,10 +243,5 @@ fn create_limits() -> Limits {
             ],
             &sample_folder_id,
         );
-        
-        
-
     }
 }
-
-

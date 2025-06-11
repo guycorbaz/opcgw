@@ -38,7 +38,7 @@ pub struct ChirpstackPollerConfig {
     ///Amount of connection retry when Chirpstack server is down
     pub retry: u32,
     /// Delay in sec between two retry
-    pub delay: u64
+    pub delay: u64,
 }
 
 /// Structure for storing opc ua server configuration parameters

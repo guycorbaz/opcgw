@@ -38,7 +38,7 @@ pub struct Device {
     device_metrics: HashMap<String, MetricType>,
 }
 
-/// Structure for storing Chirpstzack server status
+/// Structure for storing Chirpstack server status
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChirpstackStatus {
     /// Availability of Chirpstack server
@@ -46,6 +46,7 @@ pub struct ChirpstackStatus {
     /// Response time of chirpstack server
     pub response_time: f64,
 }
+
 /// Main structure for storing application data, metrics, and managing devices and applications.
 pub struct Storage {
     config: AppConfig,
