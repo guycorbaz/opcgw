@@ -11,6 +11,7 @@ use crate::utils::{OpcGwError, OPCUA_ADDRESS_SPACE};
 use log::{debug, error, info, trace, warn};
 use tonic::transport::Endpoint;
 use tokio_util::sync::CancellationToken;
+use rand::prelude::*;
 
 use local_ip_address::local_ip;
 use std::option::Option;
@@ -29,7 +30,10 @@ use opcua::server::address_space::{Variable};
 
 /// Structure for storing OpcUa server parameters
 pub struct OpcUa {
-    // OPC UA server config
+    /// Configuration for the OPC UA server
+    config: AppConfig,
+    /// Storage for the OPC UA server
+    storage: Arc<std::sync::Mutex<Storage>>,
 }
 
 impl OpcUa {
@@ -51,11 +55,11 @@ impl OpcUa {
     /// Returns an instance of the `OpcUa` structure initialized with the provided configuration and storage.
     ///
     pub fn new(config: &AppConfig, storage: Arc<std::sync::Mutex<Storage>>) -> Self {
-        trace!("Create new OPC UA structure");
-        //let server_builder = Self::create_server_builder();
+        trace!("Create new OPC UA server structure");
   
         OpcUa {
-        //    server_builder,
+            config: config.clone(),
+            storage
         }
     }
 
@@ -104,7 +108,7 @@ impl OpcUa {
                .get_namespace_index("urn:UpcUaGw")
                .unwrap();
 
-           Self::add_variables(
+           Self::add_nodes(
                ns,
                node_manager,
            );
@@ -198,33 +202,49 @@ fn create_limits() -> Limits {
 
     pub async fn run(mut self) -> Result<(), OpcGwError> {
         debug!("Running OPC UA server");
-        //let (server, handle) = Self::create_server_builder()
-        //    .build()
-        //    .map_err(|e| OpcGwError::OpcUaError(e.to_string()))?;
-        let server = Self::create_server();
-        debug!("Opc ua server is built");
-        info!("OPC UA server started on opc.tcp:://localhost:4840/");
-        server?.run().await.map_err(|e| OpcGwError::OpcUaError(e.to_string()));
-        info!("OPC UA server started on opc.tcp:://localhost:4840/"); //TODO: improve error handling
+        
+        // Error management for server creation
+        let server = match Self::create_server() {
+            Ok(server) => {
+                debug!("OPC UA server built");
+                server
+            },
+            Err(e) => {
+                error!("OPC UA server error: {}", e);
+                return Err(e);
+            }
+        };
+        
+        info!("OPC UA server started on opc.tcp:://localhost:4840/"); //TODO: make sure message display the url from parameters
+        match server.run().await {
+            Ok(_) => {
+                info!("OPC UA server stopped");
+                Ok(())
+            },
+            Err(e) => {
+                error!("Error w hile running OPC UA server {}", e);
+                Err(OpcGwError::OpcUaError(e.to_string()))
+            }
+        };
         Ok(())
     }
 
-    pub fn add_variables(
+    pub fn add_nodes( 
                          ns: u16,
                          manager: Arc<SimpleNodeManager>
     ) {
-        trace!("Add variables to OPC UA server");
+        trace!("Add nodes to OPC UA server");
         let address_space = manager.address_space();
         
         // For testing
         //TODO: load folders and variable from configuration
         let v1_node = NodeId::new(ns, "v1");
         let v2_node = NodeId::new(ns, "v2");
-        let v3_node = NodeId::new(ns, "v3");
-        let v4_node = NodeId::new(ns, "v4");
-        let v5_node = NodeId::new(ns, "v5");
-        
+
+        // The address spae is guarded so obtain a lock to change it
         let mut address_space = address_space.write();
+
+        // Create a folder
         let sample_folder_id = NodeId::new(ns, "SampleFolder");
         address_space.add_folder(
             &sample_folder_id,
@@ -232,7 +252,8 @@ fn create_limits() -> Limits {
             "SampleFolder",
             &NodeId::objects_folder_id(),
         );
-        
+
+        // Variables
         let _ = address_space.add_variables(
             vec![
                 Variable::new(&v1_node, "v1", "v1", 0_i32),
@@ -240,6 +261,9 @@ fn create_limits() -> Limits {
             ],
             &sample_folder_id,
         );
+        
+        
+
     }
 }
 
