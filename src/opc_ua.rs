@@ -65,7 +65,7 @@ impl OpcUa {
         }
     }
 
-    fn create_server() -> Result<Server, OpcGwError> {
+    fn create_server(&mut self) -> Result<Server, OpcGwError> {
         debug!("Configure Server");
 
         //TODO: configure server from opcua configuration file
@@ -86,10 +86,10 @@ impl OpcUa {
                 "demo",
             ));
 
-        let server_builder = Self::configure_network(server_builder);
-        let server_builder = Self::configure_key(server_builder);
-        let server_builder = Self::configure_user_token(server_builder);
-        let server_builder = Self::configure_end_points(server_builder);
+        let server_builder = self.configure_network(server_builder);
+        let server_builder = self.configure_key(server_builder);
+        let server_builder = self.configure_user_token(server_builder);
+        let server_builder = self.configure_end_points(server_builder);
 
         debug!("Creating server");
         let (server, handle) = server_builder
@@ -105,19 +105,19 @@ impl OpcUa {
         debug!("Creating namespace");
         let ns = handle.get_namespace_index("urn:UpcUaGw").unwrap();
 
-        Self::add_nodes(ns, node_manager);
+        self.add_nodes(ns, node_manager);
 
         Ok(server)
     }
 
-    fn configure_network(mut server_builder: ServerBuilder) -> ServerBuilder {
+    fn configure_network(&self, mut server_builder: ServerBuilder) -> ServerBuilder {
         debug!("Configure network");
         server_builder
             .hello_timeout(5)
             .host("localhost") //TODO: Use local ip address
             .port(4840)
     }
-    fn configure_key(mut server_builder: ServerBuilder) -> ServerBuilder {
+    fn configure_key(&self, mut server_builder: ServerBuilder) -> ServerBuilder {
         debug!("Configure key and pki");
         server_builder
             .create_sample_keypair(true)
@@ -128,7 +128,7 @@ impl OpcUa {
             .pki_dir("./pki")
     }
 
-    fn configure_user_token(mut server_builder: ServerBuilder) -> ServerBuilder {
+    fn configure_user_token(&self, mut server_builder: ServerBuilder) -> ServerBuilder {
         debug!("Configure user token");
         server_builder.add_user_token(
             "user1",
@@ -142,7 +142,7 @@ impl OpcUa {
         )
     }
 
-    fn configure_end_points(mut server_builder: ServerBuilder) -> ServerBuilder {
+    fn configure_end_points(&self, mut server_builder: ServerBuilder) -> ServerBuilder {
         debug!("Configure end points");
         server_builder
             .default_endpoint("null".to_string()) // The name of this enpoint has to be registered with add_endpoint
@@ -181,7 +181,7 @@ impl OpcUa {
             )
     }
 
-    fn create_limits() -> Limits {
+    fn create_limits(&self) -> Limits {
         todo!()
     }
 
@@ -189,7 +189,7 @@ impl OpcUa {
         debug!("Running OPC UA server");
 
         // Error management for server creation
-        let server = match Self::create_server() {
+        let server = match self.create_server() {
             Ok(server) => {
                 debug!("OPC UA server built");
                 server
@@ -214,7 +214,7 @@ impl OpcUa {
         Ok(())
     }
 
-    pub fn add_nodes(ns: u16, manager: Arc<SimpleNodeManager>) {
+    pub fn add_nodes(&mut self, ns: u16, manager: Arc<SimpleNodeManager>) {
         trace!("Add nodes to OPC UA server");
         let address_space = manager.address_space();
 
@@ -225,7 +225,19 @@ impl OpcUa {
 
         // The address spae is guarded so obtain a lock to change it
         let mut address_space = address_space.write();
-
+        
+        // Adding one folder per LoraWan application
+        for application in self.config.application_list.iter() {
+            debug!("Application {}", application.application_name);
+            let application_node = NodeId::new(ns, application.application_name.clone());
+            address_space.add_folder(
+                &application_node,
+                &application.application_name,
+                &application.application_name,
+                &NodeId::objects_folder_id(),
+            );
+        }
+        
         // Create a folder
         let sample_folder_id = NodeId::new(ns, "SampleFolder");
         address_space.add_folder(
