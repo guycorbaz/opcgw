@@ -2,21 +2,19 @@
 // Copyright (c) [2024] [Guy Corbaz]
 //! Manage communications with Chirpstack 4 server
 
-use crate::config::{AppConfig, ChirpstackPollerConfig, OpcMetricTypeConfig};
+use crate::config::{AppConfig, OpcMetricTypeConfig};
 use crate::utils::OpcGwError;
-use chirpstack_api::api::{DeviceState, GetDeviceMetricsRequest};
+use chirpstack_api::api::{GetDeviceMetricsRequest};
 use chirpstack_api::common::Metric;
 use log::{debug, error, trace, warn};
 use prost_types::Timestamp;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::fmt::format;
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Instant, SystemTime};
-use tokio::runtime::{Builder, Runtime};
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration};
 use tonic::codegen::InterceptedService;
 use tonic::service::Interceptor;
 use tonic::{transport::Channel, Request, Status};
@@ -27,7 +25,7 @@ use crate::storage::{ChirpstackStatus, MetricType, Storage};
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
 use chirpstack_api::api::{
-    ApplicationListItem, DeviceListItem, GetDeviceRequest, ListApplicationsRequest,
+    ApplicationListItem, DeviceListItem, ListApplicationsRequest,
     ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse,
 };
 
@@ -340,7 +338,7 @@ impl ChirpstackPoller {
 
         match result {
             Ok(_) => {
-                let chirpstack_status = ChirpstackStatus {
+                let _chirpstack_status = ChirpstackStatus {
                     server_available: true,
                     response_time: elapsed_secs,
                 };
@@ -348,7 +346,7 @@ impl ChirpstackPoller {
                 Ok(elapsed)
             }
             Err(error) => {
-                let chirpstack_status = ChirpstackStatus {
+                let _chirpstack_status = ChirpstackStatus {
                     server_available: false,
                     response_time: 0.0,
                 };
@@ -472,7 +470,7 @@ impl ChirpstackPoller {
         debug!("Polling chirpstack metrics");
 
         // Get list of applications from configuration
-        let app_list = self.config.application_list.clone();
+        //let app_list = self.config.application_list.clone();
 
         // Collect device IDs first
         let mut device_ids = Vec::new();
@@ -494,10 +492,10 @@ impl ChirpstackPoller {
                 )
                 .await?;
             // Parse metrics received from server
-            for metric in &dev_metrics.metrics.clone() {
-                trace!("Got chirpstack metrics:");
-                trace!("{:#?}", metric);
-                for (key, metric) in &dev_metrics.metrics {
+            for _metric in &dev_metrics.metrics.clone() {
+                //trace!("Got chirpstack metrics:");
+                //trace!("{:#?}", metric);
+                for (_key, metric) in &dev_metrics.metrics {
                     self.store_metric(&dev_id.clone(), &metric.clone());
                 }
             }
@@ -619,16 +617,16 @@ impl ChirpstackPoller {
         &self,
     ) -> Result<Vec<ApplicationDetail>, OpcGwError> {
         debug!("Get list of chirpstack applications");
-        trace!("Create request");
+        //trace!("Create request");
         let request = Request::new(ListApplicationsRequest {
             limit: 100, // Can be adjusted according to needs, but what does it means ?
             offset: 0,
             search: String::new(),
             tenant_id: self.config.chirpstack.tenant_id.clone(), // We work on only one tenant defined in parameter file
         });
-        trace!("Request created with: {:#?}", request);
+        //trace!("Request created with: {:#?}", request);
         let application_client = self.create_application_client().await?;
-        trace!("Send request");
+        //trace!("Send request");
         let response = application_client
             .clone()
             //.expect("Application client is not initialized")
@@ -666,7 +664,7 @@ impl ChirpstackPoller {
             order_by_desc: false,
             tags: HashMap::new(),
         });
-        trace!("Request created with: {:?}", request);
+        //trace!("Request created with: {:?}", request);
         let device_client = self.create_device_client().await?;
         trace!("Send request");
         let response = device_client
@@ -746,7 +744,7 @@ impl ChirpstackPoller {
                 warn!("Timeout: cannot reach chirpstack server");
             }
             match self.check_server_availability() {
-                Ok(t) => break,
+                Ok(_t) => break,
                 _ => {
                     warn!(
                         "{}",
@@ -762,7 +760,7 @@ impl ChirpstackPoller {
         trace!("Create device service client for Chirpstack");
         let mut device_client = self.create_device_client().await.unwrap();
 
-        trace!("Request created with: {:#?}", request);
+        //trace!("Request created with: {:#?}", request);
         match device_client.get_metrics(request).await {
             Ok(response) => {
                 let inner_response = response.into_inner();
@@ -773,11 +771,11 @@ impl ChirpstackPoller {
                     .map(|(key, value)| (key, value))
                     .collect();
 
-                let states: HashMap<String, DeviceState> = inner_response
-                    .states
-                    .into_iter()
-                    .map(|(key, value)| (key, value))
-                    .collect();
+                //let states: HashMap<String, DeviceState> = inner_response
+                //    .states
+                //    .into_iter()
+                //    .map(|(key, value)| (key, value))
+                //    .collect();
 
                 Ok(DeviceMetric { metrics })
             }

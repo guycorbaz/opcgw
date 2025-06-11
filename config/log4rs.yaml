@@ -11,7 +11,7 @@ appenders:
       pattern: "{d} - {l} - {t} - {m}{n}"
   opcuagw_log:
     kind: file
-    path: "log/opcuagw.log"
+    path: "log/opc_ua_gw.log"
     encoder:
       pattern: "{d} - {l} - {t} - {m}{n}"
   chirpstack_log:
@@ -30,17 +30,17 @@ appenders:
     encoder:
       pattern: "{d} - {l} - {t} - {m}{n}"
 root:
-  level: trace
+  level: debug
   appenders:
     - stdout
-    - opcgw_log
+    - opcuagw_log
 loggers:
-  opcgw:
+  opcgw::opc_ua:
     level: trace
     appenders:
-      - opcuagw_log
-  opcgw::opc_ua:
-    level: info
+      - opcua_log
+  opcua_server:
+    level: debug
     appenders:
       - opcua_log
   opcgw::chirpstack:

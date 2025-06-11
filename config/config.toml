@@ -13,7 +13,7 @@ debug = true
 #
 server_address = "http://192.168.1.12:8080"
 # API token defined on the chirpstack server
-api_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJjaGlycHN0YWNrIiwiaXNzIjoiY2hpcnBzdGFjayIsInN1YiI6ImIxMTBlMzg3LTNmZDYtNDUyOC1iNjJlLTFiMzI5NGNkMjQ0MiIsInR5cCI6ImtleSJ9.lGlnMUTdMxKA5rwfKToCjfk_mqUTqGMSsdF3BHktH40"
+api_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJjaGlycHN0YWNrIiwiaXNzIjoiY2hpcnBzdGFjayIsInN1YiI6ImVkNGY5YjExLTdjMGYtNGFiNi1hNmM2LWU2ZTJmN2IyMjQ3MyIsInR5cCI6ImtleSJ9.8MbM4zh7f-QnPFE5tsLUo1YzPU_8XWxHqhc9cOfxePw"
 # Tenant Id that will be used
 tenant_id = "52f14cd4-c6f1-4fbd-8f87-4025e1d49242"
 # Frequency to poll ChirpStack server in seconds
@@ -26,7 +26,21 @@ delay = 10
 
 # OPC UA parameters
 [opcua]
-config_file = "config/server.conf"
+application_name = "Chirpstack OPC UA Gateway"
+application_uri = "urn:chirpstack:opcua:gateway"
+product_uri = "urn:chirpstack:opcua:gateway"
+diagnostics_enabled = true
+#hello_timeout = 10
+#host_ip_address = "localhost"
+#host_port = 9090
+create_sample_keypair = true
+certificate_path = "own/cert.der"
+private_key_path = "private/private.pem"
+trust_client_cert = true
+check_cert_time = true
+pki_dir = "./pki"
+user_name = "user1"
+user_password = "user1"
 
 
 ###########################################################

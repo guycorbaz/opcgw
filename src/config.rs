@@ -13,7 +13,6 @@ use figment::{
 };
 use log::{debug, trace};
 use serde::Deserialize;
-use std::collections::HashMap;
 
 /// Structure for storing global application configuration  parameters.
 /// This might change in future
@@ -47,8 +46,36 @@ pub struct ChirpstackPollerConfig {
 /// in future
 #[derive(Debug, Deserialize, Clone)]
 pub struct OpcUaConfig {
-    /// Config file path for opc ua server
-    pub config_file: String,
+    /// OPC UA application name
+    pub application_name: String,
+    /// OPC UA application URI
+    pub application_uri: String,
+    /// OPC UA product URI
+    pub product_uri: String,
+    /// activate/deactivate async opcua diagnostics
+    pub diagnostics_enabled: bool,
+    /// TCP hello time
+    pub hello_timeout: Option<u32>,
+    /// IP address of the opcua server
+    pub host_ip_address: Option<String>,
+    /// Port of the opcua server
+    pub host_port: Option<u16>,
+    /// Activate/deactivate automatic creation of a new certificate
+    pub create_sample_keypair: bool,
+    /// Path of the certificate
+    pub certificate_path: String,
+    /// Path of the private key
+    pub private_key_path: String,
+    /// Activate/deactive trusting the client certificate
+    pub trust_client_cert: bool,
+    /// Activate/deactive checking the certificate validity
+    pub check_cert_time: bool,
+    /// Path of the pki certificates
+    pub pki_dir: String,
+    /// Username of the opcua server
+    pub user_name: String,
+    /// Password of the opcua server
+    pub user_password: String,
 }
 
 /// Chirpstack application description
@@ -118,7 +145,7 @@ impl AppConfig {
     /// Creates a new instance of `AppConfig` by reading the configuration from a TOML file and environment variables.
     ///
     /// This function performs the following steps:
-    /// 1. Retrieves the configuration file path from the `CONFIG_PATH` environment variable, or defaults to "config/default.toml" if not set.
+    /// 1. Retrieves the configuration file path from the `CONFIG_PATH` environment variable, or defaults to "config/config.toml" if not set.
     /// 2. Uses the `Figment` library to read the configuration from the TOML file and merge it with environment variables prefixed with `OPCGW_`.
     /// 3. Extracts the configuration and handles any errors that may occur during this process.
     ///
@@ -133,7 +160,7 @@ impl AppConfig {
 
         // Define config file path
         let config_path = std::env::var("CONFIG_PATH")
-            .unwrap_or_else(|_| format!("{}/default.toml", OPCGW_CONFIG_PATH).to_string());
+            .unwrap_or_else(|_| format!("{}/config.toml", OPCGW_CONFIG_PATH).to_string());
 
         // Reading the configuration
         trace!("with config path: {}", config_path);
@@ -143,7 +170,7 @@ impl AppConfig {
             .extract()
             .map_err(|e| OpcGwError::ConfigurationError(format!("Connexion error: {}", e)))?;
         //trace!("config: {:#?}", config);
-        Ok({ config })
+        Ok(config)
     }
 
     /// This function retrieves the application name corresponding
@@ -335,7 +362,7 @@ mod tests {
     /// Loads the application configuration from a TOML file.
     ///
     /// The configuration file path is determined by the `CONFIG_PATH` environment variable.
-    /// If this environment variable is not set, it defaults to "tests/config/default.toml".
+    /// If this environment variable is not set, it defaults to "tests/config/config.toml".
     ///
     /// # Returns
     ///
@@ -345,8 +372,11 @@ mod tests {
     ///
     /// This function will panic if the configuration file cannot be loaded or parsed.
     fn get_config() -> AppConfig {
-        let config_path = std::env::var("CONFIG_PATH")
-            .unwrap_or_else(|_| "tests/config/default.toml".to_string());
+        let current_dir = std::env::current_dir().unwrap();
+        println!("Current working directory: {:?}", current_dir);
+        let config_path =
+            std::env::var("CONFIG_PATH").unwrap_or_else(|_| "tests/config/config.toml".to_string());
+        debug!("Loading config from {}", config_path);
         let config: AppConfig = Figment::new()
             .merge(Toml::file(&config_path))
             .extract()
@@ -474,18 +504,6 @@ mod tests {
     /// let config = get_config();
     /// assert_eq!(config.opcua.config_file, "server.conf");
     /// ```
-    #[test]
-    fn test_opcua_config() {
-        let config = get_config();
-        assert_eq!(config.opcua.config_file, "server.conf");
-    }
-
-    /// This test ensures the integrity of the application configuration.
-    /// The test performs the following checks:
-    /// 1. Verifies that the configuration loads at least one application.
-    /// 2. Checks if the application name retrieved for 'application_1' matches "Application01".
-    /// 3. Checks if the application name retrieved for 'application_2' matches "Application02".
-    /// 4. Verifies that the application ID for "Application02" is correctly retrieved as 'application_2'.
     #[test]
     fn test_application_config() {
         let config = get_config();

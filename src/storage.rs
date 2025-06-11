@@ -377,7 +377,7 @@ mod tests {
     ///
     /// This function attempts to load the application configuration from a file
     /// specified by the environment variable `CONFIG_PATH`. If the environment
-    /// variable is not set, it defaults to `"tests/config/default.toml"`.
+    /// variable is not set, it defaults to `"tests/config/config.toml"`.
     ///
     /// The configuration is loaded using the `Figment` library, which merges the
     /// TOML file contents into a configuration structure of type `AppConfig`.
@@ -392,8 +392,8 @@ mod tests {
     /// * `AppConfig` - The application configuration.
     ///
     fn get_config() -> AppConfig {
-        let config_path = std::env::var("CONFIG_PATH")
-            .unwrap_or_else(|_| "tests/config/default.toml".to_string());
+        let config_path =
+            std::env::var("CONFIG_PATH").unwrap_or_else(|_| "tests/config/config.toml".to_string());
         let config: AppConfig = Figment::new()
             .merge(Toml::file(&config_path))
             .extract()

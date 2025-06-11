@@ -6,12 +6,15 @@
 
 #![allow(unused)]
 
-/// opc ua address space in which chirpstack variables
-/// are registered in
 pub const OPCUA_ADDRESS_SPACE: &str = "urn:chirpstack_opcua";
+pub const OPCUA_NAMESPACE_URI: &str = "urn:UpcUaG";
+pub const OPCUA_DEFAULT_NETWORK_TIMEOUT: u32 = 5;
+pub const OPCUA_DEFAULT_IP_ADDRESS: &str = "127.0.0.1";
+pub const OPCUA_DEFAULT_PORT: u16 = 4840;
 
 /// Configuration files are stored in the following folder
 pub const OPCGW_CONFIG_PATH: &str = "config";
+pub const OPCGW_CONFIG_FILE: &str = "config.toml";
 
 /// Chirpstack metrics configuration
 /// opcgw chirpstack server name
