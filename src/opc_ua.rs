@@ -236,6 +236,17 @@ impl OpcUa {
                 &application.application_name,
                 &NodeId::objects_folder_id(),
             );
+            // Add devices into folders
+            for device in application.device_list.iter() {
+                debug!("Device {}", device.device_name);
+                let device_node = NodeId::new(ns, device.device_name.clone());
+                address_space.add_folder(
+                    &device_node,
+                    &device.device_name,
+                    &device.device_name,
+                    &application_node,
+                );
+            }
         }
         
         // Create a folder
