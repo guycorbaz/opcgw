@@ -246,6 +246,17 @@ impl OpcUa {
                     &device.device_name,
                     &application_node,
                 );
+                // Add metrics into devices
+                for metric in device.metric_list.iter() {
+                    debug!("Metric {}", metric.metric_name);
+                    let metric_node = NodeId::new(ns, metric.metric_name.clone());
+                    let _ =address_space.add_variables(
+                        vec![
+                            Variable::new(&metric_node, metric.metric_name.clone(), metric.metric_name.clone(), 0_i32),
+                        ],
+                        &device_node,
+                    );
+                }
             }
         }
         
