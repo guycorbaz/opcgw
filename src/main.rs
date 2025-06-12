@@ -7,7 +7,16 @@
 //! Network Server with OPC UA clients. It polls device data from ChirpStack and
 //! exposes it through an OPC UA server interface for industrial automation systems.
 //!
-
+//! # Architecture
+//!
+//! The gateway consists of two main components running concurrently:
+//! - **ChirpStack Poller**: Polls device data from ChirpStack LoRaWAN Network Server
+//! - **OPC UA Server**: Exposes the collected data through an OPC UA interface
+//!
+//! # Configuration
+//!
+//! The application uses a configuration file and supports command-line arguments
+//! for customization. Logging is configured via log4rs.
 
 
 mod chirpstack;
@@ -16,6 +25,10 @@ mod opc_ua;
 mod storage;
 mod utils;
 
+/// ChirpStack API protobuf definitions
+///
+/// This module would contain the generated protobuf code for ChirpStack API.
+/// Currently commented out - uncomment when protobuf generation is set up.
 
 pub mod chirpstack_api {
     //tonic::include_proto!("chirpstack");
@@ -31,81 +44,49 @@ use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc};
 use utils::OPCGW_CONFIG_PATH;
 
-/// Command-line arguments for the ChirpStack to OPC UA Gateway.
-///
-/// This structure defines the available command-line options for configuring
-/// the gateway's behavior at startup.
+
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Set custom configuration file path
+    /// Path to the configuration file
     ///
-    /// Specifies an alternative location for the configuration file.
-    /// If not provided, the default configuration path will be used.
+    /// If not specified, the application will use the default configuration
+    /// file location defined by the application.
     #[arg(short, long, value_name = "FILE")]
     config: Option<PathBuf>,
 
-    /// Enable debug logging with increasing verbosity
+    /// Debug verbosity level
     ///
-    /// Use multiple times to increase debug level:
-    /// - `-d`: Basic debug information
-    /// - `-dd`: Verbose debug information
-    /// - `-ddd`: Very verbose debug information
+    /// Use multiple times to increase verbosity (e.g., -d, -dd, -ddd).
+    /// This controls the logging level for debugging purposes.
     #[arg(short, long, action = clap::ArgAction::Count)]
     debug: u8,
 }
 
-/// Main entry point for the ChirpStack to OPC UA Gateway application.
+/// Main entry point for the ChirpStack to OPC UA Gateway
 ///
-/// This function initializes and orchestrates the complete gateway system by:
-/// 1. Parsing command-line arguments
-/// 2. Configuring the logging system
-/// 3. Loading application configuration
-/// 4. Creating shared storage for inter-task communication
-/// 5. Initializing ChirpStack poller and OPC UA server
-/// 6. Running both services concurrently
-///
-/// # Architecture
-///
-/// The application uses a concurrent architecture with two main tasks:
-/// - **ChirpStack Poller Task**: Periodically polls device data from ChirpStack
-/// - **OPC UA Server Task**: Serves real-time device metrics to OPC UA clients
-///
-/// Both tasks share access to a thread-safe storage system that acts as a
-/// data bridge between the ChirpStack API and OPC UA address space.
-///
-/// # Error Handling
-///
-/// The function handles initialization errors by panicking with descriptive
-/// messages. Runtime errors from individual tasks are logged but do not
-/// terminate the entire application unless both tasks fail.
+/// This function:
+/// 1. Parses command line arguments
+/// 2. Initializes logging configuration
+/// 3. Loads application configuration
+/// 4. Creates shared storage for data exchange
+/// 5. Starts ChirpStack poller and OPC UA server in separate tasks
+/// 6. Waits for both tasks to complete
 ///
 /// # Returns
 ///
-/// * `Ok(())` - Application completed successfully
-/// * `Err(Box<dyn std::error::Error>)` - Critical initialization error occurred
+/// Returns `Ok(())` on successful completion, or an error if any component fails to initialize.
 ///
 /// # Panics
 ///
 /// This function will panic if:
-/// - Logger initialization fails
-/// - Application configuration cannot be loaded
-/// - ChirpStack poller creation fails
-/// - Task spawning fails
-///
-/// # Examples
-///
-/// ```bash
-/// # Run with default configuration
-/// opcgw
-///
-/// # Run with custom config and debug logging
-/// opcgw --config /etc/opcgw/config.toml --debug
-/// ```
+/// - The configuration cannot be loaded
+/// - The ChirpStack poller cannot be created
+/// - The logger cannot be initialized
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse arguments
-    let args = Args::parse();
+    let _args = Args::parse();
 
     // Configure logger
     log4rs::init_file(

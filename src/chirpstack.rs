@@ -1,6 +1,31 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) [2024] [Guy Corbaz]
-//! Manage communications with Chirpstack 4 server
+
+//! ChirpStack Communication Module
+//!
+//! This module manages communications with ChirpStack 4 server, providing functionality
+//! to poll device metrics, retrieve application and device lists, and handle authentication
+//! for gRPC connections.
+//!
+//! # Architecture
+//!
+//! The module provides:
+//! - **ChirpstackPoller**: Main polling service for device metrics
+//! - **AuthInterceptor**: gRPC authentication interceptor 
+//! - **Data Structures**: Representations for applications, devices, and metrics
+//!
+//! # Usage
+//!
+//! ```rust,no_run
+//! use crate::chirpstack::ChirpstackPoller;
+//! use std::sync::{Arc, Mutex};
+//!
+//! let config = AppConfig::new().unwrap();
+//! let storage = Arc::new(Mutex::new(Storage::new(&config)));
+//! let mut poller = ChirpstackPoller::new(&config, storage).await.unwrap();
+//! poller.run().await.unwrap();
+//!
+
 
 use crate::config::{AppConfig, OpcMetricTypeConfig};
 use crate::utils::OpcGwError;
@@ -29,7 +54,11 @@ use chirpstack_api::api::{
     ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse,
 };
 
-/// Structure representing a chirpstack application.
+/// Structure representing a ChirpStack application.
+///
+/// Contains metadata about a ChirpStack application including its unique identifier,
+/// name, and description. This structure is used when retrieving application lists
+/// from the ChirpStack server.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ApplicationDetail {
     /// Unique application identifier
@@ -41,6 +70,9 @@ pub struct ApplicationDetail {
 }
 
 /// Represents details of a device in a list format.
+///
+/// Contains essential information about a LoRaWAN device retrieved from ChirpStack.
+/// Used when listing devices within an application.
 #[derive(Debug, Deserialize, Clone)]
 pub struct DeviceListDetail {
     /// The unique identifier for the device (DevEUI).
@@ -52,37 +84,56 @@ pub struct DeviceListDetail {
 }
 
 /// Represents metrics and states for a device.
+///
+/// Contains a collection of metrics retrieved from ChirpStack for a specific device.
+/// Each metric is identified by a name and contains the actual metric data.
 #[derive(Debug, Deserialize, Clone)]
 pub struct DeviceMetric {
-    /// A map of metric names to their corresponding Metric objects.
+    /// A map of metric names to their corresponding Metric objects
+    ///
+    /// The key is the metric name (e.g., "temperature", "humidity") and the value
+    /// contains the actual metric data including timestamps and values.
     pub metrics: HashMap<String, Metric>,
     // A map of state names to their corresponding DeviceState objects.
     //pub states: HashMap<String, DeviceState>,
 }
 
-/// Definition of the interceptor for passing
-/// authentication token to Chirpstack server
+/// gRPC authentication interceptor for ChirpStack API calls.
+///
+/// This interceptor automatically adds the Bearer authentication token to all
+/// gRPC requests made to the ChirpStack server. The token is configured through
+/// the application configuration.
 #[derive(Clone)]
 struct AuthInterceptor {
-    /// Chirpstack API token
+    /// ChirpStack API token used for authentication
     api_token: String,
 }
 
-/// This method is called to intercept a gRPC request and injects an authorization token into the request's metadata.
-///
-/// # Arguments
-///
-/// * `request` - The incoming gRPC request that will be intercepted.
-///
-/// # Returns
-///
-/// * `Result<Request<()>, Status>` - Returns the modified request with the authorization token added to its metadata,
-///   or an error status if the token insertion fails.
-///
-/// # Errors
-///
-/// This method will panic if the authorization token cannot be parsed.
 impl Interceptor for AuthInterceptor {
+    /// Intercepts gRPC requests and injects the authorization token.
+    ///
+    /// This method is called automatically by the gRPC client to add authentication
+    /// headers to requests before they are sent to the ChirpStack server.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The incoming gRPC request that will be intercepted
+    ///
+    /// # Returns
+    ///
+    /// * `Result<Request<()>, Status>` - Returns the modified request with the authorization 
+    ///   token added to its metadata, or an error status if the token insertion fails
+    ///
+    /// # Panics
+    ///
+    /// This method will panic if the authorization token cannot be parsed into valid metadata.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// // This method is called automatically by the gRPC framework
+    /// // No manual invocation is typically required
+    /// ```
     fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
         debug!("Interceptor::call");
         request.metadata_mut().insert(
@@ -103,41 +154,67 @@ impl Interceptor for AuthInterceptor {
     }
 }
 
-/// Chirpstack poller
+/// ChirpStack polling service for device metrics.
+///
+/// The main service responsible for polling device metrics from ChirpStack server
+/// at configured intervals. It manages gRPC connections, handles authentication,
+/// and stores retrieved metrics in shared storage.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use crate::chirpstack::ChirpstackPoller;
+/// use std::sync::{Arc, Mutex};
+///
+/// async fn example() -> Result<(), Box<dyn std::error::Error>> {
+///     let config = AppConfig::new()?;
+///     let storage = Arc::new(Mutex::new(Storage::new(&config)));
+///     let mut poller = ChirpstackPoller::new(&config, storage).await?;
+///     poller.run().await?;
+///     Ok(())
+/// }
+/// ```
 #[derive(Clone)]
 pub struct ChirpstackPoller {
-    /// Configuration for the ChirpStack connection.
+    /// Configuration for the ChirpStack connection and polling behavior
     config: AppConfig,
-    /// Metrics list
+    /// Shared storage for collected metrics, protected by Arc<Mutex<>>
     pub storage: Arc<std::sync::Mutex<Storage>>,
 }
 
 impl ChirpstackPoller {
-    /// Asynchronously creates a new Chirpstack connection using the provided configuration and storage.
+    /// Creates a new ChirpStack poller instance.
     ///
-    /// This function establishes a connection to the Chirpstack server and prepares clients for
-    /// interacting with Chirpstack devices and applications. It utilizes an authentication interceptor
-    /// for securing the API communications.
+    /// Initializes a new poller with the provided configuration and storage reference.
+    /// This function prepares the poller for connecting to ChirpStack but does not
+    /// establish the connection immediately.
     ///
     /// # Arguments
     ///
-    /// * `config` - A reference to the application configuration.
-    /// * `storage` - A shared reference-counted, thread-safe storage.
+    /// * `config` - Application configuration containing ChirpStack server details
+    /// * `storage` - Shared storage for metrics data
     ///
     /// # Returns
     ///
-    /// `Result<Self, OpcGwError>` - Returns an instance of `ChirpstackPoller` on success, or an `OpcGwError` on failure.
+    /// `Result<Self, OpcGwError>` - Returns a new `ChirpstackPoller` instance on success,
+    /// or an `OpcGwError` if initialization fails
     ///
     /// # Errors
     ///
-    /// This function will return an `OpcGwError` if it fails to connect to the Chirpstack server.
+    /// Currently this function cannot fail, but returns a Result for future extensibility
+    /// when connection validation might be added during initialization.
     ///
-    /// # Example
+    /// # Examples
     ///
-    /// ```
-    /// let config = AppConfig::new();
-    /// let storage = Arc::new(Mutex::new(Storage::new()));
-    /// let poller = ChirpstackPoller::new(&config, storage.clone()).await?;
+    /// ```rust,no_run
+    /// use crate::chirpstack::ChirpstackPoller;
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// async fn create_poller() -> Result<ChirpstackPoller, OpcGwError> {
+    ///     let config = AppConfig::new().unwrap();
+    ///     let storage = Arc::new(Mutex::new(Storage::new(&config)));
+    ///     ChirpstackPoller::new(&config, storage).await
+    /// }
     /// ```
     pub async fn new(config: &AppConfig, storage: Arc<Mutex<Storage>>) -> Result<Self, OpcGwError> {
         debug!("Create a new Chirpstack poller");
@@ -148,20 +225,26 @@ impl ChirpstackPoller {
         })
     }
 
-    /// Asynchronously creates a channel for communication with the ChirpStack server.
+    /// Creates a gRPC channel for communication with the ChirpStack server.
     ///
-    /// # Errors
-    ///
-    /// Returns an `OpcGwError` if the creation or connection of the channel fails.
+    /// Establishes a gRPC channel to the ChirpStack server using the configured
+    /// server address. This channel is used for all subsequent API calls.
     ///
     /// # Returns
     ///
-    /// An `Ok` variant containing the `tonic::transport::Channel` if successful, else an error variant.
+    /// `Result<tonic::transport::Channel, OpcGwError>` - Returns a configured gRPC channel
+    /// on success, or an error if the channel creation or connection fails
     ///
-    /// # Example
+    /// # Errors
     ///
-    /// ```rust
-    /// let channel = self.create_channel().await?;
+    /// Returns `OpcGwError::ConfigurationError` if:
+    /// - The server address format is invalid
+    /// - The connection to the server fails
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// let channel = poller.create_channel().await?;
     /// ```
     async fn create_channel(&self) -> Result<tonic::transport::Channel, OpcGwError> {
         debug!("Create channel");
@@ -177,13 +260,20 @@ impl ChirpstackPoller {
         Ok(channel)
     }
 
-    /// Creates an authentication interceptor.
+    /// Creates an authentication interceptor for gRPC requests.
     ///
-    /// This method initializes and returns an `AuthInterceptor`
-    /// instance configured with the API token from the chirpstack configuration.
+    /// Initializes an authentication interceptor that will automatically add
+    /// the Bearer token to all gRPC requests sent to the ChirpStack server.
     ///
     /// # Returns
-    /// An `AuthInterceptor` instance with the configured API token.
+    ///
+    /// An `AuthInterceptor` instance configured with the API token from the configuration
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// let interceptor = poller.create_interceptor();
+    /// ```
     fn create_interceptor(&self) -> AuthInterceptor {
         debug!("Create interceptor");
         AuthInterceptor {
@@ -191,25 +281,27 @@ impl ChirpstackPoller {
         }
     }
 
-    /// Asynchronously creates a new ApplicationServiceClient with an interceptor.
+    /// Creates a ChirpStack ApplicationService client with authentication.
     ///
-    /// This function initializes a communication channel and attaches an authentication interceptor to it,
-    /// then creates and returns an ApplicationServiceClient. In case of any error during the creation of the
-    /// channel, it returns an `OpcGwError`.
+    /// Initializes a gRPC client for the ChirpStack ApplicationService, which is used
+    /// to manage applications and retrieve application-related information.
     ///
     /// # Returns
     ///
-    /// * `Ok(ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>)` - On successful creation of the client.
-    /// * `Err(OpcGwError)` - If there is an error while creating the channel.
+    /// `Result<ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>, OpcGwError>`
+    /// - Returns a configured application service client on success
+    /// - Returns an error if the channel creation fails
     ///
     /// # Errors
     ///
-    /// This function will return an error if the `self.create_channel().await` step fails.
+    /// This function will return an error if `create_channel()` fails.
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let client = instance.create_application_client().await?;
+    /// ```rust,no_run
+    /// let app_client = poller.create_application_client().await?;
+    /// let request = Request::new(ListApplicationsRequest { /* ... */ });
+    /// let response = app_client.list(request).await?;
     /// ```
     async fn create_application_client(
         &self,
@@ -227,28 +319,27 @@ impl ChirpstackPoller {
         Ok(application_client)
     }
 
-    /// Asynchronously creates a client for interacting with the device service.
+    /// Creates a ChirpStack DeviceService client with authentication.
     ///
-    /// This function initiates the creation of a DeviceServiceClient by
-    /// establishing a gRPC channel and attaching an authentication interceptor.
+    /// Initializes a gRPC client for the ChirpStack DeviceService, which is used
+    /// to manage devices, retrieve device information, and fetch device metrics.
     ///
     /// # Returns
     ///
-    /// A `Result` which is:
-    /// - `Ok` containing `DeviceServiceClient<InterceptedService<Channel, AuthInterceptor>>`
-    ///   if the client was successfully created.
-    /// - `Err(OpcGwError)` if there was an error in creating the channel or any other failure.
+    /// `Result<DeviceServiceClient<InterceptedService<Channel, AuthInterceptor>>, OpcGwError>`
+    /// - Returns a configured device service client on success
+    /// - Returns an error if the channel creation fails
     ///
     /// # Errors
     ///
-    /// This function will return an error if:
-    /// - The underlying `create_channel` function fails.
-    /// - Any other error occurs during client creation.
+    /// This function will return an error if `create_channel()` fails.
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let client = self.create_device_client().await?;
+    /// ```rust,no_run
+    /// let device_client = poller.create_device_client().await?;
+    /// let request = Request::new(GetDeviceMetricsRequest { /* ... */ });
+    /// let response = device_client.get_metrics(request).await?;
     /// ```
     async fn create_device_client(
         &self,
@@ -266,31 +357,30 @@ impl ChirpstackPoller {
         Ok(application_client)
     }
 
-    /// Checks the availability of the server by attempting to ping its IP address.
+    /// Checks the availability of the ChirpStack server.
     ///
-    /// This function extracts the IP address of the server and then pings it to check its availability.
-    /// It handles any errors that may occur during the extraction of the IP address or the ping operation.
+    /// Performs a TCP connection test to the ChirpStack server to verify its availability
+    /// and measure response time. This is useful for connection validation before
+    /// attempting gRPC calls.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` if the server is available and the ping operation is successful.
-    /// - `Err(OpcGwError)` if the IP address cannot be extracted or the ping operation fails.
+    /// `Result<Duration, OpcGwError>` - Returns the connection time on success,
+    /// or an error if the server is not reachable
     ///
     /// # Errors
     ///
-    /// - Returns `OpcGwError::ChirpStackError` if the ping operation fails.
+    /// Returns `OpcGwError` if:
+    /// - The server address cannot be parsed
+    /// - The TCP connection fails
+    /// - The host or port cannot be extracted from the server address
     ///
-    /// # Panics
+    /// # Examples
     ///
-    /// - Panics if the IP address cannot be extracted from the server.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// let opc_gw = OpcGateway::new();
-    /// match opc_gw.check_server_availability() {
-    ///     Ok(_) => println!("Server is available"),
-    ///     Err(e) => println!("Server is not available: {:?}", e),
+    /// ```rust,no_run
+    /// match poller.check_server_availability() {
+    ///     Ok(duration) => println!("Server responded in {:?}", duration),
+    ///     Err(e) => println!("Server unavailable: {:?}", e),
     /// }
     /// ```
     fn check_server_availability(&self) -> Result<Duration, OpcGwError> {
@@ -359,16 +449,29 @@ impl ChirpstackPoller {
         }
     }
 
-    /// Extracts the IP address from the Chirpstack server address provided in the configuration.
+    /// Extracts the IP address from the ChirpStack server address.
     ///
-    /// This method attempts to parse the server address from the configuration as a URL,
-    /// and extracts the host part as an IP address. If successful, it returns the extracted
-    /// IP address. If the parsing fails or if the host is not an IP address, it returns an error.
+    /// Parses the configured server address as a URL and extracts the host portion
+    /// as an IP address. This is useful for network diagnostics and validation.
     ///
     /// # Returns
     ///
-    /// * `Ok(IpAddr)` - If the IP address is successfully extracted from the server address.
-    /// * `Err(OpcGwError)` - If there is an error in parsing the URL or the IP address.
+    /// `Result<IpAddr, OpcGwError>` - Returns the extracted IP address on success,
+    /// or an error if parsing fails
+    ///
+    /// # Errors
+    ///
+    /// Returns `OpcGwError::ConfigurationError` if:
+    /// - The server address cannot be parsed as a URL
+    /// - The host portion is not a valid IP address
+    /// - No host is found in the server address
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// let ip = poller.extract_ip_address()?;
+    /// println!("ChirpStack server IP: {}", ip);
+    /// ```
     fn extract_ip_address(&self) -> Result<IpAddr, OpcGwError> {
         debug!(
             "Extract chirpstack server ip address from {}",
@@ -404,21 +507,29 @@ impl ChirpstackPoller {
         }
     }
 
-    /// Runs the ChirpStack client poller at a specified interval defined in the configuration.
+    /// Runs the ChirpStack polling service continuously.
     ///
-    /// The poller continuously invokes the `poll_metrics` function to fetch device metrics.
-    /// If an error occurs during polling, it logs an error message but continues retrying
-    /// after waiting for the specified duration.
+    /// Starts the main polling loop that retrieves device metrics from ChirpStack
+    /// at the configured interval. The loop continues indefinitely, handling errors
+    /// gracefully by logging them and continuing with the next polling cycle.
+    ///
+    /// # Returns
+    ///
+    /// `Result<(), OpcGwError>` - This function runs indefinitely, so it only returns
+    /// an error if there's a fundamental configuration issue
     ///
     /// # Errors
-    /// Returns an `OpcGwError` if an error occurs during polling.
+    ///
+    /// Individual polling errors are logged but do not stop the service. The function
+    /// only returns an error for critical configuration issues.
     ///
     /// # Examples
-    /// ```rust
-    /// use your_crate::YourStruct;
-    /// // Assumes you have appropriate initializations as per your implementation.
-    /// let mut your_instance = YourStruct::new();
-    /// your_instance.run().await?;
+    ///
+    /// ```rust,no_run
+    /// async fn start_polling() -> Result<(), OpcGwError> {
+    ///     let mut poller = ChirpstackPoller::new(&config, storage).await?;
+    ///     poller.run().await // Runs indefinitely
+    /// }
     /// ```
     pub async fn run(&mut self) -> Result<(), OpcGwError> {
         debug!(
@@ -443,29 +554,33 @@ impl ChirpstackPoller {
         }
     }
 
-    /// Asynchronously polls metrics for all devices in the configured application list.
+    /// Polls metrics for all configured devices.
     ///
-    /// This function first collects all device IDs from the applications specified
-    /// in the configuration. It then fetches metrics for each device by calling
-    /// `get_device_metrics_from_server` and stores the received metrics using
-    /// `store_metric`.
+    /// Retrieves device metrics from ChirpStack for all devices specified in the
+    /// configuration. For each device, it fetches the latest metrics and stores
+    /// them in the shared storage for access by other components.
+    ///
+    /// # Returns
+    ///
+    /// `Result<(), OpcGwError>` - Returns Ok on successful completion of polling cycle,
+    /// or an error if metric retrieval fails
     ///
     /// # Errors
-    /// Returns `OpcGwError` if there is an error in fetching the device metrics.
     ///
-    /// # Example
+    /// Returns `OpcGwError` if there's an error fetching metrics from the ChirpStack server.
     ///
-    /// ```rust,ignore
-    /// let mut metrics_poller = MyMetricsPoller::new(config);
-    /// metrics_poller.poll_metrics().await?;
+    /// # Process
+    ///
+    /// 1. Collects all device IDs from the configured applications
+    /// 2. For each device, requests metrics from ChirpStack
+    /// 3. Stores received metrics in the shared storage
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// // Called automatically by run(), but can be called manually for testing
+    /// poller.poll_metrics().await?;
     /// ```
-    ///
-    /// # Async
-    /// This function is asynchronous and should be awaited.
-    ///
-    /// # Logging
-    /// - Logs a debug message at the start of the function.
-    /// - Logs the fetched metrics at trace level.
     async fn poll_metrics(&mut self) -> Result<(), OpcGwError> {
         debug!("Polling chirpstack metrics");
 
@@ -503,21 +618,35 @@ impl ChirpstackPoller {
         Ok(())
     }
 
-    /// Runs the ChirpStack client poller at a specified interval defined in the configuration.
+    /// Stores a device metric in the shared storage.
     ///
-    /// The poller continuously invokes the `poll_metrics` function to fetch device metrics.
-    /// If an error occurs during polling, it logs an error message but continues retrying
-    /// after waiting for the specified duration.
+    /// Processes a metric received from ChirpStack and stores it in the appropriate
+    /// format in the shared storage. The metric is converted to the correct type
+    /// based on the configuration.
     ///
-    /// # Errors
-    /// Returns an `OpcGwError` if an error occurs during polling.
+    /// # Arguments
+    ///
+    /// * `device_id` - The unique identifier of the device
+    /// * `metric` - The metric data received from ChirpStack
+    ///
+    /// # Process
+    ///
+    /// 1. Determines the expected metric type from configuration
+    /// 2. Converts the metric value to the appropriate type (Bool, Int, Float, String)
+    /// 3. Stores the converted value in the shared storage
+    ///
+    /// # Type Conversions
+    ///
+    /// - **Bool**: 0.0 → false, 1.0 → true
+    /// - **Int**: Converts float to i64
+    /// - **Float**: Stores as f64
+    /// - **String**: Not yet implemented
     ///
     /// # Examples
-    /// ```rust
-    /// use your_crate::YourStruct;
-    /// // Assumes you have appropriate initializations as per your implementation.
-    /// let mut your_instance = YourStruct::new();
-    /// your_instance.run().await?;
+    ///
+    /// ```rust,no_run
+    /// // Called automatically during polling
+    /// poller.store_metric(&device_id, &metric);
     /// ```
     pub fn store_metric(&self, device_id: &String, metric: &Metric) {
         debug!("Store chirpstack device metric in storage");
@@ -574,13 +703,6 @@ impl ChirpstackPoller {
                         .to_string()
                     );
                 }
-                _ => {
-                    warn!(
-                        "{}",
-                        OpcGwError::ChirpStackError("Wrong chirpstack metric name".to_string())
-                            .to_string()
-                    );
-                }
             },
             None => {
                 warn!(
@@ -594,25 +716,32 @@ impl ChirpstackPoller {
         };
     }
 
-    /// Retrieves the list of applications from the server.
+    /// Retrieves the list of applications from the ChirpStack server.
     ///
-    /// This asynchronous function sends a request to the application server to obtain a list of applications
-    /// associated with a specific tenant. The request includes parameters for limiting the number of applications
-    /// retrieved (`limit`), and an offset value to specify the starting point in the list of applications. The `tenant_id`
-    /// is used to specify the tenant for which the applications are being requested.
+    /// Sends a request to the ChirpStack ApplicationService to obtain a list of all
+    /// applications associated with the configured tenant. This is useful for
+    /// discovering available applications and their metadata.
     ///
     /// # Returns
-    /// A result containing a vector of `ApplicationDetail` on success, or an `OpcGwError` on failure.
+    ///
+    /// `Result<Vec<ApplicationDetail>, OpcGwError>` - Returns a vector of application
+    /// details on success, or an error if the request fails
     ///
     /// # Errors
-    /// Returns `OpcGwError::ChirpStackError` if there is an error while collecting the application list.
     ///
-    /// # Example
-    /// ```rust
-    /// let applications = my_instance.get_applications_list_from_server().await?;
+    /// Returns `OpcGwError::ChirpStackError` if:
+    /// - The gRPC client cannot be created
+    /// - The server request fails
+    /// - Authentication fails
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// let applications = poller.get_applications_list_from_server().await?;
+    /// for app in applications {
+    ///     println!("Application: {} ({})", app.application_name, app.application_id);
+    /// }
     /// ```
-    ///
-    /// Note: Ensure that the application client is initialized before calling this function.
     pub async fn get_applications_list_from_server(
         &self,
     ) -> Result<Vec<ApplicationDetail>, OpcGwError> {
@@ -644,7 +773,37 @@ impl ChirpstackPoller {
         Ok(applications)
     }
 
-    /// Get device list from Chirpstack server
+    /// Retrieves the list of devices for a specific application.
+    ///
+    /// Sends a request to the ChirpStack DeviceService to obtain a list of all
+    /// devices within the specified application. This provides device metadata
+    /// including DevEUI, name, and description.
+    ///
+    /// # Arguments
+    ///
+    /// * `application_id` - The unique identifier of the application whose devices to retrieve
+    ///
+    /// # Returns
+    ///
+    /// `Result<Vec<DeviceListDetail>, OpcGwError>` - Returns a vector of device details
+    /// on success, or an error if the request fails
+    ///
+    /// # Errors
+    ///
+    /// Returns `OpcGwError::ChirpStackError` if:
+    /// - The gRPC client cannot be created
+    /// - The server request fails
+    /// - Authentication fails
+    /// - The application ID is invalid
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// let devices = poller.get_devices_list_from_server("app-123".to_string()).await?;
+    /// for device in devices {
+    ///     println!("Device: {} ({})", device.name, device.dev_eui);
+    /// }
+    /// ```
     pub async fn get_devices_list_from_server(
         &self,
         application_id: String,
@@ -682,38 +841,44 @@ impl ChirpstackPoller {
         Ok(devices)
     }
 
-    /// Retrieves a list of devices from the server for a specified application.
+    /// Retrieves device metrics from the ChirpStack server.
     ///
-    /// This asynchronous function communicates with the server to obtain a list of devices
-    /// associated with the given application ID. It constructs a request with specific parameters,
-    /// sends the request using the device client, and processes the server's response. The resulting
-    /// list of devices is then converted into a vector of `DeviceListDetail` objects and returned.
+    /// Fetches metrics for a specific device over a specified time duration.
+    /// Before making the request, it checks server availability with retry logic
+    /// to ensure robust operation.
     ///
     /// # Arguments
     ///
-    /// * `application_id` - A `String` representing the application ID for which the device list
-    ///   is being requested.
+    /// * `dev_eui` - The DevEUI (Device Extended Unique Identifier) of the target device
+    /// * `duration` - Time duration in seconds for the metrics query
+    /// * `aggregation` - Aggregation level for the metrics (1 = raw data)
     ///
     /// # Returns
     ///
-    /// * `Result<Vec<DeviceListDetail>, OpcGwError>` - On success, returns a vector of `DeviceListDetail`
-    ///   objects. On failure, returns an `OpcGwError` indicating the type of error encountered.
+    /// `Result<DeviceMetric, OpcGwError>` - Returns device metrics on success,
+    /// or an error if the request fails
     ///
     /// # Errors
     ///
-    /// This function will return an `OpcGwError` if:
-    /// * The device client is not initialized.
-    /// * There is an error when communicating with the server.
+    /// Returns `OpcGwError::ChirpStackError` if:
+    /// - The server is not available after all retries
+    /// - The gRPC client cannot be created
+    /// - The metrics request fails
+    /// - Authentication fails
     ///
-    /// # Example
+    /// # Server Availability
     ///
-    /// ```rust
-    /// let application_id = "some_application_id".to_string();
-    /// let devices = some_instance.get_devices_list_from_server(application_id).await;
-    /// match devices {
-    ///     Ok(device_list) => println!("Devices: {:?}", device_list),
-    ///     Err(error) => eprintln!("Error: {:?}", error),
-    /// }
+    /// The function implements retry logic based on configuration:
+    /// - Checks server availability before making the request
+    /// - Retries connection according to `config.chirpstack.retry`
+    /// - Waits `config.chirpstack.delay` seconds between retries
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// let dev_eui = "0018B20000001122".to_string();
+    /// let metrics = poller.get_device_metrics_from_server(dev_eui, 3600, 1).await?;
+    /// println!("Retrieved {} metrics", metrics.metrics.len());
     /// ```
     pub async fn get_device_metrics_from_server(
         &mut self,
@@ -788,26 +953,22 @@ impl ChirpstackPoller {
 
     /// Converts a `ListApplicationsResponse` into a vector of `ApplicationDetail`.
     ///
-    /// This method takes a `ListApplicationsResponse` and iterates over its
-    /// `result` field, mapping each `ApplicationListItem` to an `ApplicationDetail`.
+    /// Transforms the gRPC response containing application list items into a more
+    /// convenient Rust data structure for internal use.
     ///
-    /// # Parameters
-    /// - `response`: The `ListApplicationsResponse` object containing the list
-    ///   of application items to be converted.
+    /// # Arguments
+    ///
+    /// * `response` - The gRPC response containing the list of applications
     ///
     /// # Returns
-    /// A vector of `ApplicationDetail` objects.
     ///
-    /// # Example
-    /// ```
-    /// let response = ListApplicationsResponse {
-    ///     result: vec![
-    ///         ApplicationListItem { id: 1, name: String::from("App1"), description: String::from("Description1") },
-    ///         ApplicationListItem { id: 2, name: String::from("App2"), description: String::from("Description2") }
-    ///     ]
-    /// };
-    /// let app_details = convert_to_applications(response);
-    /// assert_eq!(app_details.len(), 2);
+    /// A vector of `ApplicationDetail` objects with converted field names and types
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// // Called internally by get_applications_list_from_server()
+    /// let app_details = poller.convert_to_applications(response);
     /// ```
     fn convert_to_applications(
         &self,
@@ -827,19 +988,25 @@ impl ChirpstackPoller {
             .collect()
     }
 
-    /// Converts a ListApplicationsResponse into a vector of ApplicationDetail.
+    /// Converts a `ListDevicesResponse` into a vector of `DeviceListDetail`.
     ///
-    /// This function takes a ListApplicationsResponse, which contains a list of ApplicationListItem,
-    /// and converts it into a vector of ApplicationDetail. Each ApplicationListItem is mapped to
-    /// an ApplicationDetail with corresponding fields.
+    /// Transforms the gRPC response containing device list items into a more
+    /// convenient Rust data structure for internal use.
     ///
     /// # Arguments
     ///
-    /// * `response` - The ListApplicationsResponse containing application details to convert.
+    /// * `response` - The gRPC response containing the list of devices
     ///
     /// # Returns
     ///
-    /// * `Vec<ApplicationDetail>` - A vector of ApplicationDetail containing the converted application details.
+    /// A vector of `DeviceListDetail` objects with converted field names and types
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// // Called internally by get_devices_list_from_server()
+    /// let device_details = poller.convert_to_devices(response);
+    /// ```
     fn convert_to_devices(&self, response: ListDevicesResponse) -> Vec<DeviceListDetail> {
         debug!("convert_to_devices");
 
@@ -856,23 +1023,19 @@ impl ChirpstackPoller {
     }
 }
 
-/// Prints the details of applications in a formatted manner.
+/// Utility function to print application details for debugging.
 ///
-/// This function takes a reference to a vector of `ApplicationDetail`
-/// instances and prints each application's details in a pretty-printed
-/// format using the `println!` macro.
+/// Formats and displays the details of applications in a readable format
+/// using trace-level logging. Useful for debugging and development.
 ///
 /// # Arguments
 ///
-/// * `list` - A reference to a vector containing application details.
+/// * `list` - A reference to a vector containing application details
 ///
 /// # Examples
 ///
-/// ```
-/// let applications = vec![
-///     ApplicationDetail { /* fields */ },
-///     ApplicationDetail { /* fields */ },
-/// ];
+/// ```rust,no_run
+/// let applications = poller.get_applications_list_from_server().await?;
 /// print_application_list(&applications);
 /// ```
 pub fn print_application_list(list: &Vec<ApplicationDetail>) {
@@ -881,34 +1044,26 @@ pub fn print_application_list(list: &Vec<ApplicationDetail>) {
     }
 }
 
-/// Prints the details of each device in the provided device list.
+/// Utility function to print device details for debugging.
+///
+/// Formats and displays the details of devices in a readable format
+/// using trace-level logging. Shows DevEUI, name, and description for each device.
 ///
 /// # Arguments
 ///
-/// * `list` - A reference to a vector of `DeviceListDetail` containing device information.
+/// * `list` - A reference to a vector containing device details
 ///
-/// # Example
+/// # Examples
 ///
-/// ```
-/// let device_list = vec![
-///     DeviceListDetail {
-///         dev_eui: "0018B20000001122".to_string(),
-///         name: "Device1".to_string(),
-///         description: "Temperature Sensor".to_string(),
-///     },
-///     DeviceListDetail {
-///         dev_eui: "0018B20000003344".to_string(),
-///         name: "Device2".to_string(),
-///         description: "Humidity Sensor".to_string(),
-///     },
-/// ];
-/// print_device_list(&device_list);
+/// ```rust,no_run
+/// let devices = poller.get_devices_list_from_server("app-123".to_string()).await?;
+/// print_device_list(&devices);
 /// ```
 ///
-/// This will print:
-/// ```shell
-/// Device EUI: 0018B20000001122, Name: Device1, Description: Temperature Sensor
-/// Device EUI: 0018B20000003344, Name: Device2, Description: Humidity Sensor
+/// This will output (at trace level):
+/// ```text
+/// Device EUI: 0018B20000001122, Name: Temperature Sensor, Description: Outdoor sensor
+/// Device EUI: 0018B20000003344, Name: Humidity Sensor, Description: Indoor sensor
 /// ```
 pub fn print_device_list(list: &Vec<DeviceListDetail>) {
     for device in list {

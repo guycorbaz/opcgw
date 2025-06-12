@@ -5,7 +5,7 @@ debug = true
 
 [chirpstack]
 
-# Server address
+# Chirpstack erver address
 #
 # Example format
 #   http://192.168.1.4:8080
@@ -25,21 +25,50 @@ delay = 10
 
 
 # OPC UA parameters
+#
+# At the time being, logging to the server is simple. It supports only
+# - null endpoint without security
+# - Basic256 without encryption
+# - Basic256 with encryption
+# - one user with password
+#
 [opcua]
+# OPC UA application name
+# This field is mandatory
 application_name = "Chirpstack OPC UA Gateway"
+# The globally unique identifier for the application instance
+# This field is mandatory
 application_uri = "urn:chirpstack:opcua:gateway"
+# The globally unique identifier for the product.
+# This field is mandatory
 product_uri = "urn:chirpstack:opcua:gateway"
+# Enable or disable logging of upc ua server diagnostic information
 diagnostics_enabled = true
+# TCP hello time out in s.
+# This field is optional: default value is 5s
 #hello_timeout = 10
+# IP address to bind the server to
+# This field is optional. Default, first interface IP address
 #host_ip_address = "localhost"
+# IP port for the server
+# This field is optional. Default value is 4840
 #host_port = 9090
+# Activate/deacivate keypair certificate generation.
+# This is normallly turned off in operation
 create_sample_keypair = true
+# Path of the certificate below pki_dir
 certificate_path = "own/cert.der"
+ # Path of the private key below pki_dir
 private_key_path = "private/private.pem"
+# Activate or deactivate trusting client certificate
 trust_client_cert = true
+# Activate or deactivate check of certificate validity
 check_cert_time = true
+# Kea and certificate folder
 pki_dir = "./pki"
+# Default user name
 user_name = "user1"
+# Default user password
 user_password = "user1"
 
 

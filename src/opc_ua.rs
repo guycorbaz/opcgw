@@ -15,7 +15,7 @@ use opcua::server::address_space::Variable;
 use opcua::server::{
     diagnostics::NamespaceMetadata,
     node_manager::memory::{simple_node_manager, SimpleNodeManager},
-    Limits, Server, ServerBuilder, ServerEndpoint,
+    Server, ServerBuilder, ServerEndpoint,
     ServerUserToken,
 };
 use opcua::types::{DataValue, DateTime, NodeId, Variant};
@@ -257,7 +257,7 @@ impl OpcUa {
     /// let server_builder = ServerBuilder::new();
     /// let secured_builder = self.configure_key(server_builder);
     /// ```
-    fn configure_key(&self, mut server_builder: ServerBuilder) -> ServerBuilder {
+    fn configure_key(&self, server_builder: ServerBuilder) -> ServerBuilder {
         trace!("Configure key and pki");
         server_builder
             .create_sample_keypair(self.config.opcua.create_sample_keypair)
@@ -303,7 +303,7 @@ impl OpcUa {
     /// let server_builder = ServerBuilder::new();
     /// let authenticated_builder = self.configure_user_token(server_builder);
     /// ```
-    fn configure_user_token(&self, mut server_builder: ServerBuilder) -> ServerBuilder {
+    fn configure_user_token(&self, server_builder: ServerBuilder) -> ServerBuilder {
         trace!("Configure user token");
         server_builder.add_user_token(
             "user1",
@@ -367,7 +367,7 @@ impl OpcUa {
     /// let server_builder = ServerBuilder::new();
     /// let endpoint_builder = self.configure_end_points(server_builder);
     /// ```
-    fn configure_end_points(&self, mut server_builder: ServerBuilder) -> ServerBuilder {
+    fn configure_end_points(&self, server_builder: ServerBuilder) -> ServerBuilder {
         trace!("Configure end points");
         server_builder
             .default_endpoint("null".to_string()) // The name of this enpoint has to be registered with add_endpoint
