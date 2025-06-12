@@ -1,12 +1,12 @@
 [package]
 name = "opcgw"
-version = "0.2.5"
+version = "0.2.6"
 authors = ["Guy Corbaz <guy@corbaz.org>"]
 description = "A Chirpstack to opc ua gateway"
 readme = "README.md"
 keywords = ["scada","gateway","opc_ua","chirpstack"]
 license = "MIT OR Apache-2.0"
-rust-version = "1.85.0"
+rust-version = "1.87.0"
 edition = "2021"
 categories = ["science"]
 publish = false # for now, until a running version is available
