@@ -29,6 +29,8 @@
 use crate::config::{AppConfig, OpcMetricTypeConfig};
 use crate::utils::OpcGwError;
 use chirpstack_api::api::GetDeviceMetricsRequest;
+use chirpstack_api::api::DeviceQueueItem;
+use chirpstack_api::api::EnqueueDeviceQueueItemRequest;
 use chirpstack_api::common::Metric;
 use log::{debug, error, trace, warn};
 use prost_types::Timestamp;
@@ -583,13 +585,12 @@ impl ChirpstackPoller {
     async fn poll_metrics(&mut self) -> Result<(), OpcGwError> {
         debug!("Polling chirpstack metrics");
 
-        // Get list of applications from configuration
-        //let app_list = self.config.application_list.clone();
-
+        // Just for testing
+        self.enqueue_device_request_to_server().await;
         // Collect device IDs first
         let mut device_ids = Vec::new();
 
-        // Now, parse all devices fro device id
+        // Now, parse all devices from device id
         for app in &self.config.application_list {
             for dev in &app.device_list {
                 device_ids.push(dev.device_id.clone());
@@ -757,7 +758,6 @@ impl ChirpstackPoller {
         //trace!("Send request");
         let response = application_client
             .clone()
-            //.expect("Application client is not initialized")
             .list(request)
             .await
             .map_err(|e| {
@@ -885,9 +885,9 @@ impl ChirpstackPoller {
         duration: u64,
         aggregation: i32,
     ) -> Result<DeviceMetric, OpcGwError> {
-        debug!("Get chirpstack device metrics");
-        trace!("for chirpstack device: {:?}", dev_eui);
-        trace!("Create request");
+        trace!("Get chirpstack device metrics");
+        debug!("for chirpstack device: {:?}", dev_eui);
+        debug!("Create request");
         let request = Request::new(GetDeviceMetricsRequest {
             dev_eui: dev_eui.clone(),
             start: Some(Timestamp::from(SystemTime::now())),
@@ -922,7 +922,10 @@ impl ChirpstackPoller {
         }
 
         trace!("Create device service client for Chirpstack");
-        let mut device_client = self.create_device_client().await.unwrap();
+        let mut device_client = self
+            .create_device_client()
+            .await
+            .unwrap();
 
         //trace!("Request created with: {:#?}", request);
         match device_client.get_metrics(request).await {
@@ -935,18 +938,51 @@ impl ChirpstackPoller {
                     .map(|(key, value)| (key, value))
                     .collect();
 
-                //let states: HashMap<String, DeviceState> = inner_response
-                //    .states
-                //    .into_iter()
-                //    .map(|(key, value)| (key, value))
-                //    .collect();
-
                 Ok(DeviceMetric { metrics })
             }
             Err(e) => Err(OpcGwError::ChirpStackError(format!(
                 "Error getting device metrics: {}",
                 e
             ))),
+        }
+    }
+
+    //TODO: Implement
+    pub async fn enqueue_device_request_to_server(&self) {
+        trace!("Enqueue device request");
+        // TODO: pass values through parameters
+        // Create a new request
+        debug!("Create request");
+        let queue_item = DeviceQueueItem {
+            id: "".to_string(),
+            dev_eui: "999b3d04c1523201".to_string(),
+            confirmed: true,
+            f_port: 10,
+            data: vec![0x01],
+            object: None,
+            is_pending: true,
+            f_cnt_down: 0,
+            is_encrypted: false,
+            expires_at: None
+        };
+        debug!("Request created with: {:#?}", queue_item);
+        
+        // Send request to server
+        let request = Request::new(
+            EnqueueDeviceQueueItemRequest{queue_item: Some(queue_item)});
+        
+        let mut device_client = self
+            .create_device_client()
+            .await
+            .unwrap();
+        match device_client.enqueue(request).await {
+            Ok(response) => {
+                let inner_response = response.into_inner();
+                trace!("Response: {:#?}", inner_response);
+            }
+            Err(e) => {
+                error!("Error enqueueing device request: {}", e);
+            }
         }
     }
 
