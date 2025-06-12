@@ -2,7 +2,7 @@
 # Docker file for opc ua chirpstack gateway container
 #
 
-ARG RUST_VERSION=1.82.0
+ARG RUST_VERSION=1.87.0
 ARG APP_NAME=opcgw
 
 # Builder stage
