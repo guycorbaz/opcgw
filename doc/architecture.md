@@ -218,3 +218,115 @@ The application provides:
 ## Conclusion
 
 The OPC UA Gateway for ChirpStack provides a robust bridge between LoRaWAN devices and industrial systems using OPC UA. Its modular architecture ensures clear separation of concerns, while the shared storage provides efficient data exchange between components. The configuration-driven approach allows for flexible deployment in various environments without code changes.
+# OPC UA Gateway for ChirpStack - Architecture Documentation
+
+## Overview
+
+The OPC UA Gateway for ChirpStack is a bridge application that connects ChirpStack (an open-source LoRaWAN Network Server) with industrial systems that use the OPC UA protocol. This gateway enables seamless integration of IoT data from LoRaWAN devices into industrial automation systems, SCADA, and other OPC UA compatible clients.
+
+## System Architecture
+
+### Core Components
+
+1. **ChirpStack Poller** (`src/chirpstack.rs`)
+   - Periodically polls ChirpStack API for device metrics
+   - Handles authentication and connection management
+   - Transforms and stores metrics in shared storage
+
+2. **Storage Module** (`src/storage.rs`)
+   - Thread-safe in-memory data store
+   - Hierarchical organization (Applications → Devices → Metrics)
+   - Provides access methods for reading/writing metrics
+
+3. **OPC UA Server** (`src/opc_ua.rs`)
+   - Exposes device metrics via OPC UA interface
+   - Implements OPC UA security and subscription handling
+   - Dynamically builds address space from configuration
+
+4. **Configuration** (`src/config.rs`)
+   - Loads settings from TOML and environment variables
+   - Defines applications, devices and metrics structure
+   - Provides validation and helper methods
+
+## Data Flow
+
+1. **Initialization**:
+   - Load configuration
+   - Initialize all components
+   - Build OPC UA address space
+
+2. **Runtime Operation**:
+   ```mermaid
+   sequenceDiagram
+       Poller->>ChirpStack: Get Metrics (Periodically)
+       ChirpStack-->>Poller: Device Metrics
+       Poller->>Storage: Store Metrics
+       OPC UA Client->>Server: Read Requests
+       Server->>Storage: Get Current Values
+       Storage-->>Server: Metric Values
+       Server-->>OPC UA Client: Response
+   ```
+
+## OPC UA Address Space Structure
+
+```
+Root
+└── Applications
+    ├── Application_1
+    │   ├── Device_1
+    │   │   ├── Metric_1 (Variable)
+    │   │   └── Metric_2 (Variable)
+    │   └── Device_2
+    │       └── ...
+    └── Application_2
+        └── ...
+```
+
+## Configuration
+
+Key configuration sections:
+- `[chirpstack]`: API connection parameters
+- `[opcua]`: Server endpoint and security settings
+- `[[application]]`: List of applications and devices
+
+Example:
+```toml
+[chirpstack]
+server_address = "http://localhost:8080"
+api_token = "your_token"
+polling_frequency = 60
+
+[opcua]
+endpoint_port = 4855
+
+[[application]]
+application_id = "1"
+application_name = "Water Meters"
+
+  [[application.device]]
+  device_id = "device_1"
+  device_name = "Meter 1"
+  
+    [[application.device.metric]]
+    metric_name = "consumption"
+    metric_type = "Float"
+```
+
+## Security
+
+- ChirpStack API: Token authentication
+- OPC UA: Certificate-based security
+- Configurable security policies
+
+## Error Handling
+
+- Comprehensive error types (`OpcGwError`)
+- Graceful handling of connection failures
+- Validation of configuration
+
+## Dependencies
+
+- Tonic (gRPC)
+- OPC UA crate
+- Tokio (async runtime)
+- Log4rs (logging)

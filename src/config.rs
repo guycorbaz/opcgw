@@ -1,10 +1,27 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) [2024] [Guy Corbaz]
 
-//! Manage configuration files
+//! Configuration Management Module
 //!
-//! Provides configuration file management for opc_ua_chirpstack_gateway
+//! This module provides comprehensive configuration file management for the OPC UA ChirpStack Gateway.
+//! It supports loading configuration from TOML files and environment variables, with structured
+//! organization for different service components.
 //!
+//! # Configuration Sources
+//!
+//! The configuration is loaded from:
+//! - TOML configuration file (default: `config/config.toml`)
+//! - Environment variables with `OPCGW_` prefix
+//! - Default values for optional parameters
+//!
+//! # Usage
+//!
+//! ```rust,no_run
+//! use crate::config::AppConfig;
+//!
+//! let config = AppConfig::new()?;
+//! println!("ChirpStack server: {}", config.chirpstack.server_address);
+//! ```
 
 use crate::utils::{OpcGwError, OPCGW_CONFIG_PATH};
 use figment::{
@@ -13,76 +30,251 @@ use figment::{
 };
 use log::{debug, trace};
 use serde::Deserialize;
-use std::collections::HashMap;
 
-/// Structure for storing global application configuration  parameters.
-/// This might change in future
+/// Global application configuration parameters.
+///
+/// Contains application-wide settings that affect the overall behavior
+/// of the gateway service. These settings may be expanded in future versions.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Global {
-    /// Set to true for detailed debug log
-    /// Not used now
+    /// Enable detailed debug logging throughout the application.
+    ///
+    /// When set to `true`, enables verbose logging for troubleshooting.
+    /// Currently not actively used but reserved for future implementation.
     pub debug: bool,
 }
 
-/// Structure for storing Chirpstack connection parameters
+/// ChirpStack connection and polling configuration.
+///
+/// Contains all parameters required to establish connection with the ChirpStack
+/// LoRaWAN Network Server and configure the polling behavior for device metrics.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ChirpstackPollerConfig {
-    /// ChirpStack server address.
+    /// ChirpStack server address including protocol and port.
+    ///
+    /// Format: `http://hostname:port` or `https://hostname:port`
+    /// Example: `"http://localhost:8080"` or `"https://chirpstack.example.com:8080"`
     pub server_address: String,
-    /// API token for authentication with ChirpStack.
+
+    /// API token for authentication with ChirpStack server.
+    ///
+    /// This token must have sufficient permissions to:
+    /// - List applications and devices
+    /// - Retrieve device metrics
+    /// - Access the configured tenant
     pub api_token: String,
-    /// The tenant ID we are working with.
+
+    /// The tenant ID for multi-tenant ChirpStack deployments.
+    ///
+    /// Specifies which tenant's data to access. For single-tenant
+    /// deployments, this is typically the default tenant ID.
     pub tenant_id: String,
-    /// Server polling frequency
+
+    /// Device polling frequency in seconds.
+    ///
+    /// Determines how often the gateway polls ChirpStack for updated
+    /// device metrics. Lower values provide more frequent updates but
+    /// increase server load.
     pub polling_frequency: u64,
-    ///Amount of connection retry when Chirpstack server is down
+
+    /// Maximum number of connection retry attempts.
+    ///
+    /// When the ChirpStack server is unavailable, the gateway will
+    /// retry connection up to this many times before giving up.
     pub retry: u32,
-    /// Delay in sec between two retry
-    pub delay: u64
+
+    /// Delay between retry attempts in seconds.
+    ///
+    /// Time to wait between consecutive connection retry attempts
+    /// when the ChirpStack server is unavailable.
+    pub delay: u64,
 }
 
-/// Structure for storing opc ua server configuration parameters
-/// For the time being, the configuration is
-/// coming from a dedicated file. This will be improved
-/// in future
+/// OPC UA server configuration parameters.
+///
+/// Contains all settings required to configure and run the OPC UA server
+/// that exposes ChirpStack device data to OPC UA clients. This includes
+/// security settings, network configuration, and certificate management.
 #[derive(Debug, Deserialize, Clone)]
 pub struct OpcUaConfig {
-    /// Config file path for opc ua server
-    pub config_file: String,
+    /// Human-readable name for the OPC UA application.
+    ///
+    /// This name appears in OPC UA client discovery and connection dialogs.
+    /// Example: `"ChirpStack Gateway"`
+    pub application_name: String,
+
+    /// Unique URI identifying this OPC UA application.
+    ///
+    /// Must be a valid URI that uniquely identifies this application instance.
+    /// Example: `"urn:ChirpStackGateway:Server"`
+    pub application_uri: String,
+
+    /// URI identifying the product or software vendor.
+    ///
+    /// Used for OPC UA application identification and discovery.
+    /// Example: `"urn:ChirpStackGateway:Product"`
+    pub product_uri: String,
+
+    /// Enable or disable OPC UA server diagnostics.
+    ///
+    /// When enabled, the server exposes diagnostic information such as
+    /// connection counts, data change notifications, and server statistics.
+    pub diagnostics_enabled: bool,
+
+    /// TCP hello timeout in milliseconds.
+    ///
+    /// Maximum time to wait for initial TCP connection handshake.
+    /// `None` uses the OPC UA library default.
+    pub hello_timeout: Option<u32>,
+
+    /// IP address for the OPC UA server to bind to.
+    ///
+    /// Specifies which network interface to listen on. Use:
+    /// - `"0.0.0.0"` to listen on all interfaces
+    /// - `"127.0.0.1"` for localhost only
+    /// - Specific IP for single interface
+    /// `None` uses the library default.
+    pub host_ip_address: Option<String>,
+
+    /// Port number for the OPC UA server.
+    ///
+    /// Standard OPC UA port is 4840, but any available port can be used.
+    /// `None` uses the library default port.
+    pub host_port: Option<u16>,
+
+    /// Automatically create sample certificate and private key.
+    ///
+    /// When `true`, generates a self-signed certificate for testing.
+    /// For production, set to `false` and provide proper certificates.
+    pub create_sample_keypair: bool,
+
+    /// File system path to the server certificate.
+    ///
+    /// Path to the X.509 certificate file in PEM or DER format.
+    /// Example: `"/etc/opcgw/certs/server.crt"`
+    pub certificate_path: String,
+
+    /// File system path to the server private key.
+    ///
+    /// Path to the private key file corresponding to the certificate.
+    /// Example: `"/etc/opcgw/certs/server.key"`
+    pub private_key_path: String,
+
+    /// Automatically trust client certificates.
+    ///
+    /// When `true`, accepts any client certificate without validation.
+    /// For production, set to `false` and properly manage client certificates.
+    pub trust_client_cert: bool,
+
+    /// Enable certificate time validity checking.
+    ///
+    /// When `true`, rejects expired or not-yet-valid certificates.
+    /// Should typically be `true` for production deployments.
+    pub check_cert_time: bool,
+
+    /// Directory path for PKI certificate storage.
+    ///
+    /// Directory containing trusted, rejected, and issued certificates.
+    /// Example: `"/etc/opcgw/pki"`
+    pub pki_dir: String,
+
+    /// Username for OPC UA server authentication.
+    ///
+    /// Used when the server requires username/password authentication.
+    /// Can be empty if anonymous access is allowed.
+    pub user_name: String,
+
+    /// Password for OPC UA server authentication.
+    ///
+    /// Corresponding password for the username. Should be stored securely
+    /// and can be overridden via environment variables.
+    pub user_password: String,
 }
 
-/// Chirpstack application description
-/// This defines how to connect to server
+/// ChirpStack application configuration.
+///
+/// Defines a ChirpStack application and its associated devices that should
+/// be monitored by the gateway. Each application corresponds to a logical
+/// grouping of LoRaWAN devices in ChirpStack.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ChirpStackApplications {
-    /// Chirpstack application name
+    /// Human-readable name of the ChirpStack application.
+    ///
+    /// This is the display name used in the ChirpStack web interface.
+    /// Example: `"Building Sensors"`
     pub application_name: String,
-    /// Chirpstack application ID
+
+    /// Unique identifier of the ChirpStack application.
+    ///
+    /// This is the UUID or ID assigned by ChirpStack to identify the application.
+    /// Example: `"550e8400-e29b-41d4-a716-446655440000"`
     pub application_id: String,
-    /// The list of devices for the application
+
+    /// List of devices within this application to monitor.
+    ///
+    /// Contains configuration for each device including which metrics
+    /// to collect and how to expose them via OPC UA.
     #[serde(rename = "device")]
     pub device_list: Vec<ChirpstackDevice>,
 }
 
-/// Structure that holds the data of the device
-/// we would like to monitor
+/// Configuration for a specific ChirpStack device.
+///
+/// Defines a LoRaWAN device and specifies which metrics should be collected
+/// from ChirpStack and how they should be presented in the OPC UA server.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ChirpstackDevice {
-    /// The device id defined in chirpstack
+    /// Unique device identifier in ChirpStack.
+    ///
+    /// This is typically the DevEUI (Device Extended Unique Identifier)
+    /// or the device ID assigned by ChirpStack.
+    /// Example: `"0018b20000000001"`
     pub device_id: String,
-    /// The name that will appear in opc ua
+
+    /// Display name for the device in OPC UA.
+    ///
+    /// This name will appear in the OPC UA address space and should be
+    /// descriptive and unique within the application.
+    /// Example: `"Temperature Sensor 01"`
     pub device_name: String,
-    /// The list of metrics for the device
+
+    /// List of metrics to collect from this device.
+    ///
+    /// Specifies which ChirpStack metrics to monitor and how to
+    /// expose them in the OPC UA server.
     #[serde(rename = "metric")]
     pub metric_list: Vec<Metric>,
 }
 
-/// Type of metrics
+/// Data types supported for OPC UA metric values.
+///
+/// Defines the possible data types that can be used when exposing
+/// ChirpStack metrics through the OPC UA interface. The type determines
+/// how the raw metric data is converted and presented.
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 pub enum OpcMetricTypeConfig {
+    /// Boolean value (true/false).
+    ///
+    /// Typically used for status indicators, alarms, or binary sensors.
+    /// ChirpStack values of 0.0 map to `false`, 1.0 maps to `true`.
     Bool,
+
+    /// Signed 64-bit integer value.
+    ///
+    /// Used for counters, discrete measurements, or enumerated values.
+    /// ChirpStack float values are truncated to integer.
     Int,
+
+    /// Double-precision floating-point value.
+    ///
+    /// Used for analog measurements like temperature, humidity, pressure.
+    /// Preserves the full precision of ChirpStack metric values.
     Float,
+
+    /// String value.
+    ///
+    /// Used for textual data, device status messages, or formatted values.
+    /// Currently not implemented in the conversion logic.
     String,
 }
 
@@ -100,65 +292,116 @@ pub struct Metric {
     pub metric_unit: Option<String>,
 }
 
-/// Structure for storing configuration loaded by figment
+/// Main application configuration structure.
+///
+/// Contains all configuration sections required to run the OPC UA ChirpStack Gateway.
+/// This structure is loaded from TOML configuration files and environment variables
+/// using the Figment library.
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
-    /// Global application configuration
+    /// Global application settings.
     pub global: Global,
-    /// ChirpStack-specific configuration.
+
+    /// ChirpStack connection and polling configuration.
     pub chirpstack: ChirpstackPollerConfig,
-    /// OPC UA server-specific configuration.
+
+    /// OPC UA server configuration.
     pub opcua: OpcUaConfig,
-    /// List of applications we are we would like to monitor
+
+    /// List of ChirpStack applications and devices to monitor.
     #[serde(rename = "application")]
     pub application_list: Vec<ChirpStackApplications>,
 }
 
 impl AppConfig {
-    /// Creates a new instance of `AppConfig` by reading the configuration from a TOML file and environment variables.
+    /// Creates a new `AppConfig` instance by loading configuration from files and environment.
     ///
-    /// This function performs the following steps:
-    /// 1. Retrieves the configuration file path from the `CONFIG_PATH` environment variable, or defaults to "config/default.toml" if not set.
-    /// 2. Uses the `Figment` library to read the configuration from the TOML file and merge it with environment variables prefixed with `OPCGW_`.
-    /// 3. Extracts the configuration and handles any errors that may occur during this process.
+    /// This function performs hierarchical configuration loading:
+    /// 1. Loads base configuration from TOML file
+    /// 2. Overlays environment variables with `OPCGW_` prefix
+    /// 3. Validates and parses the complete configuration
+    ///
+    /// # Configuration File Location
+    ///
+    /// The configuration file path is determined by:
+    /// - `CONFIG_PATH` environment variable if set
+    /// - Default: `${OPCGW_CONFIG_PATH}/config.toml`
+    ///
+    /// # Environment Variables
+    ///
+    /// Configuration values can be overridden using environment variables with
+    /// the `OPCGW_` prefix. Nested values use double underscores (`__`).
+    ///
+    /// Examples:
+    /// - `OPCGW_CHIRPSTACK__SERVER_ADDRESS=https://chirpstack.example.com:8080`
+    /// - `OPCGW_OPCUA__HOST_PORT=4841`
     ///
     /// # Returns
-    /// * `Ok(Self)` - if the configuration is successfully read and parsed.
-    /// * `Err(OpcGwError)` - if there is an error reading or parsing the configuration.
+    ///
+    /// * `Ok(AppConfig)` - Successfully loaded and parsed configuration
+    /// * `Err(OpcGwError)` - Configuration loading or parsing failed
     ///
     /// # Errors
-    /// This function will return an `OpcGwError::ConfigurationError` if there is an error reading the configuration file or merging environment variables.
+    ///
+    /// Returns `OpcGwError::ConfigurationError` if:
+    /// - Configuration file cannot be read
+    /// - TOML parsing fails
+    /// - Required configuration fields are missing
+    /// - Environment variable parsing fails
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use crate::config::AppConfig;
+    ///
+    /// let config = AppConfig::new()?;
+    /// println!("ChirpStack server: {}", config.chirpstack.server_address);
+    /// println!("OPC UA port: {:?}", config.opcua.host_port);
+    /// ```
     pub fn new() -> Result<Self, OpcGwError> {
-        debug!("Creating new AppConfig");
+        debug!("Creating new AppConfig instance");
 
-        // Define config file path
+        // Determine configuration file path
         let config_path = std::env::var("CONFIG_PATH")
-            .unwrap_or_else(|_| format!("{}/default.toml", OPCGW_CONFIG_PATH).to_string());
+            .unwrap_or_else(|_| format!("{}/config.toml", OPCGW_CONFIG_PATH));
 
-        // Reading the configuration
-        trace!("with config path: {}", config_path);
+        trace!("Loading configuration from: {}", config_path);
+
+        // Load and merge configuration from multiple sources
         let config: AppConfig = Figment::new()
             .merge(Toml::file(&config_path))
             .merge(Env::prefixed("OPCGW_").global())
             .extract()
-            .map_err(|e| OpcGwError::ConfigurationError(format!("Connexion error: {}", e)))?;
-        //trace!("config: {:#?}", config);
-        Ok({ config })
+            .map_err(|e| {
+                OpcGwError::ConfigurationError(format!("Configuration loading failed: {}", e))
+            })?;
+
+        Ok(config)
     }
 
-    /// This function retrieves the application name corresponding
-    /// to the given application ID.
+    /// Retrieves the application name for a given application ID.
+    ///
+    /// Searches through the configured applications to find the one with the
+    /// matching ID and returns its display name.
     ///
     /// # Arguments
     ///
-    /// * `application_id` - A reference to the application ID as a `String`.
+    /// * `application_id` - The unique identifier of the ChirpStack application
     ///
     /// # Returns
     ///
-    /// This function returns an `Option<String>`. It returns `Some(String)`
-    /// containing the application name if a match is found,
-    /// and `None` if no match is found.
+    /// * `Some(String)` - The application name if found
+    /// * `None` - If no application with the given ID exists
     ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// let app_name = config.get_application_name(&"app-123".to_string());
+    /// match app_name {
+    ///     Some(name) => println!("Application name: {}", name),
+    ///     None => println!("Application not found"),
+    /// }
+    /// ```
     pub fn get_application_name(&self, application_id: &String) -> Option<String> {
         for app in self.application_list.iter() {
             if app.application_id == *application_id {
@@ -168,19 +411,29 @@ impl AppConfig {
         None
     }
 
-    /// This function retrieves the application id corresponding
-    /// to the given application name.
+    /// Retrieves the application ID for a given application name.
+    ///
+    /// Searches through the configured applications to find the one with the
+    /// matching name and returns its unique identifier.
     ///
     /// # Arguments
     ///
-    /// * `application_name` - A reference to the application name as a `String`.
+    /// * `application_name` - The display name of the ChirpStack application
     ///
     /// # Returns
     ///
-    /// This function returns an `Option<String>`. It returns `Some(String)`
-    /// containing the application id if a match is found,
-    /// and `None` if no match is found.
+    /// * `Some(String)` - The application ID if found
+    /// * `None` - If no application with the given name exists
     ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// let app_id = config.get_application_id(&"Building Sensors".to_string());
+    /// match app_id {
+    ///     Some(id) => println!("Application ID: {}", id),
+    ///     None => println!("Application not found"),
+    /// }
+    /// ```
     pub fn get_application_id(&self, application_name: &String) -> Option<String> {
         for app in self.application_list.iter() {
             if app.application_name == *application_name {
@@ -190,22 +443,34 @@ impl AppConfig {
         None
     }
 
-    /// Returns the name of the device given its `device_id` and `application_id`.
+    /// Retrieves the device name for a given device ID.
     ///
-    /// # Parameters
-    /// - `device_id`: A reference to the device's unique identifier as a `String`.
-    /// - `application_id`: A reference to the application's unique identifier as a `String`.
+    /// Searches through all configured applications and their devices to find
+    /// the device with the matching ID and returns its display name.
+    ///
+    /// # Arguments
+    ///
+    /// * `device_id` - The unique identifier of the ChirpStack device
     ///
     /// # Returns
-    /// - `Some(String)`: The name of the device if found.
-    /// - `None`: If the device with the given `device_id`
-    ///    under the specified `application_id` is not found.
     ///
+    /// * `Some(String)` - The device display name if found
+    /// * `None` - If no device with the given ID exists
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// let device_name = config.get_device_name(&"0018b20000000001".to_string());
+    /// match device_name {
+    ///     Some(name) => println!("Device name: {}", name),
+    ///     None => println!("Device not found"),
+    /// }
+    /// ```
     pub fn get_device_name(&self, device_id: &String) -> Option<String> {
-        debug!("Getting device name");
-        // Search for the application
+        debug!("Looking up device name for ID: {}", device_id);
+
+        // Search through all applications and devices
         for app in self.application_list.iter() {
-            // Search for device id
             for device in app.device_list.iter() {
                 if device.device_id == *device_id {
                     return Some(device.device_name.clone());
@@ -215,25 +480,43 @@ impl AppConfig {
         None
     }
 
-    /// Returns the id of the device given its `device_name` and `application_id`.
+    /// Retrieves the device ID for a given device name within a specific application.
     ///
-    /// If several devices in an application have the same name, the first
-    /// is returned. There are no check for duplication.
+    /// Searches for a device with the specified name within the given application.
+    /// If multiple devices have the same name, returns the first match found.
     ///
-    /// # Parameters
-    /// - `device_name`: A reference to the device's name as a `String`.
-    /// - `application_id`: A reference to the application's unique identifier as a `String`.
+    /// # Arguments
+    ///
+    /// * `device_name` - The display name of the device
+    /// * `application_id` - The unique identifier of the ChirpStack application
     ///
     /// # Returns
-    /// - `Some(String)`: The id of the device if found.
-    /// - `None`: If the device with the given `device_id`
-    ///    under the specified `application_id` is not found.
     ///
+    /// * `Some(String)` - The device ID if found
+    /// * `None` - If no matching device exists in the specified application
+    ///
+    /// # Note
+    ///
+    /// This function does not check for duplicate device names within an application.
+    /// If duplicates exist, the first match is returned.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// let device_id = config.get_device_id(
+    ///     &"Temperature Sensor 01".to_string(),
+    ///     &"app-123".to_string()
+    /// );
+    /// match device_id {
+    ///     Some(id) => println!("Device ID: {}", id),
+    ///     None => println!("Device not found in application"),
+    /// }
+    /// ```
     pub fn get_device_id(&self, device_name: &String, application_id: &String) -> Option<String> {
-        // Search for the application
+        // Search for the specified application
         for app in self.application_list.iter() {
             if app.application_id == *application_id {
-                // Search for device id
+                // Search for device within the application
                 for device in app.device_list.iter() {
                     if device.device_name == *device_name {
                         return Some(device.device_id.clone());
@@ -244,36 +527,39 @@ impl AppConfig {
         None
     }
 
-    /// Retrieves the list of metrics for a given device ID.
+    /// Retrieves the list of metrics configured for a specific device.
     ///
-    /// This function iterates through the list of applications and their corresponding devices.
-    /// If a matching device ID is found, the list of metrics for that device is returned.
-    /// If no matching device ID is found, it returns `None`.
+    /// Searches through all applications to find the device with the specified ID
+    /// and returns a clone of its metric configuration list.
     ///
     /// # Arguments
     ///
-    /// * `self` - A reference to the current struct instance.
-    /// * `device_id` - A reference to the device ID for which the metrics list is required.
+    /// * `device_id` - The unique identifier of the ChirpStack device
     ///
     /// # Returns
     ///
-    /// * `Option<Vec<Metric>>` - Returns `Some(Vec<Metric>)` if a matching device ID is found,
-    ///   otherwise returns `None`.
+    /// * `Some(Vec<Metric>)` - The list of configured metrics if the device is found
+    /// * `None` - If no device with the given ID exists
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let metrics = instance.get_metric_list(&device_id);
+    /// ```rust,no_run
+    /// let metrics = config.get_metric_list(&"0018b20000000001".to_string());
     /// match metrics {
-    ///     Some(metrics_list) => println!("Found metrics: {:?}", metrics_list),
-    ///     None => println!("No metrics found for the given device ID"),
+    ///     Some(metric_list) => {
+    ///         println!("Device has {} metrics configured", metric_list.len());
+    ///         for metric in metric_list {
+    ///             println!("Metric: {}", metric.metric_name);
+    ///         }
+    ///     },
+    ///     None => println!("Device not found or has no metrics"),
     /// }
     /// ```
     pub fn get_metric_list(&self, device_id: &String) -> Option<Vec<Metric>> {
-        debug!("Getting metric list");
-        // Search in applications
+        debug!("Retrieving metric list for device: {}", device_id);
+
+        // Search through all applications and devices
         for app in self.application_list.iter() {
-            // Search for device
             for device in app.device_list.iter() {
                 if device.device_id == *device_id {
                     return Some(device.metric_list.clone());
@@ -283,27 +569,35 @@ impl AppConfig {
         None
     }
 
-    /// Retrieves the `OpcMetricTypeConfig` associated with a given ChirpStack metric name for a specified device.
+    /// Retrieves the OPC UA metric type for a ChirpStack metric name and device.
+    ///
+    /// Looks up the configured metric type that should be used when exposing
+    /// a specific ChirpStack metric through the OPC UA interface. The type
+    /// determines how the raw metric data is converted and presented.
     ///
     /// # Arguments
     ///
-    /// * `chirpstack_metric_name` - A reference to a `String` representing the name of the ChirpStack metric.
-    /// * `device_id` - A reference to a `String` representing the unique identifier of the device.
+    /// * `chirpstack_metric_name` - The metric name as defined in ChirpStack
+    /// * `device_id` - The unique identifier of the ChirpStack device
     ///
     /// # Returns
     ///
-    /// * `Option<OpcMetricTypeConfig>` - Returns `Some(OpcMetricTypeConfig)` if the metric type is found for the given
-    ///   ChirpStack metric name and device, otherwise returns `None`.
+    /// * `Some(OpcMetricTypeConfig)` - The configured metric type if found
+    /// * `None` - If the device or metric is not found in the configuration
     ///
-    /// # Example
+    /// # Examples
     ///
-    /// ```rust
-    /// let chirpstack_metric_name = String::from("some_metric_name");
-    /// let device_id = String::from("device123");
-    /// if let Some(metric_type) = get_metric_type(&chirpstack_metric_name, &device_id) {
-    ///     println!("Metric type found: {:?}", metric_type);
-    /// } else {
-    ///     println!("Metric type not found.");
+    /// ```rust,no_run
+    /// let metric_type = config.get_metric_type(
+    ///     &"temperature".to_string(),
+    ///     &"0018b20000000001".to_string()
+    /// );
+    /// match metric_type {
+    ///     Some(OpcMetricTypeConfig::Float) => println!("Temperature is a float value"),
+    ///     Some(OpcMetricTypeConfig::Bool) => println!("Temperature is a boolean value"),
+    ///     Some(OpcMetricTypeConfig::Int) => println!("Temperature is an integer value"),
+    ///     Some(OpcMetricTypeConfig::String) => println!("Temperature is a string value"),
+    ///     None => println!("Metric type not configured"),
     /// }
     /// ```
     pub fn get_metric_type(
@@ -311,12 +605,20 @@ impl AppConfig {
         chirpstack_metric_name: &String,
         device_id: &String,
     ) -> Option<OpcMetricTypeConfig> {
-        debug!("Getting metric type");
+        debug!(
+            "Looking up metric type for '{}' on device '{}'",
+            chirpstack_metric_name, device_id
+        );
+
+        // Get the metric list for the device
         let metric_list = match self.get_metric_list(device_id) {
             Some(metrics) => metrics,
             None => return None,
         };
-        trace!("metric list: {:?}", metric_list);
+
+        trace!("Metric list for device: {:?}", metric_list);
+
+        // Search for the specific metric
         for metric in metric_list.iter() {
             if metric.chirpstack_metric_name == *chirpstack_metric_name {
                 return Some(metric.metric_type.clone());
@@ -326,40 +628,55 @@ impl AppConfig {
     }
 }
 
-/// Test config module
+/// Configuration module test suite.
+///
+/// Tests various aspects of the configuration loading and lookup functionality
+/// using a test configuration file. These tests verify that the configuration
+/// system correctly parses TOML files and provides accurate data retrieval.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opcua::types::process_decode_io_result;
 
-    /// Loads the application configuration from a TOML file.
+    /// Loads test configuration from a TOML file.
     ///
-    /// The configuration file path is determined by the `CONFIG_PATH` environment variable.
-    /// If this environment variable is not set, it defaults to "tests/config/default.toml".
+    /// Uses a test-specific configuration file to avoid dependencies on
+    /// production configuration. The file path can be overridden using
+    /// the `CONFIG_PATH` environment variable.
     ///
     /// # Returns
     ///
-    /// * `AppConfig` - The application configuration extracted from the TOML file.
+    /// * `AppConfig` - The loaded test configuration
     ///
     /// # Panics
     ///
-    /// This function will panic if the configuration file cannot be loaded or parsed.
+    /// Panics if the test configuration file cannot be loaded or parsed.
+    /// This is appropriate for test scenarios where configuration errors
+    /// should cause immediate test failure.
     fn get_config() -> AppConfig {
-        let config_path = std::env::var("CONFIG_PATH")
-            .unwrap_or_else(|_| "tests/config/default.toml".to_string());
+        let current_dir = std::env::current_dir().unwrap();
+        println!("Current working directory: {:?}", current_dir);
+        let config_path =
+            std::env::var("CONFIG_PATH").unwrap_or_else(|_| "tests/config/config.toml".to_string());
+        debug!("Loading test config from {}", config_path);
         let config: AppConfig = Figment::new()
             .merge(Toml::file(&config_path))
             .extract()
-            .expect("Failed to load configuration");
+            .expect("Failed to load test configuration");
         config
     }
 
+    /// Tests application name lookup by ID.
+    ///
+    /// Verifies that the configuration system can correctly resolve
+    /// application names from their IDs, and returns `None` for
+    /// non-existent applications.
     #[test]
     fn test_get_application_name() {
         let config = get_config();
         let application_id = String::from("application_1");
         let no_application_id = String::from("no_application");
         let expected_name = String::from("Application01");
+
         assert_eq!(
             config.get_application_name(&application_id),
             Some(expected_name)
@@ -367,12 +684,18 @@ mod tests {
         assert_eq!(config.get_application_name(&no_application_id), None);
     }
 
+    /// Tests application ID lookup by name.
+    ///
+    /// Verifies that the configuration system can correctly resolve
+    /// application IDs from their display names, and returns `None`
+    /// for non-existent applications.
     #[test]
     fn test_get_application_id() {
         let config = get_config();
         let application_name = String::from("Application01");
         let no_application_name = String::from("no_Application");
         let expected_application_id = String::from("application_1");
+
         assert_eq!(
             config.get_application_id(&application_name),
             Some(expected_application_id)
@@ -380,12 +703,18 @@ mod tests {
         assert_eq!(config.get_application_id(&no_application_name), None);
     }
 
+    /// Tests device name lookup by ID.
+    ///
+    /// Verifies that the configuration system can correctly resolve
+    /// device names from their IDs across all applications, and
+    /// returns `None` for non-existent devices.
     #[test]
     fn test_get_device_name() {
         let config = get_config();
         let device_id = String::from("device_1");
         let no_device_name = String::from("no_device");
         let expected_device_name = String::from("Device01");
+
         assert_eq!(
             config.get_device_name(&device_id),
             Some(expected_device_name)
@@ -393,6 +722,10 @@ mod tests {
         assert_eq!(config.get_device_name(&no_device_name), None);
     }
 
+    /// Tests device ID lookup by name within an application.
+    ///
+    /// Verifies that the configuration system can correctly resolve
+    /// device IDs from their names within a specific application context.
     #[test]
     fn test_get_device_id() {
         let config = get_config();
@@ -400,6 +733,7 @@ mod tests {
         let device_name = String::from("Device01");
         let no_device_name = String::from("no_Device");
         let expected_device_id = String::from("device_1");
+
         assert_eq!(
             config.get_device_id(&device_name, &application_id),
             Some(expected_device_id)
@@ -407,17 +741,31 @@ mod tests {
         assert_eq!(config.get_device_id(&no_device_name, &application_id), None);
     }
 
+    /// Tests metric list retrieval for devices.
+    ///
+    /// Verifies that the configuration system correctly returns metric
+    /// lists for existing devices and `None` for non-existent devices.
+    /// Also validates the expected number of metrics in the test configuration.
     #[test]
     fn test_get_metric_list() {
         let config = get_config();
         let device_id = String::from("device_1");
         let no_device_id = String::from("no_device");
+
         let metric_list = config.get_metric_list(&device_id);
         let no_metric_list = config.get_metric_list(&no_device_id);
-        println!("metric list: {:?}", metric_list);
+
+        println!("Metric list: {:?}", metric_list);
         assert!(metric_list.is_some());
-        assert!(metric_list.unwrap().len() == 2);
+        assert_eq!(metric_list.unwrap().len(), 2);
+        assert!(no_metric_list.is_none());
     }
+
+    /// Tests metric type lookup functionality.
+    ///
+    /// Verifies that the configuration system correctly resolves metric
+    /// types for valid device and metric combinations, and returns `None`
+    /// for invalid combinations.
     #[test]
     fn test_get_metric_type() {
         let config = get_config();
@@ -426,6 +774,7 @@ mod tests {
         let chirpstack_metric_name = String::from("metric_1");
         let no_chirpstack_metric_name = String::from("no_metric");
         let expected_metric_type = OpcMetricTypeConfig::Float;
+
         assert_eq!(
             config.get_metric_type(&chirpstack_metric_name, &device_id),
             Some(expected_metric_type)
@@ -439,21 +788,21 @@ mod tests {
             None
         );
     }
-    /// This test verifies that the global configuration for the application
-    /// is correctly set to enable debug mode.
+
+    /// Tests global application configuration.
+    ///
+    /// Verifies that global configuration parameters are correctly
+    /// loaded from the test configuration file.
     #[test]
     fn test_application_global_config() {
         let config = get_config();
         assert_eq!(config.global.debug, true);
     }
 
-    /// Tests ChirpStack configuration to ensure default values are correctly set.
+    /// Tests ChirpStack configuration parameters.
     ///
-    /// This test retrieves the configuration by calling `get_config()` and verifies that:
-    /// - The server address is "localhost:8080"
-    /// - The API token is "test_token"
-    /// - The tenant ID is "tenant_id"
-    /// - The polling frequency is 10 seconds
+    /// Verifies that ChirpStack-specific configuration values are
+    /// correctly loaded and match expected test values.
     #[test]
     fn test_chirpstack_config() {
         let config = get_config();
@@ -463,85 +812,68 @@ mod tests {
         assert_eq!(config.chirpstack.polling_frequency, 10);
     }
 
-    /// This test verifies that the OPC UA configuration file is correctly set.
+    /// Tests application configuration loading.
     ///
-    /// The test retrieves the current configuration using the `get_config()` function.
-    /// It then asserts that the `opcua.config_file` field in the configuration
-    /// is equal to the expected value "server.conf".
-    ///
-    /// # Example
-    /// ```
-    /// let config = get_config();
-    /// assert_eq!(config.opcua.config_file, "server.conf");
-    /// ```
-    #[test]
-    fn test_opcua_config() {
-        let config = get_config();
-        assert_eq!(config.opcua.config_file, "server.conf");
-    }
-
-    /// This test ensures the integrity of the application configuration.
-    /// The test performs the following checks:
-    /// 1. Verifies that the configuration loads at least one application.
-    /// 2. Checks if the application name retrieved for 'application_1' matches "Application01".
-    /// 3. Checks if the application name retrieved for 'application_2' matches "Application02".
-    /// 4. Verifies that the application ID for "Application02" is correctly retrieved as 'application_2'.
+    /// Verifies that the application list is correctly loaded and that
+    /// application lookup functions work with the test data.
     #[test]
     fn test_application_config() {
         let config = get_config();
-        assert!(config.application_list.len() > 0); // We have loaded something
+
+        // Verify applications were loaded
+        assert!(config.application_list.len() > 0);
+
+        // Test specific application lookups
         assert_eq!(
             config
                 .get_application_name(&"application_1".to_string())
-                .unwrap()
-                .to_string(),
-            "Application01".to_string()
+                .unwrap(),
+            "Application01"
         );
         assert_eq!(
             config
                 .get_application_name(&"application_2".to_string())
-                .unwrap()
-                .to_string(),
-            "Application02".to_string()
+                .unwrap(),
+            "Application02"
         );
         assert_eq!(
             config
                 .get_application_id(&"Application02".to_string())
-                .unwrap()
-                .to_string(),
-            "application_2".to_string()
+                .unwrap(),
+            "application_2"
         );
 
+        // Test non-existent application
         assert_eq!(
             config.get_application_id(&"noapplication".to_string()),
             None
         );
     }
 
-    /// This test ensures that the device configuration is loaded correctly.
-    /// It checks that:
-    /// 1. The application list is not empty.
-    /// 2. The first application in the list has a non-empty device list.
-    /// 3. The device name for a device with ID "device_1" matches "Device01".
-    /// 4. The device ID for a device named "Device01" in the application "application_1" matches "device_1".
+    /// Tests device configuration loading.
+    ///
+    /// Verifies that device lists are correctly loaded and that device
+    /// lookup functions work with the test data.
     #[test]
     fn test_devices_config() {
         let config = get_config();
+
+        // Verify basic structure
         assert!(!config.application_list.is_empty());
-        assert!(!config.application_list[0].device_list.is_empty()); // There are devices
+        assert!(!config.application_list[0].device_list.is_empty());
+
+        // Test device name lookup
         assert_eq!(
-            config
-                .get_device_name(&"device_1".to_string())
-                .unwrap()
-                .to_string(),
-            "Device01".to_string()
+            config.get_device_name(&"device_1".to_string()).unwrap(),
+            "Device01"
         );
+
+        // Test device ID lookup
         assert_eq!(
             config
                 .get_device_id(&"Device01".to_string(), &"application_1".to_string())
-                .unwrap()
-                .to_string(),
-            "device_1".to_string()
+                .unwrap(),
+            "device_1"
         );
     }
 }

@@ -9,41 +9,41 @@ This document outlines the development plan for the ChirpStack to OPC UA Gateway
 
 #### Milestone 1.1: Project Setup and Architecture (Week 1)
 - [x] Set up development environment and tools
-- [ ] Define detailed architecture design
+- [x] Define detailed architecture design
 - [x] Create repository structure
 - [x] Set up CI/CD pipeline
-- [ ] Establish coding standards and documentation templates
+- [x] Establish coding standards and documentation templates
 
 #### Milestone 1.2: ChirpStack Integration (Weeks 2-3)
-- [ ] Implement ChirpStack API client
-- [ ] Develop connection management and authentication
-- [ ] Create polling mechanism for device metrics
-- [ ] Implement server availability verification
-- [ ] Add error handling and retry mechanisms
-- [ ] Support for multiple applications and devices
+- [x] Implement ChirpStack API client
+- [x] Develop connection management and authentication
+- [x] Create polling mechanism for device metrics
+- [x] Implement server availability verification
+- [x] Add error handling and retry mechanisms
+- [x] Support for multiple applications and devices
 
 #### Milestone 1.3: Basic Data Storage (Week 4)
-- [ ] Design in-memory storage structure
-- [ ] Implement metric type handling (Float, Integer, Boolean, String)
-- [ ] Create methods for storing and retrieving metrics
-- [ ] Add basic data validation
+- [x] Design in-memory storage structure
+- [x] Implement metric type handling (Float, Integer, Boolean, String)
+- [x] Create methods for storing and retrieving metrics
+- [x] Add basic data validation
 
 ### Phase 2: OPC UA Server Implementation (Weeks 5-8)
 
 #### Milestone 2.1: OPC UA Server Setup (Week 5)
-- [ ] Set up basic OPC UA server
-- [ ] Configure server endpoints and security settings
-- [ ] Implement namespace management
-- [ ] Create address space structure (Applications → Devices → Metrics)
+- [x] Set up basic OPC UA server
+- [x] Configure server endpoints and security settings
+- [x] Implement namespace management
+- [🔄] Create address space structure (Applications → Devices → Metrics) **PARTIELLEMENT IMPLÉMENTÉ**
 
-#### Milestone 2.2: Data Exposure (Weeks 6-7)
-- [ ] Map ChirpStack metrics to OPC UA variables
-- [ ] Implement data type conversions
-- [ ] Create update mechanisms for real-time data
-- [ ] Support standard OPC UA services (Browse, Read)
+#### Milestone 2.2: Data Exposure (Weeks 6-7) **🚨 PRIORITÉ URGENTE**
+- [ ] Map ChirpStack metrics to OPC UA variables **CRITIQUE**
+- [ ] Implement data type conversions **CRITIQUE**
+- [ ] Create update mechanisms for real-time data **CRITIQUE**
+- [ ] Support standard OPC UA services (Browse, Read) **CRITIQUE**
 
-#### Milestone 2.3: Testing and Optimization (Week 8)
-- [ ] Develop unit and integration tests for server functionality
+#### Milestone 2.3: Testing and Optimization (Week 8) **🚨 PRIORITÉ URGENTE**
+- [ ] Develop unit and integration tests for server functionality **CRITIQUE**
 - [ ] Perform load testing with simulated devices
 - [ ] Optimize performance for large datasets
 - [ ] Document server configuration options
@@ -147,3 +147,70 @@ This document outlines the development plan for the ChirpStack to OPC UA Gateway
 - Regular security updates
 - Quarterly feature updates based on user feedback
 - Monitoring of ChirpStack API changes for compatibility updates
+# Development Roadmap
+
+## Prochaines étapes prioritaires
+
+### Phase 2A: Complétion OPC UA (Urgent - 2 semaines)
+- [ ] **CRITIQUE**: Full OPC UA address space implementation
+- [ ] **CRITIQUE**: Data type conversions
+- [ ] **CRITIQUE**: Real-time metric updates
+- [ ] **CRITIQUE**: OPC UA services (Browse/Read/Subscribe)
+
+### Phase 2B: Tests et validation (2 semaines)
+- [ ] Unit test coverage (>80%)
+- [ ] Integration testing with OPC UA clients
+- [ ] Basic load testing
+
+### Phase 3: Fonctionnalités avancées (4 semaines)
+- [ ] Bidirectional communication
+- [ ] Advanced monitoring
+- [ ] Performance tuning
+- [ ] Security audit
+- [ ] Complete documentation
+
+## Phase 2: Feature Completion (Month 2) **🚨 EN COURS - PRIORITÉ CRITIQUE**
+- [ ] Full OPC UA address space implementation **URGENT**
+- [ ] Data type conversions **URGENT**
+- [x] Security configuration
+- [x] Comprehensive error handling
+- [ ] CI/CD pipeline
+
+## Phase 3: Testing & Optimization (Month 3)
+- [ ] Unit test coverage (>80%)
+- [ ] Load testing
+- [ ] Performance tuning
+- [ ] Security audit
+- [ ] Documentation
+
+## Milestones
+
+### M1: Initial Release (End Month 1) **🔄 PRESQUE ATTEINT**
+- [x] Basic polling and OPC UA exposure **PARTIELLEMENT**
+- [x] Single application/device support
+- [x] Minimal security
+
+### M2: Production Ready (End Month 2)  
+- Full feature set
+- Multi-app/device support
+- Enhanced security
+
+### M3: Enterprise Edition (End Month 3)
+- Performance optimizations
+- Advanced monitoring
+- HA/clustering support
+
+## Team Structure
+
+- **Core Team**: 2 Rust developers
+- **OPC UA Specialist**: Part-time consultant  
+- **QA Engineer**: Shared resource
+- **Project Lead**: Technical PM
+
+## Risk Management
+
+| Risk | Probability | Impact | Mitigation |
+|------|------------|--------|------------|
+| ChirpStack API changes | Medium | High | Monitor releases, abstract API layer |
+| Performance bottlenecks | High | Medium | Early load testing, profiling |
+| Security vulnerabilities | Low | High | Regular audits, follow best practices |

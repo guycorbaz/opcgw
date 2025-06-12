@@ -4,29 +4,54 @@ appenders:
     kind: console
     encoder:
       pattern: "{d} - {l} - {t} - {m}{n}"
-  opcua_server_log:
+  opcua_log:
     kind: file
-    path: "log/opcua_server.log"
+    path: "log/opc_ua.log"
     encoder:
       pattern: "{d} - {l} - {t} - {m}{n}"
   opcuagw_log:
     kind: file
-    path: "log/opcuagw.log"
+    path: "log/opc_ua_gw.log"
     encoder:
       pattern: "{d} - {l} - {t} - {m}{n}"
-
+  chirpstack_log:
+    kind: file
+    path: "log/chirpstack.log"
+    encoder:
+      pattern: "{d} - {l} - {t} - {m}{n}"
+  storage_log:
+    kind: file
+    path: "log/storage.log"
+    encoder:
+      pattern: "{d} - {l} - {t} - {m}{n}"
+  config_log:
+    kind: file
+    path: "log/config.log"
+    encoder:
+      pattern: "{d} - {l} - {t} - {m}{n}"
 root:
-  level: trace
+  level: debug
   appenders:
     - stdout
-    - opcgw_log
+    - opcuagw_log
 loggers:
-  opcgw:
+  opcgw::opc_ua:
     level: trace
     appenders:
-      - opcuagw_log
-  opcua:
-    level: info
+      - opcua_log
+  opcua_server:
+    level: debug
     appenders:
-      - opcua_server_log
-
+      - opcua_log
+  opcgw::chirpstack:
+    level: trace
+    appenders:
+      - chirpstack_log
+  opcgw::storage:
+    level: trace
+    appenders:
+      - storage_log
+  opcgw::config:
+    level: trace
+    appenders:
+      - config_log

@@ -6,25 +6,25 @@ This document outlines the requirements for the ChirpStack to OPC UA Gateway app
 ## Functional Requirements
 
 ### ChirpStack Integration
-1. The application must connect to a ChirpStack server using the provided API token and server address.
-2. The application must poll ChirpStack at configurable intervals to retrieve device metrics.
-3. The application must support retrieving metrics from multiple ChirpStack applications and devices.
-4. The application must handle connection failures to ChirpStack gracefully with appropriate error reporting.
-5. The application must verify ChirpStack server availability before attempting to poll metrics.
-6. The application must implement retry mechanisms with configurable parameters (retry count, delay) for failed operations.
-7. The application must support ChirpStack API pagination for handling large datasets.
+1. ✅ The application must connect to a ChirpStack server using the provided API token and server address.
+2. ✅ The application must poll ChirpStack at configurable intervals to retrieve device metrics.
+3. ✅ The application must support retrieving metrics from multiple ChirpStack applications and devices.
+4. ✅ The application must handle connection failures to ChirpStack gracefully with appropriate error reporting.
+5. ✅ The application must verify ChirpStack server availability before attempting to poll metrics.
+6. ✅ The application must implement retry mechanisms with configurable parameters (retry count, delay) for failed operations.
+7. ❌ The application must support ChirpStack API pagination for handling large datasets. **NON IMPLÉMENTÉ**
 
 ### OPC UA Server
-1. The application must implement an OPC UA server that exposes ChirpStack device metrics.
-2. The OPC UA server must organize metrics in a hierarchical address space (Applications → Devices → Metrics).
-3. The OPC UA server must support standard OPC UA data types for representing device metrics.
-4. The OPC UA server must provide real-time updates of device metrics based on the polling frequency.
-5. The OPC UA server must be configurable with security settings including:
+1. 🔄 The application must implement an OPC UA server that exposes ChirpStack device metrics. **PARTIELLEMENT IMPLÉMENTÉ**
+2. 🔄 The OPC UA server must organize metrics in a hierarchical address space (Applications → Devices → Metrics). **PARTIELLEMENT IMPLÉMENTÉ**
+3. ❌ The OPC UA server must support standard OPC UA data types for representing device metrics. **CRITIQUE - NON IMPLÉMENTÉ**
+4. ❌ The OPC UA server must provide real-time updates of device metrics based on the polling frequency. **CRITIQUE - NON IMPLÉMENTÉ**
+5. ✅ The OPC UA server must be configurable with security settings including:
    - Authentication methods (Anonymous, Username/Password, Certificate)
    - Encryption modes (None, Sign, SignAndEncrypt)
    - Security policies (Basic128Rsa15, Basic256, Basic256Sha256)
-6. The OPC UA server must support writing values to writable nodes that correspond to ChirpStack device parameters.
-7. The OPC UA server must implement standard OPC UA services including Browse, Read, Write, and Subscribe.
+6. ❌ The OPC UA server must support writing values to writable nodes that correspond to ChirpStack device parameters. **NON IMPLÉMENTÉ**
+7. ❌ The OPC UA server must implement standard OPC UA services including Browse, Read, Write, and Subscribe. **CRITIQUE - NON IMPLÉMENTÉ**
 
 ### Bidirectional Communication
 1. The application must support writing data back to ChirpStack devices from the OPC UA interface.
@@ -43,25 +43,25 @@ This document outlines the requirements for the ChirpStack to OPC UA Gateway app
 6. The application must detect and handle invalid or corrupted data.
 
 ### Data Storage and Management
-1. The application must maintain an in-memory storage of device metrics.
-2. The application must support mapping between ChirpStack metric names and OPC UA variable names.
-3. The application must handle different metric types (Float, Integer, Boolean, String).
-4. The application must provide methods to retrieve and update metric values.
-5. The application must track which metrics are read-only and which are writable.
-6. The application must implement data aging policies for in-memory storage.
-7. The application must support optional persistence of last known values across restarts.
+1. ✅ The application must maintain an in-memory storage of device metrics.
+2. ✅ The application must support mapping between ChirpStack metric names and OPC UA variable names.
+3. ✅ The application must handle different metric types (Float, Integer, Boolean, String).
+4. ✅ The application must provide methods to retrieve and update metric values.
+5. ❌ The application must track which metrics are read-only and which are writable. **NON IMPLÉMENTÉ**
+6. ❌ The application must implement data aging policies for in-memory storage. **NON IMPLÉMENTÉ**
+7. ❌ The application must support optional persistence of last known values across restarts. **NON IMPLÉMENTÉ**
 
 ### Configuration
-1. The application must support configuration via TOML files.
-2. The application must support environment variable overrides for configuration.
+1. ✅ The application must support configuration via TOML files.
+2. ✅ The application must support environment variable overrides for configuration.
 3. The configuration must include:
-   - ChirpStack connection details (server address, API token, polling frequency)
-   - OPC UA server settings (endpoint URL, security settings)
-   - Application and device mapping definitions
-   - Metric type definitions and mappings
-   - Retry and timeout parameters
-   - Data transformation rules
-   - Access control policies
+   - ✅ ChirpStack connection details (server address, API token, polling frequency)
+   - ✅ OPC UA server settings (endpoint URL, security settings)
+   - ✅ Application and device mapping definitions
+   - ✅ Metric type definitions and mappings
+   - ✅ Retry and timeout parameters
+   - ❌ Data transformation rules **NON IMPLÉMENTÉ**
+   - ❌ Access control policies **NON IMPLÉMENTÉ**
 
 ### Monitoring and Diagnostics
 1. The application must expose operational metrics including:
@@ -139,3 +139,74 @@ This document outlines the requirements for the ChirpStack to OPC UA Gateway app
 6. Support for OPC UA Alarms and Conditions.
 7. Integration with time-series databases for long-term data storage.
 8. Support for edge computing capabilities.
+# Requirements for ChirpStack to OPC UA Gateway
+
+## Functional Requirements
+
+### Core Functionality
+1. Poll ChirpStack API at configurable intervals (1-300 seconds)
+2. Support monitoring of multiple applications and devices
+3. Expose device metrics via OPC UA server with hierarchical address space:
+   ```
+   Root
+   └── Applications
+       ├── App1
+       │   ├── Device1
+       │   │   ├── Metric1
+       │   │   └── Metric2
+       └── App2
+           └── ...
+   ```
+
+### ChirpStack Integration
+1. Support ChirpStack API v3+
+2. Handle API authentication with bearer token
+3. Implement connection retry logic (3 attempts, 5s delay)
+4. Monitor server availability via ping/health checks
+
+### OPC UA Server
+1. Implement OPC UA 1.04 compliant server
+2. Support basic security policies (None, Basic128Rsa15)
+3. Expose metrics as OPC UA variables with correct data types
+4. Support standard services: Browse, Read, Subscribe
+
+### Configuration
+1. TOML configuration file with sections for:
+   - ChirpStack connection
+   - OPC UA server settings  
+   - Applications/devices/metrics
+2. Environment variable overrides
+3. Default values for common settings
+
+## Non-Functional Requirements
+
+### Performance
+1. Handle 100+ concurrent OPC UA client connections
+2. Support monitoring 1000+ devices
+3. Process updates within 100ms of receiving data
+4. Maintain CPU < 50% under normal load
+
+### Reliability
+1. 99.9% uptime target
+2. Graceful degradation when ChirpStack unavailable
+3. Automatic recovery from temporary failures
+
+### Security
+1. Encrypted communication with ChirpStack (HTTPS)
+2. OPC UA security policies for client connections
+3. Secure credential storage
+4. Input validation for all external data
+
+## Technical Constraints
+
+1. Implemented in Rust
+2. Containerized deployment via Docker
+3. Linux/Windows compatible
+4. Minimum hardware: 2 CPU cores, 4GB RAM
+
+## Future Considerations
+
+1. Historical data access
+2. Web administration interface  
+3. OPC UA Alarms and Conditions
+4. Edge computing capabilities
