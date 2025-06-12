@@ -149,12 +149,25 @@ This document outlines the development plan for the ChirpStack to OPC UA Gateway
 - Monitoring of ChirpStack API changes for compatibility updates
 # Development Roadmap
 
-## Phase 1: Core Functionality (Month 1) **✅ 80% COMPLÉTÉ**
-- [x] Project setup and architecture
-- [x] ChirpStack API integration
-- [x] Basic metric polling
-- [x] In-memory storage
-- [🔄] OPC UA server skeleton **PARTIELLEMENT IMPLÉMENTÉ**
+## Prochaines étapes prioritaires
+
+### Phase 2A: Complétion OPC UA (Urgent - 2 semaines)
+- [ ] **CRITIQUE**: Full OPC UA address space implementation
+- [ ] **CRITIQUE**: Data type conversions
+- [ ] **CRITIQUE**: Real-time metric updates
+- [ ] **CRITIQUE**: OPC UA services (Browse/Read/Subscribe)
+
+### Phase 2B: Tests et validation (2 semaines)
+- [ ] Unit test coverage (>80%)
+- [ ] Integration testing with OPC UA clients
+- [ ] Basic load testing
+
+### Phase 3: Fonctionnalités avancées (4 semaines)
+- [ ] Bidirectional communication
+- [ ] Advanced monitoring
+- [ ] Performance tuning
+- [ ] Security audit
+- [ ] Complete documentation
 
 ## Phase 2: Feature Completion (Month 2) **🚨 EN COURS - PRIORITÉ CRITIQUE**
 - [ ] Full OPC UA address space implementation **URGENT**
