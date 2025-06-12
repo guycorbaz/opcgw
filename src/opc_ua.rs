@@ -65,7 +65,7 @@ impl OpcUa {
             .clone()
             .unwrap_or_else(|| local_ip().unwrap().to_string());
         let host_port = config.opcua.host_port.unwrap_or(OPCUA_DEFAULT_PORT);
-        
+
         OpcUa {
             config: config.clone(),
             storage,
@@ -114,16 +114,16 @@ impl OpcUa {
     /// }
     /// ```
     fn create_server(&mut self) -> Result<Server, OpcGwError> {
-        
+
         let discovery_url = "opc.tcp://".to_owned()+&self.host_ip_address+":"+&self.host_port.to_string()+"/";
-        
+
         debug!("Creating server builder");
         let server_builder = ServerBuilder::new()
             .application_name(self.config.opcua.application_name.clone())
             .application_uri(self.config.opcua.application_uri.clone())
             .product_uri(self.config.opcua.product_uri.clone())
             .locale_ids(vec!["en".to_string()]) // Only english for the time being
-            .discovery_urls(vec![discovery_url]) //TODO: calculate this from ip address
+            .discovery_urls(vec![discovery_url])
             .default_endpoint("null".to_string())
             .diagnostics_enabled(self.config.opcua.diagnostics_enabled)
             .with_node_manager(simple_node_manager(
@@ -202,7 +202,6 @@ impl OpcUa {
     fn configure_network(&self, server_builder: ServerBuilder) -> ServerBuilder {
         trace!("Configure network");
 
-        let my_ip = local_ip().unwrap();
         let hello_timeout = self
             .config
             .opcua
