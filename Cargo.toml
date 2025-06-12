@@ -1,6 +1,6 @@
 [package]
 name = "opcgw"
-version = "0.2.6"
+version = "0.2.7"
 authors = ["Guy Corbaz <guy@corbaz.org>"]
 description = "A Chirpstack to opc ua gateway"
 readme = "README.md"
@@ -26,8 +26,6 @@ async-opcua = { version = "^0.15.1", features = ["server"] }
 clap = { version = "4.5.40", features = ["derive"] }
 local-ip-address = "0.6.5"
 url = "2.5.4"
-tokio-util = "0.7.15"
-rand = "0.9.1"
 
 [build-dependencies]
 tonic-build = "0.13.1"

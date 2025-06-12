@@ -25,6 +25,8 @@ pub struct OpcUa {
     config: AppConfig,
     /// Storage for the OPC UA server
     storage: Arc<std::sync::Mutex<Storage>>,
+    host_ip_address: String,
+    host_port: u16,
 }
 
 impl OpcUa {
@@ -57,9 +59,18 @@ impl OpcUa {
         trace!("Create new OPC UA server structure");
         //debug!("OPC UA server configuration: {:#?}", config);
 
+        let host_ip_address = config
+            .opcua
+            .host_ip_address
+            .clone()
+            .unwrap_or_else(|| local_ip().unwrap().to_string());
+        let host_port = config.opcua.host_port.unwrap_or(OPCUA_DEFAULT_PORT);
+
         OpcUa {
             config: config.clone(),
             storage,
+            host_ip_address,
+            host_port,
         }
     }
 
@@ -103,16 +114,16 @@ impl OpcUa {
     /// }
     /// ```
     fn create_server(&mut self) -> Result<Server, OpcGwError> {
-        trace!("Configure Server");
 
-        //TODO: configure server from opcua configuration file
+        let discovery_url = "opc.tcp://".to_owned()+&self.host_ip_address+":"+&self.host_port.to_string()+"/";
+
         debug!("Creating server builder");
         let server_builder = ServerBuilder::new()
             .application_name(self.config.opcua.application_name.clone())
             .application_uri(self.config.opcua.application_uri.clone())
             .product_uri(self.config.opcua.product_uri.clone())
             .locale_ids(vec!["en".to_string()]) // Only english for the time being
-            .discovery_urls(vec!["opc.tcp://localhost:4840/".to_string()]) //TODO: calculate this from ip address
+            .discovery_urls(vec![discovery_url])
             .default_endpoint("null".to_string())
             .diagnostics_enabled(self.config.opcua.diagnostics_enabled)
             .with_node_manager(simple_node_manager(
@@ -191,23 +202,13 @@ impl OpcUa {
     fn configure_network(&self, server_builder: ServerBuilder) -> ServerBuilder {
         trace!("Configure network");
 
-        let my_ip = local_ip().unwrap();
         let hello_timeout = self
             .config
             .opcua
             .hello_timeout
             .unwrap_or_else(|| OPCUA_DEFAULT_NETWORK_TIMEOUT);
-        let host_ip = self
-            .config
-            .opcua
-            .host_ip_address
-            .clone()
-            .unwrap_or_else(|| my_ip.to_string());
-        let host_port = self
-            .config
-            .opcua
-            .host_port
-            .unwrap_or_else(|| OPCUA_DEFAULT_PORT);
+        let host_ip = self.host_ip_address.clone();
+        let host_port = self.host_port;
 
         debug!(
             "Hello timeout: {}s, ip address {}, port {} ",
