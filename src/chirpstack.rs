@@ -11,7 +11,7 @@
 //!
 //! The module provides:
 //! - **ChirpstackPoller**: Main polling service for device metrics
-//! - **AuthInterceptor**: gRPC authentication interceptor 
+//! - **AuthInterceptor**: gRPC authentication interceptor
 //! - **Data Structures**: Representations for applications, devices, and metrics
 //!
 //! # Usage
@@ -26,10 +26,9 @@
 //! poller.run().await.unwrap();
 //!
 
-
 use crate::config::{AppConfig, OpcMetricTypeConfig};
 use crate::utils::OpcGwError;
-use chirpstack_api::api::{GetDeviceMetricsRequest};
+use chirpstack_api::api::GetDeviceMetricsRequest;
 use chirpstack_api::common::Metric;
 use log::{debug, error, trace, warn};
 use prost_types::Timestamp;
@@ -39,7 +38,7 @@ use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Instant, SystemTime};
-use tokio::time::{Duration};
+use tokio::time::Duration;
 use tonic::codegen::InterceptedService;
 use tonic::service::Interceptor;
 use tonic::{transport::Channel, Request, Status};
@@ -50,8 +49,8 @@ use crate::storage::{ChirpstackStatus, MetricType, Storage};
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
 use chirpstack_api::api::{
-    ApplicationListItem, DeviceListItem, ListApplicationsRequest,
-    ListApplicationsResponse, ListDevicesRequest, ListDevicesResponse,
+    ApplicationListItem, DeviceListItem, ListApplicationsRequest, ListApplicationsResponse,
+    ListDevicesRequest, ListDevicesResponse,
 };
 
 /// Structure representing a ChirpStack application.
@@ -121,7 +120,7 @@ impl Interceptor for AuthInterceptor {
     ///
     /// # Returns
     ///
-    /// * `Result<Request<()>, Status>` - Returns the modified request with the authorization 
+    /// * `Result<Request<()>, Status>` - Returns the modified request with the authorization
     ///   token added to its metadata, or an error status if the token insertion fails
     ///
     /// # Panics

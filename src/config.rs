@@ -23,7 +23,6 @@
 //! println!("ChirpStack server: {}", config.chirpstack.server_address);
 //! ```
 
-
 use crate::utils::{OpcGwError, OPCGW_CONFIG_PATH};
 use figment::{
     providers::{Env, Format, Toml},
@@ -90,7 +89,6 @@ pub struct ChirpstackPollerConfig {
     /// when the ChirpStack server is unavailable.
     pub delay: u64,
 }
-
 
 /// OPC UA server configuration parameters.
 ///
@@ -193,7 +191,6 @@ pub struct OpcUaConfig {
     pub user_password: String,
 }
 
-
 /// ChirpStack application configuration.
 ///
 /// Defines a ChirpStack application and its associated devices that should
@@ -220,7 +217,6 @@ pub struct ChirpStackApplications {
     #[serde(rename = "device")]
     pub device_list: Vec<ChirpstackDevice>,
 }
-
 
 /// Configuration for a specific ChirpStack device.
 ///
@@ -249,7 +245,6 @@ pub struct ChirpstackDevice {
     #[serde(rename = "metric")]
     pub metric_list: Vec<Metric>,
 }
-
 
 /// Data types supported for OPC UA metric values.
 ///
@@ -282,7 +277,6 @@ pub enum OpcMetricTypeConfig {
     /// Currently not implemented in the conversion logic.
     String,
 }
-
 
 /// Structure that holds the data of the device
 /// metrics we would like to monitor
@@ -611,8 +605,10 @@ impl AppConfig {
         chirpstack_metric_name: &String,
         device_id: &String,
     ) -> Option<OpcMetricTypeConfig> {
-        debug!("Looking up metric type for '{}' on device '{}'", 
-               chirpstack_metric_name, device_id);
+        debug!(
+            "Looking up metric type for '{}' on device '{}'",
+            chirpstack_metric_name, device_id
+        );
 
         // Get the metric list for the device
         let metric_list = match self.get_metric_list(device_id) {
@@ -829,20 +825,29 @@ mod tests {
 
         // Test specific application lookups
         assert_eq!(
-            config.get_application_name(&"application_1".to_string()).unwrap(),
+            config
+                .get_application_name(&"application_1".to_string())
+                .unwrap(),
             "Application01"
         );
         assert_eq!(
-            config.get_application_name(&"application_2".to_string()).unwrap(),
+            config
+                .get_application_name(&"application_2".to_string())
+                .unwrap(),
             "Application02"
         );
         assert_eq!(
-            config.get_application_id(&"Application02".to_string()).unwrap(),
+            config
+                .get_application_id(&"Application02".to_string())
+                .unwrap(),
             "application_2"
         );
 
         // Test non-existent application
-        assert_eq!(config.get_application_id(&"noapplication".to_string()), None);
+        assert_eq!(
+            config.get_application_id(&"noapplication".to_string()),
+            None
+        );
     }
 
     /// Tests device configuration loading.
@@ -865,7 +870,9 @@ mod tests {
 
         // Test device ID lookup
         assert_eq!(
-            config.get_device_id(&"Device01".to_string(), &"application_1".to_string()).unwrap(),
+            config
+                .get_device_id(&"Device01".to_string(), &"application_1".to_string())
+                .unwrap(),
             "device_1"
         );
     }

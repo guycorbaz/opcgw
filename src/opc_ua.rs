@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) [2024] [Guy Corbaz]
 
-use crate::config::{AppConfig};
+use crate::config::AppConfig;
 use crate::storage::{MetricType, Storage};
 use crate::utils::*;
 use log::{debug, error, info, trace};
@@ -15,8 +15,7 @@ use opcua::server::address_space::Variable;
 use opcua::server::{
     diagnostics::NamespaceMetadata,
     node_manager::memory::{simple_node_manager, SimpleNodeManager},
-    Server, ServerBuilder, ServerEndpoint,
-    ServerUserToken,
+    Server, ServerBuilder, ServerEndpoint, ServerUserToken,
 };
 use opcua::types::{DataValue, DateTime, NodeId, Variant};
 
@@ -470,7 +469,7 @@ impl OpcUa {
             }
         };
 
-        let _ =match server.run().await {
+        let _ = match server.run().await {
             Ok(_) => {
                 info!("OPC UA server stopped");
                 Ok(())
@@ -480,7 +479,7 @@ impl OpcUa {
                 Err(OpcGwError::OpcUaError(e.to_string()))
             }
         };
-        
+
         Ok(())
     }
 

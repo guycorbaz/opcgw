@@ -18,7 +18,6 @@
 //! The application uses a configuration file and supports command-line arguments
 //! for customization. Logging is configured via log4rs.
 
-
 mod chirpstack;
 mod config;
 mod opc_ua;
@@ -34,7 +33,7 @@ pub mod chirpstack_api {
     //tonic::include_proto!("chirpstack");
 }
 
-use crate::chirpstack::{ChirpstackPoller};
+use crate::chirpstack::ChirpstackPoller;
 use crate::storage::Storage;
 use clap::Parser;
 use config::AppConfig;
@@ -43,7 +42,6 @@ use opc_ua::OpcUa;
 use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc};
 use utils::OPCGW_CONFIG_PATH;
-
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]

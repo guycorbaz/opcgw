@@ -288,7 +288,10 @@ impl Storage {
 
             // Process each device within the application
             for device in application.device_list.iter() {
-                debug!("Initializing device: {} (ID: {})", device.device_name, device.device_id);
+                debug!(
+                    "Initializing device: {} (ID: {})",
+                    device.device_name, device.device_id
+                );
 
                 // Initialize metrics HashMap for this device
                 let mut device_metrics = HashMap::new();
@@ -301,8 +304,11 @@ impl Storage {
                         OpcMetricTypeConfig::String => MetricType::String(String::new()),
                     };
                     device_metrics.insert(metric.chirpstack_metric_name.clone(), default_value);
-                    trace!("Initialized metric '{}' for device '{}'",
-                           metric.chirpstack_metric_name, device.device_id);
+                    trace!(
+                        "Initialized metric '{}' for device '{}'",
+                        metric.chirpstack_metric_name,
+                        device.device_id
+                    );
                 }
 
                 // Create device instance
@@ -316,7 +322,10 @@ impl Storage {
             }
         }
 
-        debug!("Storage initialization complete with {} devices", devices.len());
+        debug!(
+            "Storage initialization complete with {} devices",
+            devices.len()
+        );
 
         Storage {
             config: app_config.clone(),
@@ -472,7 +481,8 @@ impl Storage {
                     Some(metric_value) => {
                         trace!(
                             "Found metric '{}' with value: {:?}",
-                            chirpstack_metric_name, metric_value
+                            chirpstack_metric_name,
+                            metric_value
                         );
                         Some(metric_value.clone())
                     }
@@ -558,7 +568,8 @@ impl Storage {
                     .insert(chirpstack_metric_name.to_string(), value);
                 trace!(
                     "Successfully updated metric '{}' for device '{}'",
-                    chirpstack_metric_name, device_id
+                    chirpstack_metric_name,
+                    device_id
                 );
             }
             None => {
@@ -745,17 +756,17 @@ impl Storage {
             trace!("Device name '{}', id: '{}'", device.device_name, device_id);
             for (metric_name, metric) in device.device_metrics.iter() {
                 match metric {
-                    MetricType::Bool(_value) => {
-                        // TODO: Implement bool metric logging
+                    MetricType::Bool(value) => {
+                        trace!("    Metric '{}': {}", metric_name, value);
                     }
-                    MetricType::Int(_value) => {
-                        // TODO: Implement int metric logging
+                    MetricType::Int(value) => {
+                        trace!("    Metric '{}': {}", metric_name, value);
                     }
                     MetricType::Float(value) => {
                         trace!("    Metric '{}': {}", metric_name, value);
                     }
-                    MetricType::String(_value) => {
-                        // TODO: Implement string metric logging
+                    MetricType::String(value) => {
+                        trace!("    Metric '{}': {}", metric_name, value);
                     }
                 }
             }
