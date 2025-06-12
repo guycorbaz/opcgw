@@ -139,3 +139,74 @@ This document outlines the requirements for the ChirpStack to OPC UA Gateway app
 6. Support for OPC UA Alarms and Conditions.
 7. Integration with time-series databases for long-term data storage.
 8. Support for edge computing capabilities.
+# Requirements for ChirpStack to OPC UA Gateway
+
+## Functional Requirements
+
+### Core Functionality
+1. Poll ChirpStack API at configurable intervals (1-300 seconds)
+2. Support monitoring of multiple applications and devices
+3. Expose device metrics via OPC UA server with hierarchical address space:
+   ```
+   Root
+   └── Applications
+       ├── App1
+       │   ├── Device1
+       │   │   ├── Metric1
+       │   │   └── Metric2
+       └── App2
+           └── ...
+   ```
+
+### ChirpStack Integration
+1. Support ChirpStack API v3+
+2. Handle API authentication with bearer token
+3. Implement connection retry logic (3 attempts, 5s delay)
+4. Monitor server availability via ping/health checks
+
+### OPC UA Server
+1. Implement OPC UA 1.04 compliant server
+2. Support basic security policies (None, Basic128Rsa15)
+3. Expose metrics as OPC UA variables with correct data types
+4. Support standard services: Browse, Read, Subscribe
+
+### Configuration
+1. TOML configuration file with sections for:
+   - ChirpStack connection
+   - OPC UA server settings  
+   - Applications/devices/metrics
+2. Environment variable overrides
+3. Default values for common settings
+
+## Non-Functional Requirements
+
+### Performance
+1. Handle 100+ concurrent OPC UA client connections
+2. Support monitoring 1000+ devices
+3. Process updates within 100ms of receiving data
+4. Maintain CPU < 50% under normal load
+
+### Reliability
+1. 99.9% uptime target
+2. Graceful degradation when ChirpStack unavailable
+3. Automatic recovery from temporary failures
+
+### Security
+1. Encrypted communication with ChirpStack (HTTPS)
+2. OPC UA security policies for client connections
+3. Secure credential storage
+4. Input validation for all external data
+
+## Technical Constraints
+
+1. Implemented in Rust
+2. Containerized deployment via Docker
+3. Linux/Windows compatible
+4. Minimum hardware: 2 CPU cores, 4GB RAM
+
+## Future Considerations
+
+1. Historical data access
+2. Web administration interface  
+3. OPC UA Alarms and Conditions
+4. Edge computing capabilities
