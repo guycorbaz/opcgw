@@ -338,7 +338,7 @@ impl Storage {
         );
 
         debug!("Creating device command queue");
-        let mut device_command_queue = Self::create_commands(); //TODO: remove after testing
+        //let mut device_command_queue = Self::create_commands(); // just for testing
 
         Storage {
             config: app_config.clone(),
