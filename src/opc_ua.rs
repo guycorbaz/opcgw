@@ -114,8 +114,11 @@ impl OpcUa {
     /// }
     /// ```
     fn create_server(&mut self) -> Result<Server, OpcGwError> {
-
-        let discovery_url = "opc.tcp://".to_owned()+&self.host_ip_address+":"+&self.host_port.to_string()+"/";
+        let discovery_url = "opc.tcp://".to_owned()
+            + &self.host_ip_address
+            + ":"
+            + &self.host_port.to_string()
+            + "/";
 
         debug!("Creating server builder");
         let server_builder = ServerBuilder::new()
@@ -142,7 +145,7 @@ impl OpcUa {
         debug!("Creating server");
         let (server, handle) = server_builder
             .build()
-            .map_err(|e| OpcGwError::OpcUaError(e.to_string()))?;
+            .map_err(|e| OpcGwError::OpcUa(e.to_string()))?;
 
         debug!("Creating node manager");
         let node_manager = handle
@@ -150,14 +153,14 @@ impl OpcUa {
             .get_of_type::<SimpleNodeManager>()
             .ok_or_else(|| {
                 error!("Failed to get SimpleNodeManager from server handle");
-                OpcGwError::OpcUaError("Failed to get SimpleNodeManager".to_string())
+                OpcGwError::OpcUa("Failed to get SimpleNodeManager".to_string())
             })?;
 
         let ns = handle
             .get_namespace_index(OPCUA_NAMESPACE_URI)
             .ok_or_else(|| {
                 error!("Failed to get name space from server handle");
-                OpcGwError::OpcUaError("Failed to get name space".to_string())
+                OpcGwError::OpcUa("Failed to get name space".to_string())
             })?;
         debug!("Creating namespace with id {} ", ns);
 
@@ -206,7 +209,7 @@ impl OpcUa {
             .config
             .opcua
             .hello_timeout
-            .unwrap_or_else(|| OPCUA_DEFAULT_NETWORK_TIMEOUT);
+            .unwrap_or(OPCUA_DEFAULT_NETWORK_TIMEOUT);
         let host_ip = self.host_ip_address.clone();
         let host_port = self.host_port;
 
@@ -477,7 +480,7 @@ impl OpcUa {
             }
             Err(e) => {
                 error!("Error w hile running OPC UA server {}", e);
-                Err(OpcGwError::OpcUaError(e.to_string()))
+                Err(OpcGwError::OpcUa(e.to_string()))
             }
         };
 
@@ -539,7 +542,6 @@ impl OpcUa {
     /// let manager = Arc::new(SimpleNodeManager::new());
     /// server.add_nodes(ns, manager);
     /// ```
-
     pub fn add_nodes(&mut self, ns: u16, manager: Arc<SimpleNodeManager>) {
         trace!("Add nodes to OPC UA server");
         let address_space = manager.address_space();

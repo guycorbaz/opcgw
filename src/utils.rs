@@ -238,7 +238,7 @@ pub enum OpcGwError {
     /// - Invalid configuration values (e.g., malformed URLs)
     /// - File system permissions issues
     #[error("Configuration error: {0}")]
-    ConfigurationError(String),
+    Configuration(String),
 
     /// ChirpStack server communication errors.
     ///
@@ -255,7 +255,7 @@ pub enum OpcGwError {
     /// - Network connectivity issues
     /// - ChirpStack API changes or compatibility issues
     #[error("ChirpStack poller error: {0}")]
-    ChirpStackError(String),
+    ChirpStack(String),
 
     /// OPC UA server and client communication errors.
     ///
@@ -273,7 +273,7 @@ pub enum OpcGwError {
     /// - Client authentication failures
     /// - Address space construction errors
     #[error("OPC UA error: {0}")]
-    OpcUaError(String),
+    OpcUa(String),
 
     /// Internal storage system errors.
     ///
@@ -290,7 +290,7 @@ pub enum OpcGwError {
     /// - Memory allocation failures
     /// - Thread synchronization issues
     #[error("Storage error: {0}")]
-    StorageError(String),
+    Storage(String),
 }
 
 // =============================================================================

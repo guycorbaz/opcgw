@@ -153,6 +153,14 @@ pub struct Device {
     device_metrics: HashMap<String, MetricType>,
 }
 
+/// Structure for enquing commands to chirpstack devices
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeviceCommand {
+    pub device_eui: String,
+    pub confirmed: bool,
+    pub f_port: u32,
+    pub data: Vec<u8>,
+}
 /// Status information for the ChirpStack server connection.
 ///
 /// This structure tracks the operational status of the ChirpStack server
@@ -226,6 +234,8 @@ pub struct Storage {
     /// contains its display name and current metric values. The structure is
     /// initialized based on the application configuration.
     devices: HashMap<String, Device>,
+
+    device_command_queue: Vec<DeviceCommand>,
 }
 
 impl Storage {
@@ -327,6 +337,9 @@ impl Storage {
             devices.len()
         );
 
+        debug!("Creating device command queue");
+        let mut device_command_queue = Self::create_commands(); //TODO: remove after testing
+
         Storage {
             config: app_config.clone(),
             chirpstack_status: ChirpstackStatus {
@@ -334,6 +347,8 @@ impl Storage {
                 response_time: 0.0,
             },
             devices,
+            device_command_queue,
+            //device_command_queue: Vec::new(),
         }
     }
 
@@ -772,6 +787,102 @@ impl Storage {
             }
         }
     }
+
+    /// Adds a new command to the end of the device command queue.
+    ///
+    /// This function appends the given command to the queue, which will be processed
+    /// in LIFO (Last In, First Out) order when dequeued.
+    ///
+    /// # Parameters
+    /// * `command` - The `DeviceCommand` to add to the queue
+    ///
+    /// # Examples
+    /// ```
+    /// let mut storage = Storage::new(&config);
+    /// let command = DeviceCommand {
+    ///     device_eui: "1234567890ABCDEF".to_string(),
+    ///     confirmed: true,
+    ///     f_port: 1,
+    ///     data: vec![0x01, 0x02, 0x03],
+    /// };
+    /// storage.enqueue_command(command);
+    /// ```
+    pub fn push_command(&mut self, command: DeviceCommand) {
+        self.device_command_queue.push(command);
+    }
+
+    /// Removes and returns the last command from the device command queue.
+    ///
+    /// This function operates in LIFO (Last In, First Out) order, removing the most
+    /// recently added command from the queue.
+    ///
+    /// # Returns
+    /// * `Some(DeviceCommand)` - The last command in the queue if one exists
+    /// * `None` - If the command queue is empty
+    ///
+    /// # Examples
+    /// ```
+    /// let mut storage = Storage::new(&config);
+    /// match storage.dequeue_command() {
+    ///     Some(command) => println!("Dequeued command for device: {}", command.device_eui),
+    ///     None => println!("No commands to dequeue"),
+    /// }
+    /// ```
+    pub fn pop_command(&mut self) -> Option<DeviceCommand> {
+        self.device_command_queue.pop()
+    }
+
+    /// Returns a copy of the device command queue if it contains commands, or None if empty.
+    ///
+    /// # Returns
+    /// * `Some(Vec<DeviceCommand>)` - A clone of the command queue if it has at least one command
+    /// * `None` - If the command queue is empty
+    ///
+    /// # Examples
+    /// ```
+    /// let storage = Storage::new(&config);
+    /// match storage.get_device_command_queue() {
+    ///     Some(commands) => println!("Found {} commands", commands.len()),
+    ///     None => println!("No commands in queue"),
+    /// }
+    /// ```
+    pub fn get_device_command_queue(&self) -> Vec<DeviceCommand> {
+        self.device_command_queue.clone()
+    }
+
+    //TODO: remove after testing
+    fn create_commands() -> Vec<DeviceCommand> {
+        trace!("Creating commands");
+        // Create a list of command for testing
+        let vanne1_command = DeviceCommand {
+            device_eui: "524d1e0a02243201".to_string(),
+            confirmed: false,
+            f_port: 10,
+            data: vec![0x02],
+        };
+
+        let vanne2_command = DeviceCommand {
+            device_eui: "3f8e3904c1523201".to_string(),
+            confirmed: false,
+            f_port: 10,
+            data: vec![0x02],
+        };
+
+        let vanne3_command = DeviceCommand {
+            device_eui: "999b3d04c1523201".to_string(),
+            confirmed: false,
+            f_port: 10,
+            data: vec![0x02],
+        };
+
+        let mut device_command_queue = vec![
+            vanne1_command,
+            vanne2_command,
+            vanne3_command
+        ];
+        debug!("Command queue is {:?}", device_command_queue);
+        device_command_queue
+    }
 }
 
 /// Storage module test suite.
@@ -992,5 +1103,23 @@ mod tests {
         // Test error cases
         assert_eq!(storage.get_metric_value(&no_device_id, &metric), None);
         assert_eq!(storage.get_metric_value(&device_id, &no_metric), None);
+    }
+
+    #[test]
+    fn test_command_queue() {
+        let mut storage = Storage::new(&get_config());
+        let command = DeviceCommand {
+            device_eui: "device01".to_string(),
+            confirmed: true,
+            f_port: 100,
+            data: vec![10, 20],
+        };
+        storage.push_command(command);
+        let result = storage.pop_command();
+
+        assert_eq!(result.clone().unwrap().device_eui, "device01");
+        assert_eq!(result.clone().unwrap().confirmed, true);
+        assert_eq!(result.clone().unwrap().f_port, 100);
+        assert_eq!(result.clone().unwrap().data, [10, 20]);
     }
 }

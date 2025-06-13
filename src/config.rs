@@ -22,7 +22,9 @@
 //! let config = AppConfig::new()?;
 //! println!("ChirpStack server: {}", config.chirpstack.server_address);
 //! ```
+//!
 
+#[allow(unused)]
 use crate::utils::{OpcGwError, OPCGW_CONFIG_PATH};
 use figment::{
     providers::{Env, Format, Toml},
@@ -35,6 +37,7 @@ use serde::Deserialize;
 ///
 /// Contains application-wide settings that affect the overall behavior
 /// of the gateway service. These settings may be expanded in future versions.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Clone)]
 pub struct Global {
     /// Enable detailed debug logging throughout the application.
@@ -48,6 +51,7 @@ pub struct Global {
 ///
 /// Contains all parameters required to establish connection with the ChirpStack
 /// LoRaWAN Network Server and configure the polling behavior for device metrics.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Clone)]
 pub struct ChirpstackPollerConfig {
     /// ChirpStack server address including protocol and port.
@@ -280,6 +284,7 @@ pub enum OpcMetricTypeConfig {
 
 /// Structure that holds the data of the device
 /// metrics we would like to monitor
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Clone)]
 pub struct Metric {
     /// The name that will appear in opc ua
@@ -297,6 +302,7 @@ pub struct Metric {
 /// Contains all configuration sections required to run the OPC UA ChirpStack Gateway.
 /// This structure is loaded from TOML configuration files and environment variables
 /// using the Figment library.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     /// Global application settings.
@@ -373,7 +379,7 @@ impl AppConfig {
             .merge(Env::prefixed("OPCGW_").global())
             .extract()
             .map_err(|e| {
-                OpcGwError::ConfigurationError(format!("Configuration loading failed: {}", e))
+                OpcGwError::Configuration(format!("Configuration loading failed: {}", e))
             })?;
 
         Ok(config)
@@ -402,6 +408,7 @@ impl AppConfig {
     ///     None => println!("Application not found"),
     /// }
     /// ```
+    #[allow(dead_code)]
     pub fn get_application_name(&self, application_id: &String) -> Option<String> {
         for app in self.application_list.iter() {
             if app.application_id == *application_id {
@@ -434,6 +441,7 @@ impl AppConfig {
     ///     None => println!("Application not found"),
     /// }
     /// ```
+    #[allow(dead_code)]
     pub fn get_application_id(&self, application_name: &String) -> Option<String> {
         for app in self.application_list.iter() {
             if app.application_name == *application_name {
@@ -512,6 +520,7 @@ impl AppConfig {
     ///     None => println!("Device not found in application"),
     /// }
     /// ```
+    #[allow(dead_code)]
     pub fn get_device_id(&self, device_name: &String, application_id: &String) -> Option<String> {
         // Search for the specified application
         for app in self.application_list.iter() {
