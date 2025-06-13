@@ -338,7 +338,7 @@ impl Storage {
         );
 
         debug!("Creating device command queue");
-        //let mut device_command_queue = Self::create_commands(); // just for testing
+        let mut device_command_queue = Self::create_commands();
 
         Storage {
             config: app_config.clone(),
@@ -348,7 +348,7 @@ impl Storage {
             },
             devices,
             device_command_queue,
-            //device_command_queue: Vec::new(),
+            
         }
     }
 
