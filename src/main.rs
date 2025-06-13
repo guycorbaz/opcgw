@@ -28,7 +28,6 @@ mod utils;
 ///
 /// This module would contain the generated protobuf code for ChirpStack API.
 /// Currently commented out - uncomment when protobuf generation is set up.
-
 pub mod chirpstack_api {
     //tonic::include_proto!("chirpstack");
 }

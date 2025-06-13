@@ -875,11 +875,7 @@ impl Storage {
             data: vec![0x02],
         };
 
-        let mut device_command_queue = vec![
-            vanne1_command,
-            vanne2_command,
-            vanne3_command
-        ];
+        let mut device_command_queue = vec![vanne1_command, vanne2_command, vanne3_command];
         debug!("Command queue is {:?}", device_command_queue);
         device_command_queue
     }

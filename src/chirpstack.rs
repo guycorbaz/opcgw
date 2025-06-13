@@ -147,10 +147,8 @@ impl Interceptor for AuthInterceptor {
                 .unwrap_or_else(|_| {
                     panic!(
                         "{}",
-                        OpcGwError::ChirpStack(
-                            "Failed to parse authorization token".to_string()
-                        )
-                        .to_string()
+                        OpcGwError::ChirpStack("Failed to parse authorization token".to_string())
+                            .to_string()
                     )
                 }),
         );
@@ -253,9 +251,7 @@ impl ChirpstackPoller {
     async fn create_channel(&self) -> Result<tonic::transport::Channel, OpcGwError> {
         debug!("Create channel");
         let channel = Channel::from_shared(self.config.chirpstack.server_address.clone())
-            .map_err(|e| {
-                OpcGwError::Configuration(format!("Failed to create channel: {}", e))
-            })?
+            .map_err(|e| OpcGwError::Configuration(format!("Failed to create channel: {}", e)))?
             .connect()
             .await
             .map_err(|e| {
@@ -399,7 +395,7 @@ impl ChirpstackPoller {
         );
 
         // Parse as URL to extract host and port
-        let url = Url::parse(&format!("{}", server_address)).map_err(|e| {
+        let url = Url::parse(server_address).map_err(|e| {
             OpcGwError::Configuration(format!("Invalid Chirpstack server address: {}", e))
         })?;
 
@@ -410,9 +406,9 @@ impl ChirpstackPoller {
         let port = url.port().unwrap_or(8080); // Default Chirpstack port
 
         // Create socket address
-        let socket_addr: SocketAddr = format!("{}:{}", host, port).parse().map_err(|e| {
-            OpcGwError::Configuration(format!("Invalid socket address: {}", e))
-        })?;
+        let socket_addr: SocketAddr = format!("{}:{}", host, port)
+            .parse()
+            .map_err(|e| OpcGwError::Configuration(format!("Invalid socket address: {}", e)))?;
 
         trace!(
             "Attempting TCP connection to Chirpstack server: {}",
@@ -487,10 +483,7 @@ impl ChirpstackPoller {
 
         trace!("Parse URL for ip address");
         let url = Url::parse(&server_address).map_err(|e| {
-            OpcGwError::Configuration(format!(
-                "Failed to parse chirpstack server address: {}",
-                e
-            ))
+            OpcGwError::Configuration(format!("Failed to parse chirpstack server address: {}", e))
         })?;
 
         if let Some(host_str) = url.host_str() {
@@ -550,13 +543,10 @@ impl ChirpstackPoller {
             if let Err(e) = self.poll_metrics().await {
                 error!(
                     "{}",
-                    &OpcGwError::ChirpStack(format!(
-                        "Error polling chirpstack devices: {:?}",
-                        e
-                    ))
+                    &OpcGwError::ChirpStack(format!("Error polling chirpstack devices: {:?}", e))
                 );
             }
-            
+
             // Wait for "wait_time"
             tokio::time::sleep(wait_time).await;
         }
@@ -619,7 +609,7 @@ impl ChirpstackPoller {
             for _metric in &dev_metrics.metrics.clone() {
                 //trace!("Got chirpstack metrics:");
                 //trace!("{:#?}", metric);
-                for (_key, metric) in &dev_metrics.metrics {
+                for metric in dev_metrics.metrics.values() {
                     self.store_metric(&dev_id.clone(), &metric.clone());
                 }
             }
@@ -659,10 +649,18 @@ impl ChirpstackPoller {
     /// ```
     pub fn store_metric(&self, device_id: &String, metric: &Metric) {
         debug!("Store chirpstack device metric in storage");
-        let device_name = self.config.get_device_name(device_id).expect(
-            &OpcGwError::ChirpStack("Failed to get chirpstack device name".to_string())
-                .to_string(),
-        );
+        //let device_name = self.config.get_device_name(device_id).expect(
+        //    &OpcGwError::ChirpStack("Failed to get chirpstack device name".to_string())
+        //        .to_string(),
+        //);
+        let device_name = self.config.get_device_name(device_id).unwrap_or_else(|| {
+            panic!(
+                "{}",
+                OpcGwError::ChirpStack("Failed to get chirpstack device name".to_string())
+                    .to_string()
+            )
+        });
+
         let metric_name = metric.name.clone();
         // We are collecting only the first returned metric
         let storage = self.storage.clone();
@@ -706,10 +704,8 @@ impl ChirpstackPoller {
                 OpcMetricTypeConfig::String => {
                     warn!(
                         "{}",
-                        OpcGwError::ChirpStack(
-                            "String conversion not implemented".to_string()
-                        )
-                        .to_string()
+                        OpcGwError::ChirpStack("String conversion not implemented".to_string())
+                            .to_string()
                     );
                 }
             },
@@ -984,8 +980,9 @@ impl ChirpstackPoller {
         loop {
             // Récupérer une commande à la fois au lieu de cloner toute la queue
             let command = {
-                let mut storage_guard = self.storage.lock()
-                    .map_err(|e| OpcGwError::ChirpStack(format!("Failed to lock storage: {}", e)))?;
+                let mut storage_guard = self.storage.lock().map_err(|e| {
+                    OpcGwError::ChirpStack(format!("Failed to lock storage: {}", e))
+                })?;
 
                 // Prendre la première commande de la queue (ou None si vide)
                 storage_guard.pop_command()
@@ -1010,7 +1007,6 @@ impl ChirpstackPoller {
 
         Ok(())
     }
-
 
     /// Enqueues a device command to the ChirpStack server for transmission to a LoRaWAN device.
     ///
