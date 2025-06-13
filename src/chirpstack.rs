@@ -556,8 +556,7 @@ impl ChirpstackPoller {
                     ))
                 );
             }
-
-            // TODO: Add sendig queue here
+            
             // Wait for "wait_time"
             tokio::time::sleep(wait_time).await;
         }
@@ -956,10 +955,31 @@ impl ChirpstackPoller {
         }
     }
 
-    //TODO: implement
+    /// Processes all commands in the device command queue.
+    ///
+    /// This method continuously retrieves and processes commands from the storage queue
+    /// until it's empty. Each command is removed from the queue before being sent to
+    /// the server, ensuring that successfully processed commands are not retried.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If all commands were processed successfully or the queue was empty
+    /// * `Err(OpcGwError)` - If there was an error accessing the storage lock
+    ///
+    /// # Behavior
+    ///
+    /// - Commands are processed one at a time to avoid memory overhead
+    /// - Each command is permanently removed from the queue before processing
+    /// - If a command fails to be enqueued, an error is logged but processing continues
+    /// - The method only returns an error if the storage lock cannot be acquired
+    ///
+    /// # Error Handling
+    ///
+    /// Failed command enqueueing is logged but does not stop the processing of remaining
+    /// commands. Consider implementing a retry mechanism or dead letter queue for
+    /// production use cases.
     async fn process_command_queue(&mut self) -> Result<(), OpcGwError> {
         trace!("Process command queue");
-        //FIXME: issue with lock
 
         loop {
             // Récupérer une commande à la fois au lieu de cloner toute la queue
@@ -992,7 +1012,45 @@ impl ChirpstackPoller {
     }
 
 
-    //TODO: Implement
+    /// Enqueues a device command to the ChirpStack server for transmission to a LoRaWAN device.
+    ///
+    /// This method takes a device command from the local queue and sends it to the ChirpStack
+    /// server, which will then transmit it to the specified LoRaWAN device when the device
+    /// next communicates with the network.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The device command containing the target device EUI, payload data,
+    ///               port number, and confirmation settings
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the command was successfully enqueued on the server
+    /// * `Err(OpcGwError)` - If validation failed or the server request failed
+    ///
+    /// # Validation
+    ///
+    /// - The `f_port` must be greater than 0 (ports 0 are reserved for MAC commands)
+    /// - The device EUI must be valid (validated by the server)
+    ///
+    /// # Behavior
+    ///
+    /// 1. Validates the command parameters locally
+    /// 2. Creates a ChirpStack-compatible queue item with default values
+    /// 3. Establishes a connection to the ChirpStack device service
+    /// 4. Sends the enqueue request to the server
+    /// 5. Logs the server response for debugging purposes
+    ///
+    /// # Error Handling
+    ///
+    /// - Invalid fPort values are rejected immediately
+    /// - Server communication errors are logged and propagated
+    /// - Client creation failures result in a panic (should be handled in production)
+    ///
+    /// # Note
+    ///
+    /// The method currently uses `unwrap()` for client creation which will panic on failure.
+    /// Consider implementing proper error handling for production use.
     async fn enqueue_device_request_to_server(
         &self,
         command: DeviceCommand,
