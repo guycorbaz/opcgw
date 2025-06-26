@@ -982,17 +982,17 @@ impl ChirpstackPoller {
         trace!("Process command queue");
 
         loop {
-            // Récupérer une commande à la fois au lieu de cloner toute la queue
+            // Retrieve one command at a time instead of cloning the entire queue
             let command = {
                 let mut storage_guard = self.storage.lock().map_err(|e| {
                     OpcGwError::ChirpStack(format!("Failed to lock storage: {}", e))
                 })?;
 
-                // Prendre la première commande de la queue (ou None si vide)
+                // Take the first command from the queue (or None if empty)
                 storage_guard.pop_command()
             };
 
-            // Si pas de commande, sortir de la boucle
+            // If no command available, exit the loop 
             let command = match command {
                 Some(cmd) => cmd,
                 None => break,
