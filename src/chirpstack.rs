@@ -1003,8 +1003,6 @@ impl ChirpstackPoller {
                 Ok(_) => debug!("Command enqueued successfully"),
                 Err(e) => {
                     error!("Failed to enqueue command: {}", e);
-                    // En cas d'erreur, vous pourriez vouloir remettre la commande dans la queue
-                    // ou la traiter différemment selon votre logique métier
                 }
             }
         }
