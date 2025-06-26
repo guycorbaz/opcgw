@@ -75,7 +75,7 @@ user_password = "user1"
 ###########################################################
 # Applications
 # application are listed below. There are no limits on the
-# application nombre
+# application number
 # Eadch applicatgion can slso have an unlimited amount
 # of device, and each device can have an unlimited amount
 # of metrics.
@@ -115,42 +115,96 @@ application_name = "Arrosage"
     device_name = "Niveau_citerne"
     device_id = "a840418371886840"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="Niveau_cit"
         chirpstack_metric_name = "Water_deep_cm"
         metric_type = "Float"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="Batterie_cit"
         chirpstack_metric_name = "Bat_V"
         metric_type = "Float"
 
+        [[application.device.read_metric]]
+        metric_name ="IDC_intput_mA"
+        chirpstack_metric_name = "IDC_intput_mA"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
+        metric_name ="VDC_intput_V"
+        chirpstack_metric_name = "VDC_intput_V"
+        metric_type = "Float"
+
+
     [[application.device]]
     device_name = "Vanne01"
+    # DevEUI
     device_id = "524d1e0a02243201"
 
-        [[application.device.metric]]
-        metric_name ="Position_v01"
-        chirpstack_metric_name = "ValveStatus"
-        metric_type = "Float"
+        [[application.device.read_metric]]
+        # This value must be unique
+        metric_name ="Status_v01"
+        chirpstack_metric_name = "valveStatusCode"
+        metric_type = "Int"
+
+        [[application.device.read_metric]]
+        # This value must be unique
+        metric_name ="BatteryLevel_v01"
+        chirpstack_metric_name = "batteryLevel"
+        metric_type = "Int"
+
+        [[application.device.command]]
+        # This value must be unique
+        command_name = "Open_close_valve01"
+        command_id = 1
+        command_confirmed = true
+        command_port = 10
+
 
     [[application.device]]
     device_name = "Vanne02"
     device_id = "3f8e3904c1523201"
 
-        [[application.device.metric]]
-        metric_name ="Position_v02"
-        chirpstack_metric_name = "ValveStatus"
-        metric_type = "Float"
+        [[application.device.read_metric]]
+        # This value must be unique
+        metric_name ="Status_v02"
+        chirpstack_metric_name = "valveStatusCode"
+        metric_type = "Int"
+        [[application.device.read_metric]]
+        # This value must be unique
+        metric_name ="BatteryLevel_v02"
+        chirpstack_metric_name = "batteryLevel"
+        metric_type = "Int"
+
+        [[application.device.command]]
+        command_name = "Open_close_valve02"
+        command_id = 2
+        command_confirmed = true
+        command_port = 10
+
 
     [[application.device]]
     device_name = "Vanne03"
     device_id = "999b3d04c1523201"
 
-        [[application.device.metric]]
-        metric_name ="Position_v03"
-        chirpstack_metric_name = "ValveStatus"
+        [[application.device.read_metric]]
+        # This value must be unique
+        metric_name ="Status_v02"
+        chirpstack_metric_name = "valveStatusCode"
         metric_type = "Float"
+
+        [[application.device.read_metric]]
+        # This value must be unique
+        metric_name ="BatteryLevel_v03"
+        chirpstack_metric_name = "batteryLevel"
+        metric_type = "Int"
+
+        [[application.device.command]]
+        command_name = "Open_close_valve03"
+        command_id = 3
+        command_confirmed = true
+        command_port = 10
+
 
 
 ###########################################################
@@ -164,17 +218,19 @@ application_name ="Bâtiments"
     device_name = "Magasin"
     device_id = "a840414bf185f365"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="Batterie_mag"
         chirpstack_metric_name = "BatV"
         metric_type = "Float"
 
-        [[application.device.metric]]
+
+        [[application.device.read_metric]]
         metric_name ="Humidite_mag"
         chirpstack_metric_name = "Hum_SHT"
         metric_type = "Float"
 
-        [[application.device.metric]]
+
+        [[application.device.read_metric]]
         metric_name ="Temperature_mag"
         chirpstack_metric_name = "TempC_SHT"
         metric_type = "Float"
@@ -184,17 +240,17 @@ application_name ="Bâtiments"
     device_name = "Grange"
     device_id = "a84041a44185f37d"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="Batterie_gr"
         chirpstack_metric_name = "BatV"
         metric_type = "Float"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="Humidite_gr"
         chirpstack_metric_name = "Hum_SHT"
         metric_type = "Float"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="Temperature_gr"
         chirpstack_metric_name = "TempC_SHT"
         metric_type = "Float"
@@ -211,22 +267,22 @@ application_name = "Cultures"
     device_name = "Verger2"
     device_id = "a8404159c1828ff0"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="Batterie_ver2"
         chirpstack_metric_name = "Batterie"
         metric_type = "Float"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="Conductivite_ver2"
         chirpstack_metric_name = "Conductivité"
         metric_type = "Float"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="Temperature_ver2"
         chirpstack_metric_name = "Température"
         metric_type = "Float"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="Humidite_ver2"
         chirpstack_metric_name = "Humidité"
         metric_type = "Float"
@@ -236,17 +292,17 @@ application_name = "Cultures"
     device_name = "Tunnel1"
     device_id = "a84041878185f36d"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="Batterie_t1"
         chirpstack_metric_name = "BatV"
         metric_type = "Float"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="Humidite_t1"
         chirpstack_metric_name = "Hum_SHT"
         metric_type = "Float"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="Temperature_t1"
         chirpstack_metric_name = "TempC_SHT"
         metric_type = "Float"
@@ -263,45 +319,55 @@ application_name = "Meteo"
     device_name = "Station_meteo_01"
     device_id = "2cf7f1c06130048a"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
+        metric_name ="Pluie"
+        chirpstack_metric_name = "rain"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
+        metric_name ="Temp"
+        chirpstack_metric_name = "Temp"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
         metric_name ="Température"
         chirpstack_metric_name = "temperature"
         metric_type = "Float"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="Humidité"
         chirpstack_metric_name = "airHumidity"
         metric_type = "Float"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="Pression"
         chirpstack_metric_name = "barometricPressure"
         metric_type = "Float"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="Vitesse_vent"
         chirpstack_metric_name = "windSpeed"
         metric_type = "Float"
         metric_unit = "m/s"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="Direction_vent"
         chirpstack_metric_name = "windDirection"
         metric_type = "Float"
         metric_unit = "Deg"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="UVIndex"
         chirpstack_metric_name = "UVIndex"
         metric_type = "Float"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="Intensité_lumineuse"
         chirpstack_metric_name = "lightIntensity"
         metric_type = "Float"
         metric_unit = "w/m2"
 
-        [[application.device.metric]]
+        [[application.device.read_metric]]
         metric_name ="Pourcent_batterie"
         chirpstack_metric_name = "batteryPercent"
         metric_type = "Float"

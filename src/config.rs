@@ -22,7 +22,9 @@
 //! let config = AppConfig::new()?;
 //! println!("ChirpStack server: {}", config.chirpstack.server_address);
 //! ```
+//!
 
+#[allow(unused)]
 use crate::utils::{OpcGwError, OPCGW_CONFIG_PATH};
 use figment::{
     providers::{Env, Format, Toml},
@@ -35,6 +37,7 @@ use serde::Deserialize;
 ///
 /// Contains application-wide settings that affect the overall behavior
 /// of the gateway service. These settings may be expanded in future versions.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Clone)]
 pub struct Global {
     /// Enable detailed debug logging throughout the application.
@@ -48,6 +51,7 @@ pub struct Global {
 ///
 /// Contains all parameters required to establish connection with the ChirpStack
 /// LoRaWAN Network Server and configure the polling behavior for device metrics.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Clone)]
 pub struct ChirpstackPollerConfig {
     /// ChirpStack server address including protocol and port.
@@ -133,7 +137,7 @@ pub struct OpcUaConfig {
     /// - `"0.0.0.0"` to listen on all interfaces
     /// - `"127.0.0.1"` for localhost only
     /// - Specific IP for single interface
-    /// `None` uses the library default.
+    /// - `None` uses the library default.
     pub host_ip_address: Option<String>,
 
     /// Port number for the OPC UA server.
@@ -242,8 +246,11 @@ pub struct ChirpstackDevice {
     ///
     /// Specifies which ChirpStack metrics to monitor and how to
     /// expose them in the OPC UA server.
-    #[serde(rename = "metric")]
-    pub metric_list: Vec<Metric>,
+    #[serde(rename = "read_metric")]
+    pub read_metric_list: Vec<ReadMetric>,
+    /// List of commands that can be send to this device.
+    #[serde(rename = "command")]
+    pub device_command_list: Option<Vec<DeviceCommandCfg>>,
 }
 
 /// Data types supported for OPC UA metric values.
@@ -278,18 +285,43 @@ pub enum OpcMetricTypeConfig {
     String,
 }
 
-/// Structure that holds the data of the device
-/// metrics we would like to monitor
+// Structure that holds the data of the device read metrics we would like to monitor
+///
+/// This structure defines a mapping between ChirpStack device metrics and their
+/// corresponding OPC UA representation. It allows the gateway to expose LoRaWAN
+/// device data through the OPC UA protocol with proper type conversion and metadata.
 #[derive(Debug, Deserialize, Clone)]
-pub struct Metric {
-    /// The name that will appear in opc ua
+pub struct ReadMetric {
+    /// The display name that will appear as a node identifier in the OPC UA address space
+    /// This is the human-readable name that OPC UA clients will see when browsing metrics
     pub metric_name: String,
-    /// The name defined in chirpstack
+
+    /// The original metric name as defined in the ChirpStack network server
+    /// This corresponds to the exact field name in ChirpStack's device data payload
+    /// and is used for mapping incoming telemetry data to the correct metric
     pub chirpstack_metric_name: String,
-    /// The type of metric
+
+    /// The data type configuration for this metric in the OPC UA context
+    /// Defines how the raw ChirpStack data should be interpreted and presented
+    /// to OPC UA clients (e.g., as integer, float, boolean, string)
     pub metric_type: OpcMetricTypeConfig,
-    /// Unit of the metric
+
+    /// Optional unit of measurement for the metric (e.g., "°C", "V", "A", "%")
+    /// When specified, this unit information can be exposed to OPC UA clients
+    /// to provide context about the metric's physical meaning and scale
     pub metric_unit: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DeviceCommandCfg {
+    /// Unique command identifier
+    pub command_id: i32,
+    /// Command name
+    pub command_name: String,
+    /// If the device has to send a confirmation after received the command
+    pub command_confirmed: bool,
+    /// The port of the chirpstack device
+    pub command_port: i32,
 }
 
 /// Main application configuration structure.
@@ -297,6 +329,7 @@ pub struct Metric {
 /// Contains all configuration sections required to run the OPC UA ChirpStack Gateway.
 /// This structure is loaded from TOML configuration files and environment variables
 /// using the Figment library.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     /// Global application settings.
@@ -373,9 +406,9 @@ impl AppConfig {
             .merge(Env::prefixed("OPCGW_").global())
             .extract()
             .map_err(|e| {
-                OpcGwError::ConfigurationError(format!("Configuration loading failed: {}", e))
+                OpcGwError::Configuration(format!("Configuration loading failed: {}", e))
             })?;
-
+        //debug!("Configuration is {:?} ", config);
         Ok(config)
     }
 
@@ -402,6 +435,7 @@ impl AppConfig {
     ///     None => println!("Application not found"),
     /// }
     /// ```
+    #[allow(dead_code)]
     pub fn get_application_name(&self, application_id: &String) -> Option<String> {
         for app in self.application_list.iter() {
             if app.application_id == *application_id {
@@ -434,6 +468,7 @@ impl AppConfig {
     ///     None => println!("Application not found"),
     /// }
     /// ```
+    #[allow(dead_code)]
     pub fn get_application_id(&self, application_name: &String) -> Option<String> {
         for app in self.application_list.iter() {
             if app.application_name == *application_name {
@@ -512,6 +547,7 @@ impl AppConfig {
     ///     None => println!("Device not found in application"),
     /// }
     /// ```
+    #[allow(dead_code)]
     pub fn get_device_id(&self, device_name: &String, application_id: &String) -> Option<String> {
         // Search for the specified application
         for app in self.application_list.iter() {
@@ -555,14 +591,14 @@ impl AppConfig {
     ///     None => println!("Device not found or has no metrics"),
     /// }
     /// ```
-    pub fn get_metric_list(&self, device_id: &String) -> Option<Vec<Metric>> {
+    pub fn get_metric_list(&self, device_id: &String) -> Option<Vec<ReadMetric>> {
         debug!("Retrieving metric list for device: {}", device_id);
 
         // Search through all applications and devices
         for app in self.application_list.iter() {
             for device in app.device_list.iter() {
                 if device.device_id == *device_id {
-                    return Some(device.metric_list.clone());
+                    return Some(device.read_metric_list.clone());
                 }
             }
         }
@@ -611,10 +647,7 @@ impl AppConfig {
         );
 
         // Get the metric list for the device
-        let metric_list = match self.get_metric_list(device_id) {
-            Some(metrics) => metrics,
-            None => return None,
-        };
+        let metric_list = self.get_metric_list(device_id)?;
 
         trace!("Metric list for device: {:?}", metric_list);
 

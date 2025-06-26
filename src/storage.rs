@@ -26,7 +26,6 @@
 //! # Thread Safety
 //!
 //! This module is designed to be used with Tokio's async runtime and requires
-//! external synchronization (e.g., Arc<Mutex<Storage>>) for concurrent access.
 //!
 //! # Usage
 //!
@@ -153,6 +152,19 @@ pub struct Device {
     device_metrics: HashMap<String, MetricType>,
 }
 
+/// Structure for enquing commands to chirpstack devices
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeviceCommand {
+    /// Unique identifier of the target device
+    pub device_id: String,
+    /// Whether the command requires confirmation from the device
+    pub confirmed: bool,
+    /// Frame port number for the LoRaWAN communication
+    pub f_port: u32,
+    /// Command payload data as bytes
+    pub data: Vec<u8>,
+}
+
 /// Status information for the ChirpStack server connection.
 ///
 /// This structure tracks the operational status of the ChirpStack server
@@ -226,6 +238,9 @@ pub struct Storage {
     /// contains its display name and current metric values. The structure is
     /// initialized based on the application configuration.
     devices: HashMap<String, Device>,
+
+    /// Command queue for chirpstack devices
+    device_command_queue: Vec<DeviceCommand>,
 }
 
 impl Storage {
@@ -282,6 +297,10 @@ impl Storage {
         debug!("Creating new Storage instance");
         let mut devices: HashMap<String, Device> = HashMap::new();
 
+        // Create an empty command queue
+        debug!("Creating an empty command queue");
+        let mut device_command_queue = Vec::new();
+
         // Process each application in the configuration
         for application in app_config.application_list.iter() {
             debug!("Processing application: {}", application.application_name);
@@ -295,7 +314,7 @@ impl Storage {
 
                 // Initialize metrics HashMap for this device
                 let mut device_metrics = HashMap::new();
-                for metric in device.metric_list.iter() {
+                for metric in device.read_metric_list.iter() {
                     // Initialize metric with type-appropriate default value
                     let default_value = match metric.metric_type {
                         OpcMetricTypeConfig::Bool => MetricType::Bool(false),
@@ -334,6 +353,7 @@ impl Storage {
                 response_time: 0.0,
             },
             devices,
+            device_command_queue,
         }
     }
 
@@ -772,6 +792,68 @@ impl Storage {
             }
         }
     }
+
+    /// Adds a new command to the end of the device command queue.
+    ///
+    /// This function appends the given command to the queue, which will be processed
+    /// in LIFO (Last In, First Out) order when dequeued.
+    ///
+    /// # Parameters
+    /// * `command` - The `DeviceCommand` to add to the queue
+    ///
+    /// # Examples
+    /// ```
+    /// let mut storage = Storage::new(&config);
+    /// let command = DeviceCommand {
+    ///     device_eui: "1234567890ABCDEF".to_string(),
+    ///     confirmed: true,
+    ///     f_port: 1,
+    ///     data: vec![0x01, 0x02, 0x03],
+    /// };
+    /// storage.enqueue_command(command);
+    /// ```
+    pub fn push_command(&mut self, command: DeviceCommand) {
+        self.device_command_queue.push(command);
+    }
+
+    /// Removes and returns the last command from the device command queue.
+    ///
+    /// This function operates in LIFO (Last In, First Out) order, removing the most
+    /// recently added command from the queue.
+    ///
+    /// # Returns
+    /// * `Some(DeviceCommand)` - The last command in the queue if one exists
+    /// * `None` - If the command queue is empty
+    ///
+    /// # Examples
+    /// ```
+    /// let mut storage = Storage::new(&config);
+    /// match storage.dequeue_command() {
+    ///     Some(command) => println!("Dequeued command for device: {}", command.device_eui),
+    ///     None => println!("No commands to dequeue"),
+    /// }
+    /// ```
+    pub fn pop_command(&mut self) -> Option<DeviceCommand> {
+        self.device_command_queue.pop()
+    }
+
+    /// Returns a copy of the device command queue if it contains commands, or None if empty.
+    ///
+    /// # Returns
+    /// * `Some(Vec<DeviceCommand>)` - A clone of the command queue if it has at least one command
+    /// * `None` - If the command queue is empty
+    ///
+    /// # Examples
+    /// ```
+    /// let storage = Storage::new(&config);
+    /// match storage.get_device_command_queue() {
+    ///     Some(commands) => println!("Found {} commands", commands.len()),
+    ///     None => println!("No commands in queue"),
+    /// }
+    /// ```
+    pub fn get_device_command_queue(&self) -> Vec<DeviceCommand> {
+        self.device_command_queue.clone()
+    }
 }
 
 /// Storage module test suite.
@@ -992,5 +1074,23 @@ mod tests {
         // Test error cases
         assert_eq!(storage.get_metric_value(&no_device_id, &metric), None);
         assert_eq!(storage.get_metric_value(&device_id, &no_metric), None);
+    }
+
+    #[test]
+    fn test_command_queue() {
+        let mut storage = Storage::new(&get_config());
+        let command = DeviceCommand {
+            device_id: "device01".to_string(),
+            confirmed: true,
+            f_port: 100,
+            data: vec![10, 20],
+        };
+        storage.push_command(command);
+        let result = storage.pop_command();
+
+        assert_eq!(result.clone().unwrap().device_id, "device01");
+        assert_eq!(result.clone().unwrap().confirmed, true);
+        assert_eq!(result.clone().unwrap().f_port, 100);
+        assert_eq!(result.clone().unwrap().data, [10, 20]);
     }
 }
