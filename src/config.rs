@@ -396,7 +396,7 @@ impl AppConfig {
 
         // Determine configuration file path
         let config_path = std::env::var("CONFIG_PATH")
-            .unwrap_or_else(|_| format!("{}/config.toml", OPCGW_CONFIG_PATH)); //TODO: Make sure this works
+            .unwrap_or_else(|_| format!("{}/config.toml", OPCGW_CONFIG_PATH));
 
         trace!("Loading configuration from: {}", config_path);
 

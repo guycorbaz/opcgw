@@ -838,7 +838,7 @@ impl OpcUa {
                     device_id: device_id.to_string(),
                     confirmed: command.command_confirmed,
                     f_port: command.command_port as u32,
-                    data: vec![value.try_into().unwrap()], //TODO: améliorer la gestion d'erreur
+                    data: vec![value.try_into().unwrap()],
                 };
                 // Add command to storage
                 match storage.lock() {
