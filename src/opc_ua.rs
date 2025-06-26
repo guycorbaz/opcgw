@@ -477,7 +477,7 @@ impl OpcUa {
                 Ok(())
             }
             Err(e) => {
-                error!("Error w hile running OPC UA server {}", e);
+                error!("Error while running OPC UA server {}", e);
                 Err(OpcGwError::OpcUa(e.to_string()))
             }
         };

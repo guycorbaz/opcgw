@@ -91,7 +91,7 @@ pub struct DeviceListDetail {
 ///
 /// Contains a collection of metrics retrieved from ChirpStack for a specific device.
 /// Each metric is identified by a name and contains the actual metric data.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Deserialize, Clone)]
 pub struct DeviceMetric {
     /// A map of metric names to their corresponding Metric objects
     ///
@@ -399,7 +399,7 @@ impl ChirpstackPoller {
             OpcGwError::Configuration(format!("Invalid Chirpstack server address: {}", e))
         })?;
 
-        // Extrackt host and port from URL
+        // Extract host and port from URL
         let host = url.host_str().ok_or_else(|| {
             OpcGwError::Configuration("No Chirpstack host in server address".to_string())
         })?;
@@ -598,7 +598,6 @@ impl ChirpstackPoller {
             }
         }
         debug!("Found {} devices ", device_names.len());
-        debug!("Found devices {:#?} ", device_names);
 
         // Get metrics from server for each device
         for dev_id in device_ids {
@@ -606,7 +605,7 @@ impl ChirpstackPoller {
                 .get_device_metrics_from_server(
                     dev_id.clone(),
                     //self.config.chirpstack.polling_frequency,
-                    1, //If we put a value different from aggregation, status variables are aggregated
+                    1, // If we put a value different from aggregation, status variables are aggregated
                     1,
                 )
                 .await?;
