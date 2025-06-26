@@ -588,27 +588,32 @@ impl ChirpstackPoller {
         // Collecting metrics
         // Collect device IDs first
         let mut device_ids = Vec::new();
+        let mut device_names = Vec::new();
 
         // Now, parse all devices from device id
         for app in &self.config.application_list {
             for dev in &app.device_list {
                 device_ids.push(dev.device_id.clone());
+                device_names.push(dev.device_name.clone());
             }
         }
+        debug!("Found {} devices ", device_names.len());
+        debug!("Found devices {:#?} ", device_names);
 
         // Get metrics from server for each device
         for dev_id in device_ids {
             let dev_metrics = self
                 .get_device_metrics_from_server(
                     dev_id.clone(),
-                    self.config.chirpstack.polling_frequency,
+                    //self.config.chirpstack.polling_frequency,
+                    1, //If we put a value different from aggregation, status variables are aggregated
                     1,
                 )
                 .await?;
             // Parse metrics received from server
-            for _metric in &dev_metrics.metrics.clone() {
-                //trace!("Got chirpstack metrics:");
-                //trace!("{:#?}", metric);
+            for metric in &dev_metrics.metrics.clone() {
+                trace!("Got chirpstack metrics:");
+                trace!("{:#?}", metric);
                 for metric in dev_metrics.metrics.values() {
                     self.store_metric(&dev_id.clone(), &metric.clone());
                 }
@@ -649,10 +654,6 @@ impl ChirpstackPoller {
     /// ```
     pub fn store_metric(&self, device_id: &String, metric: &Metric) {
         debug!("Store chirpstack device metric in storage");
-        //let device_name = self.config.get_device_name(device_id).expect(
-        //    &OpcGwError::ChirpStack("Failed to get chirpstack device name".to_string())
-        //        .to_string(),
-        //);
         let device_name = self.config.get_device_name(device_id).unwrap_or_else(|| {
             panic!(
                 "{}",
@@ -667,10 +668,14 @@ impl ChirpstackPoller {
         match self.config.get_metric_type(&metric_name, device_id) {
             Some(metric_type) => match metric_type {
                 OpcMetricTypeConfig::Bool => {
+                    debug!("Bool metric is: {:?}", metric);
                     // Convert to right boolean value
-                    let mut storage = storage.lock().expect(
-                        &OpcGwError::ChirpStack("Can't lock storage".to_string()).to_string(),
-                    );
+                    let mut storage = storage.lock().unwrap_or_else(|_| {
+                        panic!(
+                            "{}",
+                            OpcGwError::ChirpStack("Can't lock storage".to_string()).to_string()
+                        )
+                    });
                     let value = metric.datasets[0].data[0];
                     let mut bool_value = false;
                     match value {
@@ -684,17 +689,25 @@ impl ChirpstackPoller {
                     storage.set_metric_value(device_id, &metric_name, MetricType::Bool(bool_value));
                 }
                 OpcMetricTypeConfig::Int => {
+                    debug!("Int metric is: {:?}", metric);
                     let int_value = metric.datasets[0].data[0] as i64;
-                    let mut storage = storage.lock().expect(
-                        &OpcGwError::ChirpStack("Can't lock storage".to_string()).to_string(),
-                    );
+                    let mut storage = storage.lock().unwrap_or_else(|_| {
+                        panic!(
+                            "{}",
+                            OpcGwError::ChirpStack("Can't lock storage".to_string()).to_string()
+                        )
+                    });
                     storage.set_metric_value(device_id, &metric_name, MetricType::Int(int_value));
                 }
                 OpcMetricTypeConfig::Float => {
+                    debug!("Float metric is: {:?}", metric);
                     let value = metric.datasets[0].data[0];
-                    let mut storage = storage.lock().expect(
-                        &OpcGwError::ChirpStack("Can't lock storage".to_string()).to_string(),
-                    );
+                    let mut storage = storage.lock().unwrap_or_else(|_| {
+                        panic!(
+                            "{}",
+                            OpcGwError::ChirpStack("Can't lock storage".to_string()).to_string()
+                        )
+                    });
                     storage.set_metric_value(
                         device_id,
                         &metric_name,
@@ -702,11 +715,7 @@ impl ChirpstackPoller {
                     );
                 }
                 OpcMetricTypeConfig::String => {
-                    warn!(
-                        "{}",
-                        OpcGwError::ChirpStack("String conversion not implemented".to_string())
-                            .to_string()
-                    );
+                    warn!("Reading string metrics fron Chirpstack server is not implemented")
                 }
             },
             None => {
@@ -936,11 +945,7 @@ impl ChirpstackPoller {
             Ok(response) => {
                 let inner_response = response.into_inner();
 
-                let metrics: HashMap<String, Metric> = inner_response
-                    .metrics
-                    .into_iter()
-                    .map(|(key, value)| (key, value))
-                    .collect();
+                let metrics: HashMap<String, Metric> = inner_response.metrics.into_iter().collect();
 
                 Ok(DeviceMetric { metrics })
             }
@@ -1017,36 +1022,41 @@ impl ChirpstackPoller {
     /// # Arguments
     ///
     /// * `command` - The device command containing the target device EUI, payload data,
-    ///               port number, and confirmation settings
+    ///   port number, and confirmation settings
     ///
     /// # Returns
     ///
     /// * `Ok(())` - If the command was successfully enqueued on the server
     /// * `Err(OpcGwError)` - If validation failed or the server request failed
     ///
-    /// # Validation
+    /// # Errors
     ///
-    /// - The `f_port` must be greater than 0 (ports 0 are reserved for MAC commands)
-    /// - The device EUI must be valid (validated by the server)
+    /// This function will return an error if:
+    /// - The `f_port` is 0 or invalid (ports 0 are reserved for MAC commands)
+    /// - The device EUI is invalid (validated by the server)
+    /// - Server communication fails
+    /// - Client creation fails
     ///
-    /// # Behavior
+    /// # Examples
     ///
-    /// 1. Validates the command parameters locally
-    /// 2. Creates a ChirpStack-compatible queue item with default values
-    /// 3. Establishes a connection to the ChirpStack device service
-    /// 4. Sends the enqueue request to the server
-    /// 5. Logs the server response for debugging purposes
+    /// ```rust
+    /// let command = DeviceCommand {
+    ///     device_id: "1234567890abcdef".to_string(),
+    ///     confirmed: true,
+    ///     f_port: 1,
+    ///     data: vec![0x01, 0x02, 0x03],
+    /// };
     ///
-    /// # Error Handling
+    /// match chirpstack_client.enqueue_device_command(command).await {
+    ///     Ok(()) => println!("Command enqueued successfully"),
+    ///     Err(e) => eprintln!("Failed to enqueue command: {}", e),
+    /// }
+    /// ```
     ///
-    /// - Invalid fPort values are rejected immediately
-    /// - Server communication errors are logged and propagated
-    /// - Client creation failures result in a panic (should be handled in production)
+    /// # Panics
     ///
-    /// # Note
-    ///
-    /// The method currently uses `unwrap()` for client creation which will panic on failure.
-    /// Consider implementing proper error handling for production use.
+    /// The method currently panics if client creation fails. This should be handled
+    /// properly in production code.
     async fn enqueue_device_request_to_server(
         &self,
         command: DeviceCommand,
@@ -1059,7 +1069,7 @@ impl ChirpstackPoller {
         debug!("Create request");
         let queue_item = DeviceQueueItem {
             id: "".to_string(),
-            dev_eui: command.device_eui.clone(),
+            dev_eui: command.device_id.clone(),
             confirmed: command.confirmed,
             f_port: command.f_port,
             data: command.data.clone(),

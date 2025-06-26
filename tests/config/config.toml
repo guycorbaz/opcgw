@@ -41,13 +41,13 @@ application_id = "application_1" # The id defined in chirpstack
 device_name = "Device01" # The name that will apperar in opc ua
 device_id = "device_1" # The id defined in chirpstack
 
-[[application.device.metric]]
+[[application.device.read_metric]]
 metric_name ="Metric01" # The name that will appear in opc ua
 chirpstack_metric_name = "metric_1" # The name defined in Chirpstcak
 metric_type = "Float"
 metric_unit = "m"
 
-[[application.device.metric]]
+[[application.device.read_metric]]
 metric_name = "Metric02" # The name that will appear in opc ua
 chirpstack_metric_name = "metric_2" # The name defined in Chirpstcak
 metric_type = "Float"
@@ -63,14 +63,14 @@ application_id = "application_2" # The id defined in chirpstack
 device_name = "Device02" # The name that will apperar in opc ua
 device_id = "device_2" # The id defined in chirpstack
 
-[[application.device.metric]]
+[[application.device.read_metric]]
 metric_name ="Metric03" # The name that will appear in opc ua
 chirpstack_metric_name = "metric_3" # The name defined in Chirpstcak
 metric_type = "Float"
 metric_unit = "m"
 
 
-[[application.device.metric]]
+[[application.device.read_metric]]
 metric_name = "Metric04" # The name that will appear in opc ua
 chirpstack_metric_name = "metric_4" # The name defined in Chirpstcak
 metric_type = "Float"
@@ -80,13 +80,13 @@ metric_unit = "m"
 device_name = "Device03" # The name that will apperar in opc ua
 device_id = "device_3" # The id defined in chirpstack
 
-[[application.device.metric]]
+[[application.device.read_metric]]
 metric_name ="Metric05" # The name that will appear in opc ua
 chirpstack_metric_name = "metric_5" # The name defined in Chirpstcak
 metric_type = "Float"
 metric_unit = "m"
 
-[[application.device.metric]]
+[[application.device.read_metric]]
 metric_name = "Metric06" # The name that will appear in opc ua
 chirpstack_metric_name = "metric_6" # The name defined in Chirpstcak
 metric_type = "Float"

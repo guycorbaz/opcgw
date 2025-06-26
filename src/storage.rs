@@ -156,11 +156,16 @@ pub struct Device {
 /// Structure for enquing commands to chirpstack devices
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeviceCommand {
-    pub device_eui: String,
+    /// Unique identifier of the target device
+    pub device_id: String,
+    /// Whether the command requires confirmation from the device
     pub confirmed: bool,
+    /// Frame port number for the LoRaWAN communication
     pub f_port: u32,
+    /// Command payload data as bytes
     pub data: Vec<u8>,
 }
+
 /// Status information for the ChirpStack server connection.
 ///
 /// This structure tracks the operational status of the ChirpStack server
@@ -235,6 +240,7 @@ pub struct Storage {
     /// initialized based on the application configuration.
     devices: HashMap<String, Device>,
 
+    /// Command queue for chirpstack devices
     device_command_queue: Vec<DeviceCommand>,
 }
 
@@ -292,6 +298,10 @@ impl Storage {
         debug!("Creating new Storage instance");
         let mut devices: HashMap<String, Device> = HashMap::new();
 
+        // Create an empty command queue
+        debug!("Creating an empty command queue");
+        let mut device_command_queue = Vec::new();
+
         // Process each application in the configuration
         for application in app_config.application_list.iter() {
             debug!("Processing application: {}", application.application_name);
@@ -305,7 +315,7 @@ impl Storage {
 
                 // Initialize metrics HashMap for this device
                 let mut device_metrics = HashMap::new();
-                for metric in device.metric_list.iter() {
+                for metric in device.read_metric_list.iter() {
                     // Initialize metric with type-appropriate default value
                     let default_value = match metric.metric_type {
                         OpcMetricTypeConfig::Bool => MetricType::Bool(false),
@@ -337,9 +347,6 @@ impl Storage {
             devices.len()
         );
 
-        debug!("Creating device command queue");
-        let mut device_command_queue = Self::create_commands();
-
         Storage {
             config: app_config.clone(),
             chirpstack_status: ChirpstackStatus {
@@ -348,7 +355,6 @@ impl Storage {
             },
             devices,
             device_command_queue,
-            
         }
     }
 
@@ -849,36 +855,6 @@ impl Storage {
     pub fn get_device_command_queue(&self) -> Vec<DeviceCommand> {
         self.device_command_queue.clone()
     }
-
-    //TODO: remove after testing
-    fn create_commands() -> Vec<DeviceCommand> {
-        trace!("Creating commands");
-        // Create a list of command for testing
-        let vanne1_command = DeviceCommand {
-            device_eui: "524d1e0a02243201".to_string(),
-            confirmed: false,
-            f_port: 10,
-            data: vec![0x02],
-        };
-
-        let vanne2_command = DeviceCommand {
-            device_eui: "3f8e3904c1523201".to_string(),
-            confirmed: false,
-            f_port: 10,
-            data: vec![0x02],
-        };
-
-        let vanne3_command = DeviceCommand {
-            device_eui: "999b3d04c1523201".to_string(),
-            confirmed: false,
-            f_port: 10,
-            data: vec![0x02],
-        };
-
-        let mut device_command_queue = vec![vanne1_command, vanne2_command, vanne3_command];
-        debug!("Command queue is {:?}", device_command_queue);
-        device_command_queue
-    }
 }
 
 /// Storage module test suite.
@@ -1105,7 +1081,7 @@ mod tests {
     fn test_command_queue() {
         let mut storage = Storage::new(&get_config());
         let command = DeviceCommand {
-            device_eui: "device01".to_string(),
+            device_id: "device01".to_string(),
             confirmed: true,
             f_port: 100,
             data: vec![10, 20],
@@ -1113,7 +1089,7 @@ mod tests {
         storage.push_command(command);
         let result = storage.pop_command();
 
-        assert_eq!(result.clone().unwrap().device_eui, "device01");
+        assert_eq!(result.clone().unwrap().device_id, "device01");
         assert_eq!(result.clone().unwrap().confirmed, true);
         assert_eq!(result.clone().unwrap().f_port, 100);
         assert_eq!(result.clone().unwrap().data, [10, 20]);

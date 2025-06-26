@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) [2024] [Guy Corbaz]
 
-use crate::config::AppConfig;
-use crate::storage::{MetricType, Storage};
+use crate::config::{AppConfig, DeviceCommandCfg};
+use crate::storage::{DeviceCommand, MetricType, Storage};
 use crate::utils::*;
 use log::{debug, error, info, trace};
 
@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 // opcua modules
+use opcua::server::address_space::AccessLevel;
 use opcua::server::address_space::Variable;
 use opcua::server::{
     diagnostics::NamespaceMetadata,
@@ -25,7 +26,9 @@ pub struct OpcUa {
     config: AppConfig,
     /// Storage for the OPC UA server
     storage: Arc<std::sync::Mutex<Storage>>,
+    /// IP address and port for the OPC UA server
     host_ip_address: String,
+    /// Port for the OPC UA server
     host_port: u16,
 }
 
@@ -38,9 +41,9 @@ impl OpcUa {
     /// # Arguments
     ///
     /// * `config` - A reference to the application configuration containing OPC UA
-    ///              server settings and other application parameters
+    ///   server settings and other application parameters
     /// * `storage` - An `Arc<Mutex<Storage>>` providing thread-safe access to the
-    ///               shared storage system for device metrics and data
+    ///   shared storage system for device metrics and data
     ///
     /// # Returns
     ///
@@ -54,7 +57,7 @@ impl OpcUa {
     /// let config = AppConfig::new().expect("Failed to load config");
     /// let storage = Arc::new(Mutex::new(Storage::new()));
     /// let opcua_server = OpcUa::new(&config, storage);
-    ///
+    /// ```
     pub fn new(config: &AppConfig, storage: Arc<std::sync::Mutex<Storage>>) -> Self {
         trace!("Create new OPC UA server structure");
         //debug!("OPC UA server configuration: {:#?}", config);
@@ -220,7 +223,7 @@ impl OpcUa {
 
         server_builder
             .hello_timeout(hello_timeout)
-            .host(host_ip) //TODO: Use local ip address
+            .host(host_ip)
             .port(host_port)
     }
 
@@ -409,11 +412,6 @@ impl OpcUa {
             )
     }
 
-    //fn create_limits(&self) -> Limits {
-    //    trace!("Create limits");
-    //    todo!()
-    //}
-
     /// Runs the OPC UA server asynchronously.
     ///
     /// This method creates and starts the OPC UA server, handling the complete server
@@ -572,31 +570,70 @@ impl OpcUa {
                     &device.device_name,
                     &application_node,
                 );
-                // Add metrics into devices
-                for metric in device.metric_list.iter() {
-                    debug!("Adding metric {} to opc ua", metric.metric_name);
-                    let metric_node = NodeId::new(ns, metric.metric_name.clone());
+                // Add metrics into devices node
+                for read_metric in device.read_metric_list.iter() {
+                    debug!("Adding read metric {} to opc ua", read_metric.metric_name);
+                    let read_metric_node = NodeId::new(ns, read_metric.metric_name.clone());
                     let _ = address_space.add_variables(
                         vec![Variable::new(
-                            &metric_node,
-                            metric.metric_name.clone(),
-                            metric.metric_name.clone(),
+                            &read_metric_node,
+                            read_metric.metric_name.clone(),
+                            read_metric.metric_name.clone(),
                             0_i32,
                         )],
                         &device_node,
                     );
                     let storage_clone = self.storage.clone();
                     let device_id = device.device_id.clone();
-                    let chirpstack_metric_name = metric.chirpstack_metric_name.clone();
+                    let chirpstack_metric_name = read_metric.chirpstack_metric_name.clone();
                     manager
                         .inner()
-                        .add_read_callback(metric_node.clone(), move |_, _, _| {
+                        .add_read_callback(read_metric_node.clone(), move |_, _, _| {
                             Self::get_value(
                                 &storage_clone,
                                 device_id.clone().to_string(),
                                 chirpstack_metric_name.clone().to_string(),
                             )
                         })
+                }
+                // Add commands into device node
+                match &device.device_command_list {
+                    None => debug!("No device commands for device {}", device.device_name),
+                    Some(command_list) => {
+                        for command in command_list.iter() {
+                            let device_id = device.device_id.clone();
+                            debug!(
+                                "Adding command {} to device {} ",
+                                command.command_id, device.device_name
+                            );
+                            let command_node = NodeId::new(ns, command.command_id);
+                            let mut command_variable = Variable::new(
+                                &command_node,
+                                command.command_name.clone(),
+                                command.command_name.clone(),
+                                0_i32,
+                            );
+                            let storage_clone = self.storage.clone();
+                            command_variable.set_writable(true);
+                            command_variable.set_user_access_level(
+                                AccessLevel::CURRENT_READ | AccessLevel::CURRENT_WRITE,
+                            );
+                            let _ =
+                                address_space.add_variables(vec![command_variable], &device_node);
+                            let command_clone = command.clone();
+                            manager.inner().add_write_callback(
+                                command_node.clone(),
+                                move |data_value, numeric_range| {
+                                    Self::set_command(
+                                        &storage_clone,
+                                        &device_id.to_string(),
+                                        &command_clone,
+                                        data_value,
+                                    )
+                                },
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -753,6 +790,100 @@ impl OpcUa {
             MetricType::Float(value) => Variant::Float(value as f32),
             MetricType::String(value) => Variant::String(value.into()),
             MetricType::Bool(value) => Variant::Boolean(value),
+        }
+    }
+
+    /// Sets a command for a device based on OPC UA data value
+    ///
+    /// This method processes an OPC UA data value and creates a device command
+    /// that gets queued in the storage for later transmission to the target device.
+    ///
+    /// # Arguments
+    /// * `storage` - Thread-safe reference to the storage containing device commands
+    /// * `device_id` - Unique identifier of the target device
+    /// * `command` - Command configuration containing port and confirmation settings
+    /// * `data_value` - OPC UA data value containing the command payload
+    /// * `numeric_range` - Numeric range specification for the data value
+    ///
+    /// # Returns
+    /// * `opcua::types::StatusCode::Good` - Command successfully queued
+    /// * `opcua::types::StatusCode::Bad` - No value provided in data_value
+    /// * `opcua::types::StatusCode::BadTypeMismatch` - Data type conversion failed
+    /// * `opcua::types::StatusCode::BadInternalError` - Storage lock acquisition failed
+    fn set_command(
+        storage: &Arc<std::sync::Mutex<Storage>>,
+        device_id: &str,
+        command: &DeviceCommandCfg,
+        data_value: DataValue,
+    ) -> opcua::types::StatusCode {
+        trace!("Set command");
+        debug!("Command data value {:?}", data_value);
+        //let value = data_value.value.unwrap();
+
+        match data_value.value {
+            // There was no value
+            None => opcua::types::StatusCode::Bad,
+            Some(variant) => {
+                debug!("Variant: {:?}", variant);
+                let value = match Self::convert_variant_to_metric(&variant) {
+                    Ok(MetricType::Int(value)) => value,
+                    _ => return opcua::types::StatusCode::BadTypeMismatch,
+                };
+                debug!(
+                    "Add command {} for device {} in port {} with confirmation {} ",
+                    value, device_id, command.command_port, command.command_confirmed
+                );
+                // Create the command
+                let command_to_send = DeviceCommand {
+                    device_id: device_id.to_string(),
+                    confirmed: command.command_confirmed,
+                    f_port: command.command_port as u32,
+                    data: vec![value.try_into().unwrap()], //TODO: améliorer la gestion d'erreur
+                };
+                // Add command to storage
+                match storage.lock() {
+                    Ok(mut storage_guard) => {
+                        storage_guard.push_command(command_to_send);
+                        opcua::types::StatusCode::Good
+                    }
+                    Err(e) => {
+                        error!("Impossible to lock storage {}", e);
+                        opcua::types::StatusCode::BadInternalError
+                    }
+                }
+            }
+        }
+    }
+
+    /// Converts an OPC UA Variant to a MetricType
+    ///
+    /// This method handles the conversion between OPC UA data types (Variant) and
+    /// the internal metric representation (MetricType) used by the application.
+    /// It supports conversion of common data types including integers, floats,
+    /// strings, and booleans.
+    ///
+    /// # Arguments
+    /// * `variant` - Reference to the OPC UA Variant to be converted
+    ///
+    /// # Returns
+    /// * `Ok(MetricType)` - Successfully converted metric type
+    /// * `Err(String)` - Error message if the variant type is not supported
+    ///
+    /// # Supported Conversions
+    /// * `Int32/Int64` -> `MetricType::Int`
+    /// * `Float/Double` -> `MetricType::Float`
+    /// * `String` -> `MetricType::String`
+    /// * `Boolean` -> `MetricType::Bool`
+    fn convert_variant_to_metric(variant: &Variant) -> Result<MetricType, String> {
+        trace!("Convert variant to metric");
+        match variant {
+            Variant::Int32(value) => Ok(MetricType::Int(*value as i64)),
+            Variant::Int64(value) => Ok(MetricType::Int(*value)),
+            Variant::Float(value) => Ok(MetricType::Float(*value as f64)),
+            Variant::Double(value) => Ok(MetricType::Float(*value)),
+            Variant::String(value) => Ok(MetricType::String(value.to_string())),
+            Variant::Boolean(value) => Ok(MetricType::Bool(*value)),
+            _ => Err(format!("Unsupported variant type {:?}", variant)),
         }
     }
 }
