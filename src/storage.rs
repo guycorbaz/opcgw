@@ -26,7 +26,6 @@
 //! # Thread Safety
 //!
 //! This module is designed to be used with Tokio's async runtime and requires
-//! external synchronization (e.g., Arc<Mutex<Storage>>) for concurrent access.
 //!
 //! # Usage
 //!

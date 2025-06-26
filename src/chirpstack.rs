@@ -132,12 +132,9 @@ impl Interceptor for AuthInterceptor {
     ///
     /// This method will panic if the authorization token cannot be parsed into valid metadata.
     ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
     /// // This method is called automatically by the gRPC framework
     /// // No manual invocation is typically required
-    /// ```
+    /// 
     fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
         debug!("Interceptor::call");
         request.metadata_mut().insert(

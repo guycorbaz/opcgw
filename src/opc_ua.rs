@@ -492,9 +492,8 @@ impl OpcUa {
     /// Each metric variable is configured with a read callback to dynamically fetch
     /// values from the data storage.
     ///
-    /// # Node Hierarchy Structure
-    ///
-    /// ```
+    /// The node hierarchy follows this structure:
+    /// ```text
     /// Objects/
     /// └── Application_Name/
     ///     └── Device_Name/
@@ -503,35 +502,10 @@ impl OpcUa {
     ///         └── ...
     /// ```
     ///
-    /// # Node Types Created
-    ///
-    /// * **Application Folders**: Top-level containers for each LoRaWAN application
-    /// * **Device Folders**: Sub-containers for devices within each application
-    /// * **Metric Variables**: Data points that expose device telemetry values
-    ///
-    /// # Dynamic Value Resolution
-    ///
-    /// Each metric variable is configured with a read callback that:
-    /// - Queries the data storage using device ID and ChirpStack metric name
-    /// - Returns the current metric value when clients read the variable
-    /// - Provides real-time data access without polling
-    ///
     /// # Arguments
     ///
     /// * `ns` - Namespace index for the created nodes
     /// * `manager` - Shared reference to the OPC UA node manager for address space manipulation
-    ///
-    /// # Thread Safety
-    ///
-    /// The method safely handles concurrent access by:
-    /// - Acquiring a write lock on the address space
-    /// - Using Arc-wrapped storage for thread-safe access in callbacks
-    /// - Cloning necessary data for use in async callbacks
-    ///
-    /// # Logging Behavior
-    ///
-    /// * `trace!` - Method entry indication
-    /// * `debug!` - Individual application, device, and metric additions
     ///
     /// # Examples
     ///
@@ -540,6 +514,15 @@ impl OpcUa {
     /// let manager = Arc::new(SimpleNodeManager::new());
     /// server.add_nodes(ns, manager);
     /// ```
+    ///
+    /// # Node Types Created
+    ///
+    /// * **Application Folders** - Top-level containers for each LoRaWAN application
+    /// * **Device Folders** - Sub-containers for devices within each application  
+    /// * **Metric Variables** - Data points that expose device telemetry values
+    ///
+    /// Each metric variable is configured with a read callback that queries the data storage
+    /// using device ID and ChirpStack metric name, providing real-time data access without polling.
     pub fn add_nodes(&mut self, ns: u16, manager: Arc<SimpleNodeManager>) {
         trace!("Add nodes to OPC UA server");
         let address_space = manager.address_space();
