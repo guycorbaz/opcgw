@@ -25,7 +25,7 @@ prost-types = "0.13.5"
 async-opcua = { version = "^0.16.0", features = ["server"] }
 clap = { version = "4.5.47", features = ["derive"] }
 local-ip-address = "0.6.5"
-url = "2.5.4"
+url = "2.5.7"
 
 [build-dependencies]
 tonic-build = "0.13.1"
