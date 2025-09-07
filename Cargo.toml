@@ -32,6 +32,15 @@ tonic-build = "0.13.1"
 
 [profile.dev]
 opt-level = 0
+codegen-units = 32
+
+[profile.test]
+debug = true
+opt-level = 1
+
+[profile.doc]
+debug-assertions = false
 
 [profile.release]
 opt-level = 3
+lto = true
