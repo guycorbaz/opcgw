@@ -22,7 +22,7 @@ tonic = "0.13.1"
 tonic-build = "0.13.1"
 chirpstack_api = "4.13.0"
 prost-types = "0.13.5"
-async-opcua = { version = "^0.15.1", features = ["server"] }
+async-opcua = { version = "^0.16.0", features = ["server"] }
 clap = { version = "4.5.40", features = ["derive"] }
 local-ip-address = "0.6.5"
 url = "2.5.4"
@@ -37,9 +37,6 @@ codegen-units = 32
 [profile.test]
 debug = true
 opt-level = 1
-
-[profile.doc]
-debug-assertions = false
 
 [profile.release]
 opt-level = 3

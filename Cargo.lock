@@ -122,9 +122,9 @@ checksum = "69f7f8c3906b62b754cd5326047894316021dcfe5a194c8ea52bdd94934a3457"
 
 [[package]]
 name = "async-opcua"
-version = "0.15.1"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2fd414ecef5386b00277a57fb769addcc3afd357d1fb64fe1c0d45350e80ddc"
+checksum = "5e522a382c008ef291c2c43b27ddd53dedbfd433681a07c5e54de1f3d6b9d7b2"
 dependencies = [
  "async-opcua-core",
  "async-opcua-core-namespace",
@@ -138,9 +138,9 @@ dependencies = [
 
 [[package]]
 name = "async-opcua-core"
-version = "0.15.1"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "461bc09e4a42d6d3027e469eae57df0a51c1e6e2f33cd0b68bf5f497edc41fa3"
+checksum = "7d4a462fba2deba71b25c47302e573fad36930bc351e4872656b7dc77ed1ca88"
 dependencies = [
  "async-opcua-crypto",
  "async-opcua-types",
@@ -158,9 +158,9 @@ dependencies = [
 
 [[package]]
 name = "async-opcua-core-namespace"
-version = "0.15.1"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e806f30ea1aa92ba79226eacd40050b968f0841bf40031d13dbc06af54c78f5"
+checksum = "045ff8af251bf0600276a7723798a93cc1b497eb0e27ffc9638bc980bbf19984"
 dependencies = [
  "async-opcua-nodes",
  "async-opcua-types",
@@ -168,9 +168,9 @@ dependencies = [
 
 [[package]]
 name = "async-opcua-crypto"
-version = "0.15.1"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b734b8d3a1c8d998520e790e719124d51b092545d067cd0c21c05b2db3d8b6b7"
+checksum = "20a5dfb83c1759a046fa7d9b47ce65de3c7915ee613a79829730fe64820882cc"
 dependencies = [
  "aes",
  "async-opcua-types",
@@ -190,9 +190,9 @@ dependencies = [
 
 [[package]]
 name = "async-opcua-macros"
-version = "0.15.1"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6096533605f3260604b774c32907cdcf41adb2eb6743c7479d2a549941f29977"
+checksum = "b438f8343692f91440941fcca82697bd167665f6f3eb98963f408bfebc85fb2b"
 dependencies = [
  "base64 0.22.1",
  "convert_case",
@@ -204,9 +204,9 @@ dependencies = [
 
 [[package]]
 name = "async-opcua-nodes"
-version = "0.15.1"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c01383a728fbfefea52e86b5526caef7641d7a4067cb4df6767764ca2aecb013"
+checksum = "5888a0d19966f82a3ec73ec1ba63656a091347be10537aebb9710bfca4534c3c"
 dependencies = [
  "async-opcua-macros",
  "async-opcua-types",
@@ -219,9 +219,9 @@ dependencies = [
 
 [[package]]
 name = "async-opcua-server"
-version = "0.15.1"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec496b28c928ad243219a392d55acd8bb01027032f2c23525520e97d34803789"
+checksum = "3d45b15d9962d410fbcbf10275cf720e2c7b38294dc887d636dd7d4e611700bc"
 dependencies = [
  "arc-swap",
  "async-opcua-core",
@@ -246,9 +246,9 @@ dependencies = [
 
 [[package]]
 name = "async-opcua-types"
-version = "0.15.1"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e4c59407e30b429b77475328a43c1456bd84dd0fef1a34d73531f225ff26ced"
+checksum = "a24a1a9316cacb5268020ed4027a8337c28de443e4a014fb2a97737f618c5107"
 dependencies = [
  "async-opcua-macros",
  "base64 0.22.1",
