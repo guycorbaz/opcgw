@@ -20,9 +20,11 @@ that are not really user friendly, which might lead to mistakes when configuring
 
 I wanted to control my LoRa watering valves, in my fruit tree orchards, via my SCADA, in order to optimize water use.
 I also wanted to learn rust. Therefore I decided to develop this gateway with this language.
-The program is certainly not designed with the best practices of rust language and
-certainly needs some improvements. That's why *opc_ua_chirpstack_gateway* is under heavy development.
 
+## Status
+
+**opcgw** has reach a maturity level that allows to use it in production, with certain car. It does not implement all
+OPC UA features, but it is enough for my needs and it do the job.
 
 ## Features
 
@@ -30,12 +32,6 @@ certainly needs some improvements. That's why *opc_ua_chirpstack_gateway* is und
 - Implementation of an [OPC UA](https://opcfoundation.org) server
 - Management of device metrics via configuration file
 
+## Improvements
 
-## Limitations
-
-Chirpstack propose 5 metric types:
-- Unknown/Unset
-- Counter
-- Absolute
-- Gauge
-- String
+If you have any idea, feel free to open an issue, or better, a pull request.
