@@ -43,13 +43,13 @@ story_location: _bmad-output/implementation-artifacts
 
 development_status:
   # Epic 1: Crash-Free Gateway Foundation (Phase A)
-  epic-1: in-progress
+  epic-1: done
   1-1-update-dependencies-and-rust-toolchain: done
   1-2-migrate-logging-from-log4rs-to-tracing: done
   1-3-comprehensive-error-handling: done
   1-4-graceful-shutdown-with-cancellationtoken: done
   1-5-configuration-validation-and-clean-startup: done
-  epic-1-retrospective: optional
+  epic-1-retrospective: done
 
   # Epic 2: Data Persistence (Phase A)
   epic-2: in-progress

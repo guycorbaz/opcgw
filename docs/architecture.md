@@ -1,3 +1,9 @@
+---
+layout: default
+title: Architecture & Design
+permalink: /architecture/
+---
+
 # Architecture Documentation — opcgw
 
 > Generated: 2026-04-01 | Scan Level: Exhaustive

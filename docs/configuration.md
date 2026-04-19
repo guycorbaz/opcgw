@@ -1,6 +1,5 @@
 ---
 layout: default
-layout: page
 title: Configuration Reference
 permalink: /configuration/
 ---

@@ -1,6 +1,5 @@
 ---
 layout: default
-layout: page
 title: Quick Start Guide
 permalink: /quickstart/
 ---
