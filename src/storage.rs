@@ -937,7 +937,7 @@ mod tests {
         let mut storage = Storage::new(&app_config);
 
         // Test initial status
-        assert_eq!(storage.chirpstack_status.server_available, true);
+        assert!(storage.chirpstack_status.server_available);
         assert_eq!(storage.chirpstack_status.response_time, 0.0);
 
         // Test status update
@@ -968,7 +968,7 @@ mod tests {
         let storage = Storage::new(&app_config);
 
         // Verify that we loaded a meaningful configuration
-        assert!(storage.config.application_list.len() > 0);
+        assert!(!storage.config.application_list.is_empty());
     }
 
     /// Tests device retrieval functionality.
@@ -1096,9 +1096,10 @@ mod tests {
         storage.push_command(command);
         let result = storage.pop_command();
 
-        assert_eq!(result.clone().unwrap().device_id, "device01");
-        assert_eq!(result.clone().unwrap().confirmed, true);
-        assert_eq!(result.clone().unwrap().f_port, 100);
-        assert_eq!(result.clone().unwrap().data, [10, 20]);
+        let cmd = result.unwrap();
+        assert_eq!(cmd.device_id, "device01");
+        assert!(cmd.confirmed);
+        assert_eq!(cmd.f_port, 100);
+        assert_eq!(cmd.data, [10, 20]);
     }
 }

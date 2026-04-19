@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Run tests
+        run: cargo test --verbose
+
+  clippy:
+    name: Clippy (Linting)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Build (debug)
+        run: cargo build --verbose
+
+      - name: Build (release)
+        run: cargo build --release --verbose
+
+  security:
+    name: Security Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Check for hardcoded credentials
+        run: |
+          if grep -r "password\|secret\|api_key\|token" src/ --include="*.rs" | grep -v "test\|doc\|config\|unwrap\|parse" | grep -E "(=\s*['\"]|:\s*['\"])"; then
+            echo "⚠️  Potential hardcoded credentials found in source code"
+            exit 1
+          fi
+          echo "✓ No obvious hardcoded credentials detected"
+
+      - name: Verify SPDX headers
+        run: |
+          missing_headers=0
+          while IFS= read -r file; do
+            if ! head -1 "$file" | grep -q "SPDX-License-Identifier"; then
+              echo "Missing SPDX header: $file"
+              ((missing_headers++))
+            fi
+          done < <(find src -name "*.rs" -type f)
+          if [ $missing_headers -gt 0 ]; then
+            echo "❌ $missing_headers file(s) missing SPDX headers"
+            exit 1
+          fi
+          echo "✓ All source files have SPDX headers"
+
+      - name: Check for unsafe blocks
+        run: |
+          unsafe_count=$(grep -r "unsafe" src/ --include="*.rs" | grep -v "test\|doc" | wc -l)
+          if [ $unsafe_count -gt 0 ]; then
+            echo "⚠️  Found $unsafe_count unsafe block(s) - verify they are documented"
+            grep -r "unsafe" src/ --include="*.rs" | grep -v "test\|doc"
+          fi
