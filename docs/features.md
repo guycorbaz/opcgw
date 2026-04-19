@@ -1,4 +1,5 @@
 ---
+layout: default
 layout: page
 title: Features & Use Cases
 permalink: /features/

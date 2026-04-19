@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ page.title | default: site.title }}</title>
+    <meta name="description" content="{{ page.description | default: site.description }}">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <link href="{{ site.baseurl }}/assets/css/style.css" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark">
+        <div class="container">
+            <a class="navbar-brand" href="{{ site.baseurl }}/">
+                <i class="fas fa-project-diagram"></i> opcgw
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav ms-auto">
+                    <li class="nav-item"><a class="nav-link" href="{{ site.baseurl }}/features/">Features</a></li>
+                    <li class="nav-item"><a class="nav-link" href="{{ site.baseurl }}/architecture/">Architecture</a></li>
+                    <li class="nav-item"><a class="nav-link" href="{{ site.baseurl }}/quickstart/">Quick Start</a></li>
+                    <li class="nav-item"><a class="nav-link" href="{{ site.baseurl }}/usecases/">Use Cases</a></li>
+                    <li class="nav-item"><a class="nav-link" href="{{ site.baseurl }}/configuration/">Config</a></li>
+                    <li class="nav-item"><a class="nav-link" href="https://github.com/guycorbaz/opcgw" target="_blank"><i class="fab fa-github"></i></a></li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <main>
+        {{ content }}
+    </main>
+
+    <footer>
+        <div class="container">
+            <div class="row mb-4">
+                <div class="col-md-3">
+                    <div class="footer-link-group">
+                        <h5>Product</h5>
+                        <a href="{{ site.baseurl }}/features/">Features</a>
+                        <a href="{{ site.baseurl }}/quickstart/">Quick Start</a>
+                        <a href="{{ site.baseurl }}/configuration/">Configuration</a>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="footer-link-group">
+                        <h5>Documentation</h5>
+                        <a href="{{ site.baseurl }}/architecture/">Architecture</a>
+                        <a href="{{ site.baseurl }}/usecases/">Use Cases</a>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="footer-link-group">
+                        <h5>Community</h5>
+                        <a href="https://github.com/guycorbaz/opcgw" target="_blank">GitHub</a>
+                        <a href="https://github.com/guycorbaz/opcgw/issues" target="_blank">Issues</a>
+                        <a href="https://github.com/guycorbaz/opcgw/discussions" target="_blank">Discussions</a>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="footer-link-group">
+                        <h5>Connect</h5>
+                        <a href="mailto:gcorbaz@gmail.com">Email</a>
+                        <a href="https://github.com/guycorbaz" target="_blank">GitHub Profile</a>
+                    </div>
+                </div>
+            </div>
+            <hr style="border-color: rgba(16, 185, 129, 0.2);">
+            <div class="row mt-3 text-center">
+                <div class="col-12">
+                    <p>&copy; 2026 opcgw. Licensed under MIT OR Apache-2.0</p>
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

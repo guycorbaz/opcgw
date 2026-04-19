@@ -1,4 +1,5 @@
 ---
+layout: default
 layout: page
 title: Use Cases & Success Stories
 permalink: /usecases/
