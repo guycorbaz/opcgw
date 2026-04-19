@@ -1,0 +1,380 @@
+# Chirpstack server connection
+[global]
+debug = true
+
+
+[chirpstack]
+
+# Chirpstack erver address
+#
+# Example format
+#   http://192.168.1.4:8080
+#   http://xx.yy.com:8080
+#
+server_address = "http://192.168.1.12:8080"
+# API token defined on the chirpstack server
+api_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJjaGlycHN0YWNrIiwiaXNzIjoiY2hpcnBzdGFjayIsInN1YiI6ImVkNGY5YjExLTdjMGYtNGFiNi1hNmM2LWU2ZTJmN2IyMjQ3MyIsInR5cCI6ImtleSJ9.8MbM4zh7f-QnPFE5tsLUo1YzPU_8XWxHqhc9cOfxePw"
+# Tenant Id that will be used
+tenant_id = "52f14cd4-c6f1-4fbd-8f87-4025e1d49242"
+# Frequency to poll ChirpStack server in seconds
+polling_frequency = 10
+# Amount of connection retry when Chirpstack server is down
+retry = 10
+# Delay in sec between two retry
+delay = 10
+
+
+# OPC UA parameters
+#
+# At the time being, logging to the server is simple. It supports only
+# - null endpoint without security
+# - Basic256 without encryption
+# - Basic256 with encryption
+# - one user with password
+#
+[opcua]
+# OPC UA application name
+# This field is mandatory
+application_name = "Chirpstack OPC UA Gateway"
+# The globally unique identifier for the application instance
+# This field is mandatory
+application_uri = "urn:chirpstack:opcua:gateway"
+# The globally unique identifier for the product.
+# This field is mandatory
+product_uri = "urn:chirpstack:opcua:gateway"
+# Enable or disable logging of upc ua server diagnostic information
+diagnostics_enabled = true
+# TCP hello time out in s.
+# This field is optional: default value is 5s
+#hello_timeout = 10
+# IP address to bind the server to
+# This field is optional. Default, first interface IP address
+#host_ip_address = "localhost"
+# IP port for the server
+# This field is optional. Default value is 4840
+#host_port = 9090
+# Activate/deacivate keypair certificate generation.
+# This is normallly turned off in operation
+create_sample_keypair = true
+# Path of the certificate below pki_dir
+certificate_path = "own/cert.der"
+ # Path of the private key below pki_dir
+private_key_path = "private/private.pem"
+# Activate or deactivate trusting client certificate
+trust_client_cert = true
+# Activate or deactivate check of certificate validity
+check_cert_time = true
+# Kea and certificate folder
+pki_dir = "./pki"
+# Default user name
+user_name = "user1"
+# Default user password
+user_password = "user1"
+
+
+###########################################################
+# Applications
+# application are listed below. There are no limits on the
+# application number
+# Eadch applicatgion can slso have an unlimited amount
+# of device, and each device can have an unlimited amount
+# of metrics.
+# The hierarchy Application -> Device -> Metric is
+# reproduced in the opc ua address space.
+#
+# Example of configuration
+#
+# [[Aplication]]
+# application_name = "Application Name" # name displayed in opc ua
+# application_is = "application_is" # Chirpstack application id
+#
+# [[application.device]]
+# device_name = "Device Name" # name displayed in opc ua
+# device_id = "device_id" # Chirpstack device id
+#
+# [[application.device.metric]]
+# metric_name = "metric_name" # name displayed in opc ua
+# chirpstack_metric_name = "chirpstack_name" # metric name in chirpstack
+# metric_type = "Float" # Type of metric: either Bool, Int, Float, String
+# metric_unit = "W" # the optional metric unit
+#
+# All fields are mandatory, except the metric unit
+# There must be at least one application
+# An application must have at least one device
+# A device must have at least one metric
+
+
+###########################################################
+# Arrosage
+###########################################################
+[[application]]
+application_id = "ae2012c2-75a1-407d-98ab-1520fb511edf"
+application_name = "Arrosage"
+
+    [[application.device]]
+    device_name = "Niveau_citerne"
+    device_id = "a840418371886840"
+
+        [[application.device.read_metric]]
+        metric_name ="Niveau_cit"
+        chirpstack_metric_name = "Water_deep_cm"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
+        metric_name ="Batterie_cit"
+        chirpstack_metric_name = "Bat_V"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
+        metric_name ="IDC_intput_mA"
+        chirpstack_metric_name = "IDC_intput_mA"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
+        metric_name ="VDC_intput_V"
+        chirpstack_metric_name = "VDC_intput_V"
+        metric_type = "Float"
+
+
+    [[application.device]]
+    device_name = "Vanne01"
+    # DevEUI
+    device_id = "524d1e0a02243201"
+
+        [[application.device.read_metric]]
+        # This value must be unique
+        metric_name ="Status_v01"
+        chirpstack_metric_name = "valveStatusCode"
+        metric_type = "Int"
+
+        [[application.device.read_metric]]
+        # This value must be unique
+        metric_name ="BatteryLevel_v01"
+        chirpstack_metric_name = "batteryLevel"
+        metric_type = "Int"
+
+        [[application.device.command]]
+        # This value must be unique
+        command_name = "Open_close_valve01"
+        command_id = 1
+        command_confirmed = true
+        command_port = 10
+
+
+    [[application.device]]
+    device_name = "Vanne02"
+    device_id = "3f8e3904c1523201"
+
+        [[application.device.read_metric]]
+        # This value must be unique
+        metric_name ="Status_v02"
+        chirpstack_metric_name = "valveStatusCode"
+        metric_type = "Int"
+        [[application.device.read_metric]]
+        # This value must be unique
+        metric_name ="BatteryLevel_v02"
+        chirpstack_metric_name = "batteryLevel"
+        metric_type = "Int"
+
+        [[application.device.command]]
+        command_name = "Open_close_valve02"
+        command_id = 2
+        command_confirmed = true
+        command_port = 10
+
+
+    [[application.device]]
+    device_name = "Vanne03"
+    device_id = "999b3d04c1523201"
+
+        [[application.device.read_metric]]
+        # This value must be unique
+        metric_name ="Status_v02"
+        chirpstack_metric_name = "valveStatusCode"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
+        # This value must be unique
+        metric_name ="BatteryLevel_v03"
+        chirpstack_metric_name = "batteryLevel"
+        metric_type = "Int"
+
+        [[application.device.command]]
+        command_name = "Open_close_valve03"
+        command_id = 3
+        command_confirmed = true
+        command_port = 10
+
+
+
+###########################################################
+# Bâtiments
+###########################################################
+[[application]]
+application_id = "194f12ab-d0ab-4389-a446-f1b3e7152b07"
+application_name ="Bâtiments"
+
+    [[application.device]]
+    device_name = "Magasin"
+    device_id = "a840414bf185f365"
+
+        [[application.device.read_metric]]
+        metric_name ="Batterie_mag"
+        chirpstack_metric_name = "BatV"
+        metric_type = "Float"
+
+
+        [[application.device.read_metric]]
+        metric_name ="Humidite_mag"
+        chirpstack_metric_name = "Hum_SHT"
+        metric_type = "Float"
+
+
+        [[application.device.read_metric]]
+        metric_name ="Temperature_mag"
+        chirpstack_metric_name = "TempC_SHT"
+        metric_type = "Float"
+
+
+    [[application.device]]
+    device_name = "Grange"
+    device_id = "a84041a44185f37d"
+
+        [[application.device.read_metric]]
+        metric_name ="Batterie_gr"
+        chirpstack_metric_name = "BatV"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
+        metric_name ="Humidite_gr"
+        chirpstack_metric_name = "Hum_SHT"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
+        metric_name ="Temperature_gr"
+        chirpstack_metric_name = "TempC_SHT"
+        metric_type = "Float"
+
+
+###########################################################
+# Cultures
+###########################################################
+[[application]]
+application_id = "fca74250-823b-4dcb-adaf-fa8b99563533"
+application_name = "Cultures"
+
+    [[application.device]]
+    device_name = "Verger2"
+    device_id = "a8404159c1828ff0"
+
+        [[application.device.read_metric]]
+        metric_name ="Batterie_ver2"
+        chirpstack_metric_name = "Batterie"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
+        metric_name ="Conductivite_ver2"
+        chirpstack_metric_name = "Conductivité"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
+        metric_name ="Temperature_ver2"
+        chirpstack_metric_name = "Température"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
+        metric_name ="Humidite_ver2"
+        chirpstack_metric_name = "Humidité"
+        metric_type = "Float"
+
+
+    [[application.device]]
+    device_name = "Tunnel1"
+    device_id = "a84041878185f36d"
+
+        [[application.device.read_metric]]
+        metric_name ="Batterie_t1"
+        chirpstack_metric_name = "BatV"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
+        metric_name ="Humidite_t1"
+        chirpstack_metric_name = "Hum_SHT"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
+        metric_name ="Temperature_t1"
+        chirpstack_metric_name = "TempC_SHT"
+        metric_type = "Float"
+
+
+###########################################################
+# Meteo
+###########################################################
+[[application]]
+application_id = "81d88d98-81eb-48b3-8d0d-48c82361e187"
+application_name = "Meteo"
+
+    [[application.device]]
+    device_name = "Station_meteo_01"
+    device_id = "2cf7f1c06130048a"
+
+        [[application.device.read_metric]]
+        metric_name ="Pluie"
+        chirpstack_metric_name = "rain"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
+        metric_name ="Temp"
+        chirpstack_metric_name = "Temp"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
+        metric_name ="Température"
+        chirpstack_metric_name = "temperature"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
+        metric_name ="Humidité"
+        chirpstack_metric_name = "airHumidity"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
+        metric_name ="Pression"
+        chirpstack_metric_name = "barometricPressure"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
+        metric_name ="Vitesse_vent"
+        chirpstack_metric_name = "windSpeed"
+        metric_type = "Float"
+        metric_unit = "m/s"
+
+        [[application.device.read_metric]]
+        metric_name ="Direction_vent"
+        chirpstack_metric_name = "windDirection"
+        metric_type = "Float"
+        metric_unit = "Deg"
+
+        [[application.device.read_metric]]
+        metric_name ="UVIndex"
+        chirpstack_metric_name = "UVIndex"
+        metric_type = "Float"
+
+        [[application.device.read_metric]]
+        metric_name ="Intensité_lumineuse"
+        chirpstack_metric_name = "lightIntensity"
+        metric_type = "Float"
+        metric_unit = "w/m2"
+
+        [[application.device.read_metric]]
+        metric_name ="Pourcent_batterie"
+        chirpstack_metric_name = "batteryPercent"
+        metric_type = "Float"
+        metric_unit = "%"
+
+
+
+
+
+

@@ -1,0 +1,3 @@
+- [BMad Workflow Status](project_bmad_status.md) — Epic 1: 4/5 done, Story 1.5 ready-for-dev, then Epic 2
+- [User Profile](user_profile.md) — Guy Corbaz, solo dev, intermediate Rust, smart agriculture IoT
+- [Feedback: Communication](feedback_communication.md) — Guy prefers direct, efficient communication; says "go ahead" when no questions

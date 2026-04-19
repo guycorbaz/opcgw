@@ -1,0 +1,47 @@
+[package]
+name = "opcgw"
+version = "1.0.0"
+authors = ["Guy Corbaz <guy@corbaz.org>"]
+description = "A Chirpstack to opc ua gateway"
+readme = "README.md"
+keywords = ["scada","gateway","opc_ua","chirpstack"]
+license = "MIT OR Apache-2.0"
+rust-version = "1.94.0"
+edition = "2021"
+categories = ["science"]
+publish = false # for now, until a running version is available
+
+[dependencies]
+figment = { version = "0.10.19", features = ["env", "toml"] }
+serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.50.0", features = ["full", "rt-multi-thread"] }
+thiserror = "2.0.18"
+tonic = "0.14.5"
+chirpstack_api = "4.17.0"
+async-opcua = { version = "0.17.1", features = ["server"] }
+clap = { version = "4.6.0", features = ["derive"] }
+local-ip-address = "0.6.5"
+url = "2.5.7"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+tracing-appender = "0.2.3"
+
+# Dependencies for later stories (added now, not yet used)
+tokio-util = "0.7.18"
+rusqlite = { version = "0.38.0", features = ["bundled"] }
+
+[build-dependencies]
+tonic-build = "0.14.5"
+tonic-prost-build = "0.14.5"
+
+[profile.dev]
+opt-level = 0
+codegen-units = 32
+
+[profile.test]
+debug = true
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = true

@@ -1,0 +1,93 @@
+# File for testing.
+# if content is changed, tests might fail
+
+[global]
+debug = true
+
+[chirpstack]
+server_address = "http://localhost:8080"
+api_token = "test_token"
+tenant_id = "tenant_id"
+polling_frequency = 10
+retry = 10
+delay = 10
+
+[opcua]
+application_name = "Chirpstack OPC UA Gateway"
+application_uri = "urn:chirpstack:opcua:gateway"
+product_uri = "urn:chirpstack:opcua:gateway"
+diagnostics_enabled = true
+#hello_timeout = 10
+#host_ip_address = "localhost"
+#host_port = 9090
+create_sample_keypair = true
+certificate_path = "own/cert.der"
+private_key_path = "private/private.pem"
+trust_client_cert = true
+check_cert_time = true
+pki_dir = "./pki"
+user_name = "user1"
+user_password = "user1"
+
+#
+# List of application that have to be displayed in OPC UA
+#
+# Application 1
+[[application]]
+application_name = "Application01" # The name that will apperar in opc ua
+application_id = "application_1" # The id defined in chirpstack
+
+[[application.device]]
+device_name = "Device01" # The name that will apperar in opc ua
+device_id = "device_1" # The id defined in chirpstack
+
+[[application.device.read_metric]]
+metric_name ="Metric01" # The name that will appear in opc ua
+chirpstack_metric_name = "metric_1" # The name defined in Chirpstcak
+metric_type = "Float"
+metric_unit = "m"
+
+[[application.device.read_metric]]
+metric_name = "Metric02" # The name that will appear in opc ua
+chirpstack_metric_name = "metric_2" # The name defined in Chirpstcak
+metric_type = "Float"
+metric_unit = "m"
+
+
+# Application 2
+[[application]]
+application_name = "Application02" # The name that will apperar in opc ua
+application_id = "application_2" # The id defined in chirpstack
+
+[[application.device]]
+device_name = "Device02" # The name that will apperar in opc ua
+device_id = "device_2" # The id defined in chirpstack
+
+[[application.device.read_metric]]
+metric_name ="Metric03" # The name that will appear in opc ua
+chirpstack_metric_name = "metric_3" # The name defined in Chirpstcak
+metric_type = "Float"
+metric_unit = "m"
+
+
+[[application.device.read_metric]]
+metric_name = "Metric04" # The name that will appear in opc ua
+chirpstack_metric_name = "metric_4" # The name defined in Chirpstcak
+metric_type = "Float"
+metric_unit = "m"
+
+[[application.device]]
+device_name = "Device03" # The name that will apperar in opc ua
+device_id = "device_3" # The id defined in chirpstack
+
+[[application.device.read_metric]]
+metric_name ="Metric05" # The name that will appear in opc ua
+chirpstack_metric_name = "metric_5" # The name defined in Chirpstcak
+metric_type = "Float"
+metric_unit = "m"
+
+[[application.device.read_metric]]
+metric_name = "Metric06" # The name that will appear in opc ua
+chirpstack_metric_name = "metric_6" # The name defined in Chirpstcak
+metric_type = "Float"
+metric_unit = "m"
