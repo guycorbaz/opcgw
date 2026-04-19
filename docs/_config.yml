@@ -1,5 +1,28 @@
-title: opcgw
-description: ChirpStack to OPC UA Gateway
-remote_theme: pages-themes/slate@v0.2.0
+title: opcgw - ChirpStack to OPC UA Gateway
+description: Bridge LoRaWAN device data to industrial automation systems
+url: "https://guycorbaz.github.io/opcgw"
+baseurl: "/opcgw"
+
+# Jekyll settings
+theme: minima
 plugins:
-  - jekyll-remote-theme # add this line to the plugins list if you already have one
+  - jekyll-feed
+  - jekyll-seo-tag
+
+# Custom settings
+author:
+  name: Guy Corbaz
+  email: gcorbaz@gmail.com
+
+# Navigation
+header_pages:
+  - index.md
+  - features.md
+  - architecture.md
+  - quickstart.md
+  - usecases.md
+  - configuration.md
+
+# Social links
+social_links:
+  github: guycorbaz/opcgw
