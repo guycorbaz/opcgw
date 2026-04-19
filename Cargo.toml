@@ -25,10 +25,14 @@ url = "2.5.7"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 tracing-appender = "0.2.3"
+chrono = { version = "0.4.26", features = ["serde"] }
+async-trait = "0.1.81"
+serde_json = "1.0.132"
 
 # Dependencies for later stories (added now, not yet used)
 tokio-util = "0.7.18"
 rusqlite = { version = "0.38.0", features = ["bundled"] }
+uuid = { version = "1.10.0", features = ["v4", "serde"] }
 
 [build-dependencies]
 tonic-build = "0.14.5"

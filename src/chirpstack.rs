@@ -32,6 +32,7 @@ use chirpstack_api::api::DeviceQueueItem;
 use chirpstack_api::api::EnqueueDeviceQueueItemRequest;
 use chirpstack_api::api::GetDeviceMetricsRequest;
 use chirpstack_api::common::Metric;
+use chrono;
 use tracing::{debug, error, info, trace, warn};
 use chirpstack_api::prost_types::Timestamp;
 use serde::Deserialize;
@@ -418,19 +419,15 @@ impl ChirpstackPoller {
 
         match result {
             Ok(_) => {
-                let _chirpstack_status = ChirpstackStatus {
-                    server_available: true,
-                    response_time: elapsed_secs,
-                };
                 trace!("TCP connection to Chirpstack server successful");
+                // TODO: Persist status update to storage (server_available=true, last_poll_time=now)
+                // TODO: Add clock skew detection - validate that Utc::now() >= previous last_poll_time
+                // to catch system clock adjustments (NTP corrections, VM clock skew)
                 Ok(elapsed)
             }
             Err(error) => {
-                let _chirpstack_status = ChirpstackStatus {
-                    server_available: false,
-                    response_time: 0.0,
-                };
                 trace!(error = %error, "TCP connection to Chirpstack server failed");
+                // TODO: Persist status update to storage (server_available=false, error_count++)
                 Err(OpcGwError::ChirpStack(format!(
                     "TCP connection to Chirpstrack server failed: {}",
                     error
@@ -659,17 +656,30 @@ impl ChirpstackPoller {
                         }
                     };
                     let value = metric.datasets[0].data[0];
-                    let mut bool_value = false;
-                    match value {
-                        0.0 => bool_value = false,
-                        1.0 => bool_value = true,
-                        _ => error!(value = %value, "Not a boolean value"),
-                    }
-                    storage.set_metric_value(device_id, &metric_name, MetricType::Bool(bool_value));
+                    let bool_value = match value {
+                        0.0 => false,
+                        1.0 => true,
+                        _ => {
+                            error!(value = %value, "Not a boolean value");
+                            return;
+                        }
+                    };
+                    let metric_val = crate::storage::MetricValueInternal {
+                        device_id: device_id.clone(),
+                        metric_name: metric_name.clone(),
+                        value: bool_value.to_string(),
+                        timestamp: chrono::Utc::now(),
+                        data_type: crate::storage::MetricType::Bool,
+                    };
+                    storage.set_metric_value(device_id, &metric_name, metric_val);
                 }
                 OpcMetricTypeConfig::Int => {
                     debug!(metric = ?metric, "Int metric");
-                    let int_value = metric.datasets[0].data[0] as i64;
+                    let raw_value = metric.datasets[0].data[0];
+                    if raw_value.fract() != 0.0 {
+                        warn!(value = %raw_value, metric_name = %metric_name, "Float metric truncated to int; precision lost");
+                    }
+                    let int_value = raw_value as i64;
                     let mut storage = match storage.lock() {
                         Ok(guard) => guard,
                         Err(e) => {
@@ -677,7 +687,14 @@ impl ChirpstackPoller {
                             return;
                         }
                     };
-                    storage.set_metric_value(device_id, &metric_name, MetricType::Int(int_value));
+                    let metric_val = crate::storage::MetricValueInternal {
+                        device_id: device_id.clone(),
+                        metric_name: metric_name.clone(),
+                        value: int_value.to_string(),
+                        timestamp: chrono::Utc::now(),
+                        data_type: crate::storage::MetricType::Int,
+                    };
+                    storage.set_metric_value(device_id, &metric_name, metric_val);
                 }
                 OpcMetricTypeConfig::Float => {
                     debug!(metric = ?metric, "Float metric");
@@ -689,11 +706,14 @@ impl ChirpstackPoller {
                             return;
                         }
                     };
-                    storage.set_metric_value(
-                        device_id,
-                        &metric_name,
-                        MetricType::Float(value.into()),
-                    );
+                    let metric_val = crate::storage::MetricValueInternal {
+                        device_id: device_id.clone(),
+                        metric_name: metric_name.clone(),
+                        value: value.to_string(),
+                        timestamp: chrono::Utc::now(),
+                        data_type: crate::storage::MetricType::Float,
+                    };
+                    storage.set_metric_value(device_id, &metric_name, metric_val);
                 }
                 OpcMetricTypeConfig::String => {
                     warn!("Reading string metrics fron Chirpstack server is not implemented")
@@ -1010,11 +1030,17 @@ impl ChirpstackPoller {
     /// # Examples
     ///
     /// ```rust
-    /// let command = DeviceCommand {
+    /// use chrono::Utc;
+    /// use crate::storage::CommandStatus;
+    ///
+    /// let command = crate::storage::DeviceCommandInternal {
+    ///     id: 1,
     ///     device_id: "1234567890abcdef".to_string(),
-    ///     confirmed: true,
+    ///     payload: vec![0x01, 0x02, 0x03],
     ///     f_port: 1,
-    ///     data: vec![0x01, 0x02, 0x03],
+    ///     status: CommandStatus::Pending,
+    ///     created_at: Utc::now(),
+    ///     error_message: None,
     /// };
     ///
     /// match chirpstack_client.enqueue_device_command(command).await {
@@ -1029,7 +1055,7 @@ impl ChirpstackPoller {
     /// properly in production code.
     async fn enqueue_device_request_to_server(
         &self,
-        command: DeviceCommand,
+        command: crate::storage::DeviceCommandInternal,
     ) -> Result<(), OpcGwError> {
         trace!("Enqueue device request");
         if command.f_port < 1 {
@@ -1037,14 +1063,16 @@ impl ChirpstackPoller {
         }
         // Create a new request
         debug!("Create request");
+        // Determine if confirmed based on status (pending commands are not yet sent/confirmed)
+        let is_confirmed = command.status == crate::storage::CommandStatus::Sent;
         let queue_item = DeviceQueueItem {
             id: "".to_string(),
             dev_eui: command.device_id.clone(),
-            confirmed: command.confirmed,
-            f_port: command.f_port,
-            data: command.data.clone(),
+            confirmed: is_confirmed,
+            f_port: command.f_port as u32,
+            data: command.payload.clone(),
             object: None,
-            is_pending: true,
+            is_pending: command.status == crate::storage::CommandStatus::Pending,
             f_cnt_down: 0,
             is_encrypted: false,
             expires_at: None,

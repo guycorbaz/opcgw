@@ -25,7 +25,8 @@
 //!
 //! # Thread Safety
 //!
-//! This module is designed to be used with Tokio's async runtime and requires
+//! This module is designed to be used with Tokio's async runtime. The Storage
+//! struct itself is not thread-safe; use Arc<Mutex<Storage>> for concurrent access.
 //!
 //! # Usage
 //!
@@ -49,77 +50,220 @@
 //! }
 //! ```
 
-#![allow(unused)]
+pub mod types;
+pub mod memory;
+pub mod sqlite;
+pub mod schema;
+
+pub use types::{ChirpstackStatus, CommandStatus, DeviceCommand, MetricType, MetricValue, MAX_LORA_PAYLOAD_SIZE};
+pub use memory::InMemoryBackend;
+pub use sqlite::SqliteBackend;
 
 use crate::chirpstack::{ApplicationDetail, ChirpstackPoller, DeviceListDetail};
 use crate::config::OpcMetricTypeConfig;
 use crate::utils::*;
 use crate::{storage, AppConfig};
+use chrono::{DateTime, Utc};
 use tracing::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
+use rusqlite::types::{FromSql, ToSql, FromSqlResult, ValueRef};
+use rusqlite::Result as SqliteResult;
 
-/// Supported metric data types for ChirpStack device measurements.
+/// StorageBackend trait defining the interface for all storage implementations.
 ///
-/// This enum represents the different types of metric values that can be
-/// collected from ChirpStack devices and stored in the gateway. Each variant
-/// corresponds to a specific data type that can be exposed via OPC UA.
+/// This trait provides a clean abstraction for storage backends, allowing different
+/// implementations (in-memory, SQLite, etc.) to follow the same contract.
+/// All implementations must be Send + Sync for safe usage across async task boundaries
+/// and behind Arc pointers.
 ///
-/// # Type Mapping
+/// # Method Categories
 ///
-/// The metric types map to OPC UA data types as follows:
-/// - `Bool` → OPC UA Boolean
-/// - `Int` → OPC UA Int64
-/// - `Float` → OPC UA Double
-/// - `String` → OPC UA String
+/// The trait is organized into three main categories:
+/// - **Metric Operations**: Get and set individual metric values
+/// - **Gateway Status**: Manage ChirpStack server connection status
+/// - **Command Queue**: Queue and retrieve device commands
 ///
-/// # Examples
+/// # Thread Safety
 ///
-/// ```rust
-/// use crate::storage::MetricType;
+/// All implementations must be thread-safe (Send + Sync) to support usage behind
+/// Arc<dyn StorageBackend> for sharing across Tokio tasks.
 ///
-/// let temperature = MetricType::Float(23.5);
-/// let alarm_status = MetricType::Bool(false);
-/// let packet_count = MetricType::Int(1024);
-/// let device_info = MetricType::String("Online".to_string());
+/// # Error Handling
+///
+/// All trait methods return Result<T, OpcGwError> for consistent error handling.
+/// Error context should include the operation type, entity reference, and reason.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # use crate::utils::OpcGwError;
+/// # use crate::storage::{StorageBackend, MetricType, ChirpstackStatus, DeviceCommand, CommandStatus};
+/// # async fn example(backend: Arc<dyn StorageBackend>) -> Result<(), OpcGwError> {
+/// // Get a metric value
+/// let value = backend.get_metric("device_123", "temperature")?;
+///
+/// // Set a metric value
+/// backend.set_metric("device_123", "humidity", MetricType::Float(65.5))?;
+///
+/// // Get gateway status
+/// let status = backend.get_status()?;
+///
+/// // Queue a command
+/// let cmd = DeviceCommand {
+///     device_id: "device_123".to_string(),
+///     confirmed: true,
+///     f_port: 10,
+///     data: vec![0x01, 0x02],
+/// };
+/// backend.queue_command(cmd)?;
+/// # Ok(())
+/// # }
 /// ```
-#[derive(Clone, Debug, PartialEq)]
-pub enum MetricType {
-    /// Boolean value for binary states, alarms, or flags.
-    ///
-    /// Typically used for:
-    /// - Device online/offline status
-    /// - Alarm conditions
-    /// - Binary sensor states
-    Bool(bool),
+pub trait StorageBackend: Send + Sync {
+    // ===== Metric Operations =====
 
-    /// 64-bit signed integer for discrete measurements and counters.
+    /// Retrieves the current value of a specific metric for a device.
     ///
-    /// Typically used for:
-    /// - Packet counters
-    /// - Sequence numbers
-    /// - Discrete sensor readings
-    Int(i64),
+    /// # Arguments
+    ///
+    /// * `device_id` - The unique identifier for the device
+    /// * `metric_name` - The name of the metric to retrieve
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(MetricType))` - The metric value if found
+    /// * `Ok(None)` - If the device or metric does not exist
+    /// * `Err(OpcGwError)` - If an error occurs during retrieval
+    ///
+    /// # Error Cases
+    ///
+    /// - **Storage error**: Database connectivity issues, corrupted data
+    /// - **Device not found**: The device_id references a non-existent device
+    /// - **Metric not found**: The metric_name does not exist for the device
+    fn get_metric(&self, device_id: &str, metric_name: &str) -> Result<Option<MetricType>, OpcGwError>;
 
-    /// Double-precision floating-point for analog measurements.
+    /// Updates the value of a specific metric for a device.
     ///
-    /// Typically used for:
-    /// - Temperature readings
-    /// - Humidity percentages
-    /// - Voltage measurements
-    /// - Any continuous analog value
-    Float(f64),
+    /// If the metric does not exist, it will be created with the specified value.
+    /// If the device does not exist, returns an error.
+    ///
+    /// # Arguments
+    ///
+    /// * `device_id` - The unique identifier for the device
+    /// * `metric_name` - The name of the metric to update
+    /// * `value` - The new metric value
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the metric was successfully updated
+    /// * `Err(OpcGwError)` - If an error occurs during update
+    ///
+    /// # Error Cases
+    ///
+    /// - **Device not found**: The device_id references a non-existent device
+    /// - **Storage error**: Database connectivity issues, write failures
+    /// - **Type mismatch**: If the backend enforces type consistency
+    fn set_metric(&self, device_id: &str, metric_name: &str, value: MetricType) -> Result<(), OpcGwError>;
 
-    /// String value for textual data and formatted information.
+    // ===== Gateway Status Operations =====
+
+    /// Retrieves the current ChirpStack server connection status.
     ///
-    /// Typically used for:
-    /// - Device status messages
-    /// - Firmware versions
-    /// - Location descriptions
-    /// - Formatted sensor readings
-    String(String),
+    /// # Returns
+    ///
+    /// * `Ok(ChirpstackStatus)` - The current gateway status
+    /// * `Err(OpcGwError)` - If an error occurs during retrieval
+    ///
+    /// # Error Cases
+    ///
+    /// - **Storage error**: Database connectivity issues
+    /// - **Corrupted data**: Status data cannot be deserialized
+    fn get_status(&self) -> Result<ChirpstackStatus, OpcGwError>;
+
+    /// Updates the ChirpStack server connection status.
+    ///
+    /// This is typically called by the ChirpStack poller to reflect the current
+    /// health and performance of the server connection.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - The new gateway status
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the status was successfully updated
+    /// * `Err(OpcGwError)` - If an error occurs during update
+    ///
+    /// # Error Cases
+    ///
+    /// - **Storage error**: Database connectivity issues, write failures
+    fn update_status(&self, status: ChirpstackStatus) -> Result<(), OpcGwError>;
+
+    // ===== Command Queue Operations =====
+
+    /// Adds a new command to the device command queue.
+    ///
+    /// Commands are queued for delivery to ChirpStack devices. The backend assigns
+    /// a unique command ID which is returned (or available via get_pending_commands).
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The command to queue
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the command was successfully queued
+    /// * `Err(OpcGwError)` - If an error occurs during queueing
+    ///
+    /// # Error Cases
+    ///
+    /// - **Device not found**: The device_id references a non-existent device
+    /// - **Storage error**: Database connectivity issues, write failures
+    /// - **Queue full**: If the backend has a queue size limit
+    fn queue_command(&self, command: DeviceCommand) -> Result<(), OpcGwError>;
+
+    /// Retrieves all pending commands from the queue.
+    ///
+    /// Returns a vector of commands that are ready for delivery but have not yet
+    /// been sent to the ChirpStack API.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<DeviceCommand>)` - List of pending commands (may be empty)
+    /// * `Err(OpcGwError)` - If an error occurs during retrieval
+    ///
+    /// # Error Cases
+    ///
+    /// - **Storage error**: Database connectivity issues
+    fn get_pending_commands(&self) -> Result<Vec<DeviceCommand>, OpcGwError>;
+
+    /// Updates the status of a queued command.
+    ///
+    /// Called after a command has been delivered or processing has failed.
+    /// The command remains in storage for audit/historical purposes.
+    ///
+    /// # Arguments
+    ///
+    /// * `command_id` - The unique identifier of the command
+    /// * `status` - The new command status
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the status was successfully updated
+    /// * `Err(OpcGwError)` - If an error occurs during update
+    ///
+    /// # Error Cases
+    ///
+    /// - **Command not found**: The command_id references a non-existent command
+    /// - **Storage error**: Database connectivity issues, write failures
+    /// - **Invalid state transition**: If the status transition is not allowed
+    fn update_command_status(&self, command_id: u64, status: CommandStatus) -> Result<(), OpcGwError>;
 }
+
 
 /// Represents a ChirpStack LoRaWAN device and its associated metrics.
 ///
@@ -149,49 +293,119 @@ pub struct Device {
     /// The key is the ChirpStack metric name (case-sensitive) and the value
     /// is the current metric reading. Metrics are updated as new data arrives
     /// from ChirpStack polling.
-    device_metrics: HashMap<String, MetricType>,
+    device_metrics: HashMap<String, MetricValueInternal>,
 }
 
-/// Structure for enquing commands to chirpstack devices
-#[derive(Clone, Debug, PartialEq)]
-pub struct DeviceCommand {
-    /// Unique identifier of the target device
+
+
+
+/// Internal metric value representation with full metadata.
+/// Harmonized with types.rs MetricValue for easier SQL persistence.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MetricValueInternal {
     pub device_id: String,
-    /// Whether the command requires confirmation from the device
-    pub confirmed: bool,
-    /// Frame port number for the LoRaWAN communication
-    pub f_port: u32,
-    /// Command payload data as bytes
-    pub data: Vec<u8>,
+    pub metric_name: String,
+    pub value: String,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub data_type: MetricType,
 }
 
-/// Status information for the ChirpStack server connection.
-///
-/// This structure tracks the operational status of the ChirpStack server
-/// connection, including availability and performance metrics. It is used
-/// by the OPC UA server to expose system health information to clients.
-///
-/// # Usage in OPC UA
-///
-/// This information is typically exposed as diagnostic nodes in the OPC UA
-/// address space, allowing clients to monitor the health of the ChirpStack
-/// connection.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ChirpstackStatus {
-    /// Indicates whether the ChirpStack server is reachable and responding.
-    ///
-    /// This flag is updated by the ChirpStack poller based on the success
-    /// or failure of API calls. When `false`, it indicates that the server
-    /// is unreachable, authentication has failed, or the server returned
-    /// an error status.
-    pub server_available: bool,
+/// Internal device command representation (used by Storage struct's in-memory queue)
+/// Harmonized with types.rs DeviceCommand for easier SQL persistence.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeviceCommandInternal {
+    pub id: u64,
+    pub device_id: String,
+    pub payload: Vec<u8>,
+    pub f_port: u8,
+    pub status: CommandStatus,
+    pub created_at: DateTime<Utc>,
+    pub error_message: Option<String>,
+}
 
-    /// Average response time of ChirpStack API calls in milliseconds.
-    ///
-    /// This metric provides insight into the performance of the ChirpStack
-    /// server and network connection. It is calculated as a rolling average
-    /// of recent API call response times.
-    pub response_time: f64,
+/// Internal ChirpStack status representation (used by Storage struct)
+/// Harmonized with types.rs ChirpstackStatus for easier SQL persistence.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChirpstackStatusInternal {
+    pub server_available: bool,
+    pub last_poll_time: Option<DateTime<Utc>>,
+    pub error_count: u32,
+}
+
+// SQL Serialization Support
+impl ToSql for MetricValueInternal {
+    fn to_sql(&self) -> SqliteResult<rusqlite::types::ToSqlOutput<'_>> {
+        let json = serde_json::to_string(self).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        Ok(rusqlite::types::ToSqlOutput::Owned(rusqlite::types::Value::Text(json)))
+    }
+}
+
+impl FromSql for MetricValueInternal {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value {
+            ValueRef::Text(s) => {
+                let json_str = std::str::from_utf8(s).map_err(|e| {
+                    error!(error = %e, "Failed to decode JSON as UTF-8");
+                    rusqlite::types::FromSqlError::InvalidType
+                })?;
+                serde_json::from_str(json_str).map_err(|e| {
+                    error!(error = %e, json = %json_str, "Failed to deserialize MetricValueInternal from JSON");
+                    rusqlite::types::FromSqlError::InvalidType
+                })
+            }
+            _ => Err(rusqlite::types::FromSqlError::InvalidType),
+        }
+    }
+}
+
+impl ToSql for DeviceCommandInternal {
+    fn to_sql(&self) -> SqliteResult<rusqlite::types::ToSqlOutput<'_>> {
+        let json = serde_json::to_string(self).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        Ok(rusqlite::types::ToSqlOutput::Owned(rusqlite::types::Value::Text(json)))
+    }
+}
+
+impl FromSql for DeviceCommandInternal {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value {
+            ValueRef::Text(s) => {
+                let json_str = std::str::from_utf8(s).map_err(|e| {
+                    error!(error = %e, "Failed to decode JSON as UTF-8");
+                    rusqlite::types::FromSqlError::InvalidType
+                })?;
+                serde_json::from_str(json_str).map_err(|e| {
+                    error!(error = %e, json = %json_str, "Failed to deserialize DeviceCommandInternal from JSON");
+                    rusqlite::types::FromSqlError::InvalidType
+                })
+            }
+            _ => Err(rusqlite::types::FromSqlError::InvalidType),
+        }
+    }
+}
+
+impl ToSql for ChirpstackStatusInternal {
+    fn to_sql(&self) -> SqliteResult<rusqlite::types::ToSqlOutput<'_>> {
+        let json = serde_json::to_string(self).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        Ok(rusqlite::types::ToSqlOutput::Owned(rusqlite::types::Value::Text(json)))
+    }
+}
+
+impl FromSql for ChirpstackStatusInternal {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value {
+            ValueRef::Text(s) => {
+                let json_str = std::str::from_utf8(s).map_err(|e| {
+                    error!(error = %e, "Failed to decode JSON as UTF-8");
+                    rusqlite::types::FromSqlError::InvalidType
+                })?;
+                serde_json::from_str(json_str).map_err(|e| {
+                    error!(error = %e, json = %json_str, "Failed to deserialize ChirpstackStatusInternal from JSON");
+                    rusqlite::types::FromSqlError::InvalidType
+                })
+            }
+            _ => Err(rusqlite::types::FromSqlError::InvalidType),
+        }
+    }
 }
 
 /// Central storage manager for device metrics and system status.
@@ -230,7 +444,7 @@ pub struct Storage {
     ///
     /// Updated periodically by the ChirpStack poller to reflect the current
     /// health and performance of the ChirpStack API connection.
-    chirpstack_status: ChirpstackStatus,
+    chirpstack_status: ChirpstackStatusInternal,
 
     /// Collection of all monitored devices indexed by their ChirpStack device ID.
     ///
@@ -240,7 +454,7 @@ pub struct Storage {
     devices: HashMap<String, Device>,
 
     /// Command queue for chirpstack devices
-    device_command_queue: Vec<DeviceCommand>,
+    device_command_queue: Vec<DeviceCommandInternal>,
 }
 
 impl Storage {
@@ -317,11 +531,23 @@ impl Storage {
                 let mut device_metrics = HashMap::new();
                 for metric in device.read_metric_list.iter() {
                     // Initialize metric with type-appropriate default value
-                    let default_value = match metric.metric_type {
-                        OpcMetricTypeConfig::Bool => MetricType::Bool(false),
-                        OpcMetricTypeConfig::Int => MetricType::Int(0),
-                        OpcMetricTypeConfig::Float => MetricType::Float(0.0),
-                        OpcMetricTypeConfig::String => MetricType::String(String::new()),
+                    let metric_type = match metric.metric_type {
+                        OpcMetricTypeConfig::Bool => MetricType::Bool,
+                        OpcMetricTypeConfig::Int => MetricType::Int,
+                        OpcMetricTypeConfig::Float => MetricType::Float,
+                        OpcMetricTypeConfig::String => MetricType::String,
+                    };
+                    let default_value = MetricValueInternal {
+                        device_id: device.device_id.clone(),
+                        metric_name: metric.chirpstack_metric_name.clone(),
+                        value: match metric_type {
+                            MetricType::Bool => "false".to_string(),
+                            MetricType::Int => "0".to_string(),
+                            MetricType::Float => "0.0".to_string(),
+                            MetricType::String => String::new(),
+                        },
+                        timestamp: chrono::Utc::now(),
+                        data_type: metric_type,
                     };
                     device_metrics.insert(metric.chirpstack_metric_name.clone(), default_value);
                     trace!(
@@ -349,9 +575,10 @@ impl Storage {
 
         Storage {
             config: app_config.clone(),
-            chirpstack_status: ChirpstackStatus {
+            chirpstack_status: ChirpstackStatusInternal {
                 server_available: true,
-                response_time: 0.0,
+                last_poll_time: None,
+                error_count: 0,
             },
             devices,
             device_command_queue,
@@ -390,7 +617,7 @@ impl Storage {
     /// # Performance
     ///
     /// This operation has O(1) average time complexity due to HashMap indexing.
-    pub fn get_device(&mut self, device_id: &String) -> Option<&mut Device> {
+    pub fn get_device(&mut self, device_id: &str) -> Option<&mut Device> {
         debug!(device_id = %device_id, "Retrieving device");
         self.devices.get_mut(device_id)
     }
@@ -424,7 +651,7 @@ impl Storage {
     ///
     /// This operation has O(1) average time complexity for the device lookup.
     /// The string clone operation adds minimal overhead.
-    pub fn get_device_name(&self, device_id: &String) -> Option<String> {
+    pub fn get_device_name(&self, device_id: &str) -> Option<String> {
         debug!(device_id = %device_id, "Looking up device name");
         match self.devices.get(device_id) {
             Some(device) => Some(device.device_name.clone()),
@@ -474,10 +701,10 @@ impl Storage {
     /// This operation has O(1) average time complexity for both the device
     /// and metric lookups due to HashMap indexing.
     pub fn get_metric_value(
-        &mut self,
+        &self,
         device_id: &str,
         chirpstack_metric_name: &str,
-    ) -> Option<MetricType> {
+    ) -> Option<MetricValueInternal> {
         debug!(
             metric_name = %chirpstack_metric_name,
             device_id = %device_id,
@@ -485,7 +712,7 @@ impl Storage {
         );
 
         // First, find the device
-        match self.get_device(&device_id.to_string()) {
+        match self.devices.get(device_id) {
             None => {
                 debug!(device_id = %device_id, "Device not found");
                 None
@@ -526,12 +753,11 @@ impl Storage {
     /// * `chirpstack_metric_name` - The exact metric name as used in ChirpStack
     /// * `value` - The new metric value to store
     ///
-    /// # Panics
+    /// # Error Handling
     ///
-    /// This method panics if the specified device ID is not found in storage.
-    /// This is intentional behavior because attempting to set metrics for
-    /// non-existent devices indicates a configuration or logic error that
-    /// should be caught during development.
+    /// If the specified device ID is not found in storage, the method logs a
+    /// warning and silently ignores the operation. No error is returned. This
+    /// allows the system to continue operating even if a metric update fails.
     ///
     /// # Error Handling
     ///
@@ -577,7 +803,7 @@ impl Storage {
         &mut self,
         device_id: &String,
         chirpstack_metric_name: &str,
-        value: MetricType,
+        value: MetricValueInternal,
     ) {
         debug!(
             metric_name = %chirpstack_metric_name,
@@ -610,23 +836,25 @@ impl Storage {
     /// Updates the ChirpStack server status information.
     ///
     /// This method updates the stored status information about the ChirpStack
-    /// server connection, including availability and response time metrics.
+    /// server connection, including availability, last poll time, and error count.
     /// This information is typically updated by the ChirpStack poller and
     /// exposed to OPC UA clients for monitoring purposes.
     ///
     /// # Arguments
     ///
-    /// * `status` - New status information containing server availability and response time
+    /// * `status` - New status information containing server availability, last poll time, and error count
     ///
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use crate::storage::{Storage, ChirpstackStatus};
+    /// use crate::storage::{Storage, ChirpstackStatusInternal};
+    /// use chrono::Utc;
     ///
     /// let mut storage = Storage::new(&config);
-    /// let status = ChirpstackStatus {
-    ///     server_available: false,
-    ///     response_time: 5000.0, // 5 seconds timeout
+    /// let status = ChirpstackStatusInternal {
+    ///     server_available: true,
+    ///     last_poll_time: Some(Utc::now()),
+    ///     error_count: 0,
     /// };
     /// storage.update_chirpstack_status(status);
     /// ```
@@ -635,27 +863,30 @@ impl Storage {
     ///
     /// The updated status information can be exposed via OPC UA diagnostic nodes
     /// to allow clients to monitor the health of the ChirpStack connection.
-    pub fn update_chirpstack_status(&mut self, status: ChirpstackStatus) {
+    pub fn update_chirpstack_status(&mut self, status: ChirpstackStatusInternal) {
         debug!(
             server_available = %status.server_available,
-            response_time_s = %status.response_time,
+            last_poll_time = ?status.last_poll_time,
+            error_count = %status.error_count,
             "Updating ChirpStack status"
         );
         self.chirpstack_status.server_available = status.server_available;
-        self.chirpstack_status.response_time = status.response_time;
+        self.chirpstack_status.last_poll_time = status.last_poll_time;
+        self.chirpstack_status.error_count = status.error_count;
     }
 
     /// Retrieves the current ChirpStack server status.
     ///
     /// Returns a clone of the current status information, including server
-    /// availability and response time metrics. This method is typically used
+    /// availability, last poll time, and error count. This method is typically used
     /// by the OPC UA server to expose diagnostic information to clients.
     ///
     /// # Returns
     ///
     /// A clone of the current `ChirpstackStatus` containing:
     /// - `server_available`: Whether the ChirpStack server is reachable
-    /// - `response_time`: Average response time in milliseconds
+    /// - `last_poll_time`: Timestamp of the last successful poll
+    /// - `error_count`: Number of errors since last successful connection
     ///
     /// # Examples
     ///
@@ -663,9 +894,10 @@ impl Storage {
     /// let storage = Storage::new(&config);
     /// let status = storage.get_chirpstack_status();
     /// println!("ChirpStack available: {}", status.server_available);
-    /// println!("Response time: {}ms", status.response_time);
+    /// println!("Last poll: {:?}", status.last_poll_time);
+    /// println!("Error count: {}", status.error_count);
     /// ```
-    pub fn get_chirpstack_status(&self) -> ChirpstackStatus {
+    pub fn get_chirpstack_status(&self) -> ChirpstackStatusInternal {
         self.chirpstack_status.clone()
     }
 
@@ -701,39 +933,6 @@ impl Storage {
         self.chirpstack_status.server_available
     }
 
-    /// Retrieves the current ChirpStack server response time.
-    ///
-    /// Returns the average response time for ChirpStack API calls in milliseconds.
-    /// This metric provides insight into the performance of the ChirpStack
-    /// connection and can be used for monitoring and alerting.
-    ///
-    /// # Returns
-    ///
-    /// Response time in milliseconds as a floating-point number.
-    /// A value of 0.0 typically indicates either:
-    /// - No API calls have been made yet
-    /// - The server is not responding (check availability first)
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// let storage = Storage::new(&config);
-    /// let response_time = storage.get_chirpstack_response_time();
-    /// if response_time > 1000.0 {
-    ///     println!("Warning: ChirpStack response time is high: {}ms", response_time);
-    /// }
-    /// ```
-    ///
-    /// # Performance Monitoring
-    ///
-    /// This value can be used to:
-    /// - Detect network performance issues
-    /// - Monitor ChirpStack server performance
-    /// - Trigger alerts for degraded performance
-    /// - Adjust polling frequency based on response times
-    pub fn get_chirpstack_response_time(&self) -> f64 {
-        self.chirpstack_status.response_time
-    }
 
     /// Logs all stored metrics to the debug output.
     ///
@@ -782,20 +981,13 @@ impl Storage {
         for (device_id, device) in &self.devices {
             trace!(device_name = %device.device_name, device_id = %device_id, "Device entry");
             for (metric_name, metric) in device.device_metrics.iter() {
-                match metric {
-                    MetricType::Bool(value) => {
-                        trace!(metric_name = %metric_name, metric_value = %value, "Metric (Bool)");
-                    }
-                    MetricType::Int(value) => {
-                        trace!(metric_name = %metric_name, metric_value = %value, "Metric (Int)");
-                    }
-                    MetricType::Float(value) => {
-                        trace!(metric_name = %metric_name, metric_value = %value, "Metric (Float)");
-                    }
-                    MetricType::String(value) => {
-                        trace!(metric_name = %metric_name, metric_value = %value, "Metric (String)");
-                    }
-                }
+                trace!(
+                    metric_name = %metric_name,
+                    metric_value = %metric.value,
+                    data_type = %metric.data_type,
+                    timestamp = %metric.timestamp,
+                    "Metric"
+                );
             }
         }
     }
@@ -812,14 +1004,14 @@ impl Storage {
     /// ```
     /// let mut storage = Storage::new(&config);
     /// let command = DeviceCommand {
-    ///     device_eui: "1234567890ABCDEF".to_string(),
+    ///     device_id: "device_123".to_string(),
     ///     confirmed: true,
     ///     f_port: 1,
     ///     data: vec![0x01, 0x02, 0x03],
     /// };
-    /// storage.enqueue_command(command);
+    /// storage.push_command(command);
     /// ```
-    pub fn push_command(&mut self, command: DeviceCommand) {
+    pub fn push_command(&mut self, command: DeviceCommandInternal) {
         self.device_command_queue.push(command);
     }
 
@@ -829,25 +1021,25 @@ impl Storage {
     /// recently added command from the queue.
     ///
     /// # Returns
-    /// * `Some(DeviceCommand)` - The last command in the queue if one exists
+    /// * `Some(DeviceCommandInternal)` - The last command in the queue if one exists
     /// * `None` - If the command queue is empty
     ///
     /// # Examples
     /// ```
     /// let mut storage = Storage::new(&config);
     /// match storage.dequeue_command() {
-    ///     Some(command) => println!("Dequeued command for device: {}", command.device_eui),
+    ///     Some(command) => println!("Dequeued command for device: {}", command.device_id),
     ///     None => println!("No commands to dequeue"),
     /// }
     /// ```
-    pub fn pop_command(&mut self) -> Option<DeviceCommand> {
+    pub fn pop_command(&mut self) -> Option<DeviceCommandInternal> {
         self.device_command_queue.pop()
     }
 
     /// Returns a copy of the device command queue if it contains commands, or None if empty.
     ///
     /// # Returns
-    /// * `Some(Vec<DeviceCommand>)` - A clone of the command queue if it has at least one command
+    /// * `Some(Vec<DeviceCommandInternal>)` - A clone of the command queue if it has at least one command
     /// * `None` - If the command queue is empty
     ///
     /// # Examples
@@ -858,7 +1050,7 @@ impl Storage {
     ///     None => println!("No commands in queue"),
     /// }
     /// ```
-    pub fn get_device_command_queue(&self) -> Vec<DeviceCommand> {
+    pub fn get_device_command_queue(&self) -> Vec<DeviceCommandInternal> {
         self.device_command_queue.clone()
     }
 }
@@ -931,26 +1123,27 @@ mod tests {
     /// - Status structure equality works correctly
     #[test]
     fn test_chirpstack_status() {
-        let response_time = 1.0;
-        let status = false;
         let app_config = get_config();
         let mut storage = Storage::new(&app_config);
 
         // Test initial status
         assert!(storage.chirpstack_status.server_available);
-        assert_eq!(storage.chirpstack_status.response_time, 0.0);
+        assert!(storage.chirpstack_status.last_poll_time.is_none());
+        assert_eq!(storage.chirpstack_status.error_count, 0);
 
         // Test status update
-        let chirpstack_status = ChirpstackStatus {
-            server_available: status,
-            response_time,
+        let now = Utc::now();
+        let chirpstack_status = ChirpstackStatusInternal {
+            server_available: false,
+            last_poll_time: Some(now),
+            error_count: 1,
         };
         storage.update_chirpstack_status(chirpstack_status.clone());
 
         // Test status retrieval methods
         assert_eq!(storage.get_chirpstack_status(), chirpstack_status);
-        assert_eq!(storage.get_chirpstack_available(), status);
-        assert_eq!(storage.get_chirpstack_response_time(), response_time);
+        assert_eq!(storage.get_chirpstack_available(), false);
+        assert_eq!(storage.get_chirpstack_status().error_count, 1);
     }
 
     /// Tests configuration loading and storage initialization.
@@ -1036,10 +1229,16 @@ mod tests {
         let mut storage = Storage::new(&get_config());
         let no_device_id = String::from("no_device");
         let no_metric = String::from("no_metric");
-        let value = 10.0;
+        let value = MetricValueInternal {
+            device_id: no_device_id.clone(),
+            metric_name: no_metric.clone(),
+            value: "10.0".to_string(),
+            timestamp: Utc::now(),
+            data_type: MetricType::Float,
+        };
 
         // This should NOT panic — graceful handling of missing device
-        storage.set_metric_value(&no_device_id, &no_metric, storage::MetricType::Float(value));
+        storage.set_metric_value(&no_device_id, &no_metric, value);
         // Verify the device was not implicitly created
         assert!(storage.get_device(&no_device_id).is_none());
     }
@@ -1070,14 +1269,23 @@ mod tests {
         let no_device_id = String::from("no_device");
         let metric = String::from("metric_1");
         let no_metric = String::from("no_metric");
-        let value = 10.0;
+        let value = MetricValueInternal {
+            device_id: device_id.clone(),
+            metric_name: metric.clone(),
+            value: "10.0".to_string(),
+            timestamp: Utc::now(),
+            data_type: MetricType::Float,
+        };
 
         // Test setting and getting metric value
-        storage.set_metric_value(&device_id, &metric, storage::MetricType::Float(value));
-        assert_eq!(
-            storage.get_metric_value(&device_id, &metric),
-            Some(MetricType::Float(value))
-        );
+        storage.set_metric_value(&device_id, &metric, value.clone());
+        let retrieved = storage.get_metric_value(&device_id, &metric);
+        assert!(retrieved.is_some());
+        let retrieved_val = retrieved.unwrap();
+        assert_eq!(retrieved_val.device_id, device_id);
+        assert_eq!(retrieved_val.metric_name, metric);
+        assert_eq!(retrieved_val.value, "10.0");
+        assert_eq!(retrieved_val.data_type, MetricType::Float);
 
         // Test error cases
         assert_eq!(storage.get_metric_value(&no_device_id, &metric), None);
@@ -1087,19 +1295,35 @@ mod tests {
     #[test]
     fn test_command_queue() {
         let mut storage = Storage::new(&get_config());
-        let command = DeviceCommand {
+        let command = DeviceCommandInternal {
+            id: 0,
             device_id: "device01".to_string(),
-            confirmed: true,
+            payload: vec![10, 20],
             f_port: 100,
-            data: vec![10, 20],
+            status: CommandStatus::Pending,
+            created_at: Utc::now(),
+            error_message: None,
         };
         storage.push_command(command);
         let result = storage.pop_command();
 
         let cmd = result.unwrap();
         assert_eq!(cmd.device_id, "device01");
-        assert!(cmd.confirmed);
+        assert_eq!(cmd.status, CommandStatus::Pending);
         assert_eq!(cmd.f_port, 100);
-        assert_eq!(cmd.data, [10, 20]);
+        assert_eq!(cmd.payload, vec![10, 20]);
+    }
+
+    #[test]
+    fn test_trait_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Arc<dyn StorageBackend>>();
+    }
+
+    #[test]
+    fn test_trait_method_signatures_exist() {
+        use std::any::type_name;
+        let trait_name = type_name::<dyn StorageBackend>();
+        assert!(trait_name.contains("StorageBackend"));
     }
 }

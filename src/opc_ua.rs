@@ -2,8 +2,9 @@
 // Copyright (c) [2024] [Guy Corbaz]
 
 use crate::config::{AppConfig, DeviceCommandCfg};
-use crate::storage::{DeviceCommand, MetricType, Storage};
+use crate::storage::{DeviceCommand, MetricType, Storage, CommandStatus};
 use crate::utils::*;
+use chrono::Utc;
 use tracing::{debug, error, info, trace, warn};
 
 use local_ip_address::local_ip;
@@ -787,20 +788,57 @@ impl OpcUa {
     /// let variant = Self::convert_metric_to_variant(int_metric);
     /// // variant is now Variant::Int32(42)
     /// ```
-    fn convert_metric_to_variant(metric_type: MetricType) -> Variant {
-        match metric_type {
-            MetricType::Int(value) => {
-                match i32::try_from(value) {
-                    Ok(v) => Variant::Int32(v),
+    fn convert_metric_to_variant(metric: crate::storage::MetricValueInternal) -> Variant {
+        // NOTE: The metric.timestamp field is available but not currently used in the OPC UA Variant.
+        // Future enhancement: embed timestamp in OPC UA node's SourceTimestamp attribute for better
+        // temporal accuracy in OPC UA clients.
+        match metric.data_type {
+            crate::storage::MetricType::Int => {
+                match metric.value.parse::<i64>() {
+                    Ok(value) => {
+                        match i32::try_from(value) {
+                            Ok(v) => Variant::Int32(v),
+                            Err(_) => {
+                                debug!(value = %value, "Int metric value out of i32 range, using Int64");
+                                Variant::Int64(value)
+                            }
+                        }
+                    }
                     Err(_) => {
-                        debug!(value = %value, "Int metric value out of i32 range, using Int64");
-                        Variant::Int64(value)
+                        debug!("Failed to parse metric value as i64");
+                        Variant::Int32(0)
                     }
                 }
             }
-            MetricType::Float(value) => Variant::Float(value as f32),
-            MetricType::String(value) => Variant::String(value.into()),
-            MetricType::Bool(value) => Variant::Boolean(value),
+            crate::storage::MetricType::Float => {
+                match metric.value.parse::<f64>() {
+                    Ok(value) => {
+                        if !value.is_finite() {
+                            error!(value = %value, "Metric value is NaN or Infinity; using default 0.0");
+                            Variant::Float(0.0)
+                        } else {
+                            Variant::Float(value as f32)
+                        }
+                    }
+                    Err(_) => {
+                        debug!("Failed to parse metric value as f64");
+                        Variant::Float(0.0)
+                    }
+                }
+            }
+            crate::storage::MetricType::String => Variant::String(metric.value.into()),
+            crate::storage::MetricType::Bool => {
+                let lower_val = metric.value.to_lowercase();
+                let bool_value = match lower_val.as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        warn!(value = %metric.value, "Invalid bool metric value; defaulting to false");
+                        false
+                    }
+                };
+                Variant::Boolean(bool_value)
+            }
         }
     }
 
@@ -836,9 +874,26 @@ impl OpcUa {
             None => opcua::types::StatusCode::Bad,
             Some(variant) => {
                 debug!(variant = ?variant, "Variant received");
-                let value = match Self::convert_variant_to_metric(&variant) {
-                    Ok(MetricType::Int(value)) => value,
-                    _ => return opcua::types::StatusCode::BadTypeMismatch,
+                // Validate that variant is numeric (for LoRaWAN payload)
+                match &variant {
+                    opcua::types::Variant::Int32(_)
+                    | opcua::types::Variant::Int64(_)
+                    | opcua::types::Variant::Float(_)
+                    | opcua::types::Variant::Double(_) => {
+                        // Numeric types OK for payload
+                    }
+                    _ => {
+                        warn!(variant_type = ?variant, "Command payload must be numeric (Int32, Int64, Float, Double)");
+                        return opcua::types::StatusCode::BadTypeMismatch;
+                    }
+                }
+                let (value_str, _value_type) = match Self::convert_variant_to_metric(&variant) {
+                    Ok(result) => result,
+                    Err(_) => return opcua::types::StatusCode::BadTypeMismatch,
+                };
+                let value = match value_str.parse::<i64>() {
+                    Ok(v) => v,
+                    Err(_) => return opcua::types::StatusCode::BadTypeMismatch,
                 };
                 debug!(
                     value = %value,
@@ -848,17 +903,41 @@ impl OpcUa {
                     "Add command for device"
                 );
                 // Create the command
-                let command_to_send = DeviceCommand {
-                    device_id: device_id.to_string(),
-                    confirmed: command.command_confirmed,
-                    f_port: command.command_port as u32,
-                    data: vec![match u8::try_from(value) {
-                        Ok(v) => v,
-                        Err(_) => {
-                            warn!(value = %value, "Command value out of u8 range [0-255]");
+                let f_port = match u8::try_from(command.command_port) {
+                    Ok(port) => {
+                        if !crate::storage::DeviceCommand::validate_f_port(port) {
+                            warn!(port = %port, "Command port out of LoRaWAN valid range [1-223]");
                             return opcua::types::StatusCode::BadOutOfRange;
                         }
-                    }],
+                        port
+                    }
+                    Err(_) => {
+                        warn!(port = %command.command_port, "Command port out of u8 range [0-255]");
+                        return opcua::types::StatusCode::BadOutOfRange;
+                    }
+                };
+                let payload = vec![match u8::try_from(value) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        warn!(value = %value, "Command value out of u8 range [0-255]");
+                        return opcua::types::StatusCode::BadOutOfRange;
+                    }
+                }];
+
+                // Validate payload size
+                if !crate::storage::DeviceCommand::validate_payload_size(&payload) {
+                    warn!(payload_size = %payload.len(), max_size = %crate::storage::MAX_LORA_PAYLOAD_SIZE, "Command payload exceeds LoRaWAN size limit");
+                    return opcua::types::StatusCode::BadOutOfRange;
+                }
+
+                let command_to_send = crate::storage::DeviceCommandInternal {
+                    id: 0, // Will be assigned by storage when queued
+                    device_id: device_id.to_string(),
+                    payload,
+                    f_port,
+                    status: CommandStatus::Pending,
+                    created_at: Utc::now(),
+                    error_message: None,
                 };
                 // Add command to storage
                 match storage.lock() {
@@ -894,15 +973,15 @@ impl OpcUa {
     /// * `Float/Double` -> `MetricType::Float`
     /// * `String` -> `MetricType::String`
     /// * `Boolean` -> `MetricType::Bool`
-    fn convert_variant_to_metric(variant: &Variant) -> Result<MetricType, String> {
+    fn convert_variant_to_metric(variant: &Variant) -> Result<(String, crate::storage::MetricType), String> {
         trace!("Convert variant to metric");
         match variant {
-            Variant::Int32(value) => Ok(MetricType::Int(*value as i64)),
-            Variant::Int64(value) => Ok(MetricType::Int(*value)),
-            Variant::Float(value) => Ok(MetricType::Float(*value as f64)),
-            Variant::Double(value) => Ok(MetricType::Float(*value)),
-            Variant::String(value) => Ok(MetricType::String(value.to_string())),
-            Variant::Boolean(value) => Ok(MetricType::Bool(*value)),
+            Variant::Int32(value) => Ok((value.to_string(), crate::storage::MetricType::Int)),
+            Variant::Int64(value) => Ok((value.to_string(), crate::storage::MetricType::Int)),
+            Variant::Float(value) => Ok((value.to_string(), crate::storage::MetricType::Float)),
+            Variant::Double(value) => Ok((value.to_string(), crate::storage::MetricType::Float)),
+            Variant::String(value) => Ok((value.to_string(), crate::storage::MetricType::String)),
+            Variant::Boolean(value) => Ok((value.to_string(), crate::storage::MetricType::Bool)),
             _ => Err(format!("Unsupported variant type {:?}", variant)),
         }
     }

@@ -1,5 +1,5 @@
 # generated: 2026-04-02
-# last_updated: 2026-04-19 (story 2-1 created)
+# last_updated: 2026-04-19 (Story 2-1b DONE after code review; new Story 2-2 created for type system alignment)
 # project: opcgw
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-02
-last_updated: 2026-04-19
+last_updated: 2026-04-19 (Story 2-2b code review completed; 11 patches applied, 1 decision-needed, 1 deferred)
 project: opcgw
 project_key: NOKEY
 tracking_system: file-system
@@ -51,13 +51,34 @@ development_status:
   1-5-configuration-validation-and-clean-startup: done
   epic-1-retrospective: done
 
-  # Epic 2: Data Persistence (Phase A)
+  # Epic 2: Data Persistence (Phase A) — Refined: 5 stories → 15 stories (tight granularity, 1-3 days each; includes 1 legacy file)
   epic-2: in-progress
-  2-1-storagebackend-trait-and-inmemorybackend: ready-for-dev
-  2-2-sqlite-backend-and-schema-migration: backlog
-  2-3-metric-persistence-and-batch-writes: backlog
-  2-4-metric-restore-on-startup: backlog
-  2-5-historical-data-pruning: backlog
+
+  # Phase 2-1: StorageBackend Trait & Core Types (Foundational)
+  2-1a-storagebackend-trait-definition: done
+  2-1b-core-storage-data-types: done
+  2-1c-inmemorybackend-implementation: done
+
+  # Phase 2-2: SQLite Schema & Infrastructure (+ Type System Alignment Bridge)
+  2-2-type-system-sql-alignment: done
+  2-2a-sqlite-schema-design: done
+  2-2b-schema-creation-and-migration: in-progress
+  2-2c-sqlitebackend-basic-crud-implementation: backlog
+  2-2d-prepared-statements-and-sql-safety: backlog
+
+  # Phase 2-3: Metric Persistence & Optimization
+  2-3a-metric-values-persistence-upsert: backlog
+  2-3b-historical-metrics-append-only: backlog
+  2-3c-batch-write-optimization: backlog
+
+  # Phase 2-4: Startup Restore & Degradation
+  2-4a-metric-restore-on-startup: backlog
+  2-4b-graceful-degradation: backlog
+
+  # Phase 2-5: Historical Data Management
+  2-5a-historical-data-pruning-task: backlog
+  2-5b-pruning-integration-testing: backlog
+
   epic-2-retrospective: optional
 
   # Epic 3: Reliable Command Execution (Phase A)

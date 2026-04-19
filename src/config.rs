@@ -325,6 +325,57 @@ pub struct DeviceCommandCfg {
     pub command_port: i32,
 }
 
+/// SQLite storage configuration parameters.
+///
+/// Contains settings for data persistence via SQLite database.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone)]
+pub struct StorageConfig {
+    /// Path to the SQLite database file.
+    ///
+    /// Example: `"data/opcgw.db"`
+    /// Default: `"data/opcgw.db"`
+    #[serde(default = "default_database_path")]
+    pub database_path: String,
+
+    /// Historical data retention period in days.
+    ///
+    /// Older data is automatically pruned. Default: 7 days
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
+
+    /// Pruning task interval in minutes.
+    ///
+    /// How often to check and remove expired data. Default: 60 minutes
+    #[serde(default = "default_prune_interval")]
+    pub prune_interval_minutes: u32,
+}
+
+/// Default database path
+fn default_database_path() -> String {
+    "data/opcgw.db".to_string()
+}
+
+/// Default retention days
+fn default_retention_days() -> u32 {
+    7
+}
+
+/// Default prune interval
+fn default_prune_interval() -> u32 {
+    60
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            database_path: default_database_path(),
+            retention_days: default_retention_days(),
+            prune_interval_minutes: default_prune_interval(),
+        }
+    }
+}
+
 /// Main application configuration structure.
 ///
 /// Contains all configuration sections required to run the OPC UA ChirpStack Gateway.
@@ -341,6 +392,10 @@ pub struct AppConfig {
 
     /// OPC UA server configuration.
     pub opcua: OpcUaConfig,
+
+    /// Storage and persistence configuration.
+    #[serde(default)]
+    pub storage: StorageConfig,
 
     /// List of ChirpStack applications and devices to monitor.
     #[serde(rename = "application")]
