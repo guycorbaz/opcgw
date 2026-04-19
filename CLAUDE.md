@@ -72,3 +72,30 @@ All bugs, known failures, change requests, and other work items must be managed 
 - Integration with pull requests and code review
 
 Do not implement fixes or changes without a corresponding GitHub issue.
+
+## Security & Quality Assurance
+
+### Epic Completion Requirements
+
+Before closing an epic retrospective:
+
+1. **Run security check** — Execute a comprehensive security review of all changes made during the epic
+   - Verify no hardcoded credentials or secrets in code
+   - Check for input validation on all external data (ChirpStack API, OPC UA writes, config files)
+   - Validate error messages don't leak sensitive information
+   - Confirm no SQL injection, command injection, or similar vulnerabilities
+   - Review permission handling and access control
+
+2. **Code quality verification**
+   - All tests passing (`cargo test`)
+   - No clippy warnings (`cargo clippy`)
+   - No unsafe code blocks without documented justification
+   - SPDX license headers present on all files
+
+3. **Documentation review**
+   - Acceptance criteria fully satisfied
+   - File list complete and accurate
+   - Dev notes document architectural decisions
+   - References to planning documents included
+
+Do not mark an epic as done without completing the security check.

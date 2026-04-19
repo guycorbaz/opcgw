@@ -1,5 +1,5 @@
 # generated: 2026-04-02
-# last_updated: 2026-04-19
+# last_updated: 2026-04-19 (story 2-1 created)
 # project: opcgw
 # project_key: NOKEY
 # tracking_system: file-system
@@ -48,12 +48,12 @@ development_status:
   1-2-migrate-logging-from-log4rs-to-tracing: done
   1-3-comprehensive-error-handling: done
   1-4-graceful-shutdown-with-cancellationtoken: done
-  1-5-configuration-validation-and-clean-startup: review
+  1-5-configuration-validation-and-clean-startup: done
   epic-1-retrospective: optional
 
   # Epic 2: Data Persistence (Phase A)
-  epic-2: backlog
-  2-1-storagebackend-trait-and-inmemorybackend: backlog
+  epic-2: in-progress
+  2-1-storagebackend-trait-and-inmemorybackend: ready-for-dev
   2-2-sqlite-backend-and-schema-migration: backlog
   2-3-metric-persistence-and-batch-writes: backlog
   2-4-metric-restore-on-startup: backlog
