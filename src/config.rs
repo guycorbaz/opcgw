@@ -978,7 +978,7 @@ mod tests {
     #[test]
     fn test_application_global_config() {
         let config = get_config();
-        assert_eq!(config.global.debug, true);
+        assert!(config.global.debug);
     }
 
     /// Tests ChirpStack configuration parameters.
@@ -1003,7 +1003,7 @@ mod tests {
         let config = get_config();
 
         // Verify applications were loaded
-        assert!(config.application_list.len() > 0);
+        assert!(!config.application_list.is_empty());
 
         // Test specific application lookups
         assert_eq!(
