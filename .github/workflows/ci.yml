@@ -97,12 +97,12 @@ jobs:
       - name: Verify SPDX headers
         run: |
           missing_headers=0
-          for file in src/**/*.rs; do
+          while IFS= read -r file; do
             if ! head -1 "$file" | grep -q "SPDX-License-Identifier"; then
               echo "Missing SPDX header: $file"
               ((missing_headers++))
             fi
-          done
+          done < <(find src -name "*.rs" -type f)
           if [ $missing_headers -gt 0 ]; then
             echo "❌ $missing_headers file(s) missing SPDX headers"
             exit 1
