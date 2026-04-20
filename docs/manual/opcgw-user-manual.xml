@@ -32,12 +32,9 @@
   </bookinfo>
 
   <!-- ============================================ -->
-  <!-- PART 1: INTRODUCTION AND OVERVIEW -->
+  <!-- CHAPTER 1: OVERVIEW -->
   <!-- ============================================ -->
-  <part id="part-introduction">
-    <title>Introduction</title>
-
-    <chapter id="ch-overview">
+  <chapter id="ch-overview">
       <title>Overview</title>
 
       <section id="sec-what-is-opcgw">
@@ -96,10 +93,13 @@
           </listitem>
         </itemizedlist>
       </section>
-    </chapter>
+  </chapter>
 
-    <chapter id="ch-requirements">
-      <title>System Requirements</title>
+  <!-- ============================================ -->
+  <!-- CHAPTER 2: SYSTEM REQUIREMENTS -->
+  <!-- ============================================ -->
+  <chapter id="ch-requirements">
+    <title>System Requirements</title>
 
       <section id="sec-hardware-requirements">
         <title>Hardware Requirements</title>
@@ -149,15 +149,11 @@
         </itemizedlist>
       </section>
     </chapter>
-  </part>
 
   <!-- ============================================ -->
-  <!-- PART 2: INSTALLATION AND SETUP -->
+  <!-- CHAPTER 3: INSTALLATION -->
   <!-- ============================================ -->
-  <part id="part-installation">
-    <title>Installation and Setup</title>
-
-    <chapter id="ch-installation">
+  <chapter id="ch-installation">
       <title>Installation</title>
 
       <section id="sec-docker-installation">
@@ -240,8 +236,11 @@ cd opcgw</screen>
       </section>
     </chapter>
 
-    <chapter id="ch-configuration">
-      <title>Configuration</title>
+  <!-- ============================================ -->
+  <!-- CHAPTER 4: CONFIGURATION -->
+  <!-- ============================================ -->
+  <chapter id="ch-configuration">
+    <title>Configuration</title>
 
       <section id="sec-config-overview">
         <title>Configuration Overview</title>
@@ -312,8 +311,11 @@ pki_dir = "./pki"</programlisting>
       </section>
     </chapter>
 
-    <chapter id="ch-startup">
-      <title>Starting the Gateway</title>
+  <!-- ============================================ -->
+  <!-- CHAPTER 5: STARTING THE GATEWAY -->
+  <!-- ============================================ -->
+  <chapter id="ch-startup">
+    <title>Starting the Gateway</title>
 
       <section id="sec-startup-verification">
         <title>Startup Verification</title>
@@ -370,15 +372,11 @@ pki_dir = "./pki"</programlisting>
         </warning>
       </section>
     </chapter>
-  </part>
 
   <!-- ============================================ -->
-  <!-- PART 3: OPERATION AND MONITORING -->
+  <!-- CHAPTER 6: DAILY OPERATION -->
   <!-- ============================================ -->
-  <part id="part-operation">
-    <title>Operation and Monitoring</title>
-
-    <chapter id="ch-operation">
+  <chapter id="ch-operation">
       <title>Daily Operation</title>
 
       <section id="sec-monitoring-metrics">
@@ -413,8 +411,11 @@ pki_dir = "./pki"</programlisting>
       </section>
     </chapter>
 
-    <chapter id="ch-troubleshooting">
-      <title>Troubleshooting</title>
+  <!-- ============================================ -->
+  <!-- CHAPTER 7: TROUBLESHOOTING -->
+  <!-- ============================================ -->
+  <chapter id="ch-troubleshooting">
+    <title>Troubleshooting</title>
 
       <section id="sec-common-issues">
         <title>Common Issues and Solutions</title>
@@ -493,8 +494,11 @@ pki_dir = "./pki"</programlisting>
       </section>
     </chapter>
 
-    <chapter id="ch-maintenance">
-      <title>Maintenance</title>
+  <!-- ============================================ -->
+  <!-- CHAPTER 8: MAINTENANCE -->
+  <!-- ============================================ -->
+  <chapter id="ch-maintenance">
+    <title>Maintenance</title>
 
       <section id="sec-database-maintenance">
         <title>Database Maintenance</title>
@@ -535,10 +539,9 @@ pki_dir = "./pki"</programlisting>
         </itemizedlist>
       </section>
     </chapter>
-  </part>
 
   <!-- ============================================ -->
-  <!-- APPENDICES -->
+  <!-- APPENDIX: GLOSSARY -->
   <!-- ============================================ -->
   <appendix id="app-glossary">
     <title>Glossary</title>
