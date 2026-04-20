@@ -33,15 +33,15 @@ pub mod chirpstack_api {
 }
 
 use crate::chirpstack::ChirpstackPoller;
-use crate::storage::{Storage, ConnectionPool};
+use crate::storage::{Storage, ConnectionPool, StorageBackend, MetricValueInternal};
 use clap::Parser;
 use config::AppConfig;
-use tracing::{error, info};
+use tracing::{error, info, trace, warn};
 use tracing_appender::non_blocking;
 use tracing_subscriber::{filter, fmt, layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use tokio_util::sync::CancellationToken;
 use opc_ua::OpcUa;
-use std::sync::Mutex;
+use std::sync::{Mutex, Barrier};
 use std::{path::PathBuf, sync::Arc};
 use std::time::Duration;
 
@@ -198,9 +198,94 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create shared storage for ChirpStack poller and OPC UA server threads
     let storage = Arc::new(Mutex::new(Storage::new(&application_config)));
 
-    // Create chirpstack poller
+    // Create barrier for synchronizing restore completion (Task 11)
+    let restore_barrier = Arc::new(Barrier::new(2));
+
+    // Restore metrics from database on startup (Story 2-4a)
+    let sqlite_backend = crate::storage::SqliteBackend::with_pool(pool.clone())
+        .map_err(|e| {
+            error!(error = %e, "Failed to create SQLite backend for metric restore");
+            e
+        })?;
+
+    match sqlite_backend.load_all_metrics() {
+        Ok(metrics) => {
+            let metric_count = metrics.len();
+            let mut storage_guard = storage.lock()
+                .map_err(|e| {
+                    error!(error = %e, "Failed to acquire storage lock for metric restore");
+                    crate::utils::OpcGwError::Storage(format!("Storage lock failed: {}", e))
+                })?;
+
+            let mut restored_count = 0;
+            let mut orphan_count = 0;
+            let mut orphan_metrics = Vec::new();
+
+            for metric in metrics {
+                let metric_value_internal = MetricValueInternal {
+                    device_id: metric.device_id.clone(),
+                    metric_name: metric.metric_name.clone(),
+                    value: metric.value,
+                    timestamp: metric.timestamp,
+                    data_type: metric.data_type,
+                };
+
+                match storage_guard.set_metric_value(&metric.device_id, &metric.metric_name, metric_value_internal) {
+                    Ok(()) => {
+                        restored_count += 1;
+                        trace!(
+                            device_id = %metric.device_id,
+                            metric_name = %metric.metric_name,
+                            "Restored metric from database"
+                        );
+                    }
+                    Err(e) => {
+                        orphan_count += 1;
+                        orphan_metrics.push(format!("{}.{}", metric.device_id, metric.metric_name));
+                        warn!(
+                            error = %e,
+                            device_id = %metric.device_id,
+                            metric_name = %metric.metric_name,
+                            "Skipping orphan metric during restore"
+                        );
+                    }
+                }
+            }
+
+            if orphan_count > 0 {
+                warn!(
+                    restored = restored_count,
+                    orphan = orphan_count,
+                    total = metric_count,
+                    "Metric restore: {}/{} metrics restored; {} orphan metrics skipped (devices removed from config)",
+                    restored_count, metric_count, orphan_count
+                );
+                if orphan_count <= 10 {
+                    for metric_name in &orphan_metrics {
+                        warn!(orphan_metric = %metric_name);
+                    }
+                }
+            } else {
+                info!(
+                    restored_count = restored_count,
+                    "All metrics restored from database on startup"
+                );
+            }
+        }
+        Err(e) => {
+            error!(error = %e, "Failed to restore metrics from database, continuing with empty metrics (graceful degradation)");
+        }
+    }
+
+    // Create chirpstack poller with restore barrier
     let mut chirpstack_poller =
-        match ChirpstackPoller::new(&application_config, storage.clone(), pool.clone(), cancel_token.clone())
+        match ChirpstackPoller::new(
+            &application_config,
+            storage.clone(),
+            pool.clone(),
+            cancel_token.clone(),
+            Arc::clone(&restore_barrier),
+        )
             .await
         {
             Ok(poller) => poller,
@@ -212,6 +297,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create OPC UA server
     let opc_ua = OpcUa::new(&application_config, storage.clone(), pool.clone(), cancel_token.clone());
+
+    // Signal poller that restore is complete (Task 11)
+    info!("Metric restore phase complete; signaling poller to start");
+    restore_barrier.wait();
 
     // Run chirpstack poller and OPC UA server in separate tasks
     let chirpstack_handle = tokio::spawn(async move {
@@ -300,5 +389,55 @@ mod tests {
 
         // Verify the task saw the cancellation and completed
         assert!(task_completed.load(Ordering::SeqCst), "Task should have completed after cancellation");
+    }
+
+    #[test]
+    fn test_metric_restore_from_database() {
+        use crate::storage::{StorageBackend, MetricType, MetricValueInternal};
+        use std::fs;
+
+        // Create a temporary database
+        let db_path = format!("/tmp/opcgw_test_restore_{}.db", uuid::Uuid::new_v4());
+
+        // Create a backend and populate with metrics
+        {
+            let backend = crate::storage::SqliteBackend::new(&db_path).expect("Should create backend");
+            let now = std::time::SystemTime::now();
+
+            // Insert metrics of different types
+            backend.upsert_metric_value("device_1", "temperature", &MetricType::Float, now)
+                .expect("Should upsert float");
+            backend.upsert_metric_value("device_1", "humidity", &MetricType::Int, now)
+                .expect("Should upsert int");
+            backend.upsert_metric_value("device_2", "active", &MetricType::Bool, now)
+                .expect("Should upsert bool");
+            backend.upsert_metric_value("device_2", "status", &MetricType::String, now)
+                .expect("Should upsert string");
+        }
+
+        // Load metrics and populate storage
+        {
+            let backend = crate::storage::SqliteBackend::new(&db_path).expect("Should create backend");
+            let metrics = backend.load_all_metrics().expect("Should load metrics");
+
+            assert_eq!(metrics.len(), 4, "Should have 4 metrics");
+
+            // Verify type conversion
+            for metric in metrics {
+                assert!(!metric.device_id.is_empty(), "Device ID should not be empty");
+                assert!(!metric.metric_name.is_empty(), "Metric name should not be empty");
+
+                // Verify data types are correct
+                match metric.metric_name.as_str() {
+                    "temperature" => assert_eq!(metric.data_type, MetricType::Float),
+                    "humidity" => assert_eq!(metric.data_type, MetricType::Int),
+                    "active" => assert_eq!(metric.data_type, MetricType::Bool),
+                    "status" => assert_eq!(metric.data_type, MetricType::String),
+                    _ => panic!("Unexpected metric name: {}", metric.metric_name),
+                }
+            }
+        }
+
+        let _ = fs::remove_file(&db_path);
     }
 }

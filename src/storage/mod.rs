@@ -123,6 +123,23 @@ use rusqlite::Result as SqliteResult;
 /// # Ok(())
 /// # }
 /// ```
+/// Represents a single metric write operation in a batch.
+///
+/// Used with `batch_write_metrics()` to group multiple metric updates
+/// into a single atomic transaction. Includes both the current metric value
+/// (for UPSERT) and the historical record (for append-only audit log).
+#[derive(Clone, Debug)]
+pub struct BatchMetricWrite {
+    /// Unique device identifier from ChirpStack
+    pub device_id: String,
+    /// Metric name as defined in ChirpStack
+    pub metric_name: String,
+    /// The metric value to store (Float, Int, Bool, String)
+    pub value: MetricType,
+    /// Timestamp when this metric was measured (system time)
+    pub timestamp: std::time::SystemTime,
+}
+
 pub trait StorageBackend: Send + Sync {
     // ===== Metric Operations =====
 
@@ -319,6 +336,64 @@ pub trait StorageBackend: Send + Sync {
     /// - **Timestamp ordered**: Rows maintain insertion order by timestamp
     /// - **Audit trail**: Creates immutable historical record for compliance and trend analysis
     fn append_metric_history(&self, device_id: &str, metric_name: &str, value: &MetricType, timestamp: std::time::SystemTime) -> Result<(), OpcGwError>;
+
+    /// Batch write multiple metrics in a single atomic transaction.
+    ///
+    /// This method persists all metrics from a single poll cycle using UPSERT + append-only semantics
+    /// in a single transaction. If any operation fails, the entire transaction rolls back and no
+    /// partial data is persisted.
+    ///
+    /// # Arguments
+    ///
+    /// * `metrics` - Vector of `BatchMetricWrite` containing device_id, metric_name, value, and timestamp
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If all metrics were successfully persisted atomically
+    /// * `Err(OpcGwError)` - If any operation fails; entire transaction rolled back
+    ///
+    /// # Atomicity Guarantee
+    ///
+    /// All metrics succeed or all fail together — no partial writes to the database.
+    /// This satisfies AC#3 from Story 2-3b (transactional consistency for poll cycles).
+    ///
+    /// # Performance
+    ///
+    /// Batch writes execute in a single transaction with lower overhead than per-metric calls.
+    /// Expected performance: ~100-200ms for 400 metrics (vs. ~400-500ms per-metric).
+    ///
+    /// # Backward Compatibility
+    ///
+    /// This method is additive; existing single-metric methods (upsert_metric_value, append_metric_history)
+    /// remain unchanged. Backends not yet supporting batching can stub with a loop over individual operations.
+    fn batch_write_metrics(&self, metrics: Vec<BatchMetricWrite>) -> Result<(), OpcGwError>;
+
+    /// Load all persisted metrics from storage for gateway startup restore.
+    ///
+    /// This method retrieves all metric values from the metric_values table, enabling
+    /// the gateway to restore metrics into OPC UA on startup. Called during the restore phase
+    /// before starting the poller, ensuring OPC UA clients see valid cached data immediately.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<MetricValue>)` - All metrics in storage (may be empty if no metrics persisted)
+    /// * `Err(OpcGwError)` - If an error occurs during retrieval
+    ///
+    /// # Error Cases
+    ///
+    /// - **Storage error**: Database connectivity issues or query failures
+    /// - **Corrupted data**: Unparseable metric types or values
+    ///
+    /// # Performance
+    ///
+    /// Expected to complete in < 3 seconds for 100 metrics.
+    /// Suitable for startup path where quick initialization is important.
+    ///
+    /// # Semantics
+    ///
+    /// Returns metrics in arbitrary order (no guarantees about ordering).
+    /// All metrics returned have valid (device_id, metric_name, value, data_type, timestamp).
+    fn load_all_metrics(&self) -> Result<Vec<MetricValue>, OpcGwError>;
 }
 
 
@@ -861,7 +936,7 @@ impl Storage {
         device_id: &String,
         chirpstack_metric_name: &str,
         value: MetricValueInternal,
-    ) {
+    ) -> Result<(), OpcGwError> {
         debug!(
             metric_name = %chirpstack_metric_name,
             metric_value = ?value,
@@ -879,13 +954,13 @@ impl Storage {
                     device_id = %device_id,
                     "Successfully updated metric"
                 );
+                Ok(())
             }
             None => {
-                warn!(
-                    metric_name = %chirpstack_metric_name,
-                    device_id = %device_id,
-                    "Cannot set metric: device not found in storage"
-                );
+                Err(OpcGwError::Storage(format!(
+                    "Cannot restore metric {}.{}: device not found in configuration (orphan metric)",
+                    device_id, chirpstack_metric_name
+                )))
             }
         }
     }

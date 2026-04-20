@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-02
-last_updated: 2026-04-20 (Story 2-3b complete: Historical append-only with 5 tests, 71 total tests passing)
+last_updated: 2026-04-20 (Story 2-4b created: Graceful Degradation - ready-for-dev)
 project: opcgw
 project_key: NOKEY
 tracking_system: file-system
@@ -69,12 +69,12 @@ development_status:
 
   # Phase 2-3: Metric Persistence & Optimization
   2-3a-metric-values-persistence-upsert: done
-  2-3b-historical-metrics-append-only: review
-  2-3c-batch-write-optimization: backlog
+  2-3b-historical-metrics-append-only: done
+  2-3c-batch-write-optimization: done
 
   # Phase 2-4: Startup Restore & Degradation
-  2-4a-metric-restore-on-startup: backlog
-  2-4b-graceful-degradation: backlog
+  2-4a-metric-restore-on-startup: done
+  2-4b-graceful-degradation: ready-for-dev
 
   # Phase 2-5: Historical Data Management
   2-5a-historical-data-pruning-task: backlog

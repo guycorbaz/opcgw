@@ -29,7 +29,7 @@
 //! ```
 
 use rusqlite::Connection;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use crate::utils::OpcGwError;
 
@@ -62,6 +62,9 @@ impl ConnectionPool {
             ));
         }
 
+        // Handle database corruption/repair before creating connections
+        Self::detect_and_repair_database(path)?;
+
         let mut connections = Vec::with_capacity(size);
         let mut available = Vec::with_capacity(size);
 
@@ -87,6 +90,161 @@ impl ConnectionPool {
             connections,
             available: Mutex::new(available),
         })
+    }
+
+    /// Detect and repair database corruption (AC 2-4b).
+    ///
+    /// Handles three scenarios:
+    /// 1. Missing database file: SQLite auto-creates it on first open (OK)
+    /// 2. Corrupted database: Attempts PRAGMA integrity_check, repair if needed
+    /// 3. Repair failure: Deletes corrupted file and creates fresh database
+    ///
+    /// # Arguments
+    /// * `path` - File system path to SQLite database
+    ///
+    /// # Returns
+    /// * `Ok(())` - Database is healthy or was repaired/recreated
+    /// * `Err(OpcGwError::Database)` - If repair fails and database cannot be recreated
+    fn detect_and_repair_database(path: &str) -> Result<(), OpcGwError> {
+        use std::path::Path;
+        use std::fs;
+
+        let db_path = Path::new(path);
+
+        // If database doesn't exist, SQLite will auto-create it on first open - that's fine
+        if !db_path.exists() {
+            tracing::info!(database = path, "Database file does not exist; will be auto-created");
+            return Ok(());
+        }
+
+        // Try to open and check integrity
+        let conn = match Connection::open(path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(
+                    database = path,
+                    error = %e,
+                    "Failed to open database; attempting repair"
+                );
+                // Try to delete and let it be recreated
+                if let Err(del_err) = fs::remove_file(path) {
+                    tracing::error!(
+                        database = path,
+                        error = %del_err,
+                        "Failed to delete corrupted database"
+                    );
+                    return Err(OpcGwError::Database(format!(
+                        "Failed to open database at {}: {}. Could not delete for recovery: {}",
+                        path, e, del_err
+                    )));
+                }
+                tracing::info!(database = path, "Deleted corrupted database; will be recreated");
+                return Ok(());
+            }
+        };
+
+        // Run integrity check
+        let integrity_result: Result<String, _> = conn.query_row(
+            "PRAGMA integrity_check",
+            [],
+            |row| row.get(0),
+        );
+
+        match integrity_result {
+            Ok(result) if result.to_lowercase() == "ok" => {
+                tracing::info!(database = path, "Database integrity check passed");
+                Ok(())
+            }
+            Ok(errors) => {
+                // Corruption detected, attempt repair
+                tracing::warn!(
+                    database = path,
+                    corruption_details = %errors,
+                    "Database corruption detected; attempting repair"
+                );
+
+                drop(conn);  // Release the connection before repair
+
+                // Try REINDEX first
+                match Connection::open(path) {
+                    Ok(mut repair_conn) => {
+                        if let Err(e) = repair_conn.execute_batch("REINDEX") {
+                            tracing::warn!(
+                                database = path,
+                                error = %e,
+                                "REINDEX failed; attempting to delete and recreate database"
+                            );
+
+                            drop(repair_conn);
+                            if let Err(del_err) = fs::remove_file(path) {
+                                return Err(OpcGwError::Database(format!(
+                                    "Database repair failed for {}. Could not delete: {}",
+                                    path, del_err
+                                )));
+                            }
+                            tracing::info!(database = path, "Deleted corrupted database; will be recreated");
+                        } else {
+                            tracing::info!(database = path, "Database REINDEX completed successfully");
+
+                            // Verify repair succeeded
+                            if let Err(verify_err) = repair_conn.query_row(
+                                "PRAGMA integrity_check",
+                                [],
+                                |row| row.get::<_, String>(0),
+                            ) {
+                                tracing::error!(
+                                    database = path,
+                                    error = %verify_err,
+                                    "Repair verification failed"
+                                );
+                                drop(repair_conn);
+                                if let Err(del_err) = fs::remove_file(path) {
+                                    return Err(OpcGwError::Database(format!(
+                                        "Database repair failed and could not delete: {}",
+                                        del_err
+                                    )));
+                                }
+                                tracing::info!(database = path, "Deleted corrupted database after failed repair");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            database = path,
+                            error = %e,
+                            "Could not reopen database for repair"
+                        );
+                        if let Err(del_err) = fs::remove_file(path) {
+                            return Err(OpcGwError::Database(format!(
+                                "Database repair failed: {}. Could not delete: {}",
+                                e, del_err
+                            )));
+                        }
+                        tracing::info!(database = path, "Deleted corrupted database; will be recreated");
+                    }
+                }
+
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!(
+                    database = path,
+                    error = %e,
+                    "Failed to run integrity check"
+                );
+                drop(conn);
+
+                // Delete corrupted file and let it be recreated
+                if let Err(del_err) = fs::remove_file(path) {
+                    return Err(OpcGwError::Database(format!(
+                        "Failed to check database integrity: {}. Could not delete: {}",
+                        e, del_err
+                    )));
+                }
+                tracing::info!(database = path, "Deleted corrupted database; will be recreated");
+                Ok(())
+            }
+        }
     }
 
     /// Checkout a connection from the pool with timeout.
@@ -647,6 +805,172 @@ mod tests {
             total_ops,
             elapsed.as_millis()
         );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    // ========== Story 2-4b: Graceful Degradation Tests ==========
+
+    #[test]
+    fn test_missing_database_auto_created() {
+        let path = temp_db_path();
+        // Ensure file doesn't exist
+        let _ = fs::remove_file(&path);
+
+        // Pool creation should succeed and auto-create database
+        let pool = ConnectionPool::new(&path, 1).expect("Should handle missing database gracefully");
+
+        // Verify database exists now
+        assert!(std::path::Path::new(&path).exists(), "Database should be auto-created");
+
+        // Verify we can use it
+        let conn = pool.checkout(Duration::from_secs(5)).expect("Should checkout");
+        let result: String = conn.query_row(
+            "PRAGMA database_list",
+            [],
+            |row| row.get(1),
+        ).expect("Should query");
+        assert!(!result.is_empty(), "Database should be functional");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_corrupted_database_deleted_and_recreated() {
+        use std::sync::Arc;
+
+        let path = temp_db_path();
+
+        // Create a valid database first
+        {
+            let pool = ConnectionPool::new(&path, 1).expect("Should create pool");
+            let conn = pool.checkout(Duration::from_secs(5)).expect("Should checkout");
+            conn.execute(
+                "CREATE TABLE test_data (id INTEGER PRIMARY KEY, value TEXT)",
+                [],
+            ).expect("Should create table");
+        }
+
+        // Corrupt the database by overwriting with garbage
+        {
+            use std::io::Write;
+            let mut file = fs::File::create(&path).expect("Should open file");
+            let garbage = b"this is not a valid SQLite database\x00\x00\x00";
+            file.write_all(garbage).expect("Should write garbage");
+        }
+
+        // Pool creation should detect corruption, delete, and recreate
+        let result = ConnectionPool::new(&path, 1);
+        assert!(result.is_ok(), "Should handle corrupted database by recreating");
+
+        // Verify new database is functional
+        let pool = result.unwrap();
+        let conn = pool.checkout(Duration::from_secs(5)).expect("Should checkout");
+        let result: String = conn.query_row(
+            "PRAGMA database_list",
+            [],
+            |row| row.get(1),
+        ).expect("Should query new database");
+        assert!(!result.is_empty(), "Recreated database should be functional");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_valid_database_untouched() {
+        use std::sync::Arc;
+
+        let path = temp_db_path();
+
+        // Create a valid database with a table
+        {
+            let pool = ConnectionPool::new(&path, 1).expect("Should create pool");
+            let conn = pool.checkout(Duration::from_secs(5)).expect("Should checkout");
+            conn.execute(
+                "CREATE TABLE original_table (id INTEGER PRIMARY KEY, data TEXT)",
+                [],
+            ).expect("Should create table");
+            conn.execute(
+                "INSERT INTO original_table (id, data) VALUES (1, 'preserved')",
+                [],
+            ).expect("Should insert data");
+        }
+
+        // Create a new pool - should find database intact
+        let pool = ConnectionPool::new(&path, 1).expect("Should open existing pool");
+        let conn = pool.checkout(Duration::from_secs(5)).expect("Should checkout");
+
+        // Verify table still exists with data
+        let value: String = conn.query_row(
+            "SELECT data FROM original_table WHERE id = 1",
+            [],
+            |row| row.get(0),
+        ).expect("Should query existing data");
+
+        assert_eq!(value, "preserved", "Data should be preserved in valid database");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_pool_starts_with_empty_state_after_recovery() {
+        use std::sync::Arc;
+
+        let path = temp_db_path();
+
+        // Create and corrupt database
+        {
+            let pool = ConnectionPool::new(&path, 1).expect("Should create pool");
+            let conn = pool.checkout(Duration::from_secs(5)).expect("Should checkout");
+            conn.execute(
+                "CREATE TABLE test_table (id INTEGER PRIMARY KEY)",
+                [],
+            ).expect("Should create table");
+        }
+
+        // Corrupt it
+        {
+            use std::io::Write;
+            let mut file = fs::File::create(&path).expect("Should open file");
+            file.write_all(b"corrupted").expect("Should corrupt");
+        }
+
+        // Recovery should create fresh database
+        let pool = ConnectionPool::new(&path, 1).expect("Should recover");
+
+        // Old table shouldn't exist
+        let conn = pool.checkout(Duration::from_secs(5)).expect("Should checkout");
+        let result = conn.execute(
+            "SELECT COUNT(*) FROM test_table",
+            [],
+        );
+
+        assert!(result.is_err(), "Old table should not exist after recovery");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_pool_multiple_sizes_with_corrupt_recovery() {
+        use std::sync::Arc;
+
+        let path = temp_db_path();
+
+        // Create with size 3
+        let pool1 = ConnectionPool::new(&path, 3).expect("Should create pool with size 3");
+        assert_eq!(pool1.available_connections(), 3);
+
+        // Corrupt the database
+        drop(pool1);
+        {
+            use std::io::Write;
+            let mut file = fs::File::create(&path).expect("Should open file");
+            file.write_all(b"garbage").expect("Should corrupt");
+        }
+
+        // Create with size 2 - should recover and use new size
+        let pool2 = ConnectionPool::new(&path, 2).expect("Should recover with new size");
+        assert_eq!(pool2.available_connections(), 2);
 
         let _ = fs::remove_file(&path);
     }

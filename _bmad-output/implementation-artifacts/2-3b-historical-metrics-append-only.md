@@ -1,6 +1,6 @@
 # Story 2.3b: Historical Metrics Append-Only
 
-Status: review
+Status: done
 
 ## Story
 
@@ -21,6 +21,8 @@ So that I can query metric changes over time and track data provenance for regul
 3. **Given** 400 metrics appended per poll cycle
    **When** metrics are stored in a single transaction (along with metric_values UPSERT)
    **Then** all appends succeed atomically or all fail (transactional consistency)
+   **NOTE:** Batch transactional wrapping deferred to Story 2-3c (Batch Write Optimization).
+   Story 2-3b implements per-metric appends; Story 2-3c will wrap all 400 appends + UPSERTs in single transaction.
 
 4. **Given** metrics with different data types (Float, Int, Bool, String)
    **When** appended to metric_history
@@ -114,6 +116,52 @@ So that I can query metric changes over time and track data provenance for regul
   - [x] Added detailed schema comments explaining (device_id, timestamp) index and APPEND-ONLY SEMANTICS
   - [x] Note: pruning in Story 2-5a, range queries in Story 7-3 (Phase B)
 
+### Review Findings
+
+**Code Review (2026-04-20) — 11 actionable issues identified; 10 fixed, 1 deferred**
+
+#### Patches Applied ✅
+
+- [x] [Review][Patch] String metrics now appended for append_metric_history [src/chirpstack.rs:857-863]
+  - Implemented append call for String metrics (was WARNING-only before)
+
+- [x] [Review][Patch] Timestamp consistency: created_at now uses parameter timestamp [src/storage/sqlite.rs:720]
+  - Both `timestamp` and `created_at` now use the same parameter value for consistency
+
+- [x] [Review][Patch] Pool checkout explicit release: added drop(conn) in all test scopes [src/storage/sqlite.rs:multiple]
+  - Ensures immediate connection release to prevent pool depletion
+
+- [x] [Review][Patch] test_concurrent_append_read_isolation now verifies history [src/storage/sqlite.rs:1725-1775]
+  - Test reads from `metric_history` table instead of `metric_values`
+
+- [x] [Review][Patch] Error handling documentation for upsert/append gap [src/chirpstack.rs:818-821]
+  - Added comment explaining intentional non-atomic behavior and deferral to Story 2-3c
+
+- [x] [Review][Patch] Pool exhaustion error context improved [src/storage/sqlite.rs:702-704]
+  - Error now logged at ERROR level with note about possible pool undersizing or connection leak
+
+- [x] [Review][Patch] RFC3339 timestamp precision documented [src/storage/sqlite.rs:658-681]
+  - Added doc comment warning about millisecond truncation and need for secondary sort key
+
+- [x] [Review][Patch] UTC-only validation enforced [src/storage/sqlite.rs:718-722]
+  - Timestamps now formatted with 'Z' suffix (UTC-only), ensuring lexicographic ordering
+
+- [x] [Review][Patch] Input validation added for device/metric name length [src/storage/sqlite.rs:695-711]
+  - Max 256 chars for device_id and metric_name; prevents index bloat and DoS
+
+- [x] [Review][Patch] Test format verification improved [src/storage/sqlite.rs:1707-1721]
+  - Added comment explaining variant name comparison; enhanced assertion message with actual vs expected
+
+#### Deferred Findings (Pre-Existing, Out of Scope)
+
+- [x] [Review][Defer] No startup validation that metric_history index exists [migrations/v001_initial.sql:336]
+  - Assumes index exists from migration but doesn't verify. Not caused by this change; deferred as pre-existing pattern.
+
+#### Skipped (Requires Design Decision)
+
+- [ ] [Review][Skipped] Async blocking: Making append_metric_history async would require trait changes (too invasive for batch apply)
+  - Recommend deferring to refactoring task; current implementation uses blocking sleep in retry loop
+
 ## Dev Notes
 
 ### Architecture Context
@@ -139,6 +187,23 @@ So that I can query metric changes over time and track data provenance for regul
 - Time-range queries in Phase B (Story 7-3)
 
 **Anti-Pattern:** Never UPDATE or REPLACE in metric_history. Always INSERT. Immutability ensures audit trail integrity.
+
+### Transactional Consistency (AC#3) — Deferred to Story 2-3c
+
+**Current implementation:** Per-metric appends within individual INSERTs (no wrapping transaction).
+- Each metric: UPSERT → Append (separate SQL calls)
+- 400 metrics per poll = 800 individual SQL operations
+
+**Rationale for deferral:**
+- AC#3 requires "all 400 appends succeed atomically or all fail"
+- This requires wrapping entire poll cycle in single transaction
+- Story 2-3c (Batch Write Optimization) will implement batch INSERT for all 400 metrics + UPSERTs
+- Deferred for scope isolation: 2-3b focuses on append-only semantics; 2-3c handles batching
+
+**Risk mitigation (Story 2-3b):**
+- If individual append fails (pool exhaustion), metric is UPSERTED but not historically logged
+- Non-fatal error handling: poll continues, append failure logged at ERROR level
+- Operator visibility: error logs indicate missing historical entries for recovery/audit
 
 ### Data Type Serialization
 

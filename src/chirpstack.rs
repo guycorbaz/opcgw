@@ -32,6 +32,7 @@ use chirpstack_api::api::DeviceQueueItem;
 use chirpstack_api::api::EnqueueDeviceQueueItemRequest;
 use chirpstack_api::api::GetDeviceMetricsRequest;
 use chirpstack_api::common::Metric;
+use chrono::Utc;
 use tracing::{debug, error, info, trace, warn};
 use chirpstack_api::prost_types::Timestamp;
 use serde::Deserialize;
@@ -178,6 +179,8 @@ pub struct ChirpstackPoller {
     pub pool: Arc<ConnectionPool>,
     /// Cancellation token for graceful shutdown
     cancel_token: tokio_util::sync::CancellationToken,
+    /// Barrier to synchronize metric restore completion (Story 2-4a Task 11)
+    restore_barrier: Arc<std::sync::Barrier>,
 }
 
 impl ChirpstackPoller {
@@ -219,6 +222,7 @@ impl ChirpstackPoller {
         storage: Arc<Mutex<Storage>>,
         pool: Arc<ConnectionPool>,
         cancel_token: tokio_util::sync::CancellationToken,
+        restore_barrier: Arc<std::sync::Barrier>,
     ) -> Result<Self, OpcGwError> {
         debug!("Create a new Chirpstack poller");
 
@@ -227,6 +231,7 @@ impl ChirpstackPoller {
             storage,
             pool,
             cancel_token,
+            restore_barrier,
         })
     }
 
@@ -514,6 +519,51 @@ impl ChirpstackPoller {
     /// ```
     pub async fn run(&mut self) -> Result<(), OpcGwError> {
         debug!(polling_frequency_s = %self.config.chirpstack.polling_frequency, "Running chirpstack poller");
+
+        // Wait for metric restore phase to complete (Story 2-4a Task 11)
+        info!("ChirpStack poller waiting for metric restore phase to complete");
+        let barrier = Arc::clone(&self.restore_barrier);
+        tokio::task::block_in_place(|| {
+            barrier.wait();
+        });
+        info!("ChirpStack poller starting metric collection");
+
+        // Spawn pruning task (Story 2-5a Task 3)
+        let pool = Arc::clone(&self.pool);
+        let retention_days = self.config.storage.retention_days;
+        let prune_interval = Duration::from_secs(self.config.storage.prune_interval_minutes as u64 * 60);
+        let cancel_token = self.cancel_token.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        info!("Pruning task shutting down");
+                        return;
+                    }
+                    _ = tokio::time::sleep(prune_interval) => {
+                        // Perform pruning
+                        match SqliteBackend::with_pool(pool.clone()) {
+                            Ok(backend) => {
+                                info!(retention_days = retention_days, "Pruning historical metrics older than {} days", retention_days);
+                                match backend.prune_old_metrics(retention_days) {
+                                    Ok(count) => {
+                                        debug!(count = count, retention_days = retention_days, "Pruned {} rows from metric_history", count);
+                                    }
+                                    Err(e) => {
+                                        debug!(error = %e, "Failed to prune metrics");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                debug!(error = %e, "Failed to create SqliteBackend for pruning");
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
         // Define wait time
         let wait_time = Duration::from_secs(self.config.chirpstack.polling_frequency);
         // Start the poller
@@ -567,40 +617,148 @@ impl ChirpstackPoller {
         // Process command queue
         self.process_command_queue().await?;
 
-        // Collecting metrics
-        // Collect device IDs first
-        let mut device_ids = Vec::new();
-        let mut device_names = Vec::new();
+        // Collect all metrics for batch write
+        let mut batch_metrics: Vec<crate::storage::BatchMetricWrite> = Vec::new();
 
-        // Now, parse all devices from device id
+        // Collect device IDs and names
+        let mut device_ids = Vec::new();
         for app in &self.config.application_list {
             for dev in &app.device_list {
                 device_ids.push(dev.device_id.clone());
-                device_names.push(dev.device_name.clone());
             }
         }
-        debug!(device_count = device_names.len(), "Found devices");
+        debug!(device_count = device_ids.len(), "Found devices");
 
         // Get metrics from server for each device
         for dev_id in device_ids {
             let dev_metrics = self
                 .get_device_metrics_from_server(
                     dev_id.clone(),
-                    //self.config.chirpstack.polling_frequency,
-                    1, // If we put a value different from aggregation, status variables are aggregated
+                    1,
                     1,
                 )
                 .await?;
-            // Parse metrics received from server
-            for metric in &dev_metrics.metrics.clone() {
-                trace!("Got chirpstack metrics");
+
+            // Collect metrics from this device for batch write
+            for metric in dev_metrics.metrics.values() {
+                trace!("Got chirpstack metric for device {}", dev_id);
                 trace!(metric = ?metric, "Metric details");
-                for metric in dev_metrics.metrics.values() {
-                    self.store_metric(&dev_id.clone(), &metric.clone());
+
+                // Prepare metric for batch write (validate type and create BatchMetricWrite)
+                if let Some(batch_metric) = self.prepare_metric_for_batch(&dev_id, metric) {
+                    batch_metrics.push(batch_metric);
                 }
             }
         }
+
+        // Batch write all collected metrics in a single transaction
+        if !batch_metrics.is_empty() {
+            let backend = SqliteBackend::with_pool(self.pool.clone())
+                .map_err(|e| {
+                    error!(error = %e, "Failed to create SqliteBackend for batch write");
+                    e
+                })?;
+
+            debug!(count = batch_metrics.len(), "Batch writing metrics from poll cycle");
+            backend.batch_write_metrics(batch_metrics)?;
+
+            // Update gateway status after successful batch write
+            let now_ts = SystemTime::now();
+            let timestamp_rfc3339 = chrono::DateTime::<Utc>::from(now_ts).to_rfc3339();
+            let mut conn = self.pool.checkout(std::time::Duration::from_secs(5))?;
+            conn.execute(
+                "INSERT OR REPLACE INTO gateway_status (key, value, updated_at) VALUES (?1, ?2, datetime('now'))",
+                rusqlite::params!["last_poll_time", timestamp_rfc3339],
+            ).map_err(|e| {
+                error!(error = %e, "Failed to update last_poll_time in gateway_status");
+                OpcGwError::Storage(format!("Failed to update gateway status: {}", e))
+            })?;
+
+            conn.execute(
+                "INSERT OR REPLACE INTO gateway_status (key, value, updated_at) VALUES (?1, ?2, datetime('now'))",
+                rusqlite::params!["server_available", "true"],
+            ).map_err(|e| {
+                error!(error = %e, "Failed to update server_available in gateway_status");
+                OpcGwError::Storage(format!("Failed to update gateway status: {}", e))
+            })?;
+        }
+
         Ok(())
+    }
+
+    /// Prepares a device metric for batch write.
+    ///
+    /// Converts a metric received from ChirpStack into a BatchMetricWrite structure
+    /// for inclusion in a batch write operation. Validates the metric type and converts
+    /// the value to the appropriate MetricType.
+    ///
+    /// # Arguments
+    ///
+    /// * `device_id` - The unique identifier of the device
+    /// * `metric` - The metric data received from ChirpStack
+    ///
+    /// # Returns
+    ///
+    /// `Option<BatchMetricWrite>` - Some(prepared metric) if validation succeeds, None if skipped
+    ///
+    /// Returns None if:
+    /// - Device name not found in configuration
+    /// - Metric type not configured for this device
+    /// - Metric validation fails (e.g., invalid boolean values)
+    fn prepare_metric_for_batch(&self, device_id: &str, metric: &Metric) -> Option<crate::storage::BatchMetricWrite> {
+        let device_id_string = device_id.to_string();
+        let metric_name = metric.name.clone();
+        let now_ts = SystemTime::now();
+
+        match self.config.get_metric_type(&metric_name, &device_id_string) {
+            Some(metric_type) => {
+                // Validate datasets and data arrays exist with at least one element
+                if metric.datasets.is_empty() {
+                    warn!(metric_name = %metric_name, device_id = %device_id, "Metric has no datasets; skipping");
+                    return None;
+                }
+                if metric.datasets[0].data.is_empty() {
+                    warn!(metric_name = %metric_name, device_id = %device_id, "Metric dataset is empty; skipping");
+                    return None;
+                }
+
+                let metric_val = match metric_type {
+                    OpcMetricTypeConfig::Bool => {
+                        let value = metric.datasets[0].data[0];
+                        match value {
+                            0.0 | 1.0 => MetricType::Bool,
+                            _ => {
+                                error!(value = %value, "Not a valid boolean value");
+                                return None;
+                            }
+                        }
+                    }
+                    OpcMetricTypeConfig::Int => {
+                        let raw_value = metric.datasets[0].data[0];
+                        if raw_value.fract() != 0.0 {
+                            warn!(value = %raw_value, metric_name = %metric_name, "Float metric truncated to int; precision lost");
+                        }
+                        MetricType::Int
+                    }
+                    OpcMetricTypeConfig::Float => MetricType::Float,
+                    OpcMetricTypeConfig::String => {
+                        warn!("Reading string metrics from ChirpStack server is not implemented");
+                        return None;
+                    }
+                };
+
+                Some(crate::storage::BatchMetricWrite {
+                    device_id: device_id.to_string(),
+                    metric_name,
+                    value: metric_val,
+                    timestamp: now_ts,
+                })
+            }
+            None => {
+                warn!(metric_name = ?metric_name, device_id = %device_id, "No metric type found for chirpstack metric");
+                None
+            }
+        }
     }
 
     /// Stores a device metric in the shared storage.
@@ -655,6 +813,11 @@ impl ChirpstackPoller {
             }
         };
 
+        // Process metric based on configured type, with append-only historical logging
+        // NOTE: If upsert_metric_value() succeeds but append_metric_history() fails,
+        // the metric will exist in metric_values but not in metric_history. This is
+        // intentional to allow the poller to continue (non-fatal error handling).
+        // Story 2-3c will implement batch transactional wrapping to ensure atomicity.
         match self.config.get_metric_type(&metric_name, device_id) {
             Some(metric_type) => match metric_type {
                 OpcMetricTypeConfig::Bool => {
@@ -697,7 +860,12 @@ impl ChirpstackPoller {
                     }
                 }
                 OpcMetricTypeConfig::String => {
-                    warn!("Reading string metrics from ChirpStack server is not implemented")
+                    let metric_val = MetricType::String;
+                    if let Err(e) = backend.upsert_metric_value(device_id, &metric_name, &metric_val, now_ts) {
+                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to upsert string metric");
+                    } else if let Err(e) = backend.append_metric_history(device_id, &metric_name, &metric_val, now_ts) {
+                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to append string metric to history");
+                    }
                 }
             },
             None => {

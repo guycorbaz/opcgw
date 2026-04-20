@@ -6,9 +6,10 @@
 //! Provides a thread-safe in-memory implementation of the StorageBackend trait
 //! for use in unit tests and scenarios where persistence is not required.
 
-use crate::storage::types::{ChirpstackStatus, CommandStatus, DeviceCommand, MetricType};
+use crate::storage::types::{ChirpstackStatus, CommandStatus, DeviceCommand, MetricType, MetricValue};
 use crate::storage::StorageBackend;
 use crate::utils::OpcGwError;
+use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -117,6 +118,34 @@ impl StorageBackend for InMemoryBackend {
     fn append_metric_history(&self, _device_id: &str, _metric_name: &str, _value: &MetricType, _timestamp: std::time::SystemTime) -> Result<(), OpcGwError> {
         // InMemoryBackend: no-op for testing (historical data not tracked in memory)
         Ok(())
+    }
+
+    fn batch_write_metrics(&self, metrics: Vec<crate::storage::BatchMetricWrite>) -> Result<(), OpcGwError> {
+        // InMemoryBackend: batch insert all metrics (no transaction tracking)
+        for metric in metrics {
+            self.upsert_metric_value(&metric.device_id, &metric.metric_name, &metric.value, metric.timestamp)?;
+        }
+        Ok(())
+    }
+
+    fn load_all_metrics(&self) -> Result<Vec<MetricValue>, OpcGwError> {
+        // InMemoryBackend: reconstruct metrics from internal storage
+        let metrics = self.metrics.lock().map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
+        let mut result = Vec::new();
+
+        for (device_id, device_metrics) in metrics.iter() {
+            for (metric_name, metric_type) in device_metrics.iter() {
+                result.push(MetricValue {
+                    device_id: device_id.clone(),
+                    metric_name: metric_name.clone(),
+                    value: metric_type.to_string(),
+                    timestamp: Utc::now(),
+                    data_type: *metric_type,
+                });
+            }
+        }
+
+        Ok(result)
     }
 }
 
