@@ -36,7 +36,7 @@ use crate::chirpstack::ChirpstackPoller;
 use crate::storage::{Storage, ConnectionPool, StorageBackend, MetricValueInternal};
 use clap::Parser;
 use config::AppConfig;
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 use tracing_appender::non_blocking;
 use tracing_subscriber::{filter, fmt, layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use tokio_util::sync::CancellationToken;
@@ -241,35 +241,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Err(e) => {
                         orphan_count += 1;
-                        orphan_metrics.push(format!("{}.{}", metric.device_id, metric.metric_name));
-                        warn!(
+                        orphan_metrics.push(metric.device_id.clone());
+                        debug!(
                             error = %e,
                             device_id = %metric.device_id,
                             metric_name = %metric.metric_name,
-                            "Skipping orphan metric during restore"
+                            reason = "device not in configuration",
+                            "Skipped orphan metric during restore"
                         );
                     }
                 }
             }
 
-            if orphan_count > 0 {
-                warn!(
-                    restored = restored_count,
-                    orphan = orphan_count,
-                    total = metric_count,
-                    "Metric restore: {}/{} metrics restored; {} orphan metrics skipped (devices removed from config)",
-                    restored_count, metric_count, orphan_count
-                );
-                if orphan_count <= 10 {
-                    for metric_name in &orphan_metrics {
-                        warn!(orphan_metric = %metric_name);
-                    }
+            info!(
+                restored_count = restored_count,
+                orphan_count = orphan_count,
+                total_attempted = metric_count,
+                "Metric restore completed"
+            );
+
+            if orphan_count > 0 && orphan_count <= 10 {
+                for device_id in &orphan_metrics {
+                    debug!(device_id = %device_id, "Orphan metric detected (device not in config)");
                 }
-            } else {
-                info!(
-                    restored_count = restored_count,
-                    "All metrics restored from database on startup"
-                );
+            } else if orphan_count > 10 {
+                debug!(orphan_count = orphan_count, "Skipped {} orphan metrics", orphan_count);
             }
         }
         Err(e) => {

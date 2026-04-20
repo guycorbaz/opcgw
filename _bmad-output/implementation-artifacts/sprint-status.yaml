@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-02
-last_updated: 2026-04-20 (Story 2-4b created: Graceful Degradation - ready-for-dev)
+last_updated: 2026-04-20 (Story 2-4b complete: Graceful Degradation - ready for review)
 project: opcgw
 project_key: NOKEY
 tracking_system: file-system
@@ -74,7 +74,7 @@ development_status:
 
   # Phase 2-4: Startup Restore & Degradation
   2-4a-metric-restore-on-startup: done
-  2-4b-graceful-degradation: ready-for-dev
+  2-4b-graceful-degradation: review
 
   # Phase 2-5: Historical Data Management
   2-5a-historical-data-pruning-task: backlog

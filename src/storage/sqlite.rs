@@ -33,7 +33,7 @@ use chrono::{DateTime, Utc};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 use super::schema;
 
 /// SQLite-backed storage implementation for opcgw.
@@ -958,11 +958,12 @@ impl crate::storage::StorageBackend for SqliteBackend {
             let data_type: MetricType = match data_type_str.parse() {
                 Ok(dt) => dt,
                 Err(_) => {
-                    trace!(
+                    warn!(
                         device_id = %device_id,
                         metric_name = %metric_name,
                         invalid_type = %data_type_str,
-                        "Skipping metric with invalid data_type during restore"
+                        error = "invalid data type format",
+                        "Failed to restore metric; invalid data_type"
                     );
                     skipped_count += 1;
                     continue;
@@ -973,11 +974,13 @@ impl crate::storage::StorageBackend for SqliteBackend {
             let timestamp = match chrono::DateTime::parse_from_rfc3339(&timestamp_str) {
                 Ok(dt) => dt.with_timezone(&Utc),
                 Err(_) => {
-                    trace!(
+                    warn!(
                         device_id = %device_id,
                         metric_name = %metric_name,
                         invalid_timestamp = %timestamp_str,
-                        "Invalid timestamp during restore; using current time as fallback"
+                        fallback = "using current UTC time",
+                        error = "invalid timestamp format",
+                        "Failed to parse metric timestamp; using fallback"
                     );
                     Utc::now()
                 }
@@ -2123,6 +2126,349 @@ mod tests {
         let has_bool = metrics.iter().any(|(name, _)| name == "new_bool");
         assert!(has_float, "Should preserve float metric");
         assert!(has_bool, "Should preserve bool metric");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    // ============== Story 2-4b: Graceful Degradation Tests ==============
+
+    #[test]
+    fn test_load_all_metrics_graceful_degradation_valid_data() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+        let now = SystemTime::now();
+
+        // Insert valid metrics across multiple devices
+        for i in 1..=10 {
+            backend.upsert_metric_value(
+                &format!("device_{}", i),
+                "temperature",
+                &MetricType::Float,
+                now,
+            ).expect("Should upsert");
+        }
+
+        // Load metrics should succeed for all valid data
+        let metrics = backend.load_all_metrics().expect("Should load metrics");
+        assert_eq!(metrics.len(), 10, "Should load all 10 valid metrics");
+
+        for metric in &metrics {
+            assert!(!metric.device_id.is_empty(), "device_id should not be empty");
+            assert!(!metric.metric_name.is_empty(), "metric_name should not be empty");
+        }
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_all_metrics_with_parse_errors() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+        let now = SystemTime::now();
+
+        // Insert valid metrics
+        backend.upsert_metric_value("device_1", "metric_1", &MetricType::Float, now)
+            .expect("Should upsert");
+        backend.upsert_metric_value("device_2", "metric_2", &MetricType::Int, now)
+            .expect("Should upsert");
+
+        // Insert metrics with invalid data_type directly into database
+        {
+            let mut conn = backend.pool.checkout(Duration::from_secs(5))
+                .expect("Should checkout");
+            let now_rfc3339 = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params![
+                    "device_3",
+                    "metric_3",
+                    "123.45",
+                    "invalid_type",  // Invalid data type
+                    &now_rfc3339,
+                    &now_rfc3339,
+                    &now_rfc3339,
+                ],
+            ).expect("Should insert invalid type");
+        }
+
+        // Load should return valid metrics and skip the invalid one
+        let metrics = backend.load_all_metrics().expect("Should load metrics");
+        assert_eq!(metrics.len(), 2, "Should load 2 valid metrics, skipping the invalid one");
+
+        // Verify we got the expected metrics
+        let device_ids: Vec<_> = metrics.iter().map(|m| m.device_id.as_str()).collect();
+        assert!(device_ids.contains(&"device_1"), "Should have device_1");
+        assert!(device_ids.contains(&"device_2"), "Should have device_2");
+        assert!(!device_ids.contains(&"device_3"), "Should skip device_3 with invalid type");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_all_metrics_timestamp_fallback() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+        let now = SystemTime::now();
+
+        // Insert a valid metric
+        backend.upsert_metric_value("device_1", "metric_1", &MetricType::Float, now)
+            .expect("Should upsert");
+
+        // Insert a metric with invalid timestamp
+        {
+            let mut conn = backend.pool.checkout(Duration::from_secs(5))
+                .expect("Should checkout");
+            let now_rfc3339 = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params![
+                    "device_2",
+                    "metric_2",
+                    "456.78",
+                    "Float",
+                    "not-a-valid-rfc3339-timestamp",  // Invalid timestamp
+                    &now_rfc3339,
+                    &now_rfc3339,
+                ],
+            ).expect("Should insert invalid timestamp");
+        }
+
+        // Load should return both metrics, with timestamp fallback for the second
+        let metrics = backend.load_all_metrics().expect("Should load metrics");
+        assert_eq!(metrics.len(), 2, "Should load both metrics");
+
+        // Find the metric with fallback timestamp
+        let metric_2 = metrics.iter().find(|m| m.device_id == "device_2")
+            .expect("Should find device_2 metric");
+
+        // Verify timestamp is approximately now (within 5 seconds)
+        let now_utc = chrono::Utc::now();
+        let time_diff = now_utc.signed_duration_since(metric_2.timestamp);
+        assert!(time_diff.num_seconds() < 5, "Fallback timestamp should be approximately now");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_all_metrics_type_validation() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+        let now = SystemTime::now();
+
+        // Insert metrics with all valid types
+        backend.upsert_metric_value("device_1", "float_metric", &MetricType::Float, now)
+            .expect("Should insert float");
+        backend.upsert_metric_value("device_2", "int_metric", &MetricType::Int, now)
+            .expect("Should insert int");
+        backend.upsert_metric_value("device_3", "bool_metric", &MetricType::Bool, now)
+            .expect("Should insert bool");
+        backend.upsert_metric_value("device_4", "string_metric", &MetricType::String, now)
+            .expect("Should insert string");
+
+        // Load all metrics - should succeed for all types
+        let metrics = backend.load_all_metrics().expect("Should load metrics");
+        assert_eq!(metrics.len(), 4, "Should load 4 metrics with different types");
+
+        // Verify type information is preserved
+        let types: std::collections::HashSet<_> = metrics.iter()
+            .map(|m| format!("{:?}", m.data_type))
+            .collect();
+        assert_eq!(types.len(), 4, "Should have all 4 different types");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_all_metrics_multiple_devices_orphan_detection() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+        let now = SystemTime::now();
+
+        // Insert 20 metrics across 10 devices
+        for device_id in 1..=10 {
+            for metric_id in 1..=2 {
+                backend.upsert_metric_value(
+                    &format!("device_{}", device_id),
+                    &format!("metric_{}", metric_id),
+                    &MetricType::Float,
+                    now,
+                ).expect("Should insert");
+            }
+        }
+
+        // Load should return all metrics
+        let metrics = backend.load_all_metrics().expect("Should load metrics");
+        assert_eq!(metrics.len(), 20, "Should load all 20 metrics");
+
+        // Group by device to verify organization
+        let mut devices: std::collections::HashSet<_> = std::collections::HashSet::new();
+        for metric in &metrics {
+            devices.insert(&metric.device_id);
+        }
+        assert_eq!(devices.len(), 10, "Should have metrics from 10 devices");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_all_metrics_large_dataset() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+        let now = SystemTime::now();
+
+        // Insert 100 metrics across 20 devices
+        for i in 1..=100 {
+            backend.upsert_metric_value(
+                &format!("device_{}", (i % 20) + 1),
+                &format!("metric_{}", i),
+                &MetricType::Float,
+                now,
+            ).expect("Should upsert");
+        }
+
+        // Load all metrics should succeed
+        let metrics = backend.load_all_metrics().expect("Should load metrics");
+        assert_eq!(metrics.len(), 100, "Should load all 100 metrics");
+
+        // Verify distribution across devices
+        let mut device_counts: std::collections::HashMap<_, u32> = std::collections::HashMap::new();
+        for metric in &metrics {
+            *device_counts.entry(&metric.device_id).or_insert(0) += 1;
+        }
+
+        // Should have 20 devices (most with 5 metrics)
+        assert_eq!(device_counts.len(), 20, "Should have 20 devices");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_restore_partial_failure() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+        let now = SystemTime::now();
+
+        // Insert 100 metrics
+        for i in 1..=100 {
+            backend.upsert_metric_value(
+                &format!("device_{}", (i % 10) + 1),
+                &format!("metric_{}", i),
+                &MetricType::Float,
+                now,
+            ).expect("Should upsert");
+        }
+
+        // Insert 10 metrics with invalid data_type
+        {
+            let mut conn = backend.pool.checkout(Duration::from_secs(5))
+                .expect("Should checkout");
+            let now_rfc3339 = chrono::Utc::now().to_rfc3339();
+            for i in 1..=10 {
+                conn.execute(
+                    "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    rusqlite::params![
+                        "device_bad",
+                        &format!("bad_metric_{}", i),
+                        "123.45",
+                        "invalid_type",
+                        &now_rfc3339,
+                        &now_rfc3339,
+                        &now_rfc3339,
+                    ],
+                ).expect("Should insert");
+            }
+        }
+
+        let metrics = backend.load_all_metrics().expect("Should load metrics");
+        // Should get 100 valid metrics, with 10 invalid ones skipped during load
+        assert_eq!(metrics.len(), 100, "Should load 100 valid metrics, skipping 10 invalid");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_graceful_degradation_on_database_not_found() {
+        // This test verifies that creating a backend with a non-existent database works
+        let path = "/tmp/opcgw_test_nonexistent_db.db";
+        // Ensure the file doesn't exist
+        let _ = fs::remove_file(path);
+
+        // Create backend for non-existent database
+        let backend = SqliteBackend::new(path).expect("Should create backend and schema");
+
+        // Load should return empty vec since no metrics were inserted
+        let metrics = backend.load_all_metrics().expect("Should load from new database");
+        assert_eq!(metrics.len(), 0, "New database should have no metrics");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_load_all_metrics_with_mixed_data_types() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+        let now = SystemTime::now();
+
+        // Insert 100 metrics with mixed types
+        for i in 1..=100 {
+            let metric_type = match i % 4 {
+                0 => MetricType::Float,
+                1 => MetricType::Int,
+                2 => MetricType::Bool,
+                _ => MetricType::String,
+            };
+            backend.upsert_metric_value(
+                &format!("device_{}", (i % 10) + 1),
+                &format!("metric_{}", i),
+                &metric_type,
+                now,
+            ).expect("Should upsert");
+        }
+
+        // Load should handle all mixed types
+        let metrics = backend.load_all_metrics().expect("Should load metrics");
+        assert_eq!(metrics.len(), 100, "Should load all 100 metrics");
+
+        // Verify type counts
+        let mut type_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        for metric in &metrics {
+            let type_str = format!("{:?}", metric.data_type);
+            *type_counts.entry(type_str).or_insert(0) += 1;
+        }
+
+        // Should have approximately 25 of each type
+        assert_eq!(type_counts.len(), 4, "Should have 4 different types");
+        for (type_str, count) in &type_counts {
+            assert_eq!(*count, 25, "Should have 25 metrics of type {}: got {}", type_str, count);
+        }
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_graceful_degradation_performance() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+        let now = SystemTime::now();
+
+        // Insert 500 metrics with some parse errors
+        for i in 1..=500 {
+            let device_num = (i % 20) + 1;
+            backend.upsert_metric_value(
+                &format!("device_{}", device_num),
+                &format!("metric_{}", i),
+                &MetricType::Float,
+                now,
+            ).expect("Should upsert");
+        }
+
+        // Measure load time
+        let start = std::time::Instant::now();
+        let metrics = backend.load_all_metrics().expect("Should load metrics");
+        let elapsed = start.elapsed();
+
+        assert_eq!(metrics.len(), 500, "Should load all 500 metrics");
+        assert!(elapsed.as_secs() < 5, "Load should complete in <5 seconds (was {:?})", elapsed);
 
         let _ = fs::remove_file(&path);
     }
