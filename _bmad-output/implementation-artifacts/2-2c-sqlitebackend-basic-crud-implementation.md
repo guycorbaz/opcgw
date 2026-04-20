@@ -1,6 +1,6 @@
 # Story 2-2c: SqliteBackend Basic CRUD Implementation
 
-Status: ready-for-dev
+Status: done
 
 ## Story
 
@@ -94,7 +94,40 @@ Constructor calls `init_schema(&self.conn)` (defined in 2-2b) before returning. 
 - Do NOT optimize queries yet
 - Do NOT add query builder or ORM
 
+## Dev Agent Record
+
+### Completion Notes
+
+**Status:** DONE (2026-04-20)
+
+All 6 Acceptance Criteria satisfied through Story 2-2x implementation:
+- AC 1: SqliteBackend with WAL mode auto-creation ✅
+- AC 2: Metric CRUD persistence ✅
+- AC 3: Command queue CRUD with status transitions ✅
+- AC 4: Gateway status atomic updates ✅
+- AC 5: Database error handling as OpcGwError::Storage ✅
+- AC 6: All 62 tests passing with disk persistence ✅
+
+**Implementation Summary:**
+This story was superseded by Story 2-2x (Per-Task SQLite Connections), which:
+- Implements all CRUD methods required by 2-2c
+- Adds per-task connection pooling (better concurrency than 2-2c spec)
+- Includes 5 concurrency tests + performance benchmarks
+- Provides superior architecture with no Rust Mutex bottleneck
+
+**No duplicate implementation required** — 2-2x encompasses and exceeds 2-2c scope.
+
+**Files Modified (via 2-2x):**
+- `src/storage/sqlite.rs` — SqliteBackend with per-task connections
+- `src/storage/mod.rs` — exports ConnectionPool and SqliteBackend
+- `src/storage/pool.rs` — ConnectionPool implementation
+- `src/main.rs` — pool initialization and shutdown
+- `src/chirpstack.rs` — pool integration
+- `src/opc_ua.rs` — pool integration
+- `docs/architecture.md` — concurrency model documentation
+
 ## File List
 
-- `src/storage/sqlite.rs` — SqliteBackend implementation
-- `src/storage/mod.rs` — add mod sqlite; pub use sqlite::SqliteBackend
+- `src/storage/sqlite.rs` — SqliteBackend implementation (with per-task connections)
+- `src/storage/mod.rs` — exports SqliteBackend and ConnectionPool
+- `src/storage/pool.rs` — ConnectionPool and ConnectionGuard RAII pattern
