@@ -1,5 +1,5 @@
 # generated: 2026-04-02
-# last_updated: 2026-04-19 (Story 2-1b DONE after code review; new Story 2-2 created for type system alignment)
+# last_updated: 2026-04-20 (Story 2-2b implementation complete; ready for code review)
 # project: opcgw
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-02
-last_updated: 2026-04-19 (Story 2-2b code review completed; 11 patches applied, 1 decision-needed, 1 deferred)
+last_updated: 2026-04-20 (Story 2-2b code review complete: 9 patches applied, 1 deferred, AC 7 resolved, AC 10 deferred to Story 2-2x)
 project: opcgw
 project_key: NOKEY
 tracking_system: file-system
@@ -62,7 +62,7 @@ development_status:
   # Phase 2-2: SQLite Schema & Infrastructure (+ Type System Alignment Bridge)
   2-2-type-system-sql-alignment: done
   2-2a-sqlite-schema-design: done
-  2-2b-schema-creation-and-migration: in-progress
+  2-2b-schema-creation-and-migration: done
   2-2c-sqlitebackend-basic-crud-implementation: backlog
   2-2d-prepared-statements-and-sql-safety: backlog
 

@@ -6,16 +6,21 @@
 //! Provides a production-grade persistent storage implementation using SQLite.
 //! Features:
 //! - WAL (Write-Ahead Logging) mode for concurrent readers + single writer
-//! - Each task owns its own Connection (non-shared) for safety
+//! - Shared Arc<Mutex<Connection>> for safe multi-task access (see note below)
 //! - Full StorageBackend trait implementation
 //! - No panics in production paths — all errors wrapped in OpcGwError
+//!
+//! # Architecture Note
+//! This implementation uses a single shared Connection wrapped in Arc<Mutex<>> to simplify code.
+//! A future optimization (Story 2-2x) will implement per-task connections for better concurrency.
+//! Current design: Rust Mutex serializes all access; SQLite WAL handles DB-level concurrent reads.
+//! Future design: Each task owns Connection; SQLite WAL fully utilized for true concurrent access.
 
 use rusqlite::{Connection, params, OptionalExtension};
 use crate::utils::OpcGwError;
 use crate::storage::{ChirpstackStatus, CommandStatus, DeviceCommand, MetricType};
 use chrono::{DateTime, Utc};
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, trace};
 use super::schema;
@@ -94,7 +99,7 @@ impl SqliteBackend {
         })?;
 
         // Enable WAL mode for concurrent access
-        conn.pragma_update(None, "journal_mode", &"WAL")
+        conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|e| {
                 OpcGwError::Database(format!("Failed to enable WAL mode: {}", e))
             })?;
@@ -117,17 +122,17 @@ impl SqliteBackend {
         }
 
         // Configure PRAGMA settings
-        conn.pragma_update(None, "foreign_keys", &"ON")
+        conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(|e| {
                 OpcGwError::Database(format!("Failed to enable foreign_keys: {}", e))
             })?;
 
-        conn.pragma_update(None, "synchronous", &"NORMAL")
+        conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(|e| {
                 OpcGwError::Database(format!("Failed to set synchronous=NORMAL: {}", e))
             })?;
 
-        conn.pragma_update(None, "temp_store", &"MEMORY")
+        conn.pragma_update(None, "temp_store", "MEMORY")
             .map_err(|e| {
                 OpcGwError::Database(format!("Failed to set temp_store=MEMORY: {}", e))
             })?;
@@ -162,7 +167,10 @@ impl crate::storage::StorageBackend for SqliteBackend {
         device_id: &str,
         metric_name: &str,
     ) -> Result<Option<MetricType>, OpcGwError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("Database connection mutex was poisoned; recovering");
+            poisoned.into_inner()
+        });
 
         let result = conn
             .query_row(
@@ -181,10 +189,17 @@ impl crate::storage::StorageBackend for SqliteBackend {
         match result {
             Some(data_type_str) => {
                 let metric_type: MetricType = data_type_str.parse()
-                    .map_err(|_| {
+                    .map_err(|e| {
+                        tracing::warn!(
+                            device_id = %device_id,
+                            metric_name = %metric_name,
+                            corrupted_value = %data_type_str,
+                            error = %e,
+                            "Corrupted metric type in database"
+                        );
                         OpcGwError::Database(format!(
-                            "Failed to parse metric type '{}'",
-                            data_type_str
+                            "Failed to parse metric type '{}' for {}.{}: {}",
+                            data_type_str, device_id, metric_name, e
                         ))
                     })?;
                 trace!(
@@ -211,7 +226,10 @@ impl crate::storage::StorageBackend for SqliteBackend {
         metric_name: &str,
         value: MetricType,
     ) -> Result<(), OpcGwError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("Database connection mutex was poisoned; recovering");
+            poisoned.into_inner()
+        });
 
         let data_type = value.to_string();
         let timestamp = Utc::now().to_rfc3339();
@@ -240,7 +258,10 @@ impl crate::storage::StorageBackend for SqliteBackend {
     }
 
     fn get_status(&self) -> Result<ChirpstackStatus, OpcGwError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("Database connection mutex was poisoned; recovering");
+            poisoned.into_inner()
+        });
 
         let available: Option<String> = conn
             .query_row(
@@ -280,10 +301,32 @@ impl crate::storage::StorageBackend for SqliteBackend {
             .map(|v| v.to_lowercase() == "true")
             .unwrap_or(false);
         let last_poll = last_poll_time.and_then(|ts| {
-            DateTime::parse_from_rfc3339(&ts).ok().map(|dt| dt.with_timezone(&Utc))
+            match DateTime::parse_from_rfc3339(&ts) {
+                Ok(dt) => Some(dt.with_timezone(&Utc)),
+                Err(e) => {
+                    tracing::warn!(
+                        corrupted_timestamp = %ts,
+                        error = %e,
+                        "Failed to parse last_poll_time timestamp from database"
+                    );
+                    None
+                }
+            }
         });
         let errors = error_count
-            .and_then(|c| c.parse::<u32>().ok())
+            .and_then(|c| {
+                match c.parse::<u32>() {
+                    Ok(count) => Some(count),
+                    Err(e) => {
+                        tracing::warn!(
+                            corrupted_value = %c,
+                            error = %e,
+                            "Failed to parse error_count from database"
+                        );
+                        None
+                    }
+                }
+            })
             .unwrap_or(0);
 
         Ok(ChirpstackStatus {
@@ -294,13 +337,12 @@ impl crate::storage::StorageBackend for SqliteBackend {
     }
 
     fn update_status(&self, status: ChirpstackStatus) -> Result<(), OpcGwError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("Database connection mutex was poisoned; recovering");
+            poisoned.into_inner()
+        });
 
         let available = if status.server_available { "true" } else { "false" };
-        let last_poll = status
-            .last_poll_time
-            .map(|t| t.to_rfc3339())
-            .unwrap_or_else(|| "null".to_string());
         let error_count = status.error_count.to_string();
 
         conn.execute_batch("BEGIN TRANSACTION")
@@ -313,14 +355,16 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 params![available],
             )
             .map_err(|e| {
+                let _ = conn.execute_batch("ROLLBACK");
                 OpcGwError::Database(format!("Failed to update server_available: {}", e))
             })?;
 
         conn.execute(
                 "INSERT OR REPLACE INTO gateway_status (key, value, updated_at) VALUES ('last_poll_time', ?1, datetime('now'))",
-                params![last_poll],
+                params![status.last_poll_time.map(|t| t.to_rfc3339())],
             )
             .map_err(|e| {
+                let _ = conn.execute_batch("ROLLBACK");
                 OpcGwError::Database(format!("Failed to update last_poll_time: {}", e))
             })?;
 
@@ -329,11 +373,13 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 params![error_count],
             )
             .map_err(|e| {
+                let _ = conn.execute_batch("ROLLBACK");
                 OpcGwError::Database(format!("Failed to update error_count: {}", e))
             })?;
 
         conn.execute_batch("COMMIT")
             .map_err(|e| {
+                let _ = conn.execute_batch("ROLLBACK");
                 OpcGwError::Database(format!("Failed to commit transaction: {}", e))
             })?;
 
@@ -356,7 +402,10 @@ impl crate::storage::StorageBackend for SqliteBackend {
             )));
         }
 
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("Database connection mutex was poisoned; recovering");
+            poisoned.into_inner()
+        });
 
         let status_str = Self::status_to_string(&CommandStatus::Pending);
         let now = Utc::now().to_rfc3339();
@@ -389,7 +438,10 @@ impl crate::storage::StorageBackend for SqliteBackend {
     }
 
     fn get_pending_commands(&self) -> Result<Vec<DeviceCommand>, OpcGwError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("Database connection mutex was poisoned; recovering");
+            poisoned.into_inner()
+        });
 
         let mut stmt = conn
             .prepare("SELECT id, device_id, payload, f_port, created_at FROM command_queue WHERE status = 'Pending' ORDER BY id ASC")
@@ -405,7 +457,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 let f_port: i32 = row.get(3)?;
                 let created_at_str: String = row.get(4)?;
 
-                if f_port < 1 || f_port > 223 {
+                if !(1..=223).contains(&f_port) {
                     return Err(rusqlite::Error::InvalidParameterName(
                         format!("Invalid f_port {}: must be 1-223", f_port)
                     ));
@@ -447,7 +499,10 @@ impl crate::storage::StorageBackend for SqliteBackend {
         command_id: u64,
         status: CommandStatus,
     ) -> Result<(), OpcGwError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("Database connection mutex was poisoned; recovering");
+            poisoned.into_inner()
+        });
 
         let status_str = Self::status_to_string(&status);
 
@@ -561,6 +616,50 @@ mod tests {
         let retrieved = backend.get_status().expect("Should get status");
         assert_eq!(retrieved.server_available, status.server_available);
         assert_eq!(retrieved.error_count, status.error_count);
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_concurrent_metric_updates() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let path = temp_backend_path();
+        let backend = Arc::new(SqliteBackend::new(&path).expect("Should create backend"));
+        let mut handles = vec![];
+
+        // Spawn 4 threads, each updating different metrics on the same device
+        for thread_id in 0..4 {
+            let backend = Arc::clone(&backend);
+            let handle = thread::spawn(move || {
+                for iteration in 0..10 {
+                    let metric_name = format!("metric_{}", thread_id);
+                    let value = if iteration % 2 == 0 {
+                        MetricType::Float
+                    } else {
+                        MetricType::Int
+                    };
+                    backend.set_metric("device_1", &metric_name, value)
+                        .expect("Should store metric concurrently");
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("Thread should complete");
+        }
+
+        // Verify all metrics were stored (4 metrics, each updated 10 times)
+        for thread_id in 0..4 {
+            let metric_name = format!("metric_{}", thread_id);
+            let retrieved = backend
+                .get_metric("device_1", &metric_name)
+                .expect("Should retrieve metric");
+            assert!(retrieved.is_some(), "Metric {} should exist", metric_name);
+        }
 
         let _ = fs::remove_file(&path);
     }
