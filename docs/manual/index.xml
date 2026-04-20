@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-model href="http://docbook.org/xml/5.2/rng/docbook.rng" schematypens="http://relaxng.org/ns/structure/1.0"?>
+<article xmlns="http://docbook.org/ns/docbook"
+    xmlns:xlink="http://www.w3.org/1999/xlink" version="5.2"
+    xml:lang="en">
+
+    <info>
+        <title>opcgw Documentation Index</title>
+        <subtitle>LoRaWAN to OPC UA Gateway Documentation</subtitle>
+        <author>
+            <personname>
+                <firstname>Guy</firstname>
+                <surname>Corbaz</surname>
+            </personname>
+        </author>
+    </info>
+
+    <section>
+        <title>Documentation Resources</title>
+
+        <section>
+            <title>User Documentation</title>
+            <itemizedlist>
+                <listitem>
+                    <para>
+                        <link xlink:href="opcgw-user-manual.xml">
+                            <emphasis role="strong">opcgw User Manual</emphasis>
+                        </link>
+                        — Complete guide for installation, configuration, operation, and troubleshooting
+                    </para>
+                    <itemizedlist>
+                        <listitem><para>Part 1: Introduction and Overview</para></listitem>
+                        <listitem><para>Part 2: Installation and Setup</para></listitem>
+                        <listitem><para>Part 3: Operation and Monitoring</para></listitem>
+                        <listitem><para>Part 4: Appendices</para></listitem>
+                    </itemizedlist>
+                </listitem>
+            </itemizedlist>
+        </section>
+
+        <section>
+            <title>Format Information</title>
+            <para>This documentation is written in DocBook 5.2 XML format. DocBook is a standard for technical documentation that can be converted to multiple output formats:</para>
+            <itemizedlist>
+                <listitem><para>HTML — Web-based documentation</para></listitem>
+                <listitem><para>PDF — Printable format</para></listitem>
+                <listitem><para>EPUB — E-book format</para></listitem>
+                <listitem><para>Man pages — Unix manual pages</para></listitem>
+            </itemizedlist>
+        </section>
+
+        <section>
+            <title>Building Documentation from XML</title>
+            <para>To generate output formats from the DocBook XML files, use DocBook tools:</para>
+
+            <section>
+                <title>Generate HTML</title>
+                <screen>xsltproc --output opcgw-user-manual.html \
+  /usr/share/xml/docbook/stylesheet/docbook-xsl/html/docbook.xsl \
+  opcgw-user-manual.xml</screen>
+            </section>
+
+            <section>
+                <title>Generate PDF</title>
+                <screen>fop -xml opcgw-user-manual.xml \
+  -xsl /usr/share/xml/docbook/stylesheet/docbook-xsl/fo/docbook.xsl \
+  -pdf opcgw-user-manual.pdf</screen>
+            </section>
+
+            <section>
+                <title>Generate EPUB</title>
+                <screen>pandoc --from docbook --to epub \
+  --output opcgw-user-manual.epub \
+  opcgw-user-manual.xml</screen>
+            </section>
+        </section>
+
+        <section>
+            <title>Project Resources</title>
+            <itemizedlist>
+                <listitem>
+                    <para>
+                        <link xlink:href="https://github.com/guycorbaz/opcgw">
+                            GitHub Repository
+                        </link>
+                        — Source code and issue tracking
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <link xlink:href="https://www.docbook.org/">
+                            DocBook Official Site
+                        </link>
+                        — DocBook specification and tools
+                    </para>
+                </listitem>
+                <listitem>
+                    <para>
+                        <link xlink:href="https://www.oasis-open.org/committees/docbook/">
+                            OASIS DocBook Committee
+                        </link>
+                        — Standards organization
+                    </para>
+                </listitem>
+            </itemizedlist>
+        </section>
+    </section>
+
+</article>

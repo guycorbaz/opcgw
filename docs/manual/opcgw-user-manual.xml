@@ -1,0 +1,857 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-model href="http://docbook.org/xml/5.2/rng/docbook.rng" schematypens="http://relaxng.org/ns/structure/1.0"?>
+<?xml-model href="http://docbook.org/xml/5.2/rng/docbook.rng" type="application/xml" schematypens="http://purl.oclc.org/dsdl/schematron"?>
+<book xmlns="http://docbook.org/ns/docbook"
+    xmlns:xlink="http://www.w3.org/1999/xlink" version="5.2"
+    xml:lang="en">
+
+    <info>
+        <title>opcgw User Manual</title>
+        <subtitle>LoRaWAN to OPC UA Gateway</subtitle>
+        <author>
+            <personname>
+                <firstname>Guy</firstname>
+                <surname>Corbaz</surname>
+            </personname>
+            <email>gcorbaz@gmail.com</email>
+        </author>
+        <copyright>
+            <year>2024</year>
+            <holder>Guy Corbaz</holder>
+        </copyright>
+        <legalnotice>
+            <para>This work is licensed under MIT OR Apache-2.0 license.</para>
+        </legalnotice>
+        <revhistory>
+            <revision>
+                <revnumber>1.0.0</revnumber>
+                <date>2026-04-20</date>
+                <authorinitials>GC</authorinitials>
+                <revremark>Initial release of opcgw user manual</revremark>
+            </revision>
+        </revhistory>
+        <abstract>
+            <para>opcgw is a Rust-based gateway that bridges ChirpStack LoRaWAN Network Server with OPC UA clients for industrial automation and SCADA systems. This manual provides comprehensive guidance on installation, configuration, operation, and troubleshooting of the opcgw gateway.</para>
+        </abstract>
+    </info>
+
+    <!-- ============================================ -->
+    <!-- PART 1: INTRODUCTION AND OVERVIEW -->
+    <!-- ============================================ -->
+    <part xml:id="part-introduction">
+        <title>Introduction</title>
+
+        <chapter xml:id="ch-overview">
+            <title>Overview</title>
+
+            <section xml:id="sec-what-is-opcgw">
+                <title>What is opcgw?</title>
+                <para>opcgw (OPC Gateway) is a middleware application that bridges the gap between LoRaWAN sensor networks and industrial automation systems. It provides seamless integration between:</para>
+                <itemizedlist>
+                    <listitem>
+                        <para><emphasis>ChirpStack LoRaWAN Network Server</emphasis> — Manages LoRaWAN devices and gathers metrics from distributed IoT sensors</para>
+                    </listitem>
+                    <listitem>
+                        <para><emphasis>OPC UA Servers</emphasis> — Presents data to SCADA systems, industrial controllers, and human-machine interfaces</para>
+                    </listitem>
+                </itemizedlist>
+                <para>The gateway continuously polls device metrics from ChirpStack, stores them in a local SQLite database, and exposes them via OPC UA for real-time consumption by industrial clients.</para>
+            </section>
+
+            <section xml:id="sec-key-features">
+                <title>Key Features</title>
+                <itemizedlist>
+                    <listitem>
+                        <para><emphasis>Real-time Data Collection</emphasis> — Continuous polling of metrics from ChirpStack at configurable intervals</para>
+                    </listitem>
+                    <listitem>
+                        <para><emphasis>Persistent Storage</emphasis> — SQLite-backed storage with UPSERT semantics for current metrics and append-only audit logs for historical data</para>
+                    </listitem>
+                    <listitem>
+                        <para><emphasis>OPC UA Server</emphasis> — Native OPC UA 1.04 endpoint for seamless SCADA integration</para>
+                    </listitem>
+                    <listitem>
+                        <para><emphasis>Graceful Degradation</emphasis> — Continues operation even during database corruption, access failures, or partial data loss</para>
+                    </listitem>
+                    <listitem>
+                        <para><emphasis>Comprehensive Logging</emphasis> — Structured logging via tracing for operational visibility and debugging</para>
+                    </listitem>
+                    <listitem>
+                        <para><emphasis>Data Retention Policies</emphasis> — Automatic pruning of historical data based on retention configuration</para>
+                    </listitem>
+                </itemizedlist>
+            </section>
+
+            <section xml:id="sec-system-architecture">
+                <title>System Architecture</title>
+                <para>opcgw follows a modular architecture with clear separation of concerns:</para>
+                <itemizedlist>
+                    <listitem>
+                        <para><emphasis>Poller Module</emphasis> (chirpstack.rs) — Authenticates to ChirpStack gRPC API, polls metrics at regular intervals, transforms data into internal format</para>
+                    </listitem>
+                    <listitem>
+                        <para><emphasis>Storage Layer</emphasis> (storage module) — Abstracts database backend with pluggable implementations (in-memory for testing, SQLite for production)</para>
+                    </listitem>
+                    <listitem>
+                        <para><emphasis>OPC UA Server</emphasis> (opc_ua.rs) — Exposes metrics as OPC UA variables, handles subscription requests</para>
+                    </listitem>
+                    <listitem>
+                        <para><emphasis>Configuration System</emphasis> (config.rs) — TOML-based configuration with environment variable overrides</para>
+                    </listitem>
+                </itemizedlist>
+                <figure xml:id="fig-architecture">
+                    <title>opcgw Architecture Overview</title>
+                    <screen>
+┌─────────────────────────────────────────────────────────────┐
+│                    SCADA/Control Systems                    │
+│                    (OPC UA Clients)                         │
+└─────────────────┬───────────────────────────────────────────┘
+                  │
+          OPC UA 1.04 Server
+          (Port 4855)
+                  │
+┌─────────────────▼───────────────────────────────────────────┐
+│                     opcgw Gateway                           │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │ Storage Layer (SQLite)                               │   │
+│  │ - metric_values (current state, UPSERT)             │   │
+│  │ - metric_history (append-only audit log)            │   │
+│  │ - command_queue (write-back support)                │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                  ▲         ▲                                 │
+│                  │         │                                 │
+│  ┌──────────────┴─┐ ┌────┴──────────────────────────────┐   │
+│  │ ChirpStack    │ │  OPC UA Server                     │   │
+│  │ Poller        │ │  (Reads metrics, serves clients)   │   │
+│  └──────────────┬─┘ └────▲──────────────────────────────┘   │
+│                │         │                                   │
+└────────────────┼─────────┼───────────────────────────────────┘
+                 │         │
+          gRPC Poll     TCP/HTTPS
+          (ChirpStack)
+                 │
+    ┌────────────▼──────────────┐
+    │  ChirpStack Server        │
+    │  (LoRaWAN Network Server) │
+    │  - Device Registry        │
+    │  - Metric Collection      │
+    │  - API Endpoints          │
+    └──────────────────────────┘
+                    </screen>
+                </figure>
+            </section>
+        </chapter>
+
+        <chapter xml:id="ch-requirements">
+            <title>System Requirements</title>
+
+            <section xml:id="sec-hardware-requirements">
+                <title>Hardware Requirements</title>
+                <variablelist>
+                    <varlistentry>
+                        <term>Processor</term>
+                        <listitem>
+                            <para>Any 64-bit processor (x86-64, ARM64) with 2+ cores recommended for production</para>
+                        </listitem>
+                    </varlistentry>
+                    <varlistentry>
+                        <term>Memory</term>
+                        <listitem>
+                            <para>Minimum 512 MB RAM; 2 GB recommended for deployments with 100+ devices</para>
+                        </listitem>
+                    </varlistentry>
+                    <varlistentry>
+                        <term>Storage</term>
+                        <listitem>
+                            <para>Minimum 100 MB free disk space; 1 GB recommended if retaining historical data</para>
+                        </listitem>
+                    </varlistentry>
+                    <varlistentry>
+                        <term>Network</term>
+                        <listitem>
+                            <para>Network connectivity to ChirpStack server (gRPC port 8080) and OPC UA clients</para>
+                        </listitem>
+                    </varlistentry>
+                </variablelist>
+            </section>
+
+            <section xml:id="sec-software-requirements">
+                <title>Software Requirements</title>
+                <itemizedlist>
+                    <listitem>
+                        <para><emphasis>OS:</emphasis> Linux (Debian, Ubuntu, CentOS), macOS, or Windows with Docker</para>
+                    </listitem>
+                    <listitem>
+                        <para><emphasis>Rust:</emphasis> v1.87.0 or later (if building from source)</para>
+                    </listitem>
+                    <listitem>
+                        <para><emphasis>ChirpStack:</emphasis> v4.0 or later with gRPC API enabled</para>
+                    </listitem>
+                    <listitem>
+                        <para><emphasis>Network:</emphasis> Firewall rules allowing inbound connections to OPC UA port (default 4855)</para>
+                    </listitem>
+                </itemizedlist>
+            </section>
+
+            <section xml:id="sec-network-connectivity">
+                <title>Network Connectivity Requirements</title>
+                <table xml:id="table-network-ports">
+                    <title>Required Network Ports</title>
+                    <tgroup cols="4">
+                        <colspec colname="c1" colwidth="2*"/>
+                        <colspec colname="c2" colwidth="1*"/>
+                        <colspec colname="c3" colwidth="3*"/>
+                        <colspec colname="c4" colwidth="2*"/>
+                        <thead>
+                            <row>
+                                <entry>Service</entry>
+                                <entry>Port</entry>
+                                <entry>Protocol</entry>
+                                <entry>Direction</entry>
+                            </row>
+                        </thead>
+                        <tbody>
+                            <row>
+                                <entry>ChirpStack gRPC API</entry>
+                                <entry>8080</entry>
+                                <entry>gRPC (HTTP/2)</entry>
+                                <entry>Outbound (to ChirpStack)</entry>
+                            </row>
+                            <row>
+                                <entry>OPC UA Server</entry>
+                                <entry>4855 (default)</entry>
+                                <entry>TCP</entry>
+                                <entry>Inbound (from clients)</entry>
+                            </row>
+                            <row>
+                                <entry>HTTPS (if PKI enabled)</entry>
+                                <entry>4856 (default)</entry>
+                                <entry>TCP/TLS</entry>
+                                <entry>Inbound (from clients)</entry>
+                            </row>
+                        </tbody>
+                    </tgroup>
+                </table>
+            </section>
+        </chapter>
+    </part>
+
+    <!-- ============================================ -->
+    <!-- PART 2: INSTALLATION AND SETUP -->
+    <!-- ============================================ -->
+    <part xml:id="part-installation">
+        <title>Installation and Setup</title>
+
+        <chapter xml:id="ch-installation">
+            <title>Installation</title>
+
+            <section xml:id="sec-docker-installation">
+                <title>Installation via Docker (Recommended)</title>
+                <para>Docker installation is the quickest way to get opcgw running without compiling from source.</para>
+
+                <procedure>
+                    <title>Docker Installation Steps</title>
+                    <step>
+                        <para>Ensure Docker is installed on your system. Visit <link xlink:href="https://docs.docker.com/get-docker/">Docker documentation</link> for installation instructions.</para>
+                    </step>
+                    <step>
+                        <para>Create a configuration directory:</para>
+                        <screen>mkdir -p ~/opcgw-config</screen>
+                    </step>
+                    <step>
+                        <para>Prepare the configuration file (see <xref linkend="ch-configuration"/>)</para>
+                    </step>
+                    <step>
+                        <para>Run the Docker container:</para>
+                        <screen>docker run -d \
+  --name opcgw \
+  -p 4855:4855 \
+  -v ~/opcgw-config:/app/config \
+  -v opcgw-db:/app/data \
+  guycorbaz/opcgw:latest</screen>
+                    </step>
+                    <step>
+                        <para>Verify the container is running:</para>
+                        <screen>docker logs opcgw</screen>
+                    </step>
+                </procedure>
+
+                <note>
+                    <title>Docker Volumes</title>
+                    <para>The Docker image uses two volumes:</para>
+                    <itemizedlist>
+                        <listitem>
+                            <para><filename>/app/config</filename> — Configuration files (TOML, logging setup)</para>
+                        </listitem>
+                        <listitem>
+                            <para><filename>/app/data</filename> — SQLite database files and PKI certificates</para>
+                        </listitem>
+                    </itemizedlist>
+                </note>
+            </section>
+
+            <section xml:id="sec-source-installation">
+                <title>Building from Source</title>
+                <para>If you prefer to build opcgw from source or need platform-specific optimizations:</para>
+
+                <procedure>
+                    <title>Build from Source Steps</title>
+                    <step>
+                        <para>Clone the repository:</para>
+                        <screen>git clone https://github.com/guycorbaz/opcgw.git
+cd opcgw</screen>
+                    </step>
+                    <step>
+                        <para>Ensure Rust is installed (v1.87.0+):</para>
+                        <screen>rustc --version</screen>
+                    </step>
+                    <step>
+                        <para>Build the project:</para>
+                        <screen>cargo build --release</screen>
+                    </step>
+                    <step>
+                        <para>The compiled binary will be at <filename>target/release/opcgw</filename></para>
+                    </step>
+                    <step>
+                        <para>Run the gateway:</para>
+                        <screen>./target/release/opcgw -c config/config.toml</screen>
+                    </step>
+                </procedure>
+
+                <note>
+                    <title>Build Time</title>
+                    <para>Release builds may take 5-10 minutes depending on your system and internet connection. Debug builds are faster but unoptimized.</para>
+                </note>
+            </section>
+        </chapter>
+
+        <chapter xml:id="ch-configuration">
+            <title>Configuration</title>
+
+            <section xml:id="sec-config-overview">
+                <title>Configuration Overview</title>
+                <para>opcgw uses TOML configuration files for all settings. The main configuration file is typically located at <filename>config/config.toml</filename>. Environment variables can override TOML settings.</para>
+            </section>
+
+            <section xml:id="sec-global-config">
+                <title>Global Configuration</title>
+                <para>The <literal>[global]</literal> section contains general gateway settings:</para>
+                <programlisting language="toml">[global]
+# Log level: trace, debug, info, warn, error
+log_level = "info"
+
+# OPC UA endpoint URL (default: opc.tcp://localhost:4855)
+opc_ua_endpoint = "opc.tcp://0.0.0.0:4855"
+
+# Data retention in days (0 = no pruning)
+retention_days = 30</programlisting>
+            </section>
+
+            <section xml:id="sec-chirpstack-config">
+                <title>ChirpStack Configuration</title>
+                <para>The <literal>[chirpstack]</literal> section configures connection to your ChirpStack server:</para>
+                <programlisting language="toml">[chirpstack]
+# ChirpStack server address (gRPC endpoint)
+server_address = "chirpstack.example.com:8080"
+
+# API authentication token (obtain from ChirpStack)
+api_token = "your_api_token_here"
+
+# Tenant ID (UUID)
+tenant_id = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+
+# Poll interval in seconds
+poll_interval_secs = 30
+
+# Maximum retries on connection failure
+max_retries = 3
+
+# Request timeout in seconds
+request_timeout_secs = 10</programlisting>
+
+                <warning>
+                    <title>API Token Security</title>
+                    <para>Never commit the API token to version control. Use environment variable overrides for sensitive credentials:</para>
+                    <screen>export CHIRPSTACK_API_TOKEN="your_secret_token"</screen>
+                </warning>
+            </section>
+
+            <section xml:id="sec-opc-ua-config">
+                <title>OPC UA Configuration</title>
+                <para>The <literal>[opcua]</literal> section configures the OPC UA server:</para>
+                <programlisting language="toml">[opcua]
+# OPC UA server endpoint
+endpoint = "opc.tcp://0.0.0.0:4855"
+
+# Server name
+server_name = "opcgw"
+
+# Product URI
+product_uri = "https://github.com/guycorbaz/opcgw"
+
+# Enable PKI/security (true = requires certificates)
+pki_enabled = false
+
+# PKI directory (contains certs and keys)
+pki_dir = "./pki"</programlisting>
+            </section>
+
+            <section xml:id="sec-application-config">
+                <title>Application and Device Configuration</title>
+                <para>Applications and their devices are configured via application sections:</para>
+                <programlisting language="toml">[[application]]
+# Application name (from ChirpStack)
+name = "smart_agriculture"
+
+# Namespace prefix in OPC UA (address space)
+namespace = "SmartAg"
+
+# Devices in this application
+[[application.device]]
+name = "field_sensor_01"
+device_eui = "0102030405060708"
+
+# Metrics from this device
+[[application.device.metric]]
+metric_name = "temperature"
+metric_type = "Float"
+opc_ua_node_id = "ns=2;s=field_sensor_01/temperature"
+
+[[application.device.metric]]
+metric_name = "humidity"
+metric_type = "Int"
+opc_ua_node_id = "ns=2;s=field_sensor_01/humidity"</programlisting>
+            </section>
+
+            <section xml:id="sec-logging-config">
+                <title>Logging Configuration</title>
+                <para>Logging is configured via <filename>config/log4rs.yaml</filename>:</para>
+                <programlisting language="yaml">refresh_rate: 30 seconds
+
+appenders:
+  console:
+    kind: console
+    encoder:
+      pattern: "[{d(%Y-%m-%d %H:%M:%S)}] {l} - {m}\n"
+
+  file:
+    kind: file
+    path: "logs/opcgw.log"
+    encoder:
+      pattern: "[{d(%Y-%m-%d %H:%M:%S)}] {l} [{t}] {m}\n"
+
+root:
+  level: info
+  appenders:
+    - console
+    - file
+
+loggers:
+  opcgw:
+    level: debug
+  chirpstack:
+    level: info</programlisting>
+            </section>
+        </chapter>
+
+        <chapter xml:id="ch-startup">
+            <title>Starting the Gateway</title>
+
+            <section xml:id="sec-startup-verification">
+                <title>Startup Verification</title>
+                <para>After starting opcgw, verify that it is running correctly by checking the logs. Look for messages indicating:</para>
+                <orderedlist>
+                    <listitem>
+                        <para>Connection to ChirpStack server established</para>
+                    </listitem>
+                    <listitem>
+                        <para>OPC UA server started on the configured endpoint</para>
+                    </listitem>
+                    <listitem>
+                        <para>Initial metric polling completed</para>
+                    </listitem>
+                </orderedlist>
+
+                <example>
+                    <title>Expected Startup Log Output</title>
+                    <programlisting>
+2026-04-20T12:34:56.789Z  INFO opcgw: Starting opcgw v1.0.0
+2026-04-20T12:34:56.890Z  INFO chirpstack: Connecting to chirpstack.example.com:8080
+2026-04-20T12:34:57.123Z  INFO chirpstack: Connected to ChirpStack server
+2026-04-20T12:34:57.234Z  INFO opcua: Starting OPC UA server on opc.tcp://0.0.0.0:4855
+2026-04-20T12:34:57.456Z  INFO opcua: OPC UA server started successfully
+2026-04-20T12:34:58.567Z  INFO chirpstack: Poll cycle 1: 15 devices, 60 metrics collected
+                    </programlisting>
+                </example>
+            </section>
+
+            <section xml:id="sec-graceful-shutdown">
+                <title>Graceful Shutdown</title>
+                <para>The gateway supports graceful shutdown via SIGTERM signal. On shutdown, it will:</para>
+                <orderedlist>
+                    <listitem>
+                        <para>Stop accepting new OPC UA client connections</para>
+                    </listitem>
+                    <listitem>
+                        <para>Allow existing clients to disconnect gracefully</para>
+                    </listitem>
+                    <listitem>
+                        <para>Flush all pending database writes</para>
+                    </listitem>
+                    <listitem>
+                        <para>Close the database connection</para>
+                    </listitem>
+                </orderedlist>
+
+                <para>To gracefully stop the gateway:</para>
+                <screen>kill -TERM <pid></screen>
+
+                <warning>
+                    <title>Force Shutdown</title>
+                    <para>Avoid using SIGKILL (-9) as it may leave the database in an inconsistent state. Always prefer SIGTERM for graceful shutdown.</para>
+                </warning>
+            </section>
+        </chapter>
+    </part>
+
+    <!-- ============================================ -->
+    <!-- PART 3: OPERATION AND MONITORING -->
+    <!-- ============================================ -->
+    <part xml:id="part-operation">
+        <title>Operation and Monitoring</title>
+
+        <chapter xml:id="ch-operation">
+            <title>Daily Operation</title>
+
+            <section xml:id="sec-monitoring-metrics">
+                <title>Monitoring Metrics</title>
+                <para>Monitor these key indicators during normal operation:</para>
+                <variablelist>
+                    <varlistentry>
+                        <term>Poll Latency</term>
+                        <listitem>
+                            <para>Time to complete a full metric poll cycle. Should be &lt; poll_interval_secs.</para>
+                        </listitem>
+                    </varlistentry>
+                    <varlistentry>
+                        <term>Connected Devices</term>
+                        <listitem>
+                            <para>Number of devices with recent metric updates. Should match expected device count.</para>
+                        </listitem>
+                    </varlistentry>
+                    <varlistentry>
+                        <term>Database Size</term>
+                        <listitem>
+                            <para>Monitor SQLite database file size. Should grow slowly if retention is configured.</para>
+                        </listitem>
+                    </varlistentry>
+                    <varlistentry>
+                        <term>OPC UA Connections</term>
+                        <listitem>
+                            <para>Number of active OPC UA client connections. Monitor for unexpected spikes.</para>
+                        </listitem>
+                    </varlistentry>
+                </variablelist>
+            </section>
+
+            <section xml:id="sec-health-checks">
+                <title>Health Checks</title>
+                <para>Implement health checks to verify gateway operation:</para>
+                <procedure>
+                    <title>Manual Health Check</title>
+                    <step>
+                        <para>Connect to the OPC UA server using an OPC UA client tool</para>
+                    </step>
+                    <step>
+                        <para>Browse the address space and verify devices are present</para>
+                    </step>
+                    <step>
+                        <para>Check metric values are recent (updated within last poll interval)</para>
+                    </step>
+                    <step>
+                        <para>Review logs for any error messages or warnings</para>
+                    </step>
+                </procedure>
+            </section>
+        </chapter>
+
+        <chapter xml:id="ch-troubleshooting">
+            <title>Troubleshooting</title>
+
+            <section xml:id="sec-common-issues">
+                <title>Common Issues and Solutions</title>
+
+                <section xml:id="sec-issue-chirpstack-connection">
+                    <title>Cannot Connect to ChirpStack</title>
+                    <para><emphasis>Symptoms:</emphasis> Logs show connection failures to ChirpStack server</para>
+                    <para><emphasis>Solutions:</emphasis></para>
+                    <orderedlist>
+                        <listitem>
+                            <para>Verify ChirpStack server address and port are correct in configuration</para>
+                        </listitem>
+                        <listitem>
+                            <para>Confirm ChirpStack is running: <command>curl http://chirpstack.example.com:8080</command></para>
+                        </listitem>
+                        <listitem>
+                            <para>Check network connectivity: <command>ping chirpstack.example.com</command></para>
+                        </listitem>
+                        <listitem>
+                            <para>Verify firewall rules allow outbound connections to port 8080</para>
+                        </listitem>
+                        <listitem>
+                            <para>Test gRPC connectivity: <command>grpcurl -plaintext list chirpstack.example.com:8080</command></para>
+                        </listitem>
+                        <listitem>
+                            <para>Verify API token is valid and has appropriate permissions</para>
+                        </listitem>
+                    </orderedlist>
+                </section>
+
+                <section xml:id="sec-issue-database-corruption">
+                    <title>Database Corruption or Access Errors</title>
+                    <para><emphasis>Symptoms:</emphasis> Errors accessing the SQLite database, "database disk image malformed"</para>
+                    <para><emphasis>Solutions:</emphasis></para>
+                    <orderedlist>
+                        <listitem>
+                            <para>Stop the gateway gracefully</para>
+                        </listitem>
+                        <listitem>
+                            <para>Check disk space: <command>df -h</command></para>
+                        </listitem>
+                        <listitem>
+                            <para>Backup the database: <command>cp data/opcgw.db data/opcgw.db.backup</command></para>
+                        </listitem>
+                        <listitem>
+                            <para>Verify database integrity: <command>sqlite3 data/opcgw.db "PRAGMA integrity_check;"</command></para>
+                        </listitem>
+                        <listitem>
+                            <para>If corrupted, the gateway will automatically recreate on startup with graceful degradation</para>
+                        </listitem>
+                    </orderedlist>
+                </section>
+
+                <section xml:id="sec-issue-no-opc-clients">
+                    <title>OPC UA Clients Cannot Connect</title>
+                    <para><emphasis>Symptoms:</emphasis> OPC UA client connection attempts are refused</para>
+                    <para><emphasis>Solutions:</emphasis></para>
+                    <orderedlist>
+                        <listitem>
+                            <para>Verify OPC UA server is running: Check logs for "OPC UA server started"</para>
+                        </listitem>
+                        <listitem>
+                            <para>Check firewall rules allow inbound on OPC UA port (default 4855)</para>
+                        </listitem>
+                        <listitem>
+                            <para>Verify client is connecting to correct endpoint: <literal>opc.tcp://gateway-host:4855</literal></para>
+                        </listitem>
+                        <listitem>
+                            <para>Test local connectivity: <command>netstat -tlnp | grep 4855</command></para>
+                        </listitem>
+                        <listitem>
+                            <para>If PKI is enabled, verify client certificates are in trusted store</para>
+                        </listitem>
+                    </orderedlist>
+                </section>
+
+                <section xml:id="sec-issue-metrics-not-updating">
+                    <title>Metrics Not Updating from ChirpStack</title>
+                    <para><emphasis>Symptoms:</emphasis> Metrics appear in OPC UA but values are stale</para>
+                    <para><emphasis>Solutions:</emphasis></para>
+                    <orderedlist>
+                        <listitem>
+                            <para>Verify devices are configured correctly in <filename>config.toml</filename></para>
+                        </listitem>
+                        <listitem>
+                            <para>Confirm devices are active in ChirpStack (not disabled)</para>
+                        </listitem>
+                        <listitem>
+                            <para>Check poll interval is reasonable (default 30 seconds)</para>
+                        </listitem>
+                        <listitem>
+                            <para>Review logs for poll cycle messages</para>
+                        </listitem>
+                        <listitem>
+                            <para>Verify ChirpStack is collecting data from LoRaWAN devices</para>
+                        </listitem>
+                    </orderedlist>
+                </section>
+            </section>
+        </chapter>
+
+        <chapter xml:id="ch-maintenance">
+            <title>Maintenance</title>
+
+            <section xml:id="sec-database-maintenance">
+                <title>Database Maintenance</title>
+                <para>Regular database maintenance ensures optimal performance:</para>
+
+                <procedure>
+                    <title>Database Optimization</title>
+                    <step>
+                        <para>Stop the gateway gracefully</para>
+                    </step>
+                    <step>
+                        <para>Optimize the database:</para>
+                        <screen>sqlite3 data/opcgw.db "PRAGMA optimize;"</screen>
+                    </step>
+                    <step>
+                        <para>Check database integrity:</para>
+                        <screen>sqlite3 data/opcgw.db "PRAGMA integrity_check;"</screen>
+                    </step>
+                    <step>
+                        <para>Restart the gateway</para>
+                    </step>
+                </procedure>
+            </section>
+
+            <section xml:id="sec-historical-data-pruning">
+                <title>Historical Data Pruning</title>
+                <para>If data retention is enabled, old historical data is automatically pruned based on the <literal>retention_days</literal> configuration. To manually control pruning:</para>
+                <itemizedlist>
+                    <listitem>
+                        <para>Set <literal>retention_days = 0</literal> to disable automatic pruning</para>
+                    </listitem>
+                    <listitem>
+                        <para>Monitor database size to ensure pruning is working</para>
+                    </listitem>
+                    <listitem>
+                        <para>Historical metrics are preserved in <literal>metric_history</literal> table</para>
+                    </listitem>
+                </itemizedlist>
+            </section>
+
+            <section xml:id="sec-log-rotation">
+                <title>Log Rotation</title>
+                <para>Configure log rotation to prevent log files from consuming excessive disk space. Update <filename>config/log4rs.yaml</filename> to use rolling file appender:</para>
+                <programlisting language="yaml">appenders:
+  file:
+    kind: rolling_file
+    path: "logs/opcgw.log"
+    policy:
+      trigger:
+        kind: size
+        limit: 104857600  # 100 MB
+      roller:
+        kind: fixed_window
+        pattern: "logs/opcgw.{}.log"
+        count: 10</programlisting>
+            </section>
+        </chapter>
+    </part>
+
+    <!-- ============================================ -->
+    <!-- PART 4: APPENDICES -->
+    <!-- ============================================ -->
+    <part xml:id="part-appendices">
+        <title>Appendices</title>
+
+        <appendix xml:id="app-config-reference">
+            <title>Complete Configuration Reference</title>
+            <section>
+                <title>Global Section</title>
+                <table>
+                    <title>Global Configuration Parameters</title>
+                    <tgroup cols="3">
+                        <colspec colname="c1" colwidth="2*"/>
+                        <colspec colname="c2" colwidth="1*"/>
+                        <colspec colname="c3" colwidth="3*"/>
+                        <thead>
+                            <row>
+                                <entry>Parameter</entry>
+                                <entry>Type</entry>
+                                <entry>Description</entry>
+                            </row>
+                        </thead>
+                        <tbody>
+                            <row>
+                                <entry>log_level</entry>
+                                <entry>string</entry>
+                                <entry>Log level: trace, debug, info, warn, error</entry>
+                            </row>
+                            <row>
+                                <entry>opc_ua_endpoint</entry>
+                                <entry>string</entry>
+                                <entry>OPC UA server endpoint URL</entry>
+                            </row>
+                            <row>
+                                <entry>retention_days</entry>
+                                <entry>integer</entry>
+                                <entry>Historical data retention in days (0 = no pruning)</entry>
+                            </row>
+                        </tbody>
+                    </tgroup>
+                </table>
+            </section>
+        </appendix>
+
+        <appendix xml:id="app-error-codes">
+            <title>Error Codes and Messages</title>
+            <section>
+                <title>Common Error Messages</title>
+                <variablelist>
+                    <varlistentry>
+                        <term>Failed to connect to ChirpStack</term>
+                        <listitem>
+                            <para>Check network connectivity and server address</para>
+                        </listitem>
+                    </varlistentry>
+                    <varlistentry>
+                        <term>Database disk image malformed</term>
+                        <listitem>
+                            <para>Database corruption detected; will be recreated on next startup</para>
+                        </listitem>
+                    </varlistentry>
+                    <varlistentry>
+                        <term>OPC UA server failed to start</term>
+                        <listitem>
+                            <para>Check port is available and not in use; verify firewall rules</para>
+                        </listitem>
+                    </varlistentry>
+                </variablelist>
+            </section>
+        </appendix>
+
+        <appendix xml:id="app-glossary">
+            <title>Glossary</title>
+            <variablelist>
+                <varlistentry>
+                    <term>ChirpStack</term>
+                    <listitem>
+                        <para>Open-source LoRaWAN Network Server that manages devices and collects metrics</para>
+                    </listitem>
+                </varlistentry>
+                <varlistentry>
+                    <term>LoRaWAN</term>
+                    <listitem>
+                        <para>Long-Range Wide-Area Network protocol for low-power IoT devices</para>
+                    </listitem>
+                </varlistentry>
+                <varlistentry>
+                    <term>OPC UA</term>
+                    <listitem>
+                        <para>OPC Unified Architecture, a machine-to-machine communication protocol for industrial automation</para>
+                    </listitem>
+                </varlistentry>
+                <varlistentry>
+                    <term>SCADA</term>
+                    <listitem>
+                        <para>Supervisory Control and Data Acquisition system for monitoring and controlling industrial processes</para>
+                    </listitem>
+                </varlistentry>
+                <varlistentry>
+                    <term>gRPC</term>
+                    <listitem>
+                        <para>Remote Procedure Call framework built on HTTP/2 for high-performance APIs</para>
+                    </listitem>
+                </varlistentry>
+                <varlistentry>
+                    <term>SQLite</term>
+                    <listitem>
+                        <para>Lightweight embedded SQL database engine used for opcgw storage</para>
+                    </listitem>
+                </varlistentry>
+            </variablelist>
+        </appendix>
+    </part>
+
+</book>
