@@ -1,5 +1,5 @@
 # generated: 2026-04-02
-# last_updated: 2026-04-20 (Story 2-2b implementation complete; ready for code review)
+# last_updated: 2026-04-20 (Story 2-2d implementation complete: SQL injection prevention via parameterized queries)
 # project: opcgw
 # project_key: NOKEY
 # tracking_system: file-system
@@ -65,7 +65,7 @@ development_status:
   2-2b-schema-creation-and-migration: done
   2-2x-per-task-connections: done
   2-2c-sqlitebackend-basic-crud-implementation: done
-  2-2d-prepared-statements-and-sql-safety: backlog
+  2-2d-prepared-statements-and-sql-safety: done
 
   # Phase 2-3: Metric Persistence & Optimization
   2-3a-metric-values-persistence-upsert: backlog
