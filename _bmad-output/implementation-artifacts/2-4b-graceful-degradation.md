@@ -28,9 +28,12 @@ So that temporary file system failures never prevent the gateway from serving SC
 ### AC#2: Missing Database File
 **Given** the database file does not exist (first startup or deleted)  
 **When** the gateway starts  
-**Then** SQLite creates the database file and schema automatically  
+**Then** SQLite creates the database file and schema automatically (via load_all_metrics() or initialization)  
+**And** the restore attempt returns empty result (no metrics to restore from non-existent file)  
 **And** the gateway starts with empty metrics (expected for first startup)  
-**And** the OPC UA address space is built but shows no metric values until first poll completes
+**And** the OPC UA address space is built but shows no metric values until first poll completes  
+
+*Note: Database creation and schema initialization happens automatically when connecting to a non-existent file; graceful degradation here means handling the empty result without error.*
 
 ### AC#3: Orphan Metrics (Config-Database Mismatch)
 **Given** metrics exist in the database for devices removed from configuration  
@@ -54,8 +57,11 @@ So that temporary file system failures never prevent the gateway from serving SC
 **When** the restore phase cannot open the database  
 **Then** the error is logged: `"Failed to open database: {error}; starting with empty metrics"`  
 **And** the gateway continues startup and begins polling  
-**And** the gateway does NOT retry database access in the poller (deferred to Epic 2-5 or later)  
-**And** OPC UA clients can still connect and see metrics after the next successful poll
+**And** the restore phase does NOT implement retry logic (handle once and continue)  
+**And** the poller will naturally attempt database connection on each poll cycle; if DB becomes accessible, polling resumes normally  
+**And** OPC UA clients can still connect and see metrics after the next successful poll  
+
+*Note: The poller's per-poll database access is independent of the restore phase. No special retry logic is needed in restore; if the database is locked at startup, it will be attempted again naturally on each poll.*
 
 ### AC#6: Performance on Graceful Degradation
 **Given** a large database with 100+ metrics where some rows fail to parse  
@@ -115,15 +121,15 @@ So that temporary file system failures never prevent the gateway from serving SC
 
 ### Error Scenarios & Handling
 
-| Scenario | Detection | Log Level | Action | Gateway State |
-|----------|-----------|-----------|--------|--------------|
-| Database file missing | SQLite SQLITE_CANTOPEN | info | Create schema, continue | Empty metrics, ready for polling |
-| Database corrupted | SQLite SQLITE_CORRUPT | error | Skip restore, continue | Empty metrics, poller may fail until fixed |
-| Database locked | SQLite SQLITE_BUSY | error | Skip restore, continue | Empty metrics, poller tries again |
-| Orphan metric (device in DB but not in config) | set_metric_value() returns Err | debug | Log orphan count, skip | Metric remains in DB, not in OPC UA |
-| Parse error (bad data_type) | load_all_metrics() row error | debug | Skip row, continue | Partial restoration |
-| Parse error (bad timestamp RFC3339) | DateTime::parse error | debug | Use Utc::now(), continue | Row restored with current timestamp |
-| Partial loop failure (some rows fail) | Per-row error handling | debug/error | Track counts, continue loop | Partial restoration with summary |
+| Scenario | Detection | Log Level | Action | Gateway State | Test Case |
+|----------|-----------|-----------|--------|--------------|-----------|
+| Database file missing | SQLite SQLITE_CANTOPEN | info | Create schema, continue | Empty metrics, ready for polling | test_graceful_degradation_on_database_not_found |
+| Database corrupted | SQLite SQLITE_CORRUPT | error | Skip restore, continue | Empty metrics, poller may fail until fixed | test_graceful_degradation_on_corruption |
+| Database locked | SQLite SQLITE_BUSY | error | Skip restore, continue | Empty metrics, poller tries again | AC#5 integration test |
+| Orphan metric (device in DB but not in config) | set_metric_value() returns Err | debug | Log orphan count, skip | Metric remains in DB, not in OPC UA | test_load_all_metrics_with_orphans |
+| Parse error (bad data_type) | load_all_metrics() row error | debug | Skip row, continue | Partial restoration | test_load_all_metrics_with_parse_errors |
+| Parse error (bad timestamp RFC3339) | DateTime::parse error | debug | Use Utc::now(), continue | Row restored with current timestamp | test_load_all_metrics_timestamp_fallback |
+| Partial loop failure (some rows fail) | Per-row error handling | debug/error | Track counts, continue loop | Partial restoration with summary | test_restore_partial_failure |
 
 ### Logging Structure (Structured Fields)
 
@@ -168,6 +174,13 @@ No new config sections needed. Restore behavior is entirely deterministic:
 ---
 
 ## Testing Requirements
+
+**Test Summary:** This story specifies **13 tests total**:
+- 6 unit tests (API behavior, error handling at component level)
+- 6 integration tests (end-to-end restore scenarios, startup behavior)
+- 1 performance test (graceful degradation under load)
+
+All tests validate acceptance criteria and error logging patterns.
 
 ### Unit Tests
 
@@ -254,6 +267,12 @@ No new config sections needed. Restore behavior is entirely deterministic:
 
 ## Developer Context from Story 2-4a
 
+### ⚠️ API Dependency: set_metric_value() Result Change
+
+**CRITICAL PREREQUISITE:** This story depends on the `StorageBackend::set_metric_value()` API returning `Result<(), OpcGwError>` instead of `()`. This change is listed as a blocking issue from 2-4a code review (blocking issue #1).
+
+**Status:** This API change must be implemented first, before graceful degradation error handling can be added. All references to error handling in this story assume the Result type is already in place.
+
 ### Lessons from Code Review
 
 Story 2-4a was reviewed and found 4 **blocking issues** that 2-4b must address:
@@ -277,40 +296,35 @@ Story 2-4a was reviewed and found 4 **blocking issues** that 2-4b must address:
 
 ### Key Code Patterns to Follow
 
-From 2-4a implementation:
-
+**Pattern 1: API signature change (2-4a prerequisite)**
 ```rust
-// Pattern: StorageBackend trait returns Result
 fn set_metric_value(&self, device_id: &str, metric_name: &str, value: MetricType) 
-    -> Result<(), OpcGwError>
-{
-    // Verify device exists in config
-    if !self.config.contains_device(device_id) {
-        return Err(OpcGwError::Storage(
-            format!("Device not in configuration: {}", device_id)
-        ));
-    }
-    // Proceed with insertion
-    Ok(())
-}
+    -> Result<(), OpcGwError>  // Returns Result, not void
+```
 
-// Pattern: Restore loop with error handling
+**Pattern 2: Device validation (both backends)**
+Check config for device existence and reject orphans:
+```rust
+if !self.config.contains_device(device_id) {
+    return Err(OpcGwError::Storage(format!("Device not in configuration: {}", device_id)));
+}
+```
+
+**Pattern 3: Restore loop with error handling (main.rs)**
+Wrap each set_metric_value() call in error handling, track counts, log summary:
+```rust
 let mut restored_count = 0;
 let mut orphan_count = 0;
 for metric in metrics {
     match storage.set_metric_value(&metric.device_id, &metric.metric_name, metric.value) {
         Ok(()) => restored_count += 1,
         Err(e) => {
-            if e.is_orphan() {
-                orphan_count += 1;
-                debug!("Orphan metric: {}", e);
-            } else {
-                warn!("Restore error: {}", e);
-            }
+            debug!(device_id = &metric.device_id, error = %e, "Restore error");
+            orphan_count += 1;
         }
     }
 }
-info!(restored = restored_count, orphans = orphan_count, "Restore completed");
+info!(restored = restored_count, orphans = orphan_count, "Metric restore completed");
 ```
 
 ### What 2-4b Inherits from 2-4a
@@ -327,28 +341,30 @@ info!(restored = restored_count, orphans = orphan_count, "Restore completed");
 
 ### Phase 1: API Design (set_metric_value Result Type)
 - [ ] Modify `StorageBackend` trait: `fn set_metric_value()` returns `Result<(), OpcGwError>`
-- [ ] Update InMemoryBackend to return Result
-- [ ] Update SqliteBackend to return Result (verify device exists)
+- [ ] Update InMemoryBackend to return Result AND verify device exists in config (reject orphans, consistent with SqliteBackend)
+- [ ] Update SqliteBackend to return Result (verify device exists, detect orphans)
 - [ ] Update all call sites to handle Result (e.g., poller's set_metric_value calls)
+- [ ] Ensure both backends have identical validation behavior to prevent dev confusion
 
 ### Phase 2: Load-Time Error Handling (load_all_metrics)
-- [ ] Enhance load_all_metrics() to handle per-row parse errors gracefully
-- [ ] Implement timestamp RFC3339 parse with Utc::now() fallback
-- [ ] Log each parse error at debug level with full context
+- [ ] Implement per-row parse error handling (see "AC#4: Partial Restore with Per-Metric Errors" for error patterns)
+- [ ] Implement timestamp RFC3339 parse with Utc::now() fallback (intentionally loses original DB timestamp for graceful degradation; full recovery deferred to Epic 2-5)
+- [ ] Log each parse error at debug level with structured fields (device_id, metric_name, error reason)
 - [ ] Count and return summary of processed/skipped rows
 
 ### Phase 3: Restore-Phase Error Handling (main.rs)
-- [ ] Wrap restore loop with per-metric error handling
+- [ ] Wrap restore loop with per-metric error handling (see "Key Code Patterns" Pattern 3 for implementation template)
 - [ ] Track: restored_count, orphan_count, parse_error_count
-- [ ] Log each orphan at debug level with device_id
-- [ ] Log summary at info level after restore completes
+- [ ] Log each orphan at debug level with device_id (see "Logging Structure" section for structured field format)
+- [ ] Log summary at info level after restore completes (see AC#8 for expected log format)
 - [ ] Continue startup even if restore completely fails (0 metrics restored)
 
 ### Phase 4: Database Access Error Handling
+- [ ] Reference "Error Scenarios & Handling" table for all scenarios and their test cases
 - [ ] Catch SQLite open errors (SQLITE_CANTOPEN, SQLITE_CORRUPT, SQLITE_BUSY)
 - [ ] Log error with SQLite error code at error level
 - [ ] Continue startup with empty metrics (no panic)
-- [ ] Do NOT retry database access in restore phase
+- [ ] Do NOT implement retry logic in restore phase (poller will naturally retry on each poll)
 
 ### Phase 5: Testing
 - [ ] Implement all 11 unit + integration tests (see Testing Requirements)
