@@ -32,7 +32,6 @@ use chirpstack_api::api::DeviceQueueItem;
 use chirpstack_api::api::EnqueueDeviceQueueItemRequest;
 use chirpstack_api::api::GetDeviceMetricsRequest;
 use chirpstack_api::common::Metric;
-use chrono;
 use tracing::{debug, error, info, trace, warn};
 use chirpstack_api::prost_types::Timestamp;
 use serde::Deserialize;
@@ -48,7 +47,7 @@ use tonic::{transport::Channel, Request, Status};
 use url::Url;
 
 // Import generated types
-use crate::storage::{ChirpstackStatus, DeviceCommand, MetricType, Storage, ConnectionPool};
+use crate::storage::{MetricType, Storage, ConnectionPool, StorageBackend, SqliteBackend};
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
 use chirpstack_api::api::{
@@ -417,7 +416,6 @@ impl ChirpstackPoller {
         // Attempt TCP connection
         let result = TcpStream::connect_timeout(&socket_addr, timeout);
         let elapsed = start.elapsed();
-        let elapsed_secs = elapsed.as_secs_f64();
 
         trace!(address = %socket_addr, elapsed = ?elapsed, "TCP connection to Chirpstack server completed");
 
@@ -646,36 +644,33 @@ impl ChirpstackPoller {
         };
 
         let metric_name = metric.name.clone();
-        // We are collecting only the first returned metric
-        let storage = self.storage.clone();
+        let now_ts = SystemTime::now();
+
+        // Create SqliteBackend from the connection pool for durable metric persistence
+        let backend = match SqliteBackend::with_pool(self.pool.clone()) {
+            Ok(b) => b,
+            Err(e) => {
+                error!(error = %e, "Failed to create SqliteBackend for metric storage");
+                return;
+            }
+        };
+
         match self.config.get_metric_type(&metric_name, device_id) {
             Some(metric_type) => match metric_type {
                 OpcMetricTypeConfig::Bool => {
                     debug!(metric = ?metric, "Bool metric");
-                    let mut storage = match storage.lock() {
-                        Ok(guard) => guard,
-                        Err(e) => {
-                            error!(error = %e, "Cannot lock storage for bool metric");
-                            return;
-                        }
-                    };
                     let value = metric.datasets[0].data[0];
-                    let bool_value = match value {
-                        0.0 => false,
-                        1.0 => true,
+                    match value {
+                        0.0 | 1.0 => {},
                         _ => {
                             error!(value = %value, "Not a boolean value");
                             return;
                         }
                     };
-                    let metric_val = crate::storage::MetricValueInternal {
-                        device_id: device_id.clone(),
-                        metric_name: metric_name.clone(),
-                        value: bool_value.to_string(),
-                        timestamp: chrono::Utc::now(),
-                        data_type: crate::storage::MetricType::Bool,
-                    };
-                    storage.set_metric_value(device_id, &metric_name, metric_val);
+                    let metric_val = MetricType::Bool;
+                    if let Err(e) = backend.upsert_metric_value(device_id, &metric_name, &metric_val, now_ts) {
+                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to upsert bool metric");
+                    }
                 }
                 OpcMetricTypeConfig::Int => {
                     debug!(metric = ?metric, "Int metric");
@@ -683,44 +678,20 @@ impl ChirpstackPoller {
                     if raw_value.fract() != 0.0 {
                         warn!(value = %raw_value, metric_name = %metric_name, "Float metric truncated to int; precision lost");
                     }
-                    let int_value = raw_value as i64;
-                    let mut storage = match storage.lock() {
-                        Ok(guard) => guard,
-                        Err(e) => {
-                            error!(error = %e, "Cannot lock storage for int metric");
-                            return;
-                        }
-                    };
-                    let metric_val = crate::storage::MetricValueInternal {
-                        device_id: device_id.clone(),
-                        metric_name: metric_name.clone(),
-                        value: int_value.to_string(),
-                        timestamp: chrono::Utc::now(),
-                        data_type: crate::storage::MetricType::Int,
-                    };
-                    storage.set_metric_value(device_id, &metric_name, metric_val);
+                    let metric_val = MetricType::Int;
+                    if let Err(e) = backend.upsert_metric_value(device_id, &metric_name, &metric_val, now_ts) {
+                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to upsert int metric");
+                    }
                 }
                 OpcMetricTypeConfig::Float => {
                     debug!(metric = ?metric, "Float metric");
-                    let value = metric.datasets[0].data[0];
-                    let mut storage = match storage.lock() {
-                        Ok(guard) => guard,
-                        Err(e) => {
-                            error!(error = %e, "Cannot lock storage for float metric");
-                            return;
-                        }
-                    };
-                    let metric_val = crate::storage::MetricValueInternal {
-                        device_id: device_id.clone(),
-                        metric_name: metric_name.clone(),
-                        value: value.to_string(),
-                        timestamp: chrono::Utc::now(),
-                        data_type: crate::storage::MetricType::Float,
-                    };
-                    storage.set_metric_value(device_id, &metric_name, metric_val);
+                    let metric_val = MetricType::Float;
+                    if let Err(e) = backend.upsert_metric_value(device_id, &metric_name, &metric_val, now_ts) {
+                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to upsert float metric");
+                    }
                 }
                 OpcMetricTypeConfig::String => {
-                    warn!("Reading string metrics fron Chirpstack server is not implemented")
+                    warn!("Reading string metrics from ChirpStack server is not implemented")
                 }
             },
             None => {

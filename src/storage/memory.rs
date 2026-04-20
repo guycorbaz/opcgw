@@ -103,6 +103,16 @@ impl StorageBackend for InMemoryBackend {
             Err(OpcGwError::Storage(format!("Command {} not found", command_id)))
         }
     }
+
+    fn upsert_metric_value(&self, device_id: &str, metric_name: &str, value: &MetricType, _now_ts: std::time::SystemTime) -> Result<(), OpcGwError> {
+        // InMemoryBackend: simple insert/update without timestamp tracking (test only)
+        let mut metrics = self.metrics.lock().map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
+        metrics
+            .entry(device_id.to_string())
+            .or_insert_with(HashMap::new)
+            .insert(metric_name.to_string(), *value);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 # generated: 2026-04-02
-# last_updated: 2026-04-20 (Story 2-2d implementation complete: SQL injection prevention via parameterized queries)
+# last_updated: 2026-04-20 (Story 2-3a created: Metric Values Persistence with UPSERT)
 # project: opcgw
 # project_key: NOKEY
 # tracking_system: file-system
@@ -68,7 +68,7 @@ development_status:
   2-2d-prepared-statements-and-sql-safety: done
 
   # Phase 2-3: Metric Persistence & Optimization
-  2-3a-metric-values-persistence-upsert: backlog
+  2-3a-metric-values-persistence-upsert: in-progress
   2-3b-historical-metrics-append-only: backlog
   2-3c-batch-write-optimization: backlog
 

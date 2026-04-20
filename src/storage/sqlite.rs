@@ -303,7 +303,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
         })?;
 
         conn.execute(
-                "INSERT OR REPLACE INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+                "INSERT OR REPLACE INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), COALESCE((SELECT created_at FROM metric_values WHERE device_id=?1 AND metric_name=?2), datetime('now')))",
                 params![device_id, metric_name, value_str, data_type, timestamp],
             )
             .map_err(|e| {
@@ -599,84 +599,60 @@ impl crate::storage::StorageBackend for SqliteBackend {
 
         Ok(())
     }
-}
 
-// ============================================================================
-// PreparedStatements (Story 2-2d: SQL Injection Prevention)
-// ============================================================================
-
-/// Cached prepared statements for efficient and safe SQL queries.
-///
-/// This struct holds pre-compiled Statement handles for all common CRUD operations.
-/// Prepared statements prevent SQL injection attacks by separating SQL syntax from
-/// parameter values, and improve performance by eliminating query recompilation.
-///
-/// # Lifetime Binding
-/// Statements are tied to the Connection lifetime to ensure they cannot outlive
-/// the connection that created them.
-///
-/// # Usage Pattern
-/// ```no_run
-/// let prepared = PreparedStatements::new(&conn)?;
-/// // Reuse prepared statements multiple times with different parameters
-/// prepared.select_metric.query_row(params![device_id, metric_name], ...)?;
-/// ```
-pub struct PreparedStatements<'conn> {
-    /// SELECT data_type FROM metric_values WHERE device_id=? AND metric_name=?
-    pub select_metric: rusqlite::Statement<'conn>,
-    /// INSERT OR REPLACE INTO metric_values (device_id, metric_name, value, data_type, timestamp)
-    pub upsert_metric: rusqlite::Statement<'conn>,
-    /// SELECT id, device_id, payload, f_port, created_at FROM command_queue WHERE status=? ORDER BY id
-    pub select_pending_commands: rusqlite::Statement<'conn>,
-    /// UPDATE command_queue SET status=?, updated_at=datetime('now') WHERE id=?
-    pub update_command_status: rusqlite::Statement<'conn>,
-    /// SELECT value FROM gateway_status WHERE key=?
-    pub select_gateway_status: rusqlite::Statement<'conn>,
-    /// INSERT OR REPLACE INTO gateway_status (key, value, updated_at)
-    pub upsert_gateway_status: rusqlite::Statement<'conn>,
-    /// INSERT INTO command_queue (device_id, payload, f_port, status, created_at, updated_at)
-    pub insert_command: rusqlite::Statement<'conn>,
-}
-
-impl<'conn> PreparedStatements<'conn> {
-    /// Create a new set of prepared statements from a connection.
+    /// Atomically insert or update a metric value using UPSERT semantics.
     ///
-    /// # Arguments
-    /// * `conn` - The SQLite connection to prepare statements against
+    /// Uses `INSERT OR REPLACE` with a COALESCE subquery to preserve the `created_at` timestamp
+    /// across updates. On the first insert, `created_at` is set to `now_ts`. On subsequent updates
+    /// of the same (device_id, metric_name) pair, `created_at` is preserved from the existing row.
+    ///
+    /// # Parameters
+    /// - `device_id`: Device identifier (parameterized to prevent SQL injection)
+    /// - `metric_name`: Metric name (parameterized to prevent SQL injection)
+    /// - `value`: MetricType enum (Float, Int, Bool, String)
+    /// - `now_ts`: SystemTime timestamp for this operation
     ///
     /// # Returns
-    /// * `Ok(PreparedStatements)` - All statements prepared successfully
-    /// * `Err(OpcGwError::Database)` - If preparation fails
-    pub fn new(conn: &'conn rusqlite::Connection) -> Result<Self, OpcGwError> {
-        Ok(Self {
-            select_metric: conn.prepare(
-                "SELECT data_type FROM metric_values WHERE device_id = ?1 AND metric_name = ?2"
-            ).map_err(|e| OpcGwError::Database(format!("Failed to prepare select_metric: {}", e)))?,
+    /// - `Ok(())` on successful UPSERT
+    /// - `Err(OpcGwError::Storage)` if the operation fails
+    ///
+    /// # Atomicity
+    /// The UPSERT operation is atomic: either the entire row is inserted/replaced or the operation
+    /// fails with no partial updates.
+    fn upsert_metric_value(&self, device_id: &str, metric_name: &str, value: &MetricType, now_ts: std::time::SystemTime) -> Result<(), OpcGwError> {
+        let mut conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, device_id = %device_id, metric_name = %metric_name, "Pool checkout timeout for upsert_metric_value");
+                e
+            })?;
 
-            upsert_metric: conn.prepare(
-                "INSERT OR REPLACE INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))"
-            ).map_err(|e| OpcGwError::Database(format!("Failed to prepare upsert_metric: {}", e)))?,
+        let value_str = value.to_string();
+        let data_type = value.to_string();
+        let now_rfc3339 = chrono::DateTime::<Utc>::from(now_ts).to_rfc3339();
 
-            select_pending_commands: conn.prepare(
-                "SELECT id, device_id, payload, f_port, created_at FROM command_queue WHERE status = ?1 ORDER BY id ASC"
-            ).map_err(|e| OpcGwError::Database(format!("Failed to prepare select_pending_commands: {}", e)))?,
+        // UPSERT with COALESCE: preserves created_at on update, sets it on first insert
+        let query = "INSERT OR REPLACE INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE((SELECT created_at FROM metric_values WHERE device_id=?1 AND metric_name=?2), ?6))";
 
-            update_command_status: conn.prepare(
-                "UPDATE command_queue SET status = ?1, updated_at = datetime('now') WHERE id = ?2"
-            ).map_err(|e| OpcGwError::Database(format!("Failed to prepare update_command_status: {}", e)))?,
+        conn.execute(
+            query,
+            params![device_id, metric_name, value_str, data_type, now_rfc3339, now_rfc3339],
+        )
+        .map_err(|e| {
+            OpcGwError::Storage(format!(
+                "Failed to upsert metric for device {}, metric {}: {}",
+                device_id, metric_name, e
+            ))
+        })?;
 
-            select_gateway_status: conn.prepare(
-                "SELECT value FROM gateway_status WHERE key = ?1"
-            ).map_err(|e| OpcGwError::Database(format!("Failed to prepare select_gateway_status: {}", e)))?,
+        trace!(
+            device_id = %device_id,
+            metric_name = %metric_name,
+            value = %value_str,
+            "Upserted metric value"
+        );
 
-            upsert_gateway_status: conn.prepare(
-                "INSERT OR REPLACE INTO gateway_status (key, value, updated_at) VALUES (?1, ?2, datetime('now'))"
-            ).map_err(|e| OpcGwError::Database(format!("Failed to prepare upsert_gateway_status: {}", e)))?,
-
-            insert_command: conn.prepare(
-                "INSERT INTO command_queue (device_id, payload, f_port, status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
-            ).map_err(|e| OpcGwError::Database(format!("Failed to prepare insert_command: {}", e)))?,
-        })
+        Ok(())
     }
 }
 
@@ -815,61 +791,159 @@ mod tests {
     }
 
     #[test]
-    fn test_prepared_statement_performance() {
-        use std::time::Instant;
-
+    fn test_upsert_metric_value_preserves_created_at() {
         let path = temp_backend_path();
         let backend = SqliteBackend::new(&path).expect("Should create backend");
 
-        // Warm up with a single write
-        backend.set_metric("device_perf", "warmup", MetricType::Float)
-            .expect("Should warmup");
+        let device_id = "device_test";
+        let metric_name = "temperature";
+        let value = MetricType::Float;
+        let t1 = std::time::SystemTime::now();
 
-        // Benchmark 100 metric sets with reused connection pool (via prepared statements)
-        let start = Instant::now();
-        for i in 0..100 {
-            let metric_name = format!("metric_{}", i);
-            backend.set_metric("device_perf", &metric_name, MetricType::Float)
-                .expect("Should store metric");
-        }
-        let prepared_duration = start.elapsed();
+        // First insert
+        backend.upsert_metric_value(device_id, metric_name, &value, t1)
+            .expect("Should insert metric");
 
-        // Verify all metrics were stored
-        for i in 0..100 {
-            let metric_name = format!("metric_{}", i);
-            let result = backend.get_metric("device_perf", &metric_name)
-                .expect("Should retrieve metric");
-            assert!(result.is_some(), "Metric {} should exist", metric_name);
-        }
+        // Retrieve created_at from database
+        let conn = backend.pool.checkout(std::time::Duration::from_secs(5))
+            .expect("Should checkout connection");
+        let created_at_1: String = conn.query_row(
+            "SELECT created_at FROM metric_values WHERE device_id = ?1 AND metric_name = ?2",
+            rusqlite::params![device_id, metric_name],
+            |row| row.get(0)
+        ).expect("Should get created_at");
 
-        // Log performance info (not asserting specific values as they vary by system)
-        println!("Prepared statement 100 operations: {:?}", prepared_duration);
-        assert!(prepared_duration.as_millis() > 0, "Should measure time");
+        drop(conn);
+
+        // Wait a bit, then update the same metric
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let t2 = std::time::SystemTime::now();
+        backend.upsert_metric_value(device_id, metric_name, &value, t2)
+            .expect("Should update metric");
+
+        // Verify created_at is unchanged
+        let conn = backend.pool.checkout(std::time::Duration::from_secs(5))
+            .expect("Should checkout connection");
+        let created_at_2: String = conn.query_row(
+            "SELECT created_at FROM metric_values WHERE device_id = ?1 AND metric_name = ?2",
+            rusqlite::params![device_id, metric_name],
+            |row| row.get(0)
+        ).expect("Should get created_at after update");
+
+        assert_eq!(created_at_1, created_at_2, "created_at should be preserved on UPSERT");
 
         let _ = fs::remove_file(&path);
     }
 
     #[test]
-    fn test_prepared_statement_reuse_safety() {
+    fn test_upsert_100_metrics_no_duplicates() {
         let path = temp_backend_path();
         let backend = SqliteBackend::new(&path).expect("Should create backend");
+        let now = std::time::SystemTime::now();
 
-        // Store metric for device_1
-        backend.set_metric("device_1", "temp", MetricType::Float)
-            .expect("Should store first metric");
+        // Insert 100 metrics (10 devices × 10 metrics each)
+        for device_num in 0..10 {
+            for metric_num in 0..10 {
+                let device_id = format!("device_{}", device_num);
+                let metric_name = format!("metric_{}", metric_num);
+                let value = if metric_num % 2 == 0 {
+                    MetricType::Float
+                } else {
+                    MetricType::Int
+                };
 
-        // Store different metric for device_2 with same name
-        backend.set_metric("device_2", "temp", MetricType::Int)
-            .expect("Should store second metric");
+                backend.upsert_metric_value(&device_id, &metric_name, &value, now)
+                    .expect("Should upsert metric");
+            }
+        }
 
-        // Verify each device has correct type (prepared statement reuse doesn't cause stale state)
-        let device1 = backend.get_metric("device_1", "temp")
-            .expect("Should retrieve device_1 metric");
-        let device2 = backend.get_metric("device_2", "temp")
-            .expect("Should retrieve device_2 metric");
+        // Verify count is exactly 100 (no duplicates)
+        let conn = backend.pool.checkout(std::time::Duration::from_secs(5))
+            .expect("Should checkout connection");
+        let count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM metric_values",
+            [],
+            |row| row.get(0)
+        ).expect("Should count rows");
 
-        assert_eq!(device1, Some(MetricType::Float), "Device_1 should have Float type");
-        assert_eq!(device2, Some(MetricType::Int), "Device_2 should have Int type");
+        assert_eq!(count, 100, "Should have exactly 100 unique metrics");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_upsert_preserves_metric_type_information() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+        let now = std::time::SystemTime::now();
+
+        let test_cases = vec![
+            ("device_a", "metric_float", MetricType::Float),
+            ("device_a", "metric_int", MetricType::Int),
+            ("device_a", "metric_bool", MetricType::Bool),
+            ("device_a", "metric_string", MetricType::String),
+        ];
+
+        // Insert different metric types
+        for (device_id, metric_name, metric_type) in &test_cases {
+            backend.upsert_metric_value(device_id, metric_name, metric_type, now)
+                .expect("Should upsert metric");
+        }
+
+        // Verify each type is stored correctly
+        for (device_id, metric_name, expected_type) in test_cases {
+            let conn = backend.pool.checkout(std::time::Duration::from_secs(5))
+                .expect("Should checkout connection");
+            let stored_type: String = conn.query_row(
+                "SELECT data_type FROM metric_values WHERE device_id = ?1 AND metric_name = ?2",
+                rusqlite::params![device_id, metric_name],
+                |row| row.get(0)
+            ).expect("Should get data_type");
+
+            assert_eq!(stored_type, expected_type.to_string(),
+                "Type for {}.{} should be {}", device_id, metric_name, expected_type);
+        }
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_concurrent_write_read_isolation() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let path = temp_backend_path();
+        let backend = Arc::new(SqliteBackend::new(&path).expect("Should create backend"));
+        let now = std::time::SystemTime::now();
+
+        // Writer thread
+        let backend_w = Arc::clone(&backend);
+        let writer = thread::spawn(move || {
+            for i in 0..50 {
+                let metric_name = format!("metric_{}", i);
+                let value = if i % 2 == 0 { MetricType::Float } else { MetricType::Int };
+                backend_w.upsert_metric_value("device_w", &metric_name, &value, now)
+                    .expect("Writer: should upsert");
+            }
+        });
+
+        // Reader thread
+        let backend_r = Arc::clone(&backend);
+        let reader = thread::spawn(move || {
+            let mut found_count = 0;
+            for i in 0..50 {
+                let metric_name = format!("metric_{}", i);
+                if let Ok(Some(_)) = backend_r.get_metric("device_w", &metric_name) {
+                    found_count += 1;
+                }
+            }
+            found_count
+        });
+
+        writer.join().expect("Writer should complete");
+        let found = reader.join().expect("Reader should complete");
+
+        assert!(found > 0, "Reader should see some written metrics");
 
         let _ = fs::remove_file(&path);
     }

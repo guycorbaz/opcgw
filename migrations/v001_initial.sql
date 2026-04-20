@@ -18,15 +18,27 @@ PRAGMA user_version = 1;
 -- Purpose: Current metric values (hot table)
 -- Strategy: UPSERT (INSERT OR REPLACE) keyed on (device_id, metric_name)
 -- Performance: <1ms lookup time via primary key
+--
+-- UPSERT Semantics:
+-- - PRIMARY KEY (device_id, metric_name) enforces one row per device/metric pair
+-- - INSERT OR REPLACE updates existing rows atomically
+-- - created_at is preserved via COALESCE subquery to track first-insert time
+-- - updated_at is always set to current timestamp on any insert/update
+--
+-- created_at preservation pattern:
+--   INSERT OR REPLACE ... VALUES (..., COALESCE((SELECT created_at FROM metric_values
+--   WHERE device_id=?1 AND metric_name=?2), ?timestamp))
+--   This ensures: first insert -> created_at=now; subsequent updates -> created_at unchanged
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS metric_values (
   id INTEGER PRIMARY KEY,
   device_id TEXT NOT NULL,
   metric_name TEXT NOT NULL,
-  value TEXT NOT NULL,               -- JSON-serialized MetricValueInternal
-  data_type TEXT NOT NULL,           -- Float, Int, Bool, String
+  value TEXT NOT NULL,               -- Serialized value (TEXT format for durability)
+  data_type TEXT NOT NULL,           -- MetricType variant: Float, Int, Bool, String
   timestamp TEXT NOT NULL,           -- ISO8601 UTC format
-  updated_at TEXT NOT NULL,          -- Last update time
+  updated_at TEXT NOT NULL,          -- Last update time (set on every insert/update)
+  created_at TEXT NOT NULL,          -- Creation time (preserved across UPSERT updates)
   UNIQUE(device_id, metric_name)
 );
 

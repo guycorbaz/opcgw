@@ -57,16 +57,14 @@ pub mod schema;
 pub mod pool;
 
 pub use types::{ChirpstackStatus, CommandStatus, DeviceCommand, MetricType, MetricValue, MAX_LORA_PAYLOAD_SIZE};
-pub use memory::InMemoryBackend;
 pub use sqlite::SqliteBackend;
 pub use pool::ConnectionPool;
 
-use crate::chirpstack::{ApplicationDetail, ChirpstackPoller, DeviceListDetail};
 use crate::config::OpcMetricTypeConfig;
 use crate::utils::*;
-use crate::{storage, AppConfig};
+use crate::AppConfig;
 use chrono::{DateTime, Utc};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, trace, warn};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::HashMap;
@@ -264,6 +262,38 @@ pub trait StorageBackend: Send + Sync {
     /// - **Storage error**: Database connectivity issues, write failures
     /// - **Invalid state transition**: If the status transition is not allowed
     fn update_command_status(&self, command_id: u64, status: CommandStatus) -> Result<(), OpcGwError>;
+
+    // ===== Metric Persistence Operations =====
+
+    /// Inserts or updates a metric value with UPSERT semantics.
+    ///
+    /// This method persists a metric value to durable storage using UPSERT (INSERT OR REPLACE)
+    /// semantics. If the metric exists, it is updated; if not, it is created.
+    /// The `created_at` timestamp is preserved across updates.
+    ///
+    /// # Arguments
+    ///
+    /// * `device_id` - The unique identifier for the device
+    /// * `metric_name` - The name of the metric to persist
+    /// * `value` - The metric value to store
+    /// * `now_ts` - The current timestamp (system time) for `updated_at`
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the metric was successfully persisted
+    /// * `Err(OpcGwError)` - If an error occurs during persistence
+    ///
+    /// # Error Cases
+    ///
+    /// - **Storage error**: Database connectivity issues, write failures
+    /// - **Device not found**: The device_id references a non-existent device (may be acceptable depending on backend)
+    ///
+    /// # UPSERT Semantics
+    ///
+    /// - **First insert**: Creates new row with `created_at` = `now_ts`, `updated_at` = `now_ts`
+    /// - **Subsequent updates**: Modifies value and `updated_at` = `now_ts`; preserves original `created_at`
+    /// - **Atomicity**: Operation is atomic — either fully succeeds or fully fails (no partial writes)
+    fn upsert_metric_value(&self, device_id: &str, metric_name: &str, value: &MetricType, now_ts: std::time::SystemTime) -> Result<(), OpcGwError>;
 }
 
 

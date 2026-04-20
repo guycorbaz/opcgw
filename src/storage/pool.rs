@@ -466,7 +466,6 @@ mod tests {
     #[test]
     fn test_pool_exhaustion_timeout() {
         use std::sync::Arc;
-        use std::thread;
 
         let path = temp_db_path();
         let pool = Arc::new(ConnectionPool::new(&path, 1).expect("Should create pool"));

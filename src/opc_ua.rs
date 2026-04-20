@@ -2,7 +2,7 @@
 // Copyright (c) [2024] [Guy Corbaz]
 
 use crate::config::{AppConfig, DeviceCommandCfg};
-use crate::storage::{DeviceCommand, MetricType, Storage, CommandStatus, ConnectionPool};
+use crate::storage::{Storage, CommandStatus, ConnectionPool};
 use crate::utils::*;
 use chrono::Utc;
 use tracing::{debug, error, info, trace, warn};
