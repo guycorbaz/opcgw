@@ -670,6 +670,8 @@ impl ChirpstackPoller {
                     let metric_val = MetricType::Bool;
                     if let Err(e) = backend.upsert_metric_value(device_id, &metric_name, &metric_val, now_ts) {
                         error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to upsert bool metric");
+                    } else if let Err(e) = backend.append_metric_history(device_id, &metric_name, &metric_val, now_ts) {
+                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to append bool metric to history");
                     }
                 }
                 OpcMetricTypeConfig::Int => {
@@ -681,6 +683,8 @@ impl ChirpstackPoller {
                     let metric_val = MetricType::Int;
                     if let Err(e) = backend.upsert_metric_value(device_id, &metric_name, &metric_val, now_ts) {
                         error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to upsert int metric");
+                    } else if let Err(e) = backend.append_metric_history(device_id, &metric_name, &metric_val, now_ts) {
+                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to append int metric to history");
                     }
                 }
                 OpcMetricTypeConfig::Float => {
@@ -688,6 +692,8 @@ impl ChirpstackPoller {
                     let metric_val = MetricType::Float;
                     if let Err(e) = backend.upsert_metric_value(device_id, &metric_name, &metric_val, now_ts) {
                         error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to upsert float metric");
+                    } else if let Err(e) = backend.append_metric_history(device_id, &metric_name, &metric_val, now_ts) {
+                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to append float metric to history");
                     }
                 }
                 OpcMetricTypeConfig::String => {

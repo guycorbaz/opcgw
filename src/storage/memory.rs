@@ -113,6 +113,11 @@ impl StorageBackend for InMemoryBackend {
             .insert(metric_name.to_string(), *value);
         Ok(())
     }
+
+    fn append_metric_history(&self, _device_id: &str, _metric_name: &str, _value: &MetricType, _timestamp: std::time::SystemTime) -> Result<(), OpcGwError> {
+        // InMemoryBackend: no-op for testing (historical data not tracked in memory)
+        Ok(())
+    }
 }
 
 #[cfg(test)]

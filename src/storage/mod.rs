@@ -294,6 +294,31 @@ pub trait StorageBackend: Send + Sync {
     /// - **Subsequent updates**: Modifies value and `updated_at` = `now_ts`; preserves original `created_at`
     /// - **Atomicity**: Operation is atomic — either fully succeeds or fully fails (no partial writes)
     fn upsert_metric_value(&self, device_id: &str, metric_name: &str, value: &MetricType, now_ts: std::time::SystemTime) -> Result<(), OpcGwError>;
+
+    /// Append a historical metric record to the append-only audit log.
+    ///
+    /// This method appends a new row to metric_history without updating existing rows. The append-only semantics
+    /// ensure an immutable audit trail of all metric changes over time.
+    ///
+    /// # Arguments
+    ///
+    /// * `device_id` - The unique identifier for the device
+    /// * `metric_name` - The name of the metric to append
+    /// * `value` - The metric value to store
+    /// * `timestamp` - The system timestamp for this metric measurement
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the metric was successfully appended
+    /// * `Err(OpcGwError)` - If an error occurs during append
+    ///
+    /// # Append-Only Semantics
+    ///
+    /// - **Never updates**: New row inserted, never modifies existing rows
+    /// - **Multiple entries allowed**: (device_id, metric_name) can have multiple rows at different timestamps
+    /// - **Timestamp ordered**: Rows maintain insertion order by timestamp
+    /// - **Audit trail**: Creates immutable historical record for compliance and trend analysis
+    fn append_metric_history(&self, device_id: &str, metric_name: &str, value: &MetricType, timestamp: std::time::SystemTime) -> Result<(), OpcGwError>;
 }
 
 

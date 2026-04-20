@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-02
-last_updated: 2026-04-20 (Story 2-3a complete: UPSERT with 4 tests, all 66 tests passing)
+last_updated: 2026-04-20 (Story 2-3b complete: Historical append-only with 5 tests, 71 total tests passing)
 project: opcgw
 project_key: NOKEY
 tracking_system: file-system
@@ -69,7 +69,7 @@ development_status:
 
   # Phase 2-3: Metric Persistence & Optimization
   2-3a-metric-values-persistence-upsert: done
-  2-3b-historical-metrics-append-only: ready-for-dev
+  2-3b-historical-metrics-append-only: review
   2-3c-batch-write-optimization: backlog
 
   # Phase 2-4: Startup Restore & Degradation

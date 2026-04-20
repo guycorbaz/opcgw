@@ -48,8 +48,19 @@ CREATE INDEX IF NOT EXISTS idx_metric_values_device_metric
 -- ============================================================================
 -- Table: metric_history
 -- Purpose: Historical metric values (append-only audit log)
--- Strategy: INSERT only, DELETE only during pruning
+-- Strategy: INSERT only (append-only semantics), DELETE only during pruning
 -- Performance: Composite index (device_id, timestamp) for time-range queries
+--
+-- APPEND-ONLY SEMANTICS:
+-- - No PRIMARY KEY on (device_id, metric_name) — allows multiple entries at different timestamps
+-- - Only INSERT operations allowed — never UPDATE or REPLACE
+-- - Creates immutable historical record for compliance, trend analysis, data provenance
+-- - Index enables time-range queries (Phase B story 7-3: historical data access)
+--
+-- USAGE:
+-- - Story 2-3b: Append one row per metric per poll cycle to create audit trail
+-- - Story 2-5a: DELETE rows older than retention_days during pruning
+-- - Story 7-3 (Phase B): Query ranges via (device_id, timestamp) index for historical analysis
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS metric_history (
   id INTEGER PRIMARY KEY,
