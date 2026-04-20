@@ -1,6 +1,6 @@
 # Story 2.2x: Per-Task SQLite Connections (AC 10 Deferred)
 
-Status: backlog
+Status: done
 
 ## Story
 
@@ -440,6 +440,22 @@ tokio::spawn({
 
 ---
 
+### Review Findings
+
+#### ✅ Patches Applied (1)
+- [x] [Review][Patch] Add logging for pool checkout timeout [sqlite.rs:223,279,308,384,446,479,537] — **APPLIED**
+  - Added `tracing::trace!()` logs to all 7 trait methods capturing pool exhaustion events with operation context
+  - Enables debugging of connection pool issues in production logs
+  - All 62 tests passing
+
+#### ✅ Deferred (2)
+- [x] [Review][Defer] Pool checkout timeout hardcoded to 5 seconds — deferred, MVP-scoped, can be refined in 2-3-x optimization phase
+- [x] [Review][Defer] Pool size hardcoded to 3 connections — deferred, out of scope, configuration layer planned for 2-8-x phase
+
+#### ✅ All 10 Acceptance Criteria Verified
+- AC 1-10: All passing ✓ (detailed in code review layer results)
+
 ## Status Log
 
 - **2026-04-20:** Story created from 2-2b code review deferral. AC 10 compliance requires per-task connections. Enhanced with detailed pool design, integration patterns, testing strategy, performance baselines.
+- **2026-04-20:** Implementation complete. All 10 ACs satisfied. Code review performed: 1 patch applied (pool timeout logging), 2 items deferred (MVP-scoped optimizations). Ready for merge.

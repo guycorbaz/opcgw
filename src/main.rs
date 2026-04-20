@@ -33,7 +33,7 @@ pub mod chirpstack_api {
 }
 
 use crate::chirpstack::ChirpstackPoller;
-use crate::storage::Storage;
+use crate::storage::{Storage, ConnectionPool};
 use clap::Parser;
 use config::AppConfig;
 use tracing::{error, info};
@@ -43,6 +43,7 @@ use tokio_util::sync::CancellationToken;
 use opc_ua::OpcUa;
 use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc};
+use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -183,12 +184,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create cancellation token for graceful shutdown
     let cancel_token = CancellationToken::new();
 
+    // Create connection pool for per-task SQLite access (Story 2-2x: per-task connections)
+    // Pool shared via Arc; each task (poller, OPC UA) gets own connection from pool via Arc::clone()
+    // SQLite WAL mode: true concurrent readers + single writer (no Rust Mutex bottleneck)
+    let pool = match ConnectionPool::new("data/opcgw.db", 3) {
+        Ok(pool_inner) => Arc::new(pool_inner),
+        Err(e) => {
+            error!(error = %e, "Failed to create connection pool");
+            return Err(e.into());
+        }
+    };
+
     // Create shared storage for ChirpStack poller and OPC UA server threads
     let storage = Arc::new(Mutex::new(Storage::new(&application_config)));
 
     // Create chirpstack poller
     let mut chirpstack_poller =
-        match ChirpstackPoller::new(&application_config, storage.clone(), cancel_token.clone())
+        match ChirpstackPoller::new(&application_config, storage.clone(), pool.clone(), cancel_token.clone())
             .await
         {
             Ok(poller) => poller,
@@ -199,7 +211,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
     // Create OPC UA server
-    let opc_ua = OpcUa::new(&application_config, storage.clone(), cancel_token.clone());
+    let opc_ua = OpcUa::new(&application_config, storage.clone(), pool.clone(), cancel_token.clone());
 
     // Run chirpstack poller and OPC UA server in separate tasks
     let chirpstack_handle = tokio::spawn(async move {
@@ -240,6 +252,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(Ok(_)) => info!("All tasks shut down cleanly"),
         Ok(Err(e)) => error!(error = %e, "Task error during shutdown"),
         Err(_) => error!("Shutdown timed out after 10 seconds, forcing exit"),
+    }
+
+    // Close connection pool (ensure all connections flushed/closed)
+    if let Err(e) = pool.close() {
+        error!(error = %e, "Error closing connection pool");
     }
 
     info!("Stopping opcgw");

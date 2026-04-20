@@ -48,7 +48,7 @@ use tonic::{transport::Channel, Request, Status};
 use url::Url;
 
 // Import generated types
-use crate::storage::{ChirpstackStatus, DeviceCommand, MetricType, Storage};
+use crate::storage::{ChirpstackStatus, DeviceCommand, MetricType, Storage, ConnectionPool};
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
 use chirpstack_api::api::{
@@ -175,6 +175,8 @@ pub struct ChirpstackPoller {
     config: AppConfig,
     /// Shared storage for collected metrics, protected by Arc<Mutex<>>
     pub storage: Arc<std::sync::Mutex<Storage>>,
+    /// Shared connection pool for per-task SQLite access
+    pub pool: Arc<ConnectionPool>,
     /// Cancellation token for graceful shutdown
     cancel_token: tokio_util::sync::CancellationToken,
 }
@@ -216,6 +218,7 @@ impl ChirpstackPoller {
     pub async fn new(
         config: &AppConfig,
         storage: Arc<Mutex<Storage>>,
+        pool: Arc<ConnectionPool>,
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<Self, OpcGwError> {
         debug!("Create a new Chirpstack poller");
@@ -223,6 +226,7 @@ impl ChirpstackPoller {
         Ok(ChirpstackPoller {
             config: config.clone(),
             storage,
+            pool,
             cancel_token,
         })
     }

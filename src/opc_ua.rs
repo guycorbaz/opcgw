@@ -2,7 +2,7 @@
 // Copyright (c) [2024] [Guy Corbaz]
 
 use crate::config::{AppConfig, DeviceCommandCfg};
-use crate::storage::{DeviceCommand, MetricType, Storage, CommandStatus};
+use crate::storage::{DeviceCommand, MetricType, Storage, CommandStatus, ConnectionPool};
 use crate::utils::*;
 use chrono::Utc;
 use tracing::{debug, error, info, trace, warn};
@@ -27,6 +27,8 @@ pub struct OpcUa {
     config: AppConfig,
     /// Storage for the OPC UA server
     storage: Arc<std::sync::Mutex<Storage>>,
+    /// Shared connection pool for per-task SQLite access
+    pool: Arc<ConnectionPool>,
     /// IP address and port for the OPC UA server
     host_ip_address: String,
     /// Port for the OPC UA server
@@ -64,6 +66,7 @@ impl OpcUa {
     pub fn new(
         config: &AppConfig,
         storage: Arc<std::sync::Mutex<Storage>>,
+        pool: Arc<ConnectionPool>,
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> Self {
         trace!("Create new OPC UA server structure");
@@ -87,6 +90,7 @@ impl OpcUa {
         OpcUa {
             config: config.clone(),
             storage,
+            pool,
             host_ip_address,
             host_port,
             cancel_token,

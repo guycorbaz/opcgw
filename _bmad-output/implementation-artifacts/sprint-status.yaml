@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-02
-last_updated: 2026-04-20 (Story 2-2b code review complete: 9 patches applied, 1 deferred, AC 7 resolved, AC 10 deferred to Story 2-2x)
+last_updated: 2026-04-20 (Story 2-2x code review complete: 1 patch applied, 2 deferred, all 10 ACs verified, ready to merge)
 project: opcgw
 project_key: NOKEY
 tracking_system: file-system
@@ -63,7 +63,7 @@ development_status:
   2-2-type-system-sql-alignment: done
   2-2a-sqlite-schema-design: done
   2-2b-schema-creation-and-migration: done
-  2-2x-per-task-connections: ready-for-dev
+  2-2x-per-task-connections: done
   2-2c-sqlitebackend-basic-crud-implementation: backlog
   2-2d-prepared-statements-and-sql-safety: backlog
 

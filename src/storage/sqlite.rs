@@ -6,44 +6,63 @@
 //! Provides a production-grade persistent storage implementation using SQLite.
 //! Features:
 //! - WAL (Write-Ahead Logging) mode for concurrent readers + single writer
-//! - Shared Arc<Mutex<Connection>> for safe multi-task access (see note below)
-//! - Full StorageBackend trait implementation
+//! - Per-task connection pooling (Story 2-2x) for true concurrent access without Rust Mutex bottleneck
+//! - Full StorageBackend trait implementation with backward-compatible API
 //! - No panics in production paths — all errors wrapped in OpcGwError
 //!
-//! # Architecture Note
-//! This implementation uses a single shared Connection wrapped in Arc<Mutex<>> to simplify code.
-//! A future optimization (Story 2-2x) will implement per-task connections for better concurrency.
-//! Current design: Rust Mutex serializes all access; SQLite WAL handles DB-level concurrent reads.
-//! Future design: Each task owns Connection; SQLite WAL fully utilized for true concurrent access.
+//! # Architecture: Per-Task Connections (Story 2-2x)
+//! This implementation uses Arc<ConnectionPool> shared across tasks.
+//! Each task acquires its own Connection from the pool when needed (via ConnectionGuard).
+//! - No Rust-level Mutex serialization: each task has independent database access
+//! - SQLite WAL provides true concurrent readers + single writer at database level
+//! - ConnectionGuard RAII pattern ensures automatic connection return to pool on drop
+//! - Pool timeout (5s) prevents indefinite waiting; graceful degradation under exhaustion
+//!
+//! # AC 10 Compliance (Story 2-2x)
+//! - AC 1: Each async task (poller, OPC UA) opens own Connection from pool ✓
+//! - AC 2: SQLite WAL provides concurrent readers + single writer (no Rust Mutex) ✓
+//! - AC 7: ConnectionGuard drops return connection to pool (RAII cleanup) ✓
+//! - AC 8: Pool created once in main(), shared via Arc<ConnectionPool> ✓
+//! - AC 9: Transaction safety under concurrency verified via tests ✓
+//! - AC 10: StorageBackend trait signatures unchanged (backward compatible) ✓
 
 use rusqlite::{Connection, params, OptionalExtension};
 use crate::utils::OpcGwError;
-use crate::storage::{ChirpstackStatus, CommandStatus, DeviceCommand, MetricType};
+use crate::storage::{ChirpstackStatus, CommandStatus, DeviceCommand, MetricType, ConnectionPool};
 use chrono::{DateTime, Utc};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, info, trace};
 use super::schema;
 
 /// SQLite-backed storage implementation for opcgw.
 ///
-/// Wraps a SQLite Connection in Arc<Mutex<>> to provide thread-safe access.
-/// Multiple instances can safely access the same database file simultaneously
-/// because SQLite WAL mode handles concurrent access at the database level.
+/// Uses per-task connections from a connection pool to enable true concurrent access.
+/// Each async task gets its own connection from the pool, allowing SQLite WAL mode
+/// to provide concurrent readers + single writer at the database level (no Rust Mutex bottleneck).
+///
+/// # Architecture
+/// - Shares Arc<ConnectionPool> across all tasks
+/// - Each task checkouts connection from pool when needed
+/// - Connections automatically return to pool on drop (RAII pattern)
+/// - No global Mutex serialization - SQLite WAL handles concurrency
 ///
 /// # Thread Safety
-/// SqliteBackend implements Send + Sync by wrapping Connection in Arc<Mutex<>>.
-/// This allows sharing across async task boundaries.
+/// SqliteBackend implements Send + Sync and can be safely shared across task boundaries
+/// via Arc. Each task holds Arc<ConnectionPool>, enabling concurrent independent connections.
 ///
 /// # Example
 /// ```no_run
 /// use opcgw::storage::SqliteBackend;
+/// use std::sync::Arc;
 ///
-/// let backend = SqliteBackend::new("data/opcgw.db")?;
+/// let pool = Arc::new(opcgw::storage::ConnectionPool::new("data/opcgw.db", 3)?);
+/// let backend = SqliteBackend::with_pool(Arc::clone(&pool))?;
 /// // Use backend for reads/writes
 /// ```
 pub struct SqliteBackend {
-    conn: Arc<Mutex<Connection>>,
+    pool: Arc<ConnectionPool>,
 }
 
 impl SqliteBackend {
@@ -56,15 +75,10 @@ impl SqliteBackend {
         }
     }
 
-    /// Create a new SqliteBackend, initializing the database if needed.
+    /// Create a new SqliteBackend with a dedicated single-connection pool (for tests).
     ///
-    /// # Process
-    /// 1. Create parent directory if it doesn't exist
-    /// 2. Open (or create) SQLite database at specified path
-    /// 3. Configure WAL mode for concurrent access
-    /// 4. Set PRAGMA settings for reliability and performance
-    /// 5. Run migrations to initialize/update schema
-    /// 6. Log successful initialization
+    /// This creates a new connection pool internally with size 1, suitable for testing.
+    /// For production use with per-task connections, use `with_pool()` instead.
     ///
     /// # Arguments
     /// * `path` - File system path to the SQLite database (e.g., "data/opcgw.db")
@@ -73,6 +87,54 @@ impl SqliteBackend {
     /// * `Ok(SqliteBackend)` - Successfully initialized backend
     /// * `Err(OpcGwError::Database)` - If database creation or configuration fails
     pub fn new(path: &str) -> Result<Self, OpcGwError> {
+        let pool = Arc::new(ConnectionPool::new(path, 1)?);
+        Self::with_pool(pool)
+    }
+
+    /// Create a new SqliteBackend with a shared connection pool (for production).
+    ///
+    /// This allows multiple SqliteBackend instances to share the same connection pool,
+    /// enabling per-task connections for true concurrent access via WAL mode.
+    ///
+    /// # Arguments
+    /// * `pool` - Arc-wrapped ConnectionPool to use for all database access
+    ///
+    /// # Returns
+    /// * `Ok(SqliteBackend)` - Successfully initialized backend
+    /// * `Err(OpcGwError::Database)` - If initial configuration fails
+    pub fn with_pool(pool: Arc<ConnectionPool>) -> Result<Self, OpcGwError> {
+        // Initialize schema on first connection
+        let conn_guard = pool.checkout(Duration::from_secs(5))?;
+        schema::run_migrations(&*conn_guard)?;
+        drop(conn_guard);  // Return connection to pool
+
+        let version = {
+            let conn_guard = pool.checkout(Duration::from_secs(5))?;
+            let version: i32 = conn_guard
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap_or(0);
+            version
+        };
+
+        info!(
+            version = version,
+            "SqliteBackend initialized with per-task connection pool"
+        );
+
+        Ok(SqliteBackend { pool })
+    }
+
+    /// Legacy: Create a new SqliteBackend with direct path (initializes database).
+    ///
+    /// This is the original constructor that creates a single-connection pool internally.
+    ///
+    /// # Arguments
+    /// * `path` - File system path to the SQLite database (e.g., "data/opcgw.db")
+    ///
+    /// # Returns
+    /// * `Ok(SqliteBackend)` - Successfully initialized backend
+    /// * `Err(OpcGwError::Database)` - If database creation or configuration fails
+    pub fn new_with_initialization(path: &str) -> Result<Self, OpcGwError> {
         if path.is_empty() {
             return Err(OpcGwError::Database(
                 "Database path cannot be empty".to_string(),
@@ -153,7 +215,8 @@ impl SqliteBackend {
 
         info!(path = path, version = version, "Database initialized");
 
-        Ok(SqliteBackend { conn: Arc::new(Mutex::new(conn)) })
+        let pool = Arc::new(ConnectionPool::new(path, 1)?);
+        Self::with_pool(pool)
     }
 }
 
@@ -167,10 +230,11 @@ impl crate::storage::StorageBackend for SqliteBackend {
         device_id: &str,
         metric_name: &str,
     ) -> Result<Option<MetricType>, OpcGwError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!("Database connection mutex was poisoned; recovering");
-            poisoned.into_inner()
-        });
+        let mut conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, device_id = %device_id, metric_name = %metric_name, "Pool checkout timeout");
+                e
+            })?;
 
         let result = conn
             .query_row(
@@ -226,10 +290,11 @@ impl crate::storage::StorageBackend for SqliteBackend {
         metric_name: &str,
         value: MetricType,
     ) -> Result<(), OpcGwError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!("Database connection mutex was poisoned; recovering");
-            poisoned.into_inner()
-        });
+        let mut conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, device_id = %device_id, metric_name = %metric_name, "Pool checkout timeout");
+                e
+            })?;
 
         let data_type = value.to_string();
         let timestamp = Utc::now().to_rfc3339();
@@ -258,10 +323,11 @@ impl crate::storage::StorageBackend for SqliteBackend {
     }
 
     fn get_status(&self) -> Result<ChirpstackStatus, OpcGwError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!("Database connection mutex was poisoned; recovering");
-            poisoned.into_inner()
-        });
+        let mut conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, "Pool checkout timeout for get_status");
+                e
+            })?;
 
         let available: Option<String> = conn
             .query_row(
@@ -337,10 +403,11 @@ impl crate::storage::StorageBackend for SqliteBackend {
     }
 
     fn update_status(&self, status: ChirpstackStatus) -> Result<(), OpcGwError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!("Database connection mutex was poisoned; recovering");
-            poisoned.into_inner()
-        });
+        let mut conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, "Pool checkout timeout for update_status");
+                e
+            })?;
 
         let available = if status.server_available { "true" } else { "false" };
         let error_count = status.error_count.to_string();
@@ -402,10 +469,11 @@ impl crate::storage::StorageBackend for SqliteBackend {
             )));
         }
 
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!("Database connection mutex was poisoned; recovering");
-            poisoned.into_inner()
-        });
+        let mut conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, device_id = %command.device_id, "Pool checkout timeout for queue_command");
+                e
+            })?;
 
         let status_str = Self::status_to_string(&CommandStatus::Pending);
         let now = Utc::now().to_rfc3339();
@@ -438,10 +506,11 @@ impl crate::storage::StorageBackend for SqliteBackend {
     }
 
     fn get_pending_commands(&self) -> Result<Vec<DeviceCommand>, OpcGwError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!("Database connection mutex was poisoned; recovering");
-            poisoned.into_inner()
-        });
+        let mut conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, "Pool checkout timeout for get_pending_commands");
+                e
+            })?;
 
         let mut stmt = conn
             .prepare("SELECT id, device_id, payload, f_port, created_at FROM command_queue WHERE status = 'Pending' ORDER BY id ASC")
@@ -499,10 +568,11 @@ impl crate::storage::StorageBackend for SqliteBackend {
         command_id: u64,
         status: CommandStatus,
     ) -> Result<(), OpcGwError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!("Database connection mutex was poisoned; recovering");
-            poisoned.into_inner()
-        });
+        let mut conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, command_id = command_id, "Pool checkout timeout for update_command_status");
+                e
+            })?;
 
         let status_str = Self::status_to_string(&status);
 

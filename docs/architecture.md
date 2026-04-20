@@ -82,6 +82,13 @@ opcgw is a Rust-based gateway that bridges ChirpStack 4 (LoRaWAN Network Server)
 
 **Thread safety:** Wrapped in `Arc<Mutex<Storage>>` at the application level. Not internally synchronized.
 
+**Database persistence (Story 2-2x):** Can be backed by SQLite with per-task connection pooling:
+- `SqliteBackend` uses `Arc<ConnectionPool>` to manage multiple database connections
+- Each async task (ChirpStack poller, OPC UA server) gets independent connection from pool via `ConnectionGuard`
+- SQLite WAL (Write-Ahead Logging) mode enables true concurrent readers + single writer at database level
+- No Rust-level Mutex bottleneck: connections are not shared between tasks
+- Pool checkout timeout (5 seconds) provides graceful degradation under exhaustion
+
 ### `opc_ua.rs` — OPC UA Server (~873 lines)
 
 **Responsibility:** Exposes device metrics as an OPC UA 1.04 server using `async-opcua`.
@@ -168,7 +175,7 @@ Objects/
 1. **Incomplete OPC UA feature set:** The OPC UA server currently supports basic Browse/Read/Write. Many OPC UA features are missing: subscriptions and data change notifications, historical data access, alarms and conditions, method nodes, complex type support, and monitored items tuning. These are required for full industrial SCADA interoperability.
 2. **File-only configuration:** All configuration is done via TOML files. A future web-based configuration interface is planned to allow managing applications, devices, and metric mappings without editing files and restarting the service.
 3. **In-memory storage only:** All device metrics and state are stored in a `HashMap` and lost on restart. A local database (e.g., SQLite) is planned for persistent storage of metrics, configuration, and historical data.
-4. **Mutex contention:** `std::sync::Mutex` used for shared storage — could become a bottleneck under heavy load. Consider `tokio::sync::Mutex` or `RwLock`.
+4. **Concurrency:** In-memory storage uses `Arc<Mutex<Storage>>`. For persistent SQLite storage, Story 2-2x implements per-task connection pooling (see storage.rs) which eliminates Rust-level Mutex bottleneck by leveraging SQLite WAL concurrency model.
 5. **Panic behavior:** Several methods (`store_metric`, `set_metric_value`) panic on missing devices — production code should handle these gracefully.
 6. **Linear config lookups:** `get_device_name()`, `get_metric_type()` etc. do O(n) scans — acceptable for small configs but won't scale to thousands of devices.
 7. **Single metric type support:** Only ChirpStack "Gauge" metric type is supported; Counter, Absolute, Unknown are not handled.

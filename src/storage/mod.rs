@@ -54,10 +54,12 @@ pub mod types;
 pub mod memory;
 pub mod sqlite;
 pub mod schema;
+pub mod pool;
 
 pub use types::{ChirpstackStatus, CommandStatus, DeviceCommand, MetricType, MetricValue, MAX_LORA_PAYLOAD_SIZE};
 pub use memory::InMemoryBackend;
 pub use sqlite::SqliteBackend;
+pub use pool::ConnectionPool;
 
 use crate::chirpstack::{ApplicationDetail, ChirpstackPoller, DeviceListDetail};
 use crate::config::OpcMetricTypeConfig;
