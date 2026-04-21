@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-02
-last_updated: 2026-04-21 (Story 2-5b created: Pruning Integration Testing - ready-for-dev)
+last_updated: 2026-04-21 (Story 2-5b COMPLETE: Code review, 12 patches, 5 edge case fixes, 113 tests passing)
 project: opcgw
 project_key: NOKEY
 tracking_system: file-system
@@ -78,7 +78,7 @@ development_status:
 
   # Phase 2-5: Historical Data Management
   2-5a-historical-data-pruning-task: done
-  2-5b-pruning-integration-testing: ready-for-dev
+  2-5b-pruning-integration-testing: done
 
   epic-2-retrospective: optional
 

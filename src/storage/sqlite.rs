@@ -693,11 +693,9 @@ impl crate::storage::StorageBackend for SqliteBackend {
     ///
     /// # Timestamp Ordering (RFC3339)
     ///
-    /// Timestamps are stored as RFC3339 strings (ISO8601 with UTC timezone).
-    /// RFC3339 format is lexicographically sortable and suitable for ORDER BY queries.
-    /// **IMPORTANT:** RFC3339 precision is limited to milliseconds. Events occurring within
-    /// the same millisecond may have identical timestamp strings and indeterminate ordering.
-    /// For strict ordering requirements, use a secondary sort key (e.g., row id or insertion order).
+    /// Timestamps are stored as RFC3339 strings (ISO8601 with UTC timezone) with microsecond precision.
+    /// RFC3339 format is lexicographically sortable and suitable for ORDER BY queries and comparisons.
+    /// Microsecond precision ensures accurate retention boundary comparisons in pruning operations.
     fn append_metric_history(&self, device_id: &str, metric_name: &str, value: &MetricType, timestamp: std::time::SystemTime) -> Result<(), OpcGwError> {
         // Validate input lengths to prevent index bloat and DoS
         const MAX_DEVICE_ID_LEN: usize = 256;
@@ -745,8 +743,9 @@ impl crate::storage::StorageBackend for SqliteBackend {
         // Actual values are queried by joining metric_values with metric_history timestamps. See Story 7-3 (Phase B).
         let data_type = value.to_string();
         // Use 'Z' suffix for UTC timezone to ensure consistent lexicographic ordering
+        // Microsecond precision (%.6f) matches prune cutoff calculation for boundary accuracy
         let dt_utc = chrono::DateTime::<Utc>::from(timestamp);
-        let timestamp_rfc3339 = format!("{}Z", dt_utc.format("%Y-%m-%dT%H:%M:%S%.3f"));
+        let timestamp_rfc3339 = format!("{}Z", dt_utc.format("%Y-%m-%dT%H:%M:%S%.6f"));
         let created_at_rfc3339 = timestamp_rfc3339.clone();
 
         let query = "INSERT INTO metric_history (device_id, metric_name, value, data_type, timestamp, created_at)
@@ -1039,9 +1038,10 @@ impl crate::storage::StorageBackend for SqliteBackend {
             ));
         }
 
-        // Calculate cutoff timestamp (RFC3339 format with Z suffix for UTC)
+        // Calculate cutoff timestamp (RFC3339 format with microsecond precision + Z suffix for UTC)
         let cutoff = Utc::now() - chrono::Duration::days(retention_days);
-        let cutoff_rfc3339 = format!("{}Z", cutoff.format("%Y-%m-%dT%H:%M:%S%.3f"));
+        let mut cutoff_rfc3339 = format!("{}", cutoff.format("%Y-%m-%dT%H:%M:%S%.6f"));
+        cutoff_rfc3339.push('Z');
 
         // Execute DELETE with parameterized query (AC#2: exclude NULL timestamps)
         conn.execute(
@@ -1096,9 +1096,9 @@ impl SqliteBackend {
     /// * `retention_days` - Number of days to retain (older data is deleted)
     ///
     /// # Returns
-    /// * `Ok(u64)` - Number of rows deleted
+    /// * `Ok(u32)` - Number of rows deleted
     /// * `Err(OpcGwError)` - If database query fails
-    pub fn prune_old_metrics(&self, retention_days: u32) -> Result<u64, OpcGwError> {
+    pub fn prune_old_metrics(&self, retention_days: u32) -> Result<u32, OpcGwError> {
         let mut conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, retention_days = retention_days, "Pool checkout timeout for prune_old_metrics");
@@ -1116,7 +1116,7 @@ impl SqliteBackend {
                     "Failed to prune metrics older than {} days: {}",
                     retention_days, e
                 ))
-            })? as u64;
+            })? as u32;
 
         debug!(
             retention_days = retention_days,

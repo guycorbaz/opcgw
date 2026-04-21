@@ -19,18 +19,42 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::task;
 
-/// Helper: Create isolated test database
-fn temp_backend_path() -> String {
-    format!(
-        "/tmp/opcgw_prune_test_{}.db",
-        uuid::Uuid::new_v4()
-    )
+/// RAII guard to ensure database file cleanup even on panic
+struct TempDatabase {
+    path: String,
 }
 
-/// Helper: Convert DateTime<Utc> to SystemTime
+impl TempDatabase {
+    fn new(path: String) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for TempDatabase {
+    fn drop(&mut self) {
+        // Attempt cleanup; log errors but don't panic
+        if let Err(e) = fs::remove_file(&self.path) {
+            // Only warn if file exists but couldn't be deleted (might be locked on Windows)
+            // Ignore "not found" errors as cleanup may have run already
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("Warning: Failed to cleanup test database {}: {}", self.path, e);
+            }
+        }
+    }
+}
+
+/// Helper: Create isolated test database
+fn temp_backend_path() -> String {
+    let temp_dir = std::env::temp_dir();
+    let temp_path = temp_dir.join(format!("opcgw_prune_test_{}.db", uuid::Uuid::new_v4()));
+    temp_path.to_string_lossy().to_string()
+}
+
+/// Helper: Convert DateTime<Utc> to SystemTime (preserves microsecond precision)
 fn datetime_to_systemtime(dt: DateTime<Utc>) -> SystemTime {
-    let duration = dt.timestamp() as u64;
-    SystemTime::UNIX_EPOCH + Duration::from_secs(duration)
+    let secs = dt.timestamp() as u64;
+    let nanos = dt.timestamp_subsec_micros() * 1000;
+    SystemTime::UNIX_EPOCH + Duration::new(secs, nanos)
 }
 
 /// Helper: Insert N rows with controlled timestamps (RFC3339 format)
@@ -64,15 +88,16 @@ fn create_rows_with_timestamps(
 #[tokio::test]
 async fn test_concurrent_polling_and_pruning() {
     let path = temp_backend_path();
+    let _db = TempDatabase::new(path.clone());
     let backend = Arc::new(SqliteBackend::new(&path).expect("Create test backend"));
 
-    // Setup: 50K historical rows (mixed dates)
+    // Setup: 10K historical rows to reduce spawn_blocking pool saturation risk
     let now = Utc::now();
     let old_time = now - ChronoDuration::days(30);
 
     let poller_backend = Arc::clone(&backend);
     let setup_handle = task::spawn_blocking(move || {
-        create_rows_with_timestamps(&poller_backend, 50_000, old_time, 1)
+        create_rows_with_timestamps(&poller_backend, 10_000, old_time, 1)
             .expect("Create historical rows")
     });
 
@@ -129,11 +154,8 @@ async fn test_concurrent_polling_and_pruning() {
         .expect("Prune task completed")
     });
 
-    // Wait for both to complete
-    tokio::select! {
-        _ = poll_handle => {},
-        _ = prune_handle => {},
-    }
+    // Wait for both tasks to complete (join ensures both are done before assertions)
+    let _ = tokio::join!(poll_handle, prune_handle);
 
     // Verify: All metrics intact, correct count deleted, no corruption
     let final_metrics = backend
@@ -144,8 +166,6 @@ async fn test_concurrent_polling_and_pruning() {
     // Metrics written during prune should not be lost
     let final_count = final_metrics.len();
     assert!(final_count > initial_count, "Should have more metrics after polling");
-
-    let _ = fs::remove_file(&path);
 }
 
 // ============================================================================
@@ -155,6 +175,7 @@ async fn test_concurrent_polling_and_pruning() {
 #[tokio::test]
 async fn test_pruning_under_database_lock() {
     let path = temp_backend_path();
+    let _db = TempDatabase::new(path.clone());
     let backend = Arc::new(SqliteBackend::new(&path).expect("Create test backend"));
 
     // Setup: 10K rows
@@ -205,8 +226,6 @@ async fn test_pruning_under_database_lock() {
         .load_all_metrics()
         .expect("Load metrics after lock test");
     assert!(!metrics.is_empty(), "Gateway should be stable");
-
-    let _ = fs::remove_file(&path);
 }
 
 // ============================================================================
@@ -215,9 +234,10 @@ async fn test_pruning_under_database_lock() {
 
 #[tokio::test]
 async fn test_pruning_with_invalid_config() {
-    // Test 1: Normal pruning with valid config
+    // Test 1: Normal pruning with valid config (should succeed)
     {
         let path = temp_backend_path();
+        let _db = TempDatabase::new(path.clone());
         let backend = Arc::new(SqliteBackend::new(&path).expect("Create test backend"));
 
         let setup_backend = Arc::clone(&backend);
@@ -235,20 +255,19 @@ async fn test_pruning_with_invalid_config() {
         .await
         .expect("Prune task completed");
 
-        // Should succeed with valid config
-        assert!(result.is_ok(), "Should handle valid config");
-
-        let _ = fs::remove_file(&path);
+        assert!(result.is_ok(), "Should succeed with valid retention config");
     }
 
-    // Test 2: Prune with existing data
+    // Test 2: Zero-deletion case (data within retention window)
     {
         let path = temp_backend_path();
+        let _db = TempDatabase::new(path.clone());
         let backend = Arc::new(SqliteBackend::new(&path).expect("Create test backend"));
 
         let setup_backend = Arc::clone(&backend);
         task::spawn_blocking(move || {
-            create_rows_with_timestamps(&setup_backend, 1000, Utc::now() - ChronoDuration::days(15), 1)
+            // Create rows only 1 day old (within 90-day default retention)
+            create_rows_with_timestamps(&setup_backend, 1000, Utc::now() - ChronoDuration::days(1), 1)
                 .expect("Create rows")
         })
         .await
@@ -261,35 +280,46 @@ async fn test_pruning_with_invalid_config() {
         .await
         .expect("Prune task completed");
 
-        // Should handle gracefully
-        assert!(result.is_ok() || result.is_err(), "Should return result");
-
-        let _ = fs::remove_file(&path);
+        // Should succeed and delete 0 rows (within retention window)
+        match result {
+            Ok(deleted) => assert_eq!(deleted, 0, "No rows should be deleted within retention window"),
+            Err(e) => panic!("Prune should succeed: {:?}", e),
+        }
     }
 
-    // Test 3: Multiple prune cycles with same data
+    // Test 3: Multiple prune cycles (verify retention_config is reread each cycle)
     {
         let path = temp_backend_path();
+        let _db = TempDatabase::new(path.clone());
         let backend = Arc::new(SqliteBackend::new(&path).expect("Create test backend"));
 
         let setup_backend = Arc::clone(&backend);
         task::spawn_blocking(move || {
-            create_rows_with_timestamps(&setup_backend, 1000, Utc::now() - ChronoDuration::days(15), 1)
+            create_rows_with_timestamps(&setup_backend, 1000, Utc::now() - ChronoDuration::days(30), 1)
                 .expect("Create rows")
         })
         .await
         .expect("Setup completed");
 
+        // First prune
         let prune_backend = Arc::clone(&backend);
-        let result = task::spawn_blocking(move || {
+        let result1 = task::spawn_blocking(move || {
             prune_backend.prune_metric_history()
         })
         .await
-        .expect("Prune task completed");
+        .expect("First prune task completed");
 
-        assert!(result.is_ok() || result.is_err(), "Should validate retention_days");
+        assert!(result1.is_ok(), "First prune should succeed");
 
-        let _ = fs::remove_file(&path);
+        // Second prune (retention_config should be reread)
+        let prune_backend = Arc::clone(&backend);
+        let result2 = task::spawn_blocking(move || {
+            prune_backend.prune_metric_history()
+        })
+        .await
+        .expect("Second prune task completed");
+
+        assert!(result2.is_ok(), "Second prune should succeed (second+ runs with same data)");
     }
 }
 
@@ -300,6 +330,7 @@ async fn test_pruning_with_invalid_config() {
 #[tokio::test]
 async fn test_retention_boundary_precision() {
     let path = temp_backend_path();
+    let _db = TempDatabase::new(path.clone());
     let backend = Arc::new(SqliteBackend::new(&path).expect("Create test backend"));
 
     // Create rows at boundary conditions
@@ -364,8 +395,6 @@ async fn test_retention_boundary_precision() {
         cutoff_exists && after_exists,
         "Rows at and after cutoff should survive"
     );
-
-    let _ = fs::remove_file(&path);
 }
 
 // ============================================================================
@@ -376,6 +405,7 @@ async fn test_retention_boundary_precision() {
 #[ignore] // Heavy test, marked for optional benchmark runs
 async fn test_pruning_performance_5m_rows() {
     let path = temp_backend_path();
+    let _db = TempDatabase::new(path.clone());
     let backend = Arc::new(SqliteBackend::new(&path).expect("Create test backend"));
 
     // Setup: 5M rows (2M expired, 3M recent)
@@ -422,8 +452,6 @@ async fn test_pruning_performance_5m_rows() {
         "Should delete approximately 2M rows (got {})",
         deleted_count
     );
-
-    let _ = fs::remove_file(&path);
 }
 
 // ============================================================================
@@ -433,6 +461,7 @@ async fn test_pruning_performance_5m_rows() {
 #[tokio::test]
 async fn test_pruning_interval_timing() {
     let path = temp_backend_path();
+    let _db = TempDatabase::new(path.clone());
     let backend = Arc::new(SqliteBackend::new(&path).expect("Create test backend"));
 
     // Create test data
@@ -473,13 +502,12 @@ async fn test_pruning_interval_timing() {
             "Each prune should complete quickly (<5s)"
         );
     }
-
-    let _ = fs::remove_file(&path);
 }
 
 #[tokio::test]
 async fn test_pruning_graceful_shutdown() {
     let path = temp_backend_path();
+    let _db = TempDatabase::new(path.clone());
     let backend = Arc::new(SqliteBackend::new(&path).expect("Create test backend"));
 
     // Create test data
@@ -530,8 +558,6 @@ async fn test_pruning_graceful_shutdown() {
         .load_all_metrics()
         .expect("Load metrics after shutdown");
     assert!(!metrics.is_empty(), "Should be stable after shutdown");
-
-    let _ = fs::remove_file(&path);
 }
 
 // ============================================================================
@@ -541,6 +567,7 @@ async fn test_pruning_graceful_shutdown() {
 #[tokio::test]
 async fn test_pruning_log_structure() {
     let path = temp_backend_path();
+    let _db = TempDatabase::new(path.clone());
     let backend = Arc::new(SqliteBackend::new(&path).expect("Create test backend"));
 
     // Create rows with known retention period (older than 90-day default)
@@ -567,8 +594,6 @@ async fn test_pruning_log_structure() {
 
     // Verify: Prune produces structured output with expected fields
     assert!(deleted > 0, "Should delete expired rows");
-
-    let _ = fs::remove_file(&path);
 }
 
 // ============================================================================
@@ -579,6 +604,7 @@ async fn test_pruning_log_structure() {
 #[ignore] // Long-running test, marked for separate benchmark suite
 async fn test_pruning_30_day_simulation() {
     let path = temp_backend_path();
+    let _db = TempDatabase::new(path.clone());
     let backend = Arc::new(SqliteBackend::new(&path).expect("Create test backend"));
 
     // Simulate 30 days with hourly pruning
@@ -638,6 +664,4 @@ async fn test_pruning_30_day_simulation() {
         "Database should not have unbounded growth (got {})",
         final_row_count
     );
-
-    let _ = fs::remove_file(&path);
 }

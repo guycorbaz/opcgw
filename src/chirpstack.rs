@@ -183,6 +183,17 @@ pub struct ChirpstackPoller {
     restore_barrier: Arc<std::sync::Barrier>,
     /// Timestamp of last successful prune execution (Story 2-5a: Historical Data Pruning)
     last_prune_time: std::sync::Arc<std::sync::Mutex<Instant>>,
+    /// Track prune retry state for exponential backoff (Story 2-5b code review fix)
+    prune_retry_state: std::sync::Arc<std::sync::Mutex<PruneRetryState>>,
+}
+
+/// Exponential backoff state for prune failures
+#[derive(Debug, Clone)]
+struct PruneRetryState {
+    /// Number of consecutive prune failures
+    failure_count: u32,
+    /// Timestamp of first failure in this sequence
+    first_failure_time: Option<Instant>,
 }
 
 impl ChirpstackPoller {
@@ -235,6 +246,10 @@ impl ChirpstackPoller {
             cancel_token,
             restore_barrier,
             last_prune_time: std::sync::Arc::new(std::sync::Mutex::new(Instant::now())),
+            prune_retry_state: std::sync::Arc::new(std::sync::Mutex::new(PruneRetryState {
+                failure_count: 0,
+                first_failure_time: None,
+            })),
         })
     }
 
@@ -579,11 +594,61 @@ impl ChirpstackPoller {
 
         let prune_interval = Duration::from_secs(self.config.global.prune_interval_minutes as u64 * 60);
         let mut last_prune = self.last_prune_time.lock()
-            .map_err(|e| OpcGwError::Storage(format!("Failed to lock last_prune_time: {}", e)))?;
+            .map_err(|e| {
+                // PoisonError indicates panic in prior prune task; convert to clear message
+                OpcGwError::Storage(format!("Prune lock poisoned (prior panic): {}", e))
+            })?;
 
         // Check if interval has elapsed (AC#1)
         if Instant::now().duration_since(*last_prune) < prune_interval {
             return Ok(());
+        }
+
+        // Check exponential backoff for recent failures
+        // Recover from poisoned mutex if prior task panicked; reset state to safe defaults
+        let mut retry_state = match self.prune_retry_state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                warn!("Prune retry state mutex was poisoned; recovering with reset state");
+                poisoned.into_inner()
+            }
+        };
+
+        // If we recovered from poisoning, reset to clean state
+        if retry_state.failure_count > 0 || retry_state.first_failure_time.is_some() {
+            if let Err(_) = self.prune_retry_state.lock() {
+                // Retry state is poisoned; reset it
+                retry_state.failure_count = 0;
+                retry_state.first_failure_time = None;
+            }
+        }
+
+        if let Some(first_failure) = retry_state.first_failure_time {
+            if retry_state.failure_count > 0 {
+                // Exponential backoff: 1s, 5s, 30s, cap at 5 minutes
+                let backoff_secs = match retry_state.failure_count {
+                    1 => 1,
+                    2 => 5,
+                    3 => 30,
+                    _ => 300,
+                };
+                let backoff_duration = Duration::from_secs(backoff_secs);
+
+                // Check elapsed time, handling clock regression gracefully (system time went backward)
+                match Instant::now().checked_duration_since(first_failure) {
+                    Some(elapsed) if elapsed < backoff_duration => {
+                        trace!(failure_count = retry_state.failure_count, backoff_secs, "Skipping prune due to exponential backoff");
+                        return Ok(());
+                    }
+                    None => {
+                        // Clock went backward; reset backoff state to prevent indefinite failures
+                        warn!("System clock regression detected; resetting prune backoff state");
+                        retry_state.failure_count = 0;
+                        retry_state.first_failure_time = None;
+                    }
+                    _ => {}
+                }
+            }
         }
 
         // Create backend and execute pruning (AC#1: reuse pool connection)
@@ -595,13 +660,22 @@ impl ChirpstackPoller {
 
         match backend.prune_metric_history() {
             Ok(_deleted_count) => {
+                // Reset retry state on successful prune
+                retry_state.failure_count = 0;
+                retry_state.first_failure_time = None;
                 // Update last_prune_time on successful prune
                 *last_prune = Instant::now();
                 Ok(())
             }
             Err(e) => {
-                error!(error = %e, "Pruning failed; will retry on next interval");
-                // Don't update last_prune_time on failure, so we retry sooner (AC#7 graceful degradation)
+                // Increment failure count and track first failure time
+                if retry_state.failure_count == 0 {
+                    retry_state.first_failure_time = Some(Instant::now());
+                }
+                // Use saturating_add to prevent overflow; cap at u32::MAX for indefinite backoff
+                retry_state.failure_count = retry_state.failure_count.saturating_add(1);
+
+                error!(error = %e, failure_count = retry_state.failure_count, "Pruning failed; will retry with exponential backoff");
                 Err(e)
             }
         }
