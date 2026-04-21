@@ -147,6 +147,11 @@ impl StorageBackend for InMemoryBackend {
 
         Ok(result)
     }
+
+    fn prune_metric_history(&self) -> Result<u32, OpcGwError> {
+        // InMemoryBackend: no-op (in-memory storage doesn't persist historical data)
+        Ok(0)
+    }
 }
 
 #[cfg(test)]

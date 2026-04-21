@@ -181,6 +181,8 @@ pub struct ChirpstackPoller {
     cancel_token: tokio_util::sync::CancellationToken,
     /// Barrier to synchronize metric restore completion (Story 2-4a Task 11)
     restore_barrier: Arc<std::sync::Barrier>,
+    /// Timestamp of last successful prune execution (Story 2-5a: Historical Data Pruning)
+    last_prune_time: std::sync::Arc<std::sync::Mutex<Instant>>,
 }
 
 impl ChirpstackPoller {
@@ -232,6 +234,7 @@ impl ChirpstackPoller {
             pool,
             cancel_token,
             restore_barrier,
+            last_prune_time: std::sync::Arc::new(std::sync::Mutex::new(Instant::now())),
         })
     }
 
@@ -528,49 +531,19 @@ impl ChirpstackPoller {
         });
         info!("ChirpStack poller starting metric collection");
 
-        // Spawn pruning task (Story 2-5a Task 3)
-        let pool = Arc::clone(&self.pool);
-        let retention_days = self.config.storage.retention_days;
-        let prune_interval = Duration::from_secs(self.config.storage.prune_interval_minutes as u64 * 60);
-        let cancel_token = self.cancel_token.clone();
-
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        info!("Pruning task shutting down");
-                        return;
-                    }
-                    _ = tokio::time::sleep(prune_interval) => {
-                        // Perform pruning
-                        match SqliteBackend::with_pool(pool.clone()) {
-                            Ok(backend) => {
-                                info!(retention_days = retention_days, "Pruning historical metrics older than {} days", retention_days);
-                                match backend.prune_old_metrics(retention_days) {
-                                    Ok(count) => {
-                                        debug!(count = count, retention_days = retention_days, "Pruned {} rows from metric_history", count);
-                                    }
-                                    Err(e) => {
-                                        debug!(error = %e, "Failed to prune metrics");
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                debug!(error = %e, "Failed to create SqliteBackend for pruning");
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
         // Define wait time
         let wait_time = Duration::from_secs(self.config.chirpstack.polling_frequency);
         // Start the poller
         loop {
-            // Polling metrics
+            // Polling metrics (AC#1: poll_once equivalent)
             if let Err(e) = self.poll_metrics().await {
                 error!(error = ?e, "Error polling chirpstack devices");
+            }
+
+            // Execute pruning after poll_metrics completes (AC#1: sequential, not parallel)
+            if let Err(e) = self.check_and_execute_prune() {
+                error!(error = %e, "Pruning failed in poll cycle");
+                // Continue polling even if pruning fails per AC#5 (graceful degradation)
             }
 
             // Wait for next poll cycle or cancellation
@@ -580,6 +553,56 @@ impl ChirpstackPoller {
                     return Ok(());
                 }
                 _ = tokio::time::sleep(wait_time) => {}
+            }
+        }
+    }
+
+    /// Check if pruning interval has elapsed and execute pruning if needed (Story 2-5a).
+    ///
+    /// Pruning is scheduled based on config.global.prune_interval_minutes. If the interval
+    /// has elapsed, this method reads the retention policy from retention_config and prunes
+    /// expired rows from metric_history. Returns early if pruning is disabled (interval = 0).
+    ///
+    /// # Returns
+    ///
+    /// `Result<(), OpcGwError>` - Ok if pruning succeeded or was skipped, error only on failure
+    ///
+    /// # Errors
+    ///
+    /// Returns error only if database operations fail; missing retention_config is handled
+    /// gracefully with error logging per AC#7.
+    fn check_and_execute_prune(&mut self) -> Result<(), OpcGwError> {
+        // Return early if pruning is disabled (AC#1: 0 to disable)
+        if self.config.global.prune_interval_minutes == 0 {
+            return Ok(());
+        }
+
+        let prune_interval = Duration::from_secs(self.config.global.prune_interval_minutes as u64 * 60);
+        let mut last_prune = self.last_prune_time.lock()
+            .map_err(|e| OpcGwError::Storage(format!("Failed to lock last_prune_time: {}", e)))?;
+
+        // Check if interval has elapsed (AC#1)
+        if Instant::now().duration_since(*last_prune) < prune_interval {
+            return Ok(());
+        }
+
+        // Create backend and execute pruning (AC#1: reuse pool connection)
+        let backend = SqliteBackend::with_pool(self.pool.clone())
+            .map_err(|e| {
+                error!(error = %e, "Failed to create SqliteBackend for pruning");
+                e
+            })?;
+
+        match backend.prune_metric_history() {
+            Ok(_deleted_count) => {
+                // Update last_prune_time on successful prune
+                *last_prune = Instant::now();
+                Ok(())
+            }
+            Err(e) => {
+                error!(error = %e, "Pruning failed; will retry on next interval");
+                // Don't update last_prune_time on failure, so we retry sooner (AC#7 graceful degradation)
+                Err(e)
             }
         }
     }

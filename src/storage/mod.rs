@@ -60,9 +60,8 @@ pub use types::{ChirpstackStatus, CommandStatus, DeviceCommand, MetricType, Metr
 pub use sqlite::SqliteBackend;
 pub use pool::ConnectionPool;
 
-use crate::config::OpcMetricTypeConfig;
+use crate::config::{OpcMetricTypeConfig, AppConfig};
 use crate::utils::*;
-use crate::AppConfig;
 use chrono::{DateTime, Utc};
 use tracing::{debug, error, trace, warn};
 use serde::{Deserialize, Serialize};
@@ -394,6 +393,31 @@ pub trait StorageBackend: Send + Sync {
     /// Returns metrics in arbitrary order (no guarantees about ordering).
     /// All metrics returned have valid (device_id, metric_name, value, data_type, timestamp).
     fn load_all_metrics(&self) -> Result<Vec<MetricValue>, OpcGwError>;
+
+    /// Prune historical metrics older than configured retention period.
+    ///
+    /// Deletes rows from metric_history table where timestamp is older than (now - retention_days),
+    /// based on the retention policy configured in the retention_config table.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(u32)` - Number of rows deleted
+    /// * `Err(OpcGwError)` - If an error occurs during pruning
+    ///
+    /// # Error Cases
+    ///
+    /// - **Database locked**: Another process is writing; error logged, prune skipped for this cycle
+    /// - **Missing retention_config**: No retention policy found for metric_history
+    /// - **Invalid retention_days**: Negative or corrupted value in retention_config
+    /// - **Storage error**: Database connectivity issues
+    ///
+    /// # Semantics
+    ///
+    /// - Rows with NULL timestamps are NOT deleted (safety guardrail per AC#2)
+    /// - Uses parameterized query to prevent SQL injection
+    /// - Returns 0 if no rows meet the deletion criteria
+    /// - Reads retention_days fresh from retention_config at each call (never cached)
+    fn prune_metric_history(&self) -> Result<u32, OpcGwError>;
 }
 
 

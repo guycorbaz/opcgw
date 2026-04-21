@@ -241,6 +241,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Err(e) => {
                         orphan_count += 1;
+                        // Collecting orphan device_ids for logging. Full orphan cleanup/pruning deferred to Epic 2-5.
                         orphan_metrics.push(metric.device_id.clone());
                         debug!(
                             error = %e,
@@ -260,12 +261,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "Metric restore completed"
             );
 
-            if orphan_count > 0 && orphan_count <= 10 {
-                for device_id in &orphan_metrics {
-                    debug!(device_id = %device_id, "Orphan metric detected (device not in config)");
+            if orphan_count > 0 {
+                if orphan_count <= 10 {
+                    // Log all device IDs when count is manageable
+                    for device_id in &orphan_metrics {
+                        debug!(device_id = %device_id, "Orphan metric detected (device not in config)");
+                    }
+                } else {
+                    // Log sample of first 10 devices + aggregate count for large orphan sets
+                    let sample_size = std::cmp::min(10, orphan_metrics.len());
+                    for device_id in &orphan_metrics[..sample_size] {
+                        debug!(device_id = %device_id, "Orphan metric detected (device not in config)");
+                    }
+                    let remaining = orphan_count - sample_size as i32;
+                    debug!(
+                        sample_count = sample_size,
+                        remaining_count = remaining,
+                        total_orphans = orphan_count,
+                        "Orphan metrics (showing sample of {} + {} more)", sample_size, remaining
+                    );
                 }
-            } else if orphan_count > 10 {
-                debug!(orphan_count = orphan_count, "Skipped {} orphan metrics", orphan_count);
             }
         }
         Err(e) => {

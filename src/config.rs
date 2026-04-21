@@ -45,6 +45,13 @@ pub struct Global {
     /// When set to `true`, enables verbose logging for troubleshooting.
     /// Currently not actively used but reserved for future implementation.
     pub debug: bool,
+
+    /// Pruning task interval in minutes.
+    ///
+    /// How often the poller checks and removes expired historical data.
+    /// Set to 0 to disable pruning. Default: 60 minutes (Story 2-5a).
+    #[serde(default = "default_prune_interval")]
+    pub prune_interval_minutes: u32,
 }
 
 /// ChirpStack connection and polling configuration.
@@ -343,12 +350,6 @@ pub struct StorageConfig {
     /// Older data is automatically pruned. Default: 7 days
     #[serde(default = "default_retention_days")]
     pub retention_days: u32,
-
-    /// Pruning task interval in minutes.
-    ///
-    /// How often to check and remove expired data. Default: 60 minutes
-    #[serde(default = "default_prune_interval")]
-    pub prune_interval_minutes: u32,
 }
 
 /// Default database path
@@ -371,7 +372,6 @@ impl Default for StorageConfig {
         Self {
             database_path: default_database_path(),
             retention_days: default_retention_days(),
-            prune_interval_minutes: default_prune_interval(),
         }
     }
 }
