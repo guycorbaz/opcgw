@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-02
-last_updated: 2026-04-21 (Story 2-5b COMPLETE: Code review, 12 patches, 5 edge case fixes, 113 tests passing)
+last_updated: 2026-04-22 (Epic 2 Retrospective COMPLETE: Epic 3 stories created, ready-for-dev)
 project: opcgw
 project_key: NOKEY
 tracking_system: file-system
@@ -80,13 +80,13 @@ development_status:
   2-5a-historical-data-pruning-task: done
   2-5b-pruning-integration-testing: done
 
-  epic-2-retrospective: optional
+  epic-2-retrospective: done
 
   # Epic 3: Reliable Command Execution (Phase A)
-  epic-3: backlog
-  3-1-sqlite-backed-fifo-command-queue: backlog
-  3-2-command-parameter-validation: backlog
-  3-3-command-delivery-status-reporting: backlog
+  epic-3: in-progress
+  3-1-sqlite-backed-fifo-command-queue: ready-for-dev
+  3-2-command-parameter-validation: ready-for-dev
+  3-3-command-delivery-status-reporting: ready-for-dev
   epic-3-retrospective: optional
 
   # Epic 4: Scalable Data Collection (Phase A)
