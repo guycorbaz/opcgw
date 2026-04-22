@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-02
-last_updated: 2026-04-22 (Epic 2 Retrospective COMPLETE: Epic 3 stories created, ready-for-dev)
+last_updated: 2026-04-22 (Story 3-1: SQLite-backed FIFO command queue - development started)
 project: opcgw
 project_key: NOKEY
 tracking_system: file-system
@@ -84,7 +84,7 @@ development_status:
 
   # Epic 3: Reliable Command Execution (Phase A)
   epic-3: in-progress
-  3-1-sqlite-backed-fifo-command-queue: ready-for-dev
+  3-1-sqlite-backed-fifo-command-queue: in-progress
   3-2-command-parameter-validation: ready-for-dev
   3-3-command-delivery-status-reporting: ready-for-dev
   epic-3-retrospective: optional
