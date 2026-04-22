@@ -52,7 +52,7 @@ development_status:
   epic-1-retrospective: done
 
   # Epic 2: Data Persistence (Phase A) — Refined: 5 stories → 15 stories (tight granularity, 1-3 days each; includes 1 legacy file)
-  epic-2: in-progress
+  epic-2: done
 
   # Phase 2-1: StorageBackend Trait & Core Types (Foundational)
   2-1a-storagebackend-trait-definition: done
