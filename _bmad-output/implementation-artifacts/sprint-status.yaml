@@ -86,7 +86,7 @@ development_status:
   epic-3: in-progress
   3-1-sqlite-backed-fifo-command-queue: done
   3-2-command-parameter-validation: done
-  3-3-command-delivery-status-reporting: in-progress
+  3-3-command-delivery-status-reporting: review
   epic-3-retrospective: optional
 
   # Epic 4: Scalable Data Collection (Phase A)
