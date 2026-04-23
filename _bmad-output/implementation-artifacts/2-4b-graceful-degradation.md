@@ -1,6 +1,6 @@
 # Story 2-4b: Graceful Degradation
 
-**Status:** review  
+**Status:** done  
 **Epic:** Epic 2 (Data Persistence)  
 **Phase:** Phase A  
 **Date Created:** 2026-04-20
@@ -521,6 +521,24 @@ Implementation is complete and ready for code review. All acceptance criteria ve
   - Comprehensive test suite (13 tests) validating all graceful degradation scenarios
   - All acceptance criteria satisfied: orphan detection, partial restore, parse error handling
   - Ready for code review
+
+---
+
+## Review Findings
+
+### Decision-Needed (Resolved)
+
+- [x] [Review][Decision] Unbounded orphan_metrics list — src/main.rs:244 — **Resolved: Accept for Phase A.** Rationale: Story explicitly defers orphan cleanup to Epic 2-5 (Non-Blocking Notes section). Phase A focuses on graceful degradation, not lifecycle management. Typical deployments have <10 orphans; Vec is startup-only with bounded DB size.
+
+- [x] [Review][Decision] Orphans >10 aggregated in logs — src/main.rs:263-277 — **Resolved: Implement sample + aggregate.** Now logs first 10 device IDs explicitly when orphan_count > 10, then aggregate count for remaining (AC#8 compliance). Sample size chosen to balance AC#8 intent (device-level troubleshooting) with practical log verbosity.
+
+### Patches (Applied)
+
+- [x] [Review][Patch] Parse error log level mismatch — src/storage/sqlite.rs:961, 977 — **Applied fix:** Changed both `warn!()` calls to `error!()` to match AC#4 spec requirement.
+
+### Deferred (Pre-Existing, Not Blocking)
+
+- [x] [Review][Defer] Timestamp fallback loses original DB timestamp — Intentional per spec: AC#4 allows Utc::now() fallback; full recovery deferred to Epic 2-5 pruning phase.
 
 ---
 

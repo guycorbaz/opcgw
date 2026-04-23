@@ -68,12 +68,15 @@ pub struct MetricValue {
 /// Command status lifecycle states.
 ///
 /// Represents the different states a device command can be in during its lifecycle.
+/// State machine: Pending → Sent → Confirmed or Failed (terminal states)
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum CommandStatus {
     /// Command is waiting to be sent
     Pending,
     /// Command has been sent to ChirpStack
     Sent,
+    /// Command delivery confirmed by ChirpStack/device
+    Confirmed,
     /// Command delivery failed
     Failed,
 }
@@ -83,6 +86,7 @@ impl fmt::Display for CommandStatus {
         match self {
             CommandStatus::Pending => write!(f, "Pending"),
             CommandStatus::Sent => write!(f, "Sent"),
+            CommandStatus::Confirmed => write!(f, "Confirmed"),
             CommandStatus::Failed => write!(f, "Failed"),
         }
     }
@@ -95,6 +99,7 @@ impl std::str::FromStr for CommandStatus {
         match s.to_lowercase().as_str() {
             "pending" => Ok(CommandStatus::Pending),
             "sent" => Ok(CommandStatus::Sent),
+            "confirmed" => Ok(CommandStatus::Confirmed),
             "failed" => Ok(CommandStatus::Failed),
             _ => Err(format!("Unknown command status: {}", s)),
         }
@@ -150,6 +155,73 @@ impl DeviceCommand {
     }
 }
 
+/// High-level command with rich metadata for Story 3-1 (FIFO queue) integration.
+///
+/// This struct represents a command queued for delivery to a LoRaWAN device.
+/// It extends DeviceCommand with additional metadata needed for:
+/// - Parameter validation (Story 3-2)
+/// - Delivery status tracking (Story 3-3)
+/// - Deduplication via SHA256 hash
+/// - OPC UA integration (metric_id reference)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Command {
+    /// Auto-incrementing command ID (assigned by storage backend)
+    pub id: u64,
+    /// Target device identifier from ChirpStack
+    pub device_id: String,
+    /// Metric ID in OPC UA address space (for tracking in OPC UA)
+    pub metric_id: String,
+    /// Human-readable command name (e.g., "toggle_relay", "set_temperature")
+    pub command_name: String,
+    /// Command parameters as JSON (validated by Story 3-2)
+    pub parameters: serde_json::Value,
+    /// Timestamp when command was enqueued
+    pub enqueued_at: DateTime<Utc>,
+    /// Timestamp when command was sent to ChirpStack
+    pub sent_at: Option<DateTime<Utc>>,
+    /// Timestamp when command was confirmed by device/ChirpStack
+    pub confirmed_at: Option<DateTime<Utc>>,
+    /// Current status in lifecycle: Pending → Sent → Confirmed or Failed
+    pub status: CommandStatus,
+    /// Error message if delivery failed
+    pub error_message: Option<String>,
+    /// SHA256 hash of (device_id + command_name + parameters_json) for deduplication
+    pub command_hash: String,
+    /// ChirpStack API result ID (for mapping responses back to local commands)
+    pub chirpstack_result_id: Option<String>,
+}
+
+/// Filter criteria for querying commands from storage.
+///
+/// Used with StorageBackend::list_commands() to retrieve filtered command lists.
+#[derive(Clone, Debug, Default)]
+pub struct CommandFilter {
+    /// Filter by device_id (exact match)
+    pub device_id: Option<String>,
+    /// Filter by status (exact match)
+    pub status: Option<CommandStatus>,
+    /// Filter by command_name (substring match)
+    pub command_name_contains: Option<String>,
+    /// Include commands older than N days (for cleanup queries)
+    pub older_than_days: Option<u32>,
+}
+
+impl Command {
+    /// Computes SHA256 hash of (device_id + command_name + parameters_json) for deduplication.
+    ///
+    /// This hash is used to detect duplicate commands and prevent requeuing.
+    /// The hash is computed from the command's semantic content, not its metadata (timestamps, status).
+    pub fn compute_hash(device_id: &str, command_name: &str, parameters: &serde_json::Value) -> String {
+        use sha2::{Sha256, Digest};
+
+        let params_json = parameters.to_string();
+        let content = format!("{}{}{}", device_id, command_name, params_json);
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+}
+
 /// Gateway health and ChirpStack server connection status.
 ///
 /// Tracks the operational status of the ChirpStack connection and gateway health.
@@ -188,6 +260,7 @@ mod tests {
     fn test_command_status_display() {
         assert_eq!(CommandStatus::Pending.to_string(), "Pending");
         assert_eq!(CommandStatus::Sent.to_string(), "Sent");
+        assert_eq!(CommandStatus::Confirmed.to_string(), "Confirmed");
         assert_eq!(CommandStatus::Failed.to_string(), "Failed");
     }
 
@@ -198,6 +271,10 @@ mod tests {
             CommandStatus::Pending
         );
         assert_eq!("sent".parse::<CommandStatus>().unwrap(), CommandStatus::Sent);
+        assert_eq!(
+            "confirmed".parse::<CommandStatus>().unwrap(),
+            CommandStatus::Confirmed
+        );
         assert_eq!(
             "failed".parse::<CommandStatus>().unwrap(),
             CommandStatus::Failed

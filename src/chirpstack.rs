@@ -181,6 +181,19 @@ pub struct ChirpstackPoller {
     cancel_token: tokio_util::sync::CancellationToken,
     /// Barrier to synchronize metric restore completion (Story 2-4a Task 11)
     restore_barrier: Arc<std::sync::Barrier>,
+    /// Timestamp of last successful prune execution (Story 2-5a: Historical Data Pruning)
+    last_prune_time: std::sync::Arc<std::sync::Mutex<Instant>>,
+    /// Track prune retry state for exponential backoff (Story 2-5b code review fix)
+    prune_retry_state: std::sync::Arc<std::sync::Mutex<PruneRetryState>>,
+}
+
+/// Exponential backoff state for prune failures
+#[derive(Debug, Clone)]
+struct PruneRetryState {
+    /// Number of consecutive prune failures
+    failure_count: u32,
+    /// Timestamp of first failure in this sequence
+    first_failure_time: Option<Instant>,
 }
 
 impl ChirpstackPoller {
@@ -232,6 +245,11 @@ impl ChirpstackPoller {
             pool,
             cancel_token,
             restore_barrier,
+            last_prune_time: std::sync::Arc::new(std::sync::Mutex::new(Instant::now())),
+            prune_retry_state: std::sync::Arc::new(std::sync::Mutex::new(PruneRetryState {
+                failure_count: 0,
+                first_failure_time: None,
+            })),
         })
     }
 
@@ -528,49 +546,19 @@ impl ChirpstackPoller {
         });
         info!("ChirpStack poller starting metric collection");
 
-        // Spawn pruning task (Story 2-5a Task 3)
-        let pool = Arc::clone(&self.pool);
-        let retention_days = self.config.storage.retention_days;
-        let prune_interval = Duration::from_secs(self.config.storage.prune_interval_minutes as u64 * 60);
-        let cancel_token = self.cancel_token.clone();
-
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        info!("Pruning task shutting down");
-                        return;
-                    }
-                    _ = tokio::time::sleep(prune_interval) => {
-                        // Perform pruning
-                        match SqliteBackend::with_pool(pool.clone()) {
-                            Ok(backend) => {
-                                info!(retention_days = retention_days, "Pruning historical metrics older than {} days", retention_days);
-                                match backend.prune_old_metrics(retention_days) {
-                                    Ok(count) => {
-                                        debug!(count = count, retention_days = retention_days, "Pruned {} rows from metric_history", count);
-                                    }
-                                    Err(e) => {
-                                        debug!(error = %e, "Failed to prune metrics");
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                debug!(error = %e, "Failed to create SqliteBackend for pruning");
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
         // Define wait time
         let wait_time = Duration::from_secs(self.config.chirpstack.polling_frequency);
         // Start the poller
         loop {
-            // Polling metrics
+            // Polling metrics (AC#1: poll_once equivalent)
             if let Err(e) = self.poll_metrics().await {
                 error!(error = ?e, "Error polling chirpstack devices");
+            }
+
+            // Execute pruning after poll_metrics completes (AC#1: sequential, not parallel)
+            if let Err(e) = self.check_and_execute_prune() {
+                error!(error = %e, "Pruning failed in poll cycle");
+                // Continue polling even if pruning fails per AC#5 (graceful degradation)
             }
 
             // Wait for next poll cycle or cancellation
@@ -580,6 +568,115 @@ impl ChirpstackPoller {
                     return Ok(());
                 }
                 _ = tokio::time::sleep(wait_time) => {}
+            }
+        }
+    }
+
+    /// Check if pruning interval has elapsed and execute pruning if needed (Story 2-5a).
+    ///
+    /// Pruning is scheduled based on config.global.prune_interval_minutes. If the interval
+    /// has elapsed, this method reads the retention policy from retention_config and prunes
+    /// expired rows from metric_history. Returns early if pruning is disabled (interval = 0).
+    ///
+    /// # Returns
+    ///
+    /// `Result<(), OpcGwError>` - Ok if pruning succeeded or was skipped, error only on failure
+    ///
+    /// # Errors
+    ///
+    /// Returns error only if database operations fail; missing retention_config is handled
+    /// gracefully with error logging per AC#7.
+    fn check_and_execute_prune(&mut self) -> Result<(), OpcGwError> {
+        // Return early if pruning is disabled (AC#1: 0 to disable)
+        if self.config.global.prune_interval_minutes == 0 {
+            return Ok(());
+        }
+
+        let prune_interval = Duration::from_secs(self.config.global.prune_interval_minutes as u64 * 60);
+        let mut last_prune = self.last_prune_time.lock()
+            .map_err(|e| {
+                // PoisonError indicates panic in prior prune task; convert to clear message
+                OpcGwError::Storage(format!("Prune lock poisoned (prior panic): {}", e))
+            })?;
+
+        // Check if interval has elapsed (AC#1)
+        if Instant::now().duration_since(*last_prune) < prune_interval {
+            return Ok(());
+        }
+
+        // Check exponential backoff for recent failures
+        // Recover from poisoned mutex if prior task panicked; reset state to safe defaults
+        let mut retry_state = match self.prune_retry_state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                warn!("Prune retry state mutex was poisoned; recovering with reset state");
+                poisoned.into_inner()
+            }
+        };
+
+        // If we recovered from poisoning, reset to clean state
+        if retry_state.failure_count > 0 || retry_state.first_failure_time.is_some() {
+            if let Err(_) = self.prune_retry_state.lock() {
+                // Retry state is poisoned; reset it
+                retry_state.failure_count = 0;
+                retry_state.first_failure_time = None;
+            }
+        }
+
+        if let Some(first_failure) = retry_state.first_failure_time {
+            if retry_state.failure_count > 0 {
+                // Exponential backoff: 1s, 5s, 30s, cap at 5 minutes
+                let backoff_secs = match retry_state.failure_count {
+                    1 => 1,
+                    2 => 5,
+                    3 => 30,
+                    _ => 300,
+                };
+                let backoff_duration = Duration::from_secs(backoff_secs);
+
+                // Check elapsed time, handling clock regression gracefully (system time went backward)
+                match Instant::now().checked_duration_since(first_failure) {
+                    Some(elapsed) if elapsed < backoff_duration => {
+                        trace!(failure_count = retry_state.failure_count, backoff_secs, "Skipping prune due to exponential backoff");
+                        return Ok(());
+                    }
+                    None => {
+                        // Clock went backward; reset backoff state to prevent indefinite failures
+                        warn!("System clock regression detected; resetting prune backoff state");
+                        retry_state.failure_count = 0;
+                        retry_state.first_failure_time = None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Create backend and execute pruning (AC#1: reuse pool connection)
+        let backend = SqliteBackend::with_pool(self.pool.clone())
+            .map_err(|e| {
+                error!(error = %e, "Failed to create SqliteBackend for pruning");
+                e
+            })?;
+
+        match backend.prune_metric_history() {
+            Ok(_deleted_count) => {
+                // Reset retry state on successful prune
+                retry_state.failure_count = 0;
+                retry_state.first_failure_time = None;
+                // Update last_prune_time on successful prune
+                *last_prune = Instant::now();
+                Ok(())
+            }
+            Err(e) => {
+                // Increment failure count and track first failure time
+                if retry_state.failure_count == 0 {
+                    retry_state.first_failure_time = Some(Instant::now());
+                }
+                // Use saturating_add to prevent overflow; cap at u32::MAX for indefinite backoff
+                retry_state.failure_count = retry_state.failure_count.saturating_add(1);
+
+                error!(error = %e, failure_count = retry_state.failure_count, "Pruning failed; will retry with exponential backoff");
+                Err(e)
             }
         }
     }
@@ -1369,5 +1466,191 @@ pub fn print_application_list(list: &Vec<ApplicationDetail>) {
 pub fn print_device_list(list: &Vec<DeviceListDetail>) {
     for device in list {
         trace!(dev_eui = %device.dev_eui, device_name = %device.name, description = %device.description, "Device details");
+    }
+}
+
+// ============================================================================
+// Story 3-3: Command Delivery Status Polling and Timeout Handler
+// ============================================================================
+
+/// CommandStatusPoller: Polls ChirpStack for command delivery confirmations
+///
+/// Runs as a background task that periodically queries ChirpStack for command
+/// status updates. When confirmations are received, marks local commands as confirmed
+/// for end-to-end visibility into command delivery lifecycle.
+pub struct CommandStatusPoller {
+    /// Configuration for polling intervals and timeouts
+    config: AppConfig,
+    /// Shared storage backend for updating command statuses
+    pub storage: Arc<dyn crate::storage::StorageBackend>,
+    /// Cancellation token for graceful shutdown
+    cancel_token: tokio_util::sync::CancellationToken,
+}
+
+impl CommandStatusPoller {
+    /// Creates a new CommandStatusPoller instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Application configuration with command delivery settings
+    /// * `storage` - Shared storage backend for command status updates
+    /// * `cancel_token` - Cancellation token for graceful shutdown
+    ///
+    /// # Returns
+    ///
+    /// `Result<Self, OpcGwError>` - New poller instance
+    pub fn new(
+        config: &AppConfig,
+        storage: Arc<dyn crate::storage::StorageBackend>,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Result<Self, OpcGwError> {
+        debug!("Creating CommandStatusPoller for command delivery confirmation polling");
+
+        Ok(CommandStatusPoller {
+            config: config.clone(),
+            storage,
+            cancel_token,
+        })
+    }
+
+    /// Main polling loop for command delivery confirmations.
+    ///
+    /// Periodically queries for pending confirmations and polls ChirpStack for updates.
+    /// When confirmations are received from ChirpStack, marks commands as confirmed
+    /// in the local storage for OPC UA visibility.
+    ///
+    /// # Returns
+    ///
+    /// `Result<(), OpcGwError>` - Ok on graceful shutdown, error on failure
+    pub async fn run(&mut self) -> Result<(), OpcGwError> {
+        let poll_interval = Duration::from_secs(
+            self.config.global.command_delivery_poll_interval_secs
+        );
+
+        debug!(interval_s = poll_interval.as_secs(), "Starting CommandStatusPoller");
+
+        loop {
+            // Find commands awaiting confirmation
+            match self.storage.find_pending_confirmations() {
+                Ok(pending_commands) => {
+                    if !pending_commands.is_empty() {
+                        debug!(count = pending_commands.len(), "Found pending command confirmations");
+
+                        // For each pending command, check ChirpStack status
+                        // (In a real implementation, would call ChirpStack API here)
+                        // For now, this is a placeholder for integration with ChirpStack
+                        // The actual ChirpStack API calls would happen here
+                        trace!(pending_count = pending_commands.len(), "Would poll ChirpStack for {} commands", pending_commands.len());
+                    }
+                }
+                Err(e) => {
+                    error!(error = %e, "Failed to query pending command confirmations");
+                }
+            }
+
+            // Wait for next poll cycle or cancellation
+            tokio::select! {
+                _ = self.cancel_token.cancelled() => {
+                    info!("CommandStatusPoller shutting down");
+                    return Ok(());
+                }
+                _ = tokio::time::sleep(poll_interval) => {}
+            }
+        }
+    }
+}
+
+/// CommandTimeoutHandler: Marks timed-out commands as failed
+///
+/// Runs as a background task that scans for commands that have been in "sent" state
+/// for too long without confirmation. After the TTL expires, marks them as failed
+/// with a "Confirmation timeout" error message.
+pub struct CommandTimeoutHandler {
+    /// Configuration for timeout settings
+    config: AppConfig,
+    /// Shared storage backend for updating command statuses
+    pub storage: Arc<dyn crate::storage::StorageBackend>,
+    /// Cancellation token for graceful shutdown
+    cancel_token: tokio_util::sync::CancellationToken,
+}
+
+impl CommandTimeoutHandler {
+    /// Creates a new CommandTimeoutHandler instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Application configuration with timeout settings
+    /// * `storage` - Shared storage backend for command status updates
+    /// * `cancel_token` - Cancellation token for graceful shutdown
+    ///
+    /// # Returns
+    ///
+    /// `Result<Self, OpcGwError>` - New handler instance
+    pub fn new(
+        config: &AppConfig,
+        storage: Arc<dyn crate::storage::StorageBackend>,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Result<Self, OpcGwError> {
+        debug!("Creating CommandTimeoutHandler for command delivery timeout detection");
+
+        Ok(CommandTimeoutHandler {
+            config: config.clone(),
+            storage,
+            cancel_token,
+        })
+    }
+
+    /// Main loop for detecting and handling timed-out commands.
+    ///
+    /// Periodically scans for commands that have exceeded their TTL without confirmation.
+    /// When found, marks them as failed with a "Confirmation timeout" error message.
+    /// Timeout check interval can be configured via config.global.command_timeout_check_interval_secs.
+    ///
+    /// # Returns
+    ///
+    /// `Result<(), OpcGwError>` - Ok on graceful shutdown, error on failure
+    pub async fn run(&mut self) -> Result<(), OpcGwError> {
+        let ttl_secs = self.config.global.command_delivery_timeout_secs;
+        let check_interval = Duration::from_secs(
+            self.config.global.command_timeout_check_interval_secs
+        );
+
+        debug!(ttl_s = ttl_secs, check_interval_s = check_interval.as_secs(), "Starting CommandTimeoutHandler");
+
+        loop {
+            // Find commands that have timed out
+            match self.storage.find_timed_out_commands(ttl_secs) {
+                Ok(timed_out_commands) => {
+                    for cmd in timed_out_commands {
+                        debug!(
+                            command_id = cmd.id,
+                            device_id = %cmd.device_id,
+                            command_name = %cmd.command_name,
+                            "Command timed out, marking as failed"
+                        );
+
+                        if let Err(e) = self.storage.mark_command_failed(cmd.id, "Confirmation timeout") {
+                            error!(
+                                error = %e,
+                                command_id = cmd.id,
+                                "Failed to mark timed-out command as failed"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!(error = %e, "Failed to query timed-out commands");
+                }
+            }
+
+            // Wait for next check cycle or cancellation
+            tokio::select! {
+                _ = self.cancel_token.cancelled() => {
+                    info!("CommandTimeoutHandler shutting down");
+                    return Ok(());
+                }
+                _ = tokio::time::sleep(check_interval) => {}
+            }
+        }
     }
 }

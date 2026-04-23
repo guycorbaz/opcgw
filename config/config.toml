@@ -373,6 +373,32 @@ application_name = "Meteo"
         metric_type = "Float"
         metric_unit = "%"
 
+# Command Delivery Status Configuration
+#
+# Configures polling intervals, timeout behavior, and retention for command
+# status tracking. Commands transition through states: Pending -> Sent -> Confirmed (or Failed).
+#
+[command_delivery]
+# Polling interval for ChirpStack command delivery confirmations (seconds)
+# Default: 5 seconds
+status_poll_interval_secs = 5
+
+# Maximum time to wait for ChirpStack delivery confirmation (seconds)
+# Commands in "Sent" state timeout after this period and are marked "Failed"
+# Default: 60 seconds
+confirmation_timeout_secs = 60
+
+# Frequency of timeout detection scan (seconds)
+# Timeout handler wakes every N seconds to check for expired commands
+# Default: 10 seconds
+timeout_check_interval_secs = 10
+
+# Command history retention period (days)
+# Completed commands (Confirmed or Failed) are retained for this period
+# then automatically purged
+# Default: 7 days
+history_retention_days = 7
+
 
 
 

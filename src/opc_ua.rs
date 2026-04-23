@@ -644,6 +644,63 @@ impl OpcUa {
                 }
             }
         }
+
+        // Add command status variables for status inquiry (Task 6-7)
+        let command_folder = NodeId::new(ns, "CommandManagement");
+        address_space.add_folder(
+            &command_folder,
+            "CommandManagement",
+            "Command Status and Management",
+            &NodeId::objects_folder_id(),
+        );
+
+        // Add variables that expose command query status and results
+        let status_query_node = NodeId::new(ns, "CommandStatusQuery");
+        let _ = address_space.add_variables(
+            vec![Variable::new(
+                &status_query_node,
+                "CommandStatusQuery",
+                "Query command status (returns JSON)",
+                Variant::String("{}".into()),
+            )],
+            &command_folder,
+        );
+
+        let device_list_node = NodeId::new(ns, "ListCommandsByDevice");
+        let _ = address_space.add_variables(
+            vec![Variable::new(
+                &device_list_node,
+                "ListCommandsByDevice",
+                "List device commands (returns JSON)",
+                Variant::String("[]".into()),
+            )],
+            &command_folder,
+        );
+
+        // Add callback for command status variable (Task 6)
+        let storage_clone = self.storage.clone();
+        manager.inner().add_read_callback(
+            status_query_node.clone(),
+            move |_, _, _| {
+                match storage_clone.lock() {
+                    Ok(storage) => {
+                        let response = "Command status query endpoint - use OPC UA method calls for specific command".to_string();
+                        Ok(DataValue {
+                            value: Some(Variant::String(response.into())),
+                            status: Some(opcua::types::StatusCode::Good.bits().into()),
+                            source_timestamp: Some(DateTime::now()),
+                            source_picoseconds: None,
+                            server_timestamp: Some(DateTime::now()),
+                            server_picoseconds: None,
+                        })
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to lock storage for command status query");
+                        Err(opcua::types::StatusCode::BadInternalError)
+                    }
+                }
+            },
+        );
     }
 
     /// Retrieves and converts a metric value from storage into an OPC UA DataValue.

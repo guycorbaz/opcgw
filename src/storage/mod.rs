@@ -56,13 +56,12 @@ pub mod sqlite;
 pub mod schema;
 pub mod pool;
 
-pub use types::{ChirpstackStatus, CommandStatus, DeviceCommand, MetricType, MetricValue, MAX_LORA_PAYLOAD_SIZE};
+pub use types::{ChirpstackStatus, Command, CommandFilter, CommandStatus, DeviceCommand, MetricType, MetricValue, MAX_LORA_PAYLOAD_SIZE};
 pub use sqlite::SqliteBackend;
 pub use pool::ConnectionPool;
 
-use crate::config::OpcMetricTypeConfig;
+use crate::config::{OpcMetricTypeConfig, AppConfig};
 use crate::utils::*;
-use crate::AppConfig;
 use chrono::{DateTime, Utc};
 use tracing::{debug, error, trace, warn};
 use serde::{Deserialize, Serialize};
@@ -262,11 +261,13 @@ pub trait StorageBackend: Send + Sync {
     ///
     /// Called after a command has been delivered or processing has failed.
     /// The command remains in storage for audit/historical purposes.
+    /// Supports error_message for Failed status tracking.
     ///
     /// # Arguments
     ///
     /// * `command_id` - The unique identifier of the command
     /// * `status` - The new command status
+    /// * `error_message` - Optional error description if status is Failed
     ///
     /// # Returns
     ///
@@ -278,7 +279,7 @@ pub trait StorageBackend: Send + Sync {
     /// - **Command not found**: The command_id references a non-existent command
     /// - **Storage error**: Database connectivity issues, write failures
     /// - **Invalid state transition**: If the status transition is not allowed
-    fn update_command_status(&self, command_id: u64, status: CommandStatus) -> Result<(), OpcGwError>;
+    fn update_command_status(&self, command_id: u64, status: CommandStatus, error_message: Option<String>) -> Result<(), OpcGwError>;
 
     // ===== Metric Persistence Operations =====
 
@@ -394,6 +395,161 @@ pub trait StorageBackend: Send + Sync {
     /// Returns metrics in arbitrary order (no guarantees about ordering).
     /// All metrics returned have valid (device_id, metric_name, value, data_type, timestamp).
     fn load_all_metrics(&self) -> Result<Vec<MetricValue>, OpcGwError>;
+
+    /// Prune historical metrics older than configured retention period.
+    ///
+    /// Deletes rows from metric_history table where timestamp is older than (now - retention_days),
+    /// based on the retention policy configured in the retention_config table.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(u32)` - Number of rows deleted
+    /// * `Err(OpcGwError)` - If an error occurs during pruning
+    ///
+    /// # Error Cases
+    ///
+    /// - **Database locked**: Another process is writing; error logged, prune skipped for this cycle
+    /// - **Missing retention_config**: No retention policy found for metric_history
+    /// - **Invalid retention_days**: Negative or corrupted value in retention_config
+    /// - **Storage error**: Database connectivity issues
+    ///
+    /// # Semantics
+    ///
+    /// - Rows with NULL timestamps are NOT deleted (safety guardrail per AC#2)
+    /// - Uses parameterized query to prevent SQL injection
+    /// - Returns 0 if no rows meet the deletion criteria
+    /// - Reads retention_days fresh from retention_config at each call (never cached)
+    fn prune_metric_history(&self) -> Result<u32, OpcGwError>;
+
+    // ===== High-Level Command Queue Operations (Story 3-1) =====
+
+    /// Enqueues a command for delivery to a device.
+    ///
+    /// Adds a new command to the persistent FIFO queue with status=Pending.
+    /// The backend assigns a unique command ID and returns it.
+    /// Deduplication is enforced via command_hash to prevent requeuing identical commands.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The command to enqueue (id should be 0, backend assigns actual id)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(u64)` - The assigned command ID
+    /// * `Err(OpcGwError)` - If enqueue fails (queue full, duplicate, database error)
+    fn enqueue_command(&self, command: Command) -> Result<u64, OpcGwError>;
+
+    /// Dequeues the next pending command in FIFO order.
+    ///
+    /// Returns the oldest pending command (by creation timestamp/ROWID).
+    /// Does NOT remove it from storage (for audit trail), but marks status as Sent.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(Command))` - The next pending command
+    /// * `Ok(None)` - If queue is empty (no pending commands)
+    /// * `Err(OpcGwError)` - If database error occurs
+    fn dequeue_command(&self) -> Result<Option<Command>, OpcGwError>;
+
+    /// Lists commands matching filter criteria.
+    ///
+    /// Supports filtering by device_id, status, command_name (substring), or age.
+    /// Returns results in FIFO order (by creation timestamp).
+    ///
+    /// # Arguments
+    ///
+    /// * `filter` - CommandFilter with optional criteria
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<Command>)` - Matching commands (may be empty)
+    /// * `Err(OpcGwError)` - If database error occurs
+    fn list_commands(&self, filter: &CommandFilter) -> Result<Vec<Command>, OpcGwError>;
+
+    /// Returns the number of pending commands in the queue.
+    ///
+    /// Used for operational visibility and capacity monitoring.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(usize)` - Count of pending commands
+    /// * `Err(OpcGwError)` - If database error occurs
+    fn get_queue_depth(&self) -> Result<usize, OpcGwError>;
+
+    // ===== Command Delivery Status Operations (Story 3-3) =====
+
+    /// Marks a command as sent with ChirpStack result ID for tracking.
+    ///
+    /// Updates a pending command to "Sent" status and records the ChirpStack result ID
+    /// for mapping delivery confirmations back to local commands. Sets sent_at timestamp.
+    ///
+    /// # Arguments
+    ///
+    /// * `command_id` - The unique identifier of the command
+    /// * `chirpstack_result_id` - The result ID from ChirpStack API response (for confirmation mapping)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the status was successfully updated
+    /// * `Err(OpcGwError)` - If command not found or database error occurs
+    fn mark_command_sent(&self, command_id: u64, chirpstack_result_id: &str) -> Result<(), OpcGwError>;
+
+    /// Marks a command as confirmed by ChirpStack/device.
+    ///
+    /// Updates a sent command to "Confirmed" status and sets confirmed_at timestamp.
+    /// Called by CommandStatusPoller when ChirpStack confirms delivery.
+    ///
+    /// # Arguments
+    ///
+    /// * `command_id` - The unique identifier of the command
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the status was successfully updated
+    /// * `Err(OpcGwError)` - If command not found or database error occurs
+    fn mark_command_confirmed(&self, command_id: u64) -> Result<(), OpcGwError>;
+
+    /// Marks a command as failed with optional error message.
+    ///
+    /// Updates a sent command to "Failed" status with an error message for diagnostics.
+    /// Called by timeout handler or when ChirpStack reports delivery failure.
+    ///
+    /// # Arguments
+    ///
+    /// * `command_id` - The unique identifier of the command
+    /// * `error_message` - Human-readable error description (e.g., "Confirmation timeout")
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the status was successfully updated
+    /// * `Err(OpcGwError)` - If command not found or database error occurs
+    fn mark_command_failed(&self, command_id: u64, error_message: &str) -> Result<(), OpcGwError>;
+
+    /// Finds all sent commands awaiting confirmation from ChirpStack.
+    ///
+    /// Returns commands in "Sent" status that don't yet have confirmed_at timestamps.
+    /// Used by CommandStatusPoller to poll ChirpStack for delivery confirmations.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<Command>)` - All sent commands awaiting confirmation (may be empty)
+    /// * `Err(OpcGwError)` - If database error occurs
+    fn find_pending_confirmations(&self) -> Result<Vec<Command>, OpcGwError>;
+
+    /// Finds all sent commands that have timed out awaiting confirmation.
+    ///
+    /// Returns commands in "Sent" status where sent_at is older than ttl_secs.
+    /// Used by timeout handler to mark expired commands as failed.
+    ///
+    /// # Arguments
+    ///
+    /// * `ttl_secs` - Time-to-live in seconds (e.g., 60 for 60-second timeout)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<Command>)` - All timed-out commands (may be empty)
+    /// * `Err(OpcGwError)` - If database error occurs
+    fn find_timed_out_commands(&self, ttl_secs: u32) -> Result<Vec<Command>, OpcGwError>;
 }
 
 
