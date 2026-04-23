@@ -58,23 +58,30 @@ pub struct Global {
     /// Command delivery status polling interval in seconds (Story 3-3).
     ///
     /// How often the CommandStatusPoller queries ChirpStack for command confirmations.
-    /// Default: 5 seconds, same as metric polling interval.
+    /// Default: 5 seconds, same as metric polling interval. Must be >= 1.
     #[serde(default = "default_command_delivery_poll_interval")]
-    pub command_delivery_poll_interval_secs: Option<u64>,
+    pub command_delivery_poll_interval_secs: u64,
 
     /// Command delivery timeout in seconds (Story 3-3).
     ///
     /// Commands in "sent" state for longer than this are marked as failed.
-    /// Default: 60 seconds.
+    /// Default: 60 seconds. Must be >= 1.
     #[serde(default = "default_command_delivery_timeout")]
-    pub command_delivery_timeout_secs: Option<u32>,
+    pub command_delivery_timeout_secs: u32,
 
     /// Command timeout check interval in seconds (Story 3-3).
     ///
     /// How often the timeout handler scans for expired commands.
-    /// Default: 10 seconds.
+    /// Default: 10 seconds. Must be >= 1.
     #[serde(default = "default_command_timeout_check_interval")]
-    pub command_timeout_check_interval_secs: Option<u64>,
+    pub command_timeout_check_interval_secs: u64,
+
+    /// Command history retention period in days (Story 3-3).
+    ///
+    /// Completed commands are retained for this period then automatically purged.
+    /// Default: 7 days. Must be >= 1.
+    #[serde(default = "default_history_retention_days")]
+    pub history_retention_days: u32,
 }
 
 /// ChirpStack connection and polling configuration.
@@ -390,16 +397,20 @@ fn default_prune_interval() -> u32 {
     60
 }
 
-fn default_command_delivery_poll_interval() -> Option<u64> {
-    Some(5)
+fn default_command_delivery_poll_interval() -> u64 {
+    5
 }
 
-fn default_command_delivery_timeout() -> Option<u32> {
-    Some(60)
+fn default_command_delivery_timeout() -> u32 {
+    60
 }
 
-fn default_command_timeout_check_interval() -> Option<u64> {
-    Some(10)
+fn default_command_timeout_check_interval() -> u64 {
+    10
+}
+
+fn default_history_retention_days() -> u32 {
+    7
 }
 
 impl Default for StorageConfig {
@@ -698,6 +709,23 @@ impl AppConfig {
                     }
                 }
             }
+        }
+
+        // Validate Global config (command delivery settings)
+        if self.global.command_delivery_poll_interval_secs < 1 {
+            errors.push("global.command_delivery_poll_interval_secs: must be >= 1".to_string());
+        }
+
+        if self.global.command_delivery_timeout_secs < 1 {
+            errors.push("global.command_delivery_timeout_secs: must be >= 1".to_string());
+        }
+
+        if self.global.command_timeout_check_interval_secs < 1 {
+            errors.push("global.command_timeout_check_interval_secs: must be >= 1".to_string());
+        }
+
+        if self.global.history_retention_days < 1 {
+            errors.push("global.history_retention_days: must be >= 1".to_string());
         }
 
         if errors.is_empty() {

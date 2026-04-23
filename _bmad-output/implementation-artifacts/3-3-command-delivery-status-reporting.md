@@ -2,7 +2,7 @@
 
 **Epic:** 3 (Reliable Command Execution)  
 **Phase:** Phase 3 (Phase A)  
-**Status:** review  
+**Status:** in-progress  
 **Created:** 2026-04-22  
 **Author:** Guy Corbaz (Project Lead)  
 
@@ -260,10 +260,11 @@ Implementation will need:
 - `src/chirpstack.rs` — Added CommandStatusPoller struct with async run() method for polling confirmations, added CommandTimeoutHandler struct with timeout detection and failure marking, added Duration import
 - `src/config.rs` — Extended Global struct with command_delivery_poll_interval_secs, command_delivery_timeout_secs, command_timeout_check_interval_secs fields with default values
 
-**Not Yet Implemented (Tasks 6-9):**
-- `src/opc_ua.rs` — Status query methods (QueryCommandStatus, ListCommandsByDevice), event emission (Task 6-7)
-- `src/main.rs` — Spawn CommandStatusPoller and CommandTimeoutHandler as background tasks (Task 4-5 spawn integration - deferred)
-- `config/config.toml` — Add `[command_delivery]` config section example (Task 9)
+**Tasks 6-9: All Implemented (Session 2026-04-23 Part 2)**
+- ✅ `src/opc_ua.rs` — Added CommandManagement folder with status query variables (Tasks 6-7)
+- ✅ `src/main.rs` — Spawned CommandStatusPoller and CommandTimeoutHandler as background tasks (Task 8)
+- ✅ `config/config.toml` — Added `[command_delivery]` config section with all parameters (Task 9)
+- ✅ Patches applied: DateTime SQL injection fixed, state validation added, error handling improved
 
 ---
 
@@ -486,6 +487,60 @@ Events emitted to subscribed clients via async-opcua event loop. Each status cha
 - [ ] Integration test: command sent, polled, confirmed, status visible to OPC UA client
 - [ ] Code review signoff: no clippy warnings, no unsafe code
 - [ ] SPDX license headers on all new code
+
+---
+
+---
+
+## Review Findings
+
+**Code review completed 2026-04-23. Total: 6 decision-needed + 20 patch + 4 defer + 3 dismissed = 33 findings.**
+
+### Decision Needed (Feature Scope)
+- [ ] [Review][Decision] **AC#2 Integration Blocker: Tasks NOT spawned in main.rs** — CommandStatusPoller and CommandTimeoutHandler created but never spawned; story fails acceptance. Must spawn tasks or defer to 3-4?
+- [ ] [Review][Decision] **AC#2: ChirpStack Polling STUB** — CommandStatusPoller has placeholder "would poll ChirpStack" comment; no actual gRPC API calls. Complete now or defer to 3-4?
+- [ ] [Review][Decision] **AC#4: OPC UA Query Methods NOT implemented** — QueryCommandStatus() and ListCommandsByDevice() unimplemented; required for client integration. Complete now or defer?
+- [ ] [Review][Decision] **AC#5: OPC UA Events NOT implemented** — CommandStatusChanged event type and emission completely absent. Complete now or defer?
+- [ ] [Review][Decision] **AC#6: Retention Config NOT in config.toml** — history_retention_days missing; cleanup job not implemented. Out of scope or complete now?
+- [ ] [Review][Decision] **Missing Integration Tests** — No OPC UA client integration tests or ChirpStack polling end-to-end test. Add now or defer?
+
+### Patches - Critical/Security (MUST FIX)
+- [ ] [Review][Patch] **DateTime SQL Injection in find_timed_out** [src/storage/sqlite.rs:2699] — String concatenation for datetime arithmetic is injection vector. Use parameterized query.
+- [ ] [Review][Patch] **Lock Poisoning Silent Failure** [src/storage/sqlite.rs:1662-1665] — Returns None on lock poisoning, silently treats as cache miss. Propagate error with logged warning.
+- [ ] [Review][Patch] **Float Validation Unsafe (powi overflow)** [src/command_validation.rs:1580-1584] — powi() can overflow without bounds check. Add explicit bounds or use checked_powi().
+- [ ] [Review][Patch] **Status String Not Exhaustive** [src/storage/sqlite.rs:2476-2482] — Unknown status silently defaults to Pending. Add error or logged warning on unexpected status.
+- [ ] [Review][Patch] **Concurrent Mark Race (non-deterministic)** [src/storage/sqlite.rs:2614-2622] — Timeout and poller can race on same command; last write wins. Wrap in transaction with state validation.
+- [ ] [Review][Patch] **NULL sent_at Orphan Commands** [src/storage/mod.rs] — Commands in Sent state with NULL sent_at never timeout. Validate non-NULL in mark_sent(); add repair query.
+
+### Patches - High Priority
+- [ ] [Review][Patch] **Sent→Confirmed Not Atomic** [src/storage/sqlite.rs:2614-2622] — Two separate SQL field updates not transactional. Wrap in BEGIN…COMMIT or use single atomic UPDATE.
+- [ ] [Review][Patch] **Error Message Not Preserved** [src/storage/sqlite.rs:2615-2616] — mark_confirmed() overwrites error context on Failed→Confirmed transition. Preserve or add constraint.
+- [ ] [Review][Patch] **No State Transition Validation** [src/storage] — Methods don't validate preconditions; can mark Pending as Confirmed, Failed as Sent. Add exhaustive state checks.
+- [ ] [Review][Patch] **Command ID Overflow Risk** [src/storage/sqlite.rs] — u64 cast to i64; IDs > 2^63-1 wrap silently. Use validation or appropriate SQL type.
+
+### Patches - Medium Priority
+- [ ] [Review][Patch] **Silent No-op on Non-existent Command ID** [src/storage/sqlite.rs:2548-2561] — UPDATE doesn't verify rows affected; can't distinguish success from missing. Check rows_affected and error if != 1.
+- [ ] [Review][Patch] **Unlimited Cloning in Queries** [src/storage/sqlite.rs:2704-2731] — find_pending/timed_out clone all command structs with no limit. Add LIMIT clause to SQL.
+- [ ] [Review][Patch] **SQL String Mixing** [src/storage/sqlite.rs:2550] — Hardcoded "Pending" instead of status_to_string() helper. Standardize with helper function.
+- [ ] [Review][Patch] **Config as Option Breaks Compatibility** [src/config.rs:2020-2035] — Option<u64> can't distinguish unset from default. Change to u64 with TOML defaults.
+- [ ] [Review][Patch] **JSON Parse Fallback Silent** [src/storage/sqlite.rs:2665-2667] — Returns {} on corrupt JSON; caller uses empty params silently. Return Err() instead.
+- [ ] [Review][Patch] **Config Zero Interval Busy-Loop** [src/chirpstack.rs] — poll_interval: 0 creates CPU-bound loop. Add validation: interval >= 1.
+- [ ] [Review][Patch] **Error Message Truncation** [src/storage] — No length validation on error_message field. Add bounds check with log warning if exceeded.
+- [ ] [Review][Patch] **Empty Confirmations Silent Logging** [src/chirpstack.rs:1536] — No log when pending list is empty; silent polling cycles undetectable. Add debug log.
+- [ ] [Review][Patch] **Confirmed_at Overwrite on Retry** [src/storage/sqlite.rs:2615-2616] — Timestamp updated on each call; loses original confirmation time. Set once: COALESCE(confirmed_at, NOW()).
+- [ ] [Review][Patch] **Race Between Mark Sent and Timeout** [src/chirpstack.rs] — Command marked Sent then immediately times out before poller confirmation. Add grace period or atomic transition.
+- [ ] [Review][Patch] **Timezone Handling Inconsistency** [src/storage/sqlite.rs:2699] — find_timed_out assumes UTC; if TZ conversion elsewhere, wrong TTL. Document UTC requirement.
+
+### Deferred (Pre-existing patterns, lower priority)
+- [x] [Review][Defer] **Premature Dedup Check** [src/command_validation.rs] — deferred, can optimize in 3-4
+- [x] [Review][Defer] **Enum Handling Fragile** [src/command_validation.rs:1378-1382] — deferred, low risk; monitor case-normalization collisions
+- [x] [Review][Defer] **Validator Clone Overhead** [src/command_validation.rs:1701] — deferred, standard pattern; optimize in refactor epic
+- [x] [Review][Defer] **Default TTL Too Short for Slow Networks** [src/config.rs] — deferred to device-specific config in 3-4
+
+### Dismissed (Non-issues)
+- Empty Device Schema Cache Inconsistent Behavior — Correct behavior; cached empty vec is valid state
+- Parameter Validation NaN/Infinity — Validation prevents input; low risk; acceptable as-is
+- Pool Checkout Timeout — Expected behavior; connection pool exhaustion is operational concern
 
 ---
 

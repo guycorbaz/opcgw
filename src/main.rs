@@ -327,6 +327,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Spawn command status poller task (Task 3-3 Task 5)
+    let pool_poller = pool.clone();
+    let cancel_poller = cancel_token.clone();
+    let config_poller = application_config.clone();
+    let poller_handle = tokio::spawn(async move {
+        let backend = Arc::new(storage::SqliteBackend::with_pool(pool_poller)
+            .expect("Failed to create SqliteBackend for poller"));
+        match chirpstack::CommandStatusPoller::new(&config_poller, backend, cancel_poller) {
+            Ok(mut cmd_poller) => {
+                if let Err(e) = cmd_poller.run().await {
+                    error!(error = ?e, "CommandStatusPoller error");
+                }
+            }
+            Err(e) => error!(error = ?e, "Failed to create CommandStatusPoller"),
+        }
+    });
+
+    // Spawn command timeout handler task (Task 3-3 Task 5)
+    let pool_timeout = pool.clone();
+    let cancel_timeout = cancel_token.clone();
+    let config_timeout = application_config.clone();
+    let timeout_handle = tokio::spawn(async move {
+        let backend = Arc::new(storage::SqliteBackend::with_pool(pool_timeout)
+            .expect("Failed to create SqliteBackend for timeout handler"));
+        match chirpstack::CommandTimeoutHandler::new(&config_timeout, backend, cancel_timeout) {
+            Ok(mut cmd_timeout) => {
+                if let Err(e) = cmd_timeout.run().await {
+                    error!(error = ?e, "CommandTimeoutHandler error");
+                }
+            }
+            Err(e) => error!(error = ?e, "Failed to create CommandTimeoutHandler"),
+        }
+    });
+
     // Wait for shutdown signal (SIGINT or SIGTERM)
     let mut sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -346,7 +380,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Wait for tasks to finish gracefully (with timeout)
     match tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        async { tokio::try_join!(chirpstack_handle, opcua_handle) },
+        async { tokio::try_join!(chirpstack_handle, opcua_handle, poller_handle, timeout_handle) },
     )
     .await
     {

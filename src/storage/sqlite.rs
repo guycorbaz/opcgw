@@ -89,7 +89,11 @@ impl SqliteBackend {
             "Sent" => CommandStatus::Sent,
             "Confirmed" => CommandStatus::Confirmed,
             "Failed" => CommandStatus::Failed,
-            _ => CommandStatus::Pending,
+            "Pending" => CommandStatus::Pending,
+            _ => {
+                warn!("Unknown command status in database: '{}', defaulting to Pending", s);
+                CommandStatus::Pending
+            }
         }
     }
 
@@ -1420,11 +1424,15 @@ impl crate::storage::StorageBackend for SqliteBackend {
 
         let now = format_rfc3339(&Utc::now());
 
-        conn.execute(
-            "UPDATE command_queue SET status = 'Confirmed', confirmed_at = ?, updated_at = ? WHERE id = ?",
+        let rows_affected = conn.execute(
+            "UPDATE command_queue SET status = 'Confirmed', confirmed_at = COALESCE(confirmed_at, ?), updated_at = ? WHERE id = ? AND status IN ('Sent', 'Pending')",
             params![&now, &now, command_id as i64],
         )
             .map_err(|e| OpcGwError::Database(format!("Failed to mark command as confirmed: {}", e)))?;
+
+        if rows_affected == 0 {
+            return Err(OpcGwError::Database(format!("Command {} not found or already in terminal state", command_id)));
+        }
 
         debug!(command_id, "Marked command as confirmed");
         Ok(())
@@ -1437,15 +1445,28 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 e
             })?;
 
-        let now = format_rfc3339(&Utc::now());
+        if error_message.len() > 1000 {
+            warn!(command_id, msg_len = error_message.len(), "Error message truncated (max 1000 chars)");
+        }
 
-        conn.execute(
-            "UPDATE command_queue SET status = 'Failed', error_message = ?, updated_at = ? WHERE id = ?",
-            params![error_message, &now, command_id as i64],
+        let now = format_rfc3339(&Utc::now());
+        let truncated_msg = if error_message.len() > 1000 {
+            &error_message[..1000]
+        } else {
+            error_message
+        };
+
+        let rows_affected = conn.execute(
+            "UPDATE command_queue SET status = 'Failed', error_message = ?, updated_at = ? WHERE id = ? AND status IN ('Sent', 'Pending')",
+            params![truncated_msg, &now, command_id as i64],
         )
             .map_err(|e| OpcGwError::Database(format!("Failed to mark command as failed: {}", e)))?;
 
-        debug!(command_id, error_message, "Marked command as failed");
+        if rows_affected == 0 {
+            return Err(OpcGwError::Database(format!("Command {} not found or already in terminal state", command_id)));
+        }
+
+        debug!(command_id, error_message = truncated_msg, "Marked command as failed");
         Ok(())
     }
 
@@ -1460,7 +1481,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
             "SELECT id, device_id, command_name, parameters, status, enqueued_at, sent_at, confirmed_at, \
              error_message, command_hash, chirpstack_result_id FROM command_queue \
              WHERE status = 'Sent' AND confirmed_at IS NULL \
-             ORDER BY enqueued_at ASC"
+             ORDER BY enqueued_at ASC LIMIT 1000"
         )
             .map_err(|e| OpcGwError::Database(format!("Failed to prepare statement: {}", e)))?;
 
@@ -1471,10 +1492,10 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 metric_id: String::new(),
                 command_name: row.get(2)?,
                 parameters: serde_json::from_str(&row.get::<_, String>(3)?)
-                    .unwrap_or_else(|e| {
-                        warn!("Failed to parse command parameters: {}", e);
-                        serde_json::json!({})
-                    }),
+                    .map_err(|e| {
+                        error!("Failed to parse command parameters: {}", e);
+                        rusqlite::Error::InvalidParameterName("Invalid JSON".to_string())
+                    })?,
                 enqueued_at: row.get::<_, Option<String>>(5)?
                     .and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc)))
                     .unwrap_or_else(|| Utc::now()),
@@ -1490,7 +1511,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| OpcGwError::Database(format!("Failed to collect commands: {}", e)))?;
 
-        debug!(count = commands.len(), "Found pending confirmations");
+        debug!(count = commands.len(), "Checked for pending confirmations");
         Ok(commands)
     }
 
@@ -1501,26 +1522,28 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 e
             })?;
 
+        let cutoff_time = Utc::now() - std::time::Duration::from_secs(ttl_secs as u64);
+        let cutoff_rfc3339 = format_rfc3339(&cutoff_time);
+
         let mut stmt = conn.prepare(
             "SELECT id, device_id, command_name, parameters, status, enqueued_at, sent_at, confirmed_at, \
              error_message, command_hash, chirpstack_result_id FROM command_queue \
-             WHERE status = 'Sent' AND sent_at IS NOT NULL \
-             AND datetime(sent_at) < datetime('now', '-' || ? || ' seconds') \
-             ORDER BY enqueued_at ASC"
+             WHERE status = 'Sent' AND sent_at IS NOT NULL AND sent_at < ? \
+             ORDER BY enqueued_at ASC LIMIT 1000"
         )
             .map_err(|e| OpcGwError::Database(format!("Failed to prepare statement: {}", e)))?;
 
-        let commands = stmt.query_map(params![ttl_secs], |row| {
+        let commands = stmt.query_map(params![&cutoff_rfc3339], |row| {
             Ok(Command {
                 id: row.get::<_, i64>(0)? as u64,
                 device_id: row.get(1)?,
                 metric_id: String::new(),
                 command_name: row.get(2)?,
                 parameters: serde_json::from_str(&row.get::<_, String>(3)?)
-                    .unwrap_or_else(|e| {
-                        warn!("Failed to parse command parameters: {}", e);
-                        serde_json::json!({})
-                    }),
+                    .map_err(|e| {
+                        error!("Failed to parse command parameters: {}", e);
+                        rusqlite::Error::InvalidParameterName("Invalid JSON".to_string())
+                    })?,
                 enqueued_at: row.get::<_, Option<String>>(5)?
                     .and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc)))
                     .unwrap_or_else(|| Utc::now()),
@@ -1536,7 +1559,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| OpcGwError::Database(format!("Failed to collect commands: {}", e)))?;
 
-        debug!(count = commands.len(), ttl_secs, "Found timed out commands");
+        debug!(count = commands.len(), ttl_secs, "Checked for timed-out commands");
         Ok(commands)
     }
 }

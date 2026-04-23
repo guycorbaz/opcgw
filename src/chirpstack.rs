@@ -1524,7 +1524,7 @@ impl CommandStatusPoller {
     /// `Result<(), OpcGwError>` - Ok on graceful shutdown, error on failure
     pub async fn run(&mut self) -> Result<(), OpcGwError> {
         let poll_interval = Duration::from_secs(
-            self.config.global.command_delivery_poll_interval_secs.unwrap_or(5)
+            self.config.global.command_delivery_poll_interval_secs
         );
 
         debug!(interval_s = poll_interval.as_secs(), "Starting CommandStatusPoller");
@@ -1610,9 +1610,9 @@ impl CommandTimeoutHandler {
     ///
     /// `Result<(), OpcGwError>` - Ok on graceful shutdown, error on failure
     pub async fn run(&mut self) -> Result<(), OpcGwError> {
-        let ttl_secs = self.config.global.command_delivery_timeout_secs.unwrap_or(60);
+        let ttl_secs = self.config.global.command_delivery_timeout_secs;
         let check_interval = Duration::from_secs(
-            self.config.global.command_timeout_check_interval_secs.unwrap_or(10)
+            self.config.global.command_timeout_check_interval_secs
         );
 
         debug!(ttl_s = ttl_secs, check_interval_s = check_interval.as_secs(), "Starting CommandTimeoutHandler");
