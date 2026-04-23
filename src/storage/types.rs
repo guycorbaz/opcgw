@@ -150,6 +150,73 @@ impl DeviceCommand {
     }
 }
 
+/// High-level command with rich metadata for Story 3-1 (FIFO queue) integration.
+///
+/// This struct represents a command queued for delivery to a LoRaWAN device.
+/// It extends DeviceCommand with additional metadata needed for:
+/// - Parameter validation (Story 3-2)
+/// - Delivery status tracking (Story 3-3)
+/// - Deduplication via SHA256 hash
+/// - OPC UA integration (metric_id reference)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Command {
+    /// Auto-incrementing command ID (assigned by storage backend)
+    pub id: u64,
+    /// Target device identifier from ChirpStack
+    pub device_id: String,
+    /// Metric ID in OPC UA address space (for tracking in OPC UA)
+    pub metric_id: String,
+    /// Human-readable command name (e.g., "toggle_relay", "set_temperature")
+    pub command_name: String,
+    /// Command parameters as JSON (validated by Story 3-2)
+    pub parameters: serde_json::Value,
+    /// Timestamp when command was enqueued
+    pub enqueued_at: DateTime<Utc>,
+    /// Timestamp when command was sent to ChirpStack
+    pub sent_at: Option<DateTime<Utc>>,
+    /// Timestamp when command was confirmed by device/ChirpStack
+    pub confirmed_at: Option<DateTime<Utc>>,
+    /// Current status in lifecycle: Pending → Sent → Confirmed or Failed
+    pub status: CommandStatus,
+    /// Error message if delivery failed
+    pub error_message: Option<String>,
+    /// SHA256 hash of (device_id + command_name + parameters_json) for deduplication
+    pub command_hash: String,
+    /// ChirpStack API result ID (for mapping responses back to local commands)
+    pub chirpstack_result_id: Option<String>,
+}
+
+/// Filter criteria for querying commands from storage.
+///
+/// Used with StorageBackend::list_commands() to retrieve filtered command lists.
+#[derive(Clone, Debug, Default)]
+pub struct CommandFilter {
+    /// Filter by device_id (exact match)
+    pub device_id: Option<String>,
+    /// Filter by status (exact match)
+    pub status: Option<CommandStatus>,
+    /// Filter by command_name (substring match)
+    pub command_name_contains: Option<String>,
+    /// Include commands older than N days (for cleanup queries)
+    pub older_than_days: Option<u32>,
+}
+
+impl Command {
+    /// Computes SHA256 hash of (device_id + command_name + parameters_json) for deduplication.
+    ///
+    /// This hash is used to detect duplicate commands and prevent requeuing.
+    /// The hash is computed from the command's semantic content, not its metadata (timestamps, status).
+    pub fn compute_hash(device_id: &str, command_name: &str, parameters: &serde_json::Value) -> String {
+        use sha2::{Sha256, Digest};
+
+        let params_json = parameters.to_string();
+        let content = format!("{}{}{}", device_id, command_name, params_json);
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+}
+
 /// Gateway health and ChirpStack server connection status.
 ///
 /// Tracks the operational status of the ChirpStack connection and gateway health.

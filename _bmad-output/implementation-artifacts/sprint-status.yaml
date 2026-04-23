@@ -84,7 +84,7 @@ development_status:
 
   # Epic 3: Reliable Command Execution (Phase A)
   epic-3: in-progress
-  3-1-sqlite-backed-fifo-command-queue: in-progress
+  3-1-sqlite-backed-fifo-command-queue: done
   3-2-command-parameter-validation: ready-for-dev
   3-3-command-delivery-status-reporting: ready-for-dev
   epic-3-retrospective: optional

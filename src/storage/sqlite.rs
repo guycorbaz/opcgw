@@ -28,13 +28,18 @@
 
 use rusqlite::{Connection, params, OptionalExtension};
 use crate::utils::OpcGwError;
-use crate::storage::{ChirpstackStatus, CommandStatus, DeviceCommand, MetricType, ConnectionPool, MetricValue};
+use crate::storage::{ChirpstackStatus, Command, CommandFilter, CommandStatus, DeviceCommand, MetricType, ConnectionPool, MetricValue};
 use chrono::{DateTime, Utc};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, trace, warn};
 use super::schema;
+
+/// Format a DateTime as RFC3339 with microsecond precision
+fn format_rfc3339(dt: &DateTime<Utc>) -> String {
+    format!("{}Z", dt.format("%Y-%m-%dT%H:%M:%S%.6f"))
+}
 
 /// SQLite-backed storage implementation for opcgw.
 ///
@@ -72,6 +77,15 @@ impl SqliteBackend {
             CommandStatus::Pending => "Pending",
             CommandStatus::Sent => "Sent",
             CommandStatus::Failed => "Failed",
+        }
+    }
+
+    /// Convert database string representation to CommandStatus.
+    fn status_from_string(s: &str) -> CommandStatus {
+        match s {
+            "Sent" => CommandStatus::Sent,
+            "Failed" => CommandStatus::Failed,
+            _ => CommandStatus::Pending,
         }
     }
 
@@ -568,6 +582,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
         &self,
         command_id: u64,
         status: CommandStatus,
+        error_message: Option<String>,
     ) -> Result<(), OpcGwError> {
         let mut conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
@@ -577,10 +592,19 @@ impl crate::storage::StorageBackend for SqliteBackend {
 
         let status_str = Self::status_to_string(&status);
 
-        let rows_affected = conn.execute(
-                "UPDATE command_queue SET status = ?1, updated_at = datetime('now') WHERE id = ?2",
-                params![status_str, command_id as i64],
-            )
+        // Only update error_message if status is Failed or error_message is explicitly provided
+        // This prevents inadvertently clearing error messages when transitioning between non-Failed states
+        let update_sql = if matches!(status, CommandStatus::Failed) || error_message.is_some() {
+            "UPDATE command_queue SET status = ?1, error_message = ?2, updated_at = datetime('now') WHERE id = ?3"
+        } else {
+            "UPDATE command_queue SET status = ?1, updated_at = datetime('now') WHERE id = ?2"
+        };
+
+        let rows_affected = if matches!(status, CommandStatus::Failed) || error_message.is_some() {
+            conn.execute(update_sql, params![status_str, error_message, command_id as i64])
+        } else {
+            conn.execute(update_sql, params![status_str, command_id as i64])
+        }
             .map_err(|e| {
                 OpcGwError::Database(format!(
                     "Failed to update command {} status: {}",
@@ -1083,6 +1107,224 @@ impl crate::storage::StorageBackend for SqliteBackend {
         }
 
         Ok(deleted_count)
+    }
+
+    // ===== Story 3-1: High-level Command Queue =====
+
+    fn enqueue_command(&self, command: Command) -> Result<u64, OpcGwError> {
+        // Validate command_hash is not empty
+        if command.command_hash.is_empty() {
+            return Err(OpcGwError::Storage("Command hash cannot be empty".to_string()));
+        }
+
+        let mut conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, device_id = %command.device_id, "Pool checkout timeout for enqueue_command");
+                e
+            })?;
+
+        let now = Utc::now();
+        let now_rfc3339 = format_rfc3339(&now);
+
+        let status_str = Self::status_to_string(&command.status);
+
+        // Format enqueued_at timestamp (RFC3339 with microseconds)
+        let enqueued_at_rfc3339 = format_rfc3339(&command.enqueued_at);
+
+        conn.execute(
+            "INSERT INTO command_queue (device_id, payload, f_port, command_name, parameters, status, created_at, updated_at, enqueued_at, command_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                &command.device_id,
+                None::<Vec<u8>>,  // payload: NULL for high-level commands
+                None::<i32>,      // f_port: NULL for high-level commands
+                &command.command_name,
+                command.parameters.to_string(),
+                status_str,
+                &now_rfc3339,
+                &now_rfc3339,
+                &enqueued_at_rfc3339,
+                &command.command_hash,
+            ],
+        )
+        .map_err(|e| {
+            OpcGwError::Database(format!(
+                "Failed to enqueue command for device {}: {}",
+                command.device_id, e
+            ))
+        })?;
+
+        let command_id = conn.last_insert_rowid() as u64;
+        info!(command_id = command_id, device_id = %command.device_id, command_name = %command.command_name, status = %command.status, "Command enqueued");
+
+        Ok(command_id)
+    }
+
+    fn dequeue_command(&self) -> Result<Option<Command>, OpcGwError> {
+        let mut conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, "Pool checkout timeout for dequeue_command");
+                e
+            })?;
+
+        // Get the next pending command and update its status to Sent
+        // Use IMMEDIATE to acquire write lock immediately, preventing race conditions
+        let mut tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| OpcGwError::Database(format!("Failed to start transaction: {}", e)))?;
+
+        let command = tx.query_row(
+            "SELECT id, device_id, command_name, parameters, status, enqueued_at, sent_at, confirmed_at, error_message, command_hash, chirpstack_result_id
+             FROM command_queue WHERE status = 'Pending' ORDER BY id ASC LIMIT 1",
+            [],
+            |row| {
+                Ok(Command {
+                    id: row.get::<_, i64>(0)? as u64,
+                    device_id: row.get(1)?,
+                    metric_id: String::new(), // Will be populated from config if needed
+                    command_name: row.get(2)?,
+                    parameters: serde_json::from_str(&row.get::<_, String>(3)?)
+                        .unwrap_or_else(|e| {
+                            warn!("Failed to parse command parameters: {}", e);
+                            serde_json::json!({})
+                        }),
+                    enqueued_at: row.get::<_, Option<String>>(5)?
+                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc)))
+                        .unwrap_or_else(|| {
+                            warn!("Command missing or unparseable enqueued_at timestamp, using current time");
+                            Utc::now()
+                        }),
+                    sent_at: row.get::<_, Option<String>>(6)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
+                    confirmed_at: row.get::<_, Option<String>>(7)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
+                    status: match row.get::<_, String>(4)?.as_str() {
+                        "Sent" => CommandStatus::Sent,
+                        "Failed" => CommandStatus::Failed,
+                        _ => CommandStatus::Pending,
+                    },
+                    error_message: row.get(8)?,
+                    command_hash: row.get(9)?,
+                    chirpstack_result_id: row.get(10)?,
+                })
+            }
+        ).optional()
+        .map_err(|e| {
+            OpcGwError::Database(format!("Failed to dequeue command: {}", e))
+        })?;
+
+        if let Some(ref cmd) = command {
+            // Update status to Sent to prevent requeuing
+            let now = Utc::now();
+            let now_rfc3339 = format_rfc3339(&now);
+
+            tx.execute(
+                "UPDATE command_queue SET status = 'Sent', sent_at = ?1, updated_at = ?2 WHERE id = ?3",
+                rusqlite::params![&now_rfc3339, &now_rfc3339, cmd.id as i64],
+            ).map_err(|e| {
+                OpcGwError::Database(format!("Failed to update command status after dequeue: {}", e))
+            })?;
+
+            tx.commit()
+                .map_err(|e| OpcGwError::Database(format!("Failed to commit dequeue transaction: {}", e)))?;
+
+            info!(command_id = cmd.id, device_id = %cmd.device_id, command_name = %cmd.command_name, old_status = "Pending", new_status = "Sent", "Command status transition");
+        }
+
+        Ok(command)
+    }
+
+    fn list_commands(&self, filter: &CommandFilter) -> Result<Vec<Command>, OpcGwError> {
+        let mut conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, "Pool checkout timeout for list_commands");
+                e
+            })?;
+
+        let mut query = "SELECT id, device_id, command_name, parameters, status, enqueued_at, sent_at, confirmed_at, error_message, command_hash, chirpstack_result_id
+                         FROM command_queue WHERE 1=1".to_string();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(device_id) = &filter.device_id {
+            query.push_str(" AND device_id = ?");
+            params.push(Box::new(device_id.clone()));
+        }
+
+        if let Some(status) = filter.status {
+            let status_str = Self::status_to_string(&status);
+            query.push_str(" AND status = ?");
+            params.push(Box::new(status_str.to_string()));
+        }
+
+        if let Some(cmd_name) = &filter.command_name_contains {
+            // Escape LIKE wildcards in the search term (escape backslash first)
+            let escaped = cmd_name.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+            query.push_str(" AND command_name LIKE ? ESCAPE '\\'");
+            params.push(Box::new(format!("%{}%", escaped)));
+        }
+
+        if let Some(days) = filter.older_than_days {
+            // Filter commands older than N days (based on enqueued_at timestamp)
+            let cutoff_date = Utc::now() - chrono::Duration::days(days as i64);
+            let cutoff_rfc3339 = format!("{}", cutoff_date.format("%Y-%m-%dT%H:%M:%S%.6fZ"));
+            query.push_str(" AND enqueued_at < ?");
+            params.push(Box::new(cutoff_rfc3339));
+        }
+
+        query.push_str(" ORDER BY id ASC");
+
+        let mut stmt = conn.prepare(&query)
+            .map_err(|e| OpcGwError::Database(format!("Failed to prepare command list query: {}", e)))?;
+
+        let commands = stmt.query_map(rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())), |row| {
+            Ok(Command {
+                id: row.get::<_, i64>(0)? as u64,
+                device_id: row.get(1)?,
+                metric_id: String::new(),
+                command_name: row.get(2)?,
+                parameters: serde_json::from_str(&row.get::<_, String>(3)?)
+                    .unwrap_or_else(|e| {
+                        warn!("Failed to parse command parameters: {}", e);
+                        serde_json::json!({})
+                    }),
+                enqueued_at: row.get::<_, Option<String>>(5)?
+                    .and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc)))
+                    .unwrap_or_else(|| {
+                        warn!("Command missing or unparseable enqueued_at timestamp, using current time");
+                        Utc::now()
+                    }),
+                sent_at: row.get::<_, Option<String>>(6)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
+                confirmed_at: row.get::<_, Option<String>>(7)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
+                status: Self::status_from_string(&row.get::<_, String>(4)?),
+                error_message: row.get(8)?,
+                command_hash: row.get(9)?,
+                chirpstack_result_id: row.get(10)?,
+            })
+        })
+        .map_err(|e| OpcGwError::Database(format!("Failed to query commands: {}", e)))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| OpcGwError::Database(format!("Failed to collect commands: {}", e)))?;
+
+        debug!(count = commands.len(), "Retrieved commands with filter");
+
+        Ok(commands)
+    }
+
+    fn get_queue_depth(&self) -> Result<usize, OpcGwError> {
+        let mut conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, "Pool checkout timeout for get_queue_depth");
+                e
+            })?;
+
+        let depth: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM command_queue WHERE status = 'Pending'",
+                [],
+                |row| row.get::<_, i64>(0).map(|v| v as usize),
+            )
+            .map_err(|e| {
+                OpcGwError::Database(format!("Failed to get queue depth: {}", e))
+            })?;
+
+        Ok(depth)
     }
 }
 
@@ -2741,6 +2983,414 @@ mod tests {
 
         // Verify performance (AC#6: <30 seconds)
         assert!(elapsed.as_secs() < 30, "Prune should complete in <30s for 1M rows (was {:?})", elapsed);
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_enqueue_command_basic() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        let cmd = Command {
+            id: 0,
+            device_id: "device_123".to_string(),
+            metric_id: "temperature".to_string(),
+            command_name: "set_mode".to_string(),
+            parameters: serde_json::json!({"mode": "auto"}),
+            enqueued_at: chrono::Utc::now(),
+            sent_at: None,
+            confirmed_at: None,
+            status: CommandStatus::Pending,
+            error_message: None,
+            command_hash: "hash_abc123".to_string(),
+            chirpstack_result_id: None,
+        };
+
+        let id = backend.enqueue_command(cmd).expect("Should enqueue command");
+        assert_eq!(id, 1, "First command should get ID 1");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_enqueue_command_increments_ids() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        for i in 1..=5 {
+            let cmd = Command {
+                id: 0,
+                device_id: format!("device_{}", i),
+                metric_id: "temperature".to_string(),
+                command_name: "cmd".to_string(),
+                parameters: serde_json::json!({}),
+                enqueued_at: chrono::Utc::now(),
+                sent_at: None,
+                confirmed_at: None,
+                status: CommandStatus::Pending,
+                error_message: None,
+                command_hash: format!("hash_{}", i),
+                chirpstack_result_id: None,
+            };
+
+            let id = backend.enqueue_command(cmd).expect("Should enqueue");
+            assert_eq!(id, i as u64, "Command {} should get ID {}", i, i);
+        }
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_dequeue_command_fifo() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        for i in 1..=3 {
+            let cmd = Command {
+                id: 0,
+                device_id: format!("device_{}", i),
+                metric_id: "temperature".to_string(),
+                command_name: "cmd".to_string(),
+                parameters: serde_json::json!({}),
+                enqueued_at: chrono::Utc::now(),
+                sent_at: None,
+                confirmed_at: None,
+                status: CommandStatus::Pending,
+                error_message: None,
+                command_hash: format!("hash_{}", i),
+                chirpstack_result_id: None,
+            };
+            backend.enqueue_command(cmd).expect("Should enqueue");
+        }
+
+        let cmd1 = backend.dequeue_command().expect("Should dequeue").expect("Should have command");
+        assert_eq!(cmd1.id, 1);
+
+        let cmd2 = backend.dequeue_command().expect("Should dequeue").expect("Should have command");
+        assert_eq!(cmd2.id, 2);
+
+        let cmd3 = backend.dequeue_command().expect("Should dequeue").expect("Should have command");
+        assert_eq!(cmd3.id, 3);
+
+        let cmd4 = backend.dequeue_command().expect("Should dequeue");
+        assert!(cmd4.is_none(), "Should be no more commands");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_dequeue_command_empty() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        let cmd = backend.dequeue_command().expect("Should dequeue from empty");
+        assert!(cmd.is_none(), "Empty queue should return None");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_dequeue_command_only_pending() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        let cmd1 = Command {
+            id: 0,
+            device_id: "device_1".to_string(),
+            metric_id: "temperature".to_string(),
+            command_name: "cmd".to_string(),
+            parameters: serde_json::json!({}),
+            enqueued_at: chrono::Utc::now(),
+            sent_at: None,
+            confirmed_at: None,
+            status: CommandStatus::Pending,
+            error_message: None,
+            command_hash: "hash_1".to_string(),
+            chirpstack_result_id: None,
+        };
+
+        let mut cmd2 = Command {
+            id: 0,
+            device_id: "device_2".to_string(),
+            metric_id: "temperature".to_string(),
+            command_name: "cmd".to_string(),
+            parameters: serde_json::json!({}),
+            enqueued_at: chrono::Utc::now(),
+            sent_at: None,
+            confirmed_at: None,
+            status: CommandStatus::Sent,
+            error_message: None,
+            command_hash: "hash_2".to_string(),
+            chirpstack_result_id: None,
+        };
+
+        backend.enqueue_command(cmd1).expect("Should enqueue");
+        backend.enqueue_command(cmd2).expect("Should enqueue");
+
+        let dequeued = backend.dequeue_command().expect("Should dequeue").expect("Should have command");
+        assert_eq!(dequeued.id, 1, "Should dequeue first (Pending) command");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_list_commands_filter_by_device_id() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        for i in 1..=3 {
+            let device_id = if i <= 2 { "device_a" } else { "device_b" };
+            let cmd = Command {
+                id: 0,
+                device_id: device_id.to_string(),
+                metric_id: "temperature".to_string(),
+                command_name: "cmd".to_string(),
+                parameters: serde_json::json!({}),
+                enqueued_at: chrono::Utc::now(),
+                sent_at: None,
+                confirmed_at: None,
+                status: CommandStatus::Pending,
+                error_message: None,
+                command_hash: format!("hash_{}", i),
+                chirpstack_result_id: None,
+            };
+            backend.enqueue_command(cmd).expect("Should enqueue");
+        }
+
+        let filter = CommandFilter {
+            device_id: Some("device_a".to_string()),
+            status: None,
+            command_name_contains: None,
+            older_than_days: None,
+        };
+
+        let commands = backend.list_commands(&filter).expect("Should list commands");
+        assert_eq!(commands.len(), 2);
+        assert!(commands.iter().all(|c| c.device_id == "device_a"));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_list_commands_filter_by_status() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        for i in 1..=3 {
+            let status = if i == 1 { CommandStatus::Sent } else { CommandStatus::Pending };
+            let cmd = Command {
+                id: 0,
+                device_id: format!("device_{}", i),
+                metric_id: "temperature".to_string(),
+                command_name: "cmd".to_string(),
+                parameters: serde_json::json!({}),
+                enqueued_at: chrono::Utc::now(),
+                sent_at: None,
+                confirmed_at: None,
+                status,
+                error_message: None,
+                command_hash: format!("hash_{}", i),
+                chirpstack_result_id: None,
+            };
+            backend.enqueue_command(cmd).expect("Should enqueue");
+        }
+
+        let filter = CommandFilter {
+            device_id: None,
+            status: Some(CommandStatus::Pending),
+            command_name_contains: None,
+            older_than_days: None,
+        };
+
+        let commands = backend.list_commands(&filter).expect("Should list commands");
+        assert_eq!(commands.len(), 2);
+        assert!(commands.iter().all(|c| c.status == CommandStatus::Pending));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_list_commands_filter_by_command_name() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        for (i, name) in vec!["set_temperature", "set_mode", "get_status"].iter().enumerate() {
+            let cmd = Command {
+                id: 0,
+                device_id: "device_1".to_string(),
+                metric_id: "temperature".to_string(),
+                command_name: name.to_string(),
+                parameters: serde_json::json!({}),
+                enqueued_at: chrono::Utc::now(),
+                sent_at: None,
+                confirmed_at: None,
+                status: CommandStatus::Pending,
+                error_message: None,
+                command_hash: format!("hash_{}", i),
+                chirpstack_result_id: None,
+            };
+            backend.enqueue_command(cmd).expect("Should enqueue");
+        }
+
+        let filter = CommandFilter {
+            device_id: None,
+            status: None,
+            command_name_contains: Some("set_".to_string()),
+            older_than_days: None,
+        };
+
+        let commands = backend.list_commands(&filter).expect("Should list commands");
+        assert_eq!(commands.len(), 2);
+        assert!(commands.iter().all(|c| c.command_name.contains("set_")));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_list_commands_multiple_filters() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        let cmd1 = Command {
+            id: 0,
+            device_id: "device_a".to_string(),
+            metric_id: "temperature".to_string(),
+            command_name: "set_mode".to_string(),
+            parameters: serde_json::json!({}),
+            enqueued_at: chrono::Utc::now(),
+            sent_at: None,
+            confirmed_at: None,
+            status: CommandStatus::Pending,
+            error_message: None,
+            command_hash: "hash_1".to_string(),
+            chirpstack_result_id: None,
+        };
+
+        let cmd2 = Command {
+            id: 0,
+            device_id: "device_a".to_string(),
+            metric_id: "humidity".to_string(),
+            command_name: "set_mode".to_string(),
+            parameters: serde_json::json!({}),
+            enqueued_at: chrono::Utc::now(),
+            sent_at: None,
+            confirmed_at: None,
+            status: CommandStatus::Sent,
+            error_message: None,
+            command_hash: "hash_2".to_string(),
+            chirpstack_result_id: None,
+        };
+
+        let cmd3 = Command {
+            id: 0,
+            device_id: "device_b".to_string(),
+            metric_id: "temperature".to_string(),
+            command_name: "set_mode".to_string(),
+            parameters: serde_json::json!({}),
+            enqueued_at: chrono::Utc::now(),
+            sent_at: None,
+            confirmed_at: None,
+            status: CommandStatus::Pending,
+            error_message: None,
+            command_hash: "hash_3".to_string(),
+            chirpstack_result_id: None,
+        };
+
+        backend.enqueue_command(cmd1).expect("Should enqueue");
+        backend.enqueue_command(cmd2).expect("Should enqueue");
+        backend.enqueue_command(cmd3).expect("Should enqueue");
+
+        let filter = CommandFilter {
+            device_id: Some("device_a".to_string()),
+            status: Some(CommandStatus::Pending),
+            command_name_contains: None,
+            older_than_days: None,
+        };
+
+        let commands = backend.list_commands(&filter).expect("Should list commands");
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].device_id, "device_a");
+        assert_eq!(commands[0].status, CommandStatus::Pending);
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_get_queue_depth_empty() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        let depth = backend.get_queue_depth().expect("Should get depth");
+        assert_eq!(depth, 0);
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_get_queue_depth_pending_only() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        for i in 1..=5 {
+            let status = if i > 3 { CommandStatus::Sent } else { CommandStatus::Pending };
+            let cmd = Command {
+                id: 0,
+                device_id: format!("device_{}", i),
+                metric_id: "temperature".to_string(),
+                command_name: "cmd".to_string(),
+                parameters: serde_json::json!({}),
+                enqueued_at: chrono::Utc::now(),
+                sent_at: None,
+                confirmed_at: None,
+                status,
+                error_message: None,
+                command_hash: format!("hash_{}", i),
+                chirpstack_result_id: None,
+            };
+            backend.enqueue_command(cmd).expect("Should enqueue");
+        }
+
+        let depth = backend.get_queue_depth().expect("Should get depth");
+        assert_eq!(depth, 3, "Should count only pending commands");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_enqueue_command_persists() {
+        let path = temp_backend_path();
+        {
+            let backend = SqliteBackend::new(&path).expect("Should create backend");
+            let cmd = Command {
+                id: 0,
+                device_id: "device_123".to_string(),
+                metric_id: "temperature".to_string(),
+                command_name: "persist_test".to_string(),
+                parameters: serde_json::json!({"value": 42}),
+                enqueued_at: chrono::Utc::now(),
+                sent_at: None,
+                confirmed_at: None,
+                status: CommandStatus::Pending,
+                error_message: None,
+                command_hash: "persist_hash".to_string(),
+                chirpstack_result_id: None,
+            };
+            backend.enqueue_command(cmd).expect("Should enqueue");
+        }
+
+        // Reopen and verify command persists
+        let backend = SqliteBackend::new(&path).expect("Should reopen");
+        let filter = CommandFilter {
+            device_id: Some("device_123".to_string()),
+            status: None,
+            command_name_contains: None,
+            older_than_days: None,
+        };
+
+        let commands = backend.list_commands(&filter).expect("Should list");
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].command_name, "persist_test");
 
         let _ = fs::remove_file(&path);
     }

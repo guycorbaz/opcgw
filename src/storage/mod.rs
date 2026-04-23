@@ -56,7 +56,7 @@ pub mod sqlite;
 pub mod schema;
 pub mod pool;
 
-pub use types::{ChirpstackStatus, CommandStatus, DeviceCommand, MetricType, MetricValue, MAX_LORA_PAYLOAD_SIZE};
+pub use types::{ChirpstackStatus, Command, CommandFilter, CommandStatus, DeviceCommand, MetricType, MetricValue, MAX_LORA_PAYLOAD_SIZE};
 pub use sqlite::SqliteBackend;
 pub use pool::ConnectionPool;
 
@@ -261,11 +261,13 @@ pub trait StorageBackend: Send + Sync {
     ///
     /// Called after a command has been delivered or processing has failed.
     /// The command remains in storage for audit/historical purposes.
+    /// Supports error_message for Failed status tracking.
     ///
     /// # Arguments
     ///
     /// * `command_id` - The unique identifier of the command
     /// * `status` - The new command status
+    /// * `error_message` - Optional error description if status is Failed
     ///
     /// # Returns
     ///
@@ -277,7 +279,7 @@ pub trait StorageBackend: Send + Sync {
     /// - **Command not found**: The command_id references a non-existent command
     /// - **Storage error**: Database connectivity issues, write failures
     /// - **Invalid state transition**: If the status transition is not allowed
-    fn update_command_status(&self, command_id: u64, status: CommandStatus) -> Result<(), OpcGwError>;
+    fn update_command_status(&self, command_id: u64, status: CommandStatus, error_message: Option<String>) -> Result<(), OpcGwError>;
 
     // ===== Metric Persistence Operations =====
 
@@ -418,6 +420,61 @@ pub trait StorageBackend: Send + Sync {
     /// - Returns 0 if no rows meet the deletion criteria
     /// - Reads retention_days fresh from retention_config at each call (never cached)
     fn prune_metric_history(&self) -> Result<u32, OpcGwError>;
+
+    // ===== High-Level Command Queue Operations (Story 3-1) =====
+
+    /// Enqueues a command for delivery to a device.
+    ///
+    /// Adds a new command to the persistent FIFO queue with status=Pending.
+    /// The backend assigns a unique command ID and returns it.
+    /// Deduplication is enforced via command_hash to prevent requeuing identical commands.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The command to enqueue (id should be 0, backend assigns actual id)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(u64)` - The assigned command ID
+    /// * `Err(OpcGwError)` - If enqueue fails (queue full, duplicate, database error)
+    fn enqueue_command(&self, command: Command) -> Result<u64, OpcGwError>;
+
+    /// Dequeues the next pending command in FIFO order.
+    ///
+    /// Returns the oldest pending command (by creation timestamp/ROWID).
+    /// Does NOT remove it from storage (for audit trail), but marks status as Sent.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(Command))` - The next pending command
+    /// * `Ok(None)` - If queue is empty (no pending commands)
+    /// * `Err(OpcGwError)` - If database error occurs
+    fn dequeue_command(&self) -> Result<Option<Command>, OpcGwError>;
+
+    /// Lists commands matching filter criteria.
+    ///
+    /// Supports filtering by device_id, status, command_name (substring), or age.
+    /// Returns results in FIFO order (by creation timestamp).
+    ///
+    /// # Arguments
+    ///
+    /// * `filter` - CommandFilter with optional criteria
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<Command>)` - Matching commands (may be empty)
+    /// * `Err(OpcGwError)` - If database error occurs
+    fn list_commands(&self, filter: &CommandFilter) -> Result<Vec<Command>, OpcGwError>;
+
+    /// Returns the number of pending commands in the queue.
+    ///
+    /// Used for operational visibility and capacity monitoring.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(usize)` - Count of pending commands
+    /// * `Err(OpcGwError)` - If database error occurs
+    fn get_queue_depth(&self) -> Result<usize, OpcGwError>;
 }
 
 

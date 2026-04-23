@@ -51,7 +51,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
     debug!(current_version, "Current schema version read");
 
     // Latest available schema version
-    const LATEST_VERSION: u32 = 1;
+    const LATEST_VERSION: u32 = 3;
 
     // Apply migrations in order
     if current_version < 1 {
@@ -65,15 +65,83 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
             })?;
 
         // Update schema version
-        conn.pragma_update(None, "user_version", &LATEST_VERSION.to_string())
+        conn.pragma_update(None, "user_version", &1u32.to_string())
             .map_err(|e| {
                 OpcGwError::Database(format!(
-                    "Failed to set schema version to {}: {}",
-                    LATEST_VERSION, e
+                    "Failed to set schema version to 1: {}",
+                    e
                 ))
             })?;
 
-        info!(version = LATEST_VERSION, "Applied migration v001_initial");
+        info!(version = 1, "Applied migration v001_initial");
+    }
+
+    if current_version < 2 {
+        debug!("Applying migration v002_add_command_fields");
+
+        // List of columns to add to command_queue table
+        let columns_to_add = vec![
+            ("command_name", "TEXT"),
+            ("parameters", "TEXT"),
+            ("enqueued_at", "TEXT"),
+            ("sent_at", "TEXT"),
+            ("confirmed_at", "TEXT"),
+            ("command_hash", "TEXT"),
+            ("chirpstack_result_id", "TEXT"),
+        ];
+
+        // Add columns to command_queue table, skipping if they already exist
+        for (col_name, col_type) in columns_to_add {
+            let sql = format!("ALTER TABLE command_queue ADD COLUMN {} {}", col_name, col_type);
+            match conn.execute(&sql, []) {
+                Ok(_) => debug!("Added column {}", col_name),
+                Err(e) if e.to_string().contains("duplicate column name") => {
+                    debug!("Column {} already exists, skipping", col_name);
+                }
+                Err(e) => {
+                    return Err(OpcGwError::Database(format!(
+                        "Failed to add column {} to command_queue: {}",
+                        col_name, e
+                    )));
+                }
+            }
+        }
+
+        conn.pragma_update(None, "user_version", &2u32.to_string())
+            .map_err(|e| {
+                OpcGwError::Database(format!(
+                    "Failed to set schema version to 2: {}",
+                    e
+                ))
+            })?;
+
+        info!(version = 2, "Applied migration v002_add_command_fields");
+    }
+
+    if current_version < 3 {
+        debug!("Applying migration v003_make_payload_optional");
+
+        // Read and execute the v003 migration SQL
+        // NOTE: This file must exist at compile time (migrations/v003_make_payload_optional.sql)
+        // If missing, the build will fail with file not found error
+        let v003_sql = include_str!("../../migrations/v003_make_payload_optional.sql");
+        conn.execute_batch(v003_sql)
+            .map_err(|e| {
+                OpcGwError::Database(format!(
+                    "Failed to execute migration v003_make_payload_optional: {}",
+                    e
+                ))
+            })?;
+
+        conn.pragma_update(None, "user_version", &3u32.to_string())
+            .map_err(|e| {
+                OpcGwError::Database(format!(
+                    "Failed to set schema version to 3: {}",
+                    e
+                ))
+            })?;
+
+        info!(version = 3, "Applied migration v003_make_payload_optional");
     }
 
     // Verify final version
@@ -116,11 +184,11 @@ mod tests {
         let result = run_migrations(&conn);
         assert!(result.is_ok(), "Migration on fresh DB should succeed");
 
-        // Verify version was set
+        // Verify version was set to the latest (3)
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read version");
-        assert_eq!(version, 1, "Schema version should be 1");
+        assert_eq!(version, 3, "Schema version should be 3 (latest)");
 
         // Verify tables were created (excluding sqlite_sequence which is created automatically for AUTOINCREMENT)
         let table_count: i32 = conn
@@ -149,7 +217,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read version");
-        assert_eq!(version, 1, "Version should still be 1");
+        assert_eq!(version, 3, "Version should still be 3 (latest)");
 
         // Cleanup
         let _ = fs::remove_file(&path);
