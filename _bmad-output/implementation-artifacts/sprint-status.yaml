@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-02
-last_updated: "2026-04-23 (Story 3-3: Implementation started)"
+last_updated: "2026-04-23 (Story 3-3: Complete - Merged to main PR #80)"
 project: opcgw
 project_key: NOKEY
 tracking_system: file-system
@@ -86,7 +86,7 @@ development_status:
   epic-3: in-progress
   3-1-sqlite-backed-fifo-command-queue: done
   3-2-command-parameter-validation: done
-  3-3-command-delivery-status-reporting: review
+  3-3-command-delivery-status-reporting: done
   epic-3-retrospective: optional
 
   # Epic 4: Scalable Data Collection (Phase A)
