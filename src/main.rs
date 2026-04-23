@@ -19,6 +19,7 @@
 //! for customization. Logging is configured via log4rs.
 
 mod chirpstack;
+mod command_validation;
 mod config;
 mod opc_ua;
 mod storage;

@@ -29,6 +29,7 @@
 use rusqlite::{Connection, params, OptionalExtension};
 use crate::utils::OpcGwError;
 use crate::storage::{ChirpstackStatus, Command, CommandFilter, CommandStatus, DeviceCommand, MetricType, ConnectionPool, MetricValue};
+use crate::command_validation::CommandValidator;
 use chrono::{DateTime, Utc};
 use std::path::Path;
 use std::sync::Arc;
@@ -68,6 +69,7 @@ fn format_rfc3339(dt: &DateTime<Utc>) -> String {
 /// ```
 pub struct SqliteBackend {
     pool: Arc<ConnectionPool>,
+    validator: Option<Arc<CommandValidator>>,
 }
 
 impl SqliteBackend {
@@ -76,6 +78,7 @@ impl SqliteBackend {
         match status {
             CommandStatus::Pending => "Pending",
             CommandStatus::Sent => "Sent",
+            CommandStatus::Confirmed => "Confirmed",
             CommandStatus::Failed => "Failed",
         }
     }
@@ -84,6 +87,7 @@ impl SqliteBackend {
     fn status_from_string(s: &str) -> CommandStatus {
         match s {
             "Sent" => CommandStatus::Sent,
+            "Confirmed" => CommandStatus::Confirmed,
             "Failed" => CommandStatus::Failed,
             _ => CommandStatus::Pending,
         }
@@ -135,7 +139,42 @@ impl SqliteBackend {
             "SqliteBackend initialized with per-task connection pool"
         );
 
-        Ok(SqliteBackend { pool })
+        Ok(SqliteBackend { pool, validator: None })
+    }
+
+    /// Create a new SqliteBackend with validator support for command parameter validation.
+    ///
+    /// This method creates a backend with optional command validator for Story 3-2.
+    ///
+    /// # Arguments
+    /// * `pool` - Arc-wrapped connection pool
+    /// * `validator` - Optional command validator for parameter validation
+    ///
+    /// # Returns
+    /// * `Ok(SqliteBackend)` - Successfully initialized backend
+    pub fn with_pool_and_validator(
+        pool: Arc<ConnectionPool>,
+        validator: Option<Arc<CommandValidator>>,
+    ) -> Result<Self, OpcGwError> {
+        // Initialize schema on first connection
+        let conn_guard = pool.checkout(Duration::from_secs(5))?;
+        schema::run_migrations(&*conn_guard)?;
+        drop(conn_guard);
+
+        let version = {
+            let conn_guard = pool.checkout(Duration::from_secs(5))?;
+            let version: i32 = conn_guard
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap_or(0);
+            version
+        };
+
+        info!(
+            version = version,
+            "SqliteBackend initialized with command validator"
+        );
+
+        Ok(SqliteBackend { pool, validator })
     }
 
     /// Legacy: Create a new SqliteBackend with direct path (initializes database).
@@ -1117,11 +1156,37 @@ impl crate::storage::StorageBackend for SqliteBackend {
             return Err(OpcGwError::Storage("Command hash cannot be empty".to_string()));
         }
 
+        // Validate command parameters if validator is configured (Story 3-2)
+        if let Some(validator) = &self.validator {
+            validator.validate_command_parameters(
+                &command.device_id,
+                &command.command_name,
+                &command.parameters,
+            )?;
+        } else {
+            tracing::warn!("Command validator not configured; skipping parameter validation");
+        }
+
         let mut conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, device_id = %command.device_id, "Pool checkout timeout for enqueue_command");
                 e
             })?;
+
+        // Check for duplicate command (deduplication on pending commands)
+        let exists: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM command_queue WHERE command_hash = ?1 AND status = 'Pending'",
+            params![&command.command_hash],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+        if exists {
+            return Err(OpcGwError::Storage(
+                format!("Duplicate command already queued: {} for device {}",
+                        command.command_name, command.device_id)
+            ));
+        }
 
         let now = Utc::now();
         let now_rfc3339 = format_rfc3339(&now);
@@ -1183,10 +1248,10 @@ impl crate::storage::StorageBackend for SqliteBackend {
                     metric_id: String::new(), // Will be populated from config if needed
                     command_name: row.get(2)?,
                     parameters: serde_json::from_str(&row.get::<_, String>(3)?)
-                        .unwrap_or_else(|e| {
-                            warn!("Failed to parse command parameters: {}", e);
-                            serde_json::json!({})
-                        }),
+                        .map_err(|e| {
+                            error!("Corrupted command parameters in database: {}", e);
+                            rusqlite::Error::InvalidParameterName(format!("JSON parse error: {}", e))
+                        })?,
                     enqueued_at: row.get::<_, Option<String>>(5)?
                         .and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc)))
                         .unwrap_or_else(|| {
@@ -1325,6 +1390,154 @@ impl crate::storage::StorageBackend for SqliteBackend {
             })?;
 
         Ok(depth)
+    }
+
+    fn mark_command_sent(&self, command_id: u64, chirpstack_result_id: &str) -> Result<(), OpcGwError> {
+        let mut conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, command_id, "Pool checkout timeout for mark_command_sent");
+                e
+            })?;
+
+        let now = format_rfc3339(&Utc::now());
+
+        conn.execute(
+            "UPDATE command_queue SET status = 'Sent', sent_at = ?, chirpstack_result_id = ?, updated_at = ? WHERE id = ?",
+            params![&now, chirpstack_result_id, &now, command_id as i64],
+        )
+            .map_err(|e| OpcGwError::Database(format!("Failed to mark command as sent: {}", e)))?;
+
+        debug!(command_id, chirpstack_result_id, "Marked command as sent");
+        Ok(())
+    }
+
+    fn mark_command_confirmed(&self, command_id: u64) -> Result<(), OpcGwError> {
+        let mut conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, command_id, "Pool checkout timeout for mark_command_confirmed");
+                e
+            })?;
+
+        let now = format_rfc3339(&Utc::now());
+
+        conn.execute(
+            "UPDATE command_queue SET status = 'Confirmed', confirmed_at = ?, updated_at = ? WHERE id = ?",
+            params![&now, &now, command_id as i64],
+        )
+            .map_err(|e| OpcGwError::Database(format!("Failed to mark command as confirmed: {}", e)))?;
+
+        debug!(command_id, "Marked command as confirmed");
+        Ok(())
+    }
+
+    fn mark_command_failed(&self, command_id: u64, error_message: &str) -> Result<(), OpcGwError> {
+        let mut conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, command_id, "Pool checkout timeout for mark_command_failed");
+                e
+            })?;
+
+        let now = format_rfc3339(&Utc::now());
+
+        conn.execute(
+            "UPDATE command_queue SET status = 'Failed', error_message = ?, updated_at = ? WHERE id = ?",
+            params![error_message, &now, command_id as i64],
+        )
+            .map_err(|e| OpcGwError::Database(format!("Failed to mark command as failed: {}", e)))?;
+
+        debug!(command_id, error_message, "Marked command as failed");
+        Ok(())
+    }
+
+    fn find_pending_confirmations(&self) -> Result<Vec<Command>, OpcGwError> {
+        let mut conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, "Pool checkout timeout for find_pending_confirmations");
+                e
+            })?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, device_id, command_name, parameters, status, enqueued_at, sent_at, confirmed_at, \
+             error_message, command_hash, chirpstack_result_id FROM command_queue \
+             WHERE status = 'Sent' AND confirmed_at IS NULL \
+             ORDER BY enqueued_at ASC"
+        )
+            .map_err(|e| OpcGwError::Database(format!("Failed to prepare statement: {}", e)))?;
+
+        let commands = stmt.query_map([], |row| {
+            Ok(Command {
+                id: row.get::<_, i64>(0)? as u64,
+                device_id: row.get(1)?,
+                metric_id: String::new(),
+                command_name: row.get(2)?,
+                parameters: serde_json::from_str(&row.get::<_, String>(3)?)
+                    .unwrap_or_else(|e| {
+                        warn!("Failed to parse command parameters: {}", e);
+                        serde_json::json!({})
+                    }),
+                enqueued_at: row.get::<_, Option<String>>(5)?
+                    .and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc)))
+                    .unwrap_or_else(|| Utc::now()),
+                sent_at: row.get::<_, Option<String>>(6)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
+                confirmed_at: row.get::<_, Option<String>>(7)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
+                status: Self::status_from_string(&row.get::<_, String>(4)?),
+                error_message: row.get(8)?,
+                command_hash: row.get(9)?,
+                chirpstack_result_id: row.get(10)?,
+            })
+        })
+            .map_err(|e| OpcGwError::Database(format!("Failed to query pending confirmations: {}", e)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| OpcGwError::Database(format!("Failed to collect commands: {}", e)))?;
+
+        debug!(count = commands.len(), "Found pending confirmations");
+        Ok(commands)
+    }
+
+    fn find_timed_out_commands(&self, ttl_secs: u32) -> Result<Vec<Command>, OpcGwError> {
+        let mut conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, ttl_secs, "Pool checkout timeout for find_timed_out_commands");
+                e
+            })?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, device_id, command_name, parameters, status, enqueued_at, sent_at, confirmed_at, \
+             error_message, command_hash, chirpstack_result_id FROM command_queue \
+             WHERE status = 'Sent' AND sent_at IS NOT NULL \
+             AND datetime(sent_at) < datetime('now', '-' || ? || ' seconds') \
+             ORDER BY enqueued_at ASC"
+        )
+            .map_err(|e| OpcGwError::Database(format!("Failed to prepare statement: {}", e)))?;
+
+        let commands = stmt.query_map(params![ttl_secs], |row| {
+            Ok(Command {
+                id: row.get::<_, i64>(0)? as u64,
+                device_id: row.get(1)?,
+                metric_id: String::new(),
+                command_name: row.get(2)?,
+                parameters: serde_json::from_str(&row.get::<_, String>(3)?)
+                    .unwrap_or_else(|e| {
+                        warn!("Failed to parse command parameters: {}", e);
+                        serde_json::json!({})
+                    }),
+                enqueued_at: row.get::<_, Option<String>>(5)?
+                    .and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc)))
+                    .unwrap_or_else(|| Utc::now()),
+                sent_at: row.get::<_, Option<String>>(6)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
+                confirmed_at: row.get::<_, Option<String>>(7)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
+                status: Self::status_from_string(&row.get::<_, String>(4)?),
+                error_message: row.get(8)?,
+                command_hash: row.get(9)?,
+                chirpstack_result_id: row.get(10)?,
+            })
+        })
+            .map_err(|e| OpcGwError::Database(format!("Failed to query timed out commands: {}", e)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| OpcGwError::Database(format!("Failed to collect commands: {}", e)))?;
+
+        debug!(count = commands.len(), ttl_secs, "Found timed out commands");
+        Ok(commands)
     }
 }
 

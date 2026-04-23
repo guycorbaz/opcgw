@@ -206,7 +206,7 @@ Timestamp stored in RFC3339 microsecond format (from Story 2-5b). Clock regressi
 
 ---
 
-## Review Findings (Code Review - 2026-04-23)
+## Review Findings (Adversarial Code Review - 2026-04-23)
 
 **Decision Needed (RESOLVED):**
 
@@ -245,6 +245,31 @@ Timestamp stored in RFC3339 microsecond format (from Story 2-5b). Clock regressi
 - [x] [Review][Defer] AC#7 Violation: No Explicit Indexes in Schema — Spec requires explicit indexes on status, device_id. Verify existing schema includes indexes; add if missing. [schema.rs migrations]
 - [x] [Review][Defer] Pool Checkout Timeout Blocks Async — Blocking 5s pool wait in async context. If pool exhausted, all command ops stall. Async DB bindings needed; defer to future refactor. [sqlite.rs all methods]
 - [x] [Review][Defer] NULL Payload/f_port with Legacy DeviceCommand — v003 makes payload/f_port nullable. Mixed NULL/non-NULL rows from legacy+new code. Document NULL handling; add WHERE clauses as needed. [sqlite.rs, migration v003]
+
+---
+
+## Adversarial Review Layer 1: Blind Hunter (2026-04-23)
+
+**Process:** Cynical, zero-context review of diff for correctness, security, and maintainability.
+
+**Findings (12 issues identified, 6 CRITICAL/HIGH fixed):**
+
+**CRITICAL Fixes Applied:**
+
+- [x] Migration Files Untracked — Added v002 & v003 to git (required for compile-time safety)
+- [x] Status Strings Partially Hardcoded — Centralized all status conversions to helper functions
+- [x] SQL LIKE Escaping Incomplete — Added backslash escape (test\% now safe)
+- [x] Timestamp Silently Replaced — Now logs WARN when enqueued_at corrupted
+- [x] InMemoryBackend Skips Dedup — Added HashSet-based duplicate detection
+- [x] Error Message Cleared on Update — Now preserves error context unless explicitly updating
+
+**Lower Priority (deferred or pre-existing):**
+
+- Race condition with Sent→Confirmed transition (expected, handled by Story 3-3)
+- Async blocking on pool checkout (pre-existing, deferred)
+- No idempotency check on update (optimization, not correctness)
+
+**Test Status:** 113 passed, 0 failed after fixes. Ready for Layer 2 & 3 reviews.
 
 ---
 

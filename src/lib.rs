@@ -6,6 +6,7 @@
 //! This module re-exports the main components for use in integration tests.
 
 pub mod chirpstack;
+pub mod command_validation;
 pub mod config;
 pub mod opc_ua;
 pub mod storage;

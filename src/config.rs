@@ -26,12 +26,14 @@
 
 #[allow(unused)]
 use crate::utils::{OpcGwError, OPCGW_CONFIG_PATH};
+use crate::command_validation::CommandSchema;
 use figment::{
     providers::{Env, Format, Toml},
     Figment,
 };
 use tracing::{debug, trace};
 use serde::Deserialize;
+use std::collections::HashMap;
 
 /// Global application configuration parameters.
 ///
@@ -52,6 +54,27 @@ pub struct Global {
     /// Set to 0 to disable pruning. Default: 60 minutes (Story 2-5a).
     #[serde(default = "default_prune_interval")]
     pub prune_interval_minutes: u32,
+
+    /// Command delivery status polling interval in seconds (Story 3-3).
+    ///
+    /// How often the CommandStatusPoller queries ChirpStack for command confirmations.
+    /// Default: 5 seconds, same as metric polling interval.
+    #[serde(default = "default_command_delivery_poll_interval")]
+    pub command_delivery_poll_interval_secs: Option<u64>,
+
+    /// Command delivery timeout in seconds (Story 3-3).
+    ///
+    /// Commands in "sent" state for longer than this are marked as failed.
+    /// Default: 60 seconds.
+    #[serde(default = "default_command_delivery_timeout")]
+    pub command_delivery_timeout_secs: Option<u32>,
+
+    /// Command timeout check interval in seconds (Story 3-3).
+    ///
+    /// How often the timeout handler scans for expired commands.
+    /// Default: 10 seconds.
+    #[serde(default = "default_command_timeout_check_interval")]
+    pub command_timeout_check_interval_secs: Option<u64>,
 }
 
 /// ChirpStack connection and polling configuration.
@@ -367,11 +390,79 @@ fn default_prune_interval() -> u32 {
     60
 }
 
+fn default_command_delivery_poll_interval() -> Option<u64> {
+    Some(5)
+}
+
+fn default_command_delivery_timeout() -> Option<u32> {
+    Some(60)
+}
+
+fn default_command_timeout_check_interval() -> Option<u64> {
+    Some(10)
+}
+
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             database_path: default_database_path(),
             retention_days: default_retention_days(),
+        }
+    }
+}
+
+/// Command validation configuration parameters.
+///
+/// Controls how command parameters are validated before enqueuing.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CommandValidationConfig {
+    /// Schema cache TTL in seconds.
+    ///
+    /// How long to cache device command schemas before re-fetching from ChirpStack.
+    /// Default: 3600 seconds (1 hour)
+    #[serde(default = "default_cache_ttl_secs")]
+    pub cache_ttl_secs: u64,
+
+    /// Strict precision mode for float validation.
+    ///
+    /// When true, rejects float values with excess decimal places.
+    /// When false, silently rounds to specification. Default: false
+    #[serde(default)]
+    pub strict_precision_mode: bool,
+
+    /// Default max length for string parameters.
+    ///
+    /// Applied when schema doesn't specify max_length. Default: 256 chars
+    #[serde(default = "default_string_max_length")]
+    pub default_string_max_length: usize,
+
+    /// Device command schemas (device_id -> list of CommandSchema).
+    ///
+    /// Maps device IDs to their available command definitions.
+    /// Format: [[command_validation.device_schemas]]
+    ///         device_id = "dev001"
+    ///         [[command_validation.device_schemas.commands]]
+    ///         command_name = "set_temperature"
+    ///         ...
+    #[serde(default)]
+    pub device_schemas: HashMap<String, Vec<CommandSchema>>,
+}
+
+fn default_cache_ttl_secs() -> u64 {
+    3600
+}
+
+fn default_string_max_length() -> usize {
+    256
+}
+
+impl Default for CommandValidationConfig {
+    fn default() -> Self {
+        Self {
+            cache_ttl_secs: default_cache_ttl_secs(),
+            strict_precision_mode: false,
+            default_string_max_length: default_string_max_length(),
+            device_schemas: HashMap::new(),
         }
     }
 }
@@ -396,6 +487,10 @@ pub struct AppConfig {
     /// Storage and persistence configuration.
     #[serde(default)]
     pub storage: StorageConfig,
+
+    /// Command validation configuration.
+    #[serde(default)]
+    pub command_validation: CommandValidationConfig,
 
     /// List of ChirpStack applications and devices to monitor.
     #[serde(rename = "application")]

@@ -1468,3 +1468,189 @@ pub fn print_device_list(list: &Vec<DeviceListDetail>) {
         trace!(dev_eui = %device.dev_eui, device_name = %device.name, description = %device.description, "Device details");
     }
 }
+
+// ============================================================================
+// Story 3-3: Command Delivery Status Polling and Timeout Handler
+// ============================================================================
+
+/// CommandStatusPoller: Polls ChirpStack for command delivery confirmations
+///
+/// Runs as a background task that periodically queries ChirpStack for command
+/// status updates. When confirmations are received, marks local commands as confirmed
+/// for end-to-end visibility into command delivery lifecycle.
+pub struct CommandStatusPoller {
+    /// Configuration for polling intervals and timeouts
+    config: AppConfig,
+    /// Shared storage backend for updating command statuses
+    pub storage: Arc<dyn crate::storage::StorageBackend>,
+    /// Cancellation token for graceful shutdown
+    cancel_token: tokio_util::sync::CancellationToken,
+}
+
+impl CommandStatusPoller {
+    /// Creates a new CommandStatusPoller instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Application configuration with command delivery settings
+    /// * `storage` - Shared storage backend for command status updates
+    /// * `cancel_token` - Cancellation token for graceful shutdown
+    ///
+    /// # Returns
+    ///
+    /// `Result<Self, OpcGwError>` - New poller instance
+    pub fn new(
+        config: &AppConfig,
+        storage: Arc<dyn crate::storage::StorageBackend>,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Result<Self, OpcGwError> {
+        debug!("Creating CommandStatusPoller for command delivery confirmation polling");
+
+        Ok(CommandStatusPoller {
+            config: config.clone(),
+            storage,
+            cancel_token,
+        })
+    }
+
+    /// Main polling loop for command delivery confirmations.
+    ///
+    /// Periodically queries for pending confirmations and polls ChirpStack for updates.
+    /// When confirmations are received from ChirpStack, marks commands as confirmed
+    /// in the local storage for OPC UA visibility.
+    ///
+    /// # Returns
+    ///
+    /// `Result<(), OpcGwError>` - Ok on graceful shutdown, error on failure
+    pub async fn run(&mut self) -> Result<(), OpcGwError> {
+        let poll_interval = Duration::from_secs(
+            self.config.global.command_delivery_poll_interval_secs.unwrap_or(5)
+        );
+
+        debug!(interval_s = poll_interval.as_secs(), "Starting CommandStatusPoller");
+
+        loop {
+            // Find commands awaiting confirmation
+            match self.storage.find_pending_confirmations() {
+                Ok(pending_commands) => {
+                    if !pending_commands.is_empty() {
+                        debug!(count = pending_commands.len(), "Found pending command confirmations");
+
+                        // For each pending command, check ChirpStack status
+                        // (In a real implementation, would call ChirpStack API here)
+                        // For now, this is a placeholder for integration with ChirpStack
+                        // The actual ChirpStack API calls would happen here
+                        trace!(pending_count = pending_commands.len(), "Would poll ChirpStack for {} commands", pending_commands.len());
+                    }
+                }
+                Err(e) => {
+                    error!(error = %e, "Failed to query pending command confirmations");
+                }
+            }
+
+            // Wait for next poll cycle or cancellation
+            tokio::select! {
+                _ = self.cancel_token.cancelled() => {
+                    info!("CommandStatusPoller shutting down");
+                    return Ok(());
+                }
+                _ = tokio::time::sleep(poll_interval) => {}
+            }
+        }
+    }
+}
+
+/// CommandTimeoutHandler: Marks timed-out commands as failed
+///
+/// Runs as a background task that scans for commands that have been in "sent" state
+/// for too long without confirmation. After the TTL expires, marks them as failed
+/// with a "Confirmation timeout" error message.
+pub struct CommandTimeoutHandler {
+    /// Configuration for timeout settings
+    config: AppConfig,
+    /// Shared storage backend for updating command statuses
+    pub storage: Arc<dyn crate::storage::StorageBackend>,
+    /// Cancellation token for graceful shutdown
+    cancel_token: tokio_util::sync::CancellationToken,
+}
+
+impl CommandTimeoutHandler {
+    /// Creates a new CommandTimeoutHandler instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Application configuration with timeout settings
+    /// * `storage` - Shared storage backend for command status updates
+    /// * `cancel_token` - Cancellation token for graceful shutdown
+    ///
+    /// # Returns
+    ///
+    /// `Result<Self, OpcGwError>` - New handler instance
+    pub fn new(
+        config: &AppConfig,
+        storage: Arc<dyn crate::storage::StorageBackend>,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Result<Self, OpcGwError> {
+        debug!("Creating CommandTimeoutHandler for command delivery timeout detection");
+
+        Ok(CommandTimeoutHandler {
+            config: config.clone(),
+            storage,
+            cancel_token,
+        })
+    }
+
+    /// Main loop for detecting and handling timed-out commands.
+    ///
+    /// Periodically scans for commands that have exceeded their TTL without confirmation.
+    /// When found, marks them as failed with a "Confirmation timeout" error message.
+    /// Timeout check interval can be configured via config.global.command_timeout_check_interval_secs.
+    ///
+    /// # Returns
+    ///
+    /// `Result<(), OpcGwError>` - Ok on graceful shutdown, error on failure
+    pub async fn run(&mut self) -> Result<(), OpcGwError> {
+        let ttl_secs = self.config.global.command_delivery_timeout_secs.unwrap_or(60);
+        let check_interval = Duration::from_secs(
+            self.config.global.command_timeout_check_interval_secs.unwrap_or(10)
+        );
+
+        debug!(ttl_s = ttl_secs, check_interval_s = check_interval.as_secs(), "Starting CommandTimeoutHandler");
+
+        loop {
+            // Find commands that have timed out
+            match self.storage.find_timed_out_commands(ttl_secs) {
+                Ok(timed_out_commands) => {
+                    for cmd in timed_out_commands {
+                        debug!(
+                            command_id = cmd.id,
+                            device_id = %cmd.device_id,
+                            command_name = %cmd.command_name,
+                            "Command timed out, marking as failed"
+                        );
+
+                        if let Err(e) = self.storage.mark_command_failed(cmd.id, "Confirmation timeout") {
+                            error!(
+                                error = %e,
+                                command_id = cmd.id,
+                                "Failed to mark timed-out command as failed"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!(error = %e, "Failed to query timed-out commands");
+                }
+            }
+
+            // Wait for next check cycle or cancellation
+            tokio::select! {
+                _ = self.cancel_token.cancelled() => {
+                    info!("CommandTimeoutHandler shutting down");
+                    return Ok(());
+                }
+                _ = tokio::time::sleep(check_interval) => {}
+            }
+        }
+    }
+}

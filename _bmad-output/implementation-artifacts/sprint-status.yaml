@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-02
-last_updated: "2026-04-22 (Story 4-1: Poller refactoring - story created, ready-for-dev)"
+last_updated: "2026-04-23 (Story 3-3: Implementation started)"
 project: opcgw
 project_key: NOKEY
 tracking_system: file-system
@@ -85,14 +85,14 @@ development_status:
   # Epic 3: Reliable Command Execution (Phase A)
   epic-3: in-progress
   3-1-sqlite-backed-fifo-command-queue: done
-  3-2-command-parameter-validation: ready-for-dev
-  3-3-command-delivery-status-reporting: ready-for-dev
+  3-2-command-parameter-validation: done
+  3-3-command-delivery-status-reporting: in-progress
   epic-3-retrospective: optional
 
   # Epic 4: Scalable Data Collection (Phase A)
   epic-4: in-progress
   4-1-poller-refactoring-to-sqlite-backend: ready-for-dev
-  4-2-support-all-chirpstack-metric-types: backlog
+  4-2-support-all-chirpstack-metric-types: ready-for-dev
   4-3-api-pagination-for-large-deployments: backlog
   4-4-auto-recovery-from-chirpstack-outages: backlog
   epic-4-retrospective: optional

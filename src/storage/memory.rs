@@ -8,6 +8,7 @@
 
 use crate::storage::types::{ChirpstackStatus, CommandStatus, DeviceCommand, MetricType, MetricValue, Command, CommandFilter};
 use crate::storage::StorageBackend;
+use crate::command_validation::CommandValidator;
 use crate::utils::OpcGwError;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -29,6 +30,8 @@ pub struct InMemoryBackend {
     command_id_counter: Arc<Mutex<u64>>,
     /// ChirpStack server status
     status: Arc<Mutex<ChirpstackStatus>>,
+    /// Optional command validator (Story 3-2)
+    validator: Option<Arc<CommandValidator>>,
 }
 
 impl InMemoryBackend {
@@ -40,6 +43,19 @@ impl InMemoryBackend {
             command_queue: Arc::new(Mutex::new(Vec::new())),
             command_id_counter: Arc::new(Mutex::new(0)),
             status: Arc::new(Mutex::new(ChirpstackStatus::default())),
+            validator: None,
+        }
+    }
+
+    /// Creates a new InMemoryBackend with an optional command validator
+    pub fn with_validator(validator: Option<Arc<CommandValidator>>) -> Self {
+        Self {
+            metrics: Arc::new(Mutex::new(HashMap::new())),
+            commands: Arc::new(Mutex::new(Vec::new())),
+            command_queue: Arc::new(Mutex::new(Vec::new())),
+            command_id_counter: Arc::new(Mutex::new(0)),
+            status: Arc::new(Mutex::new(ChirpstackStatus::default())),
+            validator,
         }
     }
 }
@@ -158,6 +174,17 @@ impl StorageBackend for InMemoryBackend {
     }
 
     fn enqueue_command(&self, mut command: Command) -> Result<u64, OpcGwError> {
+        // Validate command parameters if validator is configured (Story 3-2)
+        if let Some(validator) = &self.validator {
+            validator.validate_command_parameters(
+                &command.device_id,
+                &command.command_name,
+                &command.parameters,
+            )?;
+        } else {
+            tracing::warn!("Command validator not configured; skipping parameter validation");
+        }
+
         // Check for duplicate command (deduplication on pending commands)
         let queue = self.command_queue.lock()
             .map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
@@ -239,6 +266,77 @@ impl StorageBackend for InMemoryBackend {
             .map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
 
         Ok(queue.iter().filter(|cmd| cmd.status == CommandStatus::Pending).count())
+    }
+
+    fn mark_command_sent(&self, command_id: u64, chirpstack_result_id: &str) -> Result<(), OpcGwError> {
+        let mut queue = self.command_queue.lock()
+            .map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
+
+        if let Some(cmd) = queue.iter_mut().find(|c| c.id == command_id) {
+            cmd.status = CommandStatus::Sent;
+            cmd.sent_at = Some(Utc::now());
+            cmd.chirpstack_result_id = Some(chirpstack_result_id.to_string());
+            Ok(())
+        } else {
+            Err(OpcGwError::Storage(format!("Command {} not found", command_id)))
+        }
+    }
+
+    fn mark_command_confirmed(&self, command_id: u64) -> Result<(), OpcGwError> {
+        let mut queue = self.command_queue.lock()
+            .map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
+
+        if let Some(cmd) = queue.iter_mut().find(|c| c.id == command_id) {
+            cmd.status = CommandStatus::Confirmed;
+            cmd.confirmed_at = Some(Utc::now());
+            Ok(())
+        } else {
+            Err(OpcGwError::Storage(format!("Command {} not found", command_id)))
+        }
+    }
+
+    fn mark_command_failed(&self, command_id: u64, error_message: &str) -> Result<(), OpcGwError> {
+        let mut queue = self.command_queue.lock()
+            .map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
+
+        if let Some(cmd) = queue.iter_mut().find(|c| c.id == command_id) {
+            cmd.status = CommandStatus::Failed;
+            cmd.error_message = Some(error_message.to_string());
+            Ok(())
+        } else {
+            Err(OpcGwError::Storage(format!("Command {} not found", command_id)))
+        }
+    }
+
+    fn find_pending_confirmations(&self) -> Result<Vec<Command>, OpcGwError> {
+        let queue = self.command_queue.lock()
+            .map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
+
+        let commands = queue.iter()
+            .filter(|cmd| cmd.status == CommandStatus::Sent && cmd.confirmed_at.is_none())
+            .cloned()
+            .collect();
+
+        Ok(commands)
+    }
+
+    fn find_timed_out_commands(&self, ttl_secs: u32) -> Result<Vec<Command>, OpcGwError> {
+        let queue = self.command_queue.lock()
+            .map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
+
+        let now = Utc::now();
+        let ttl = chrono::Duration::seconds(ttl_secs as i64);
+
+        let commands = queue.iter()
+            .filter(|cmd| {
+                cmd.status == CommandStatus::Sent && cmd.sent_at
+                    .map(|sent| now - sent > ttl)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+
+        Ok(commands)
     }
 }
 

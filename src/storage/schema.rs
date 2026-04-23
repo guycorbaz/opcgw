@@ -16,6 +16,7 @@ use tracing::{debug, info};
 /// Embedded migration SQL files via include_str!()
 /// No runtime file dependency — migrations are compiled into the binary
 const MIGRATION_V001: &str = include_str!("../../migrations/v001_initial.sql");
+const MIGRATION_V004: &str = include_str!("../../migrations/v004_add_command_indexes.sql");
 
 /// Run all pending migrations based on current schema version.
 ///
@@ -51,7 +52,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
     debug!(current_version, "Current schema version read");
 
     // Latest available schema version
-    const LATEST_VERSION: u32 = 3;
+    const LATEST_VERSION: u32 = 4;
 
     // Apply migrations in order
     if current_version < 1 {
@@ -144,6 +145,28 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
         info!(version = 3, "Applied migration v003_make_payload_optional");
     }
 
+    if current_version < 4 {
+        debug!("Applying migration v004_add_command_indexes");
+
+        conn.execute_batch(MIGRATION_V004)
+            .map_err(|e| {
+                OpcGwError::Database(format!(
+                    "Failed to execute migration v004_add_command_indexes: {}",
+                    e
+                ))
+            })?;
+
+        conn.pragma_update(None, "user_version", &4u32.to_string())
+            .map_err(|e| {
+                OpcGwError::Database(format!(
+                    "Failed to set schema version to 4: {}",
+                    e
+                ))
+            })?;
+
+        info!(version = 4, "Applied migration v004_add_command_indexes");
+    }
+
     // Verify final version
     let final_version: u32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -188,7 +211,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read version");
-        assert_eq!(version, 3, "Schema version should be 3 (latest)");
+        assert_eq!(version, 4, "Schema version should be 4 (latest)");
 
         // Verify tables were created (excluding sqlite_sequence which is created automatically for AUTOINCREMENT)
         let table_count: i32 = conn
@@ -217,7 +240,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read version");
-        assert_eq!(version, 3, "Version should still be 3 (latest)");
+        assert_eq!(version, 4, "Version should still be 4 (latest)");
 
         // Cleanup
         let _ = fs::remove_file(&path);

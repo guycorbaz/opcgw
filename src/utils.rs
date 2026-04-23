@@ -301,6 +301,21 @@ pub enum OpcGwError {
     /// - Database corruption
     #[error("Database error: {0}")]
     Database(String),
+
+    /// Command parameter validation errors.
+    ///
+    /// This variant is used for errors during command parameter validation:
+    /// - Parameter type mismatches
+    /// - Out-of-range values
+    /// - Missing required parameters
+    /// - Invalid enum values
+    /// - Missing device schema
+    #[error("Command validation error for device '{device_id}', command '{command_name}': {reason}")]
+    CommandValidation {
+        device_id: String,
+        command_name: String,
+        reason: String,
+    },
 }
 
 // =============================================================================

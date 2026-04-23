@@ -475,6 +475,81 @@ pub trait StorageBackend: Send + Sync {
     /// * `Ok(usize)` - Count of pending commands
     /// * `Err(OpcGwError)` - If database error occurs
     fn get_queue_depth(&self) -> Result<usize, OpcGwError>;
+
+    // ===== Command Delivery Status Operations (Story 3-3) =====
+
+    /// Marks a command as sent with ChirpStack result ID for tracking.
+    ///
+    /// Updates a pending command to "Sent" status and records the ChirpStack result ID
+    /// for mapping delivery confirmations back to local commands. Sets sent_at timestamp.
+    ///
+    /// # Arguments
+    ///
+    /// * `command_id` - The unique identifier of the command
+    /// * `chirpstack_result_id` - The result ID from ChirpStack API response (for confirmation mapping)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the status was successfully updated
+    /// * `Err(OpcGwError)` - If command not found or database error occurs
+    fn mark_command_sent(&self, command_id: u64, chirpstack_result_id: &str) -> Result<(), OpcGwError>;
+
+    /// Marks a command as confirmed by ChirpStack/device.
+    ///
+    /// Updates a sent command to "Confirmed" status and sets confirmed_at timestamp.
+    /// Called by CommandStatusPoller when ChirpStack confirms delivery.
+    ///
+    /// # Arguments
+    ///
+    /// * `command_id` - The unique identifier of the command
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the status was successfully updated
+    /// * `Err(OpcGwError)` - If command not found or database error occurs
+    fn mark_command_confirmed(&self, command_id: u64) -> Result<(), OpcGwError>;
+
+    /// Marks a command as failed with optional error message.
+    ///
+    /// Updates a sent command to "Failed" status with an error message for diagnostics.
+    /// Called by timeout handler or when ChirpStack reports delivery failure.
+    ///
+    /// # Arguments
+    ///
+    /// * `command_id` - The unique identifier of the command
+    /// * `error_message` - Human-readable error description (e.g., "Confirmation timeout")
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the status was successfully updated
+    /// * `Err(OpcGwError)` - If command not found or database error occurs
+    fn mark_command_failed(&self, command_id: u64, error_message: &str) -> Result<(), OpcGwError>;
+
+    /// Finds all sent commands awaiting confirmation from ChirpStack.
+    ///
+    /// Returns commands in "Sent" status that don't yet have confirmed_at timestamps.
+    /// Used by CommandStatusPoller to poll ChirpStack for delivery confirmations.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<Command>)` - All sent commands awaiting confirmation (may be empty)
+    /// * `Err(OpcGwError)` - If database error occurs
+    fn find_pending_confirmations(&self) -> Result<Vec<Command>, OpcGwError>;
+
+    /// Finds all sent commands that have timed out awaiting confirmation.
+    ///
+    /// Returns commands in "Sent" status where sent_at is older than ttl_secs.
+    /// Used by timeout handler to mark expired commands as failed.
+    ///
+    /// # Arguments
+    ///
+    /// * `ttl_secs` - Time-to-live in seconds (e.g., 60 for 60-second timeout)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<Command>)` - All timed-out commands (may be empty)
+    /// * `Err(OpcGwError)` - If database error occurs
+    fn find_timed_out_commands(&self, ttl_secs: u32) -> Result<Vec<Command>, OpcGwError>;
 }
 
 

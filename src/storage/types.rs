@@ -68,12 +68,15 @@ pub struct MetricValue {
 /// Command status lifecycle states.
 ///
 /// Represents the different states a device command can be in during its lifecycle.
+/// State machine: Pending → Sent → Confirmed or Failed (terminal states)
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum CommandStatus {
     /// Command is waiting to be sent
     Pending,
     /// Command has been sent to ChirpStack
     Sent,
+    /// Command delivery confirmed by ChirpStack/device
+    Confirmed,
     /// Command delivery failed
     Failed,
 }
@@ -83,6 +86,7 @@ impl fmt::Display for CommandStatus {
         match self {
             CommandStatus::Pending => write!(f, "Pending"),
             CommandStatus::Sent => write!(f, "Sent"),
+            CommandStatus::Confirmed => write!(f, "Confirmed"),
             CommandStatus::Failed => write!(f, "Failed"),
         }
     }
@@ -95,6 +99,7 @@ impl std::str::FromStr for CommandStatus {
         match s.to_lowercase().as_str() {
             "pending" => Ok(CommandStatus::Pending),
             "sent" => Ok(CommandStatus::Sent),
+            "confirmed" => Ok(CommandStatus::Confirmed),
             "failed" => Ok(CommandStatus::Failed),
             _ => Err(format!("Unknown command status: {}", s)),
         }
@@ -255,6 +260,7 @@ mod tests {
     fn test_command_status_display() {
         assert_eq!(CommandStatus::Pending.to_string(), "Pending");
         assert_eq!(CommandStatus::Sent.to_string(), "Sent");
+        assert_eq!(CommandStatus::Confirmed.to_string(), "Confirmed");
         assert_eq!(CommandStatus::Failed.to_string(), "Failed");
     }
 
@@ -265,6 +271,10 @@ mod tests {
             CommandStatus::Pending
         );
         assert_eq!("sent".parse::<CommandStatus>().unwrap(), CommandStatus::Sent);
+        assert_eq!(
+            "confirmed".parse::<CommandStatus>().unwrap(),
+            CommandStatus::Confirmed
+        );
         assert_eq!(
             "failed".parse::<CommandStatus>().unwrap(),
             CommandStatus::Failed
