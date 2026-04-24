@@ -68,7 +68,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
             })?;
 
         // Update schema version
-        conn.pragma_update(None, "user_version", &1u32.to_string())
+        conn.pragma_update(None, "user_version", 1u32.to_string())
             .map_err(|e| {
                 OpcGwError::Database(format!(
                     "Failed to set schema version to 1: {}",
@@ -110,7 +110,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
             }
         }
 
-        conn.pragma_update(None, "user_version", &2u32.to_string())
+        conn.pragma_update(None, "user_version", 2u32.to_string())
             .map_err(|e| {
                 OpcGwError::Database(format!(
                     "Failed to set schema version to 2: {}",
@@ -132,7 +132,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
                 ))
             })?;
 
-        conn.pragma_update(None, "user_version", &3u32.to_string())
+        conn.pragma_update(None, "user_version", 3u32.to_string())
             .map_err(|e| {
                 OpcGwError::Database(format!(
                     "Failed to set schema version to 3: {}",
@@ -154,7 +154,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
                 ))
             })?;
 
-        conn.pragma_update(None, "user_version", &4u32.to_string())
+        conn.pragma_update(None, "user_version", 4u32.to_string())
             .map_err(|e| {
                 OpcGwError::Database(format!(
                     "Failed to set schema version to 4: {}",
@@ -176,7 +176,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
                 ))
             })?;
 
-        conn.pragma_update(None, "user_version", &5u32.to_string())
+        conn.pragma_update(None, "user_version", 5u32.to_string())
             .map_err(|e| {
                 OpcGwError::Database(format!(
                     "Failed to set schema version to 5: {}",

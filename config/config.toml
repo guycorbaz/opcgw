@@ -73,6 +73,13 @@ pki_dir = "./pki"
 user_name = "user1"
 # Default user password
 user_password = "user1"
+# Staleness threshold in seconds for metric status codes (Story 5-2)
+# Metrics older than this threshold return Uncertain status in OPC UA (outside threshold but <24h)
+# Metrics older than 24 hours return Bad status in OPC UA
+# Default: 120 seconds (2x polling frequency at 10s polling interval)
+# Valid range: 1-86400 seconds
+# Can override with OPCGW_OPC_UA_STALE_THRESHOLD_SECONDS environment variable
+stale_threshold_seconds = 120
 
 
 ###########################################################

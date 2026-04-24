@@ -48,3 +48,10 @@
 - **Empty payload allowed in queue_command** [sqlite.rs:318-331] — No explicit constraint against zero-byte LoRaWAN payloads. May be acceptable per spec. Clarify intent with LoRaWAN specialists. Target: Story 3.1 (Command execution).
 
 - **Config path validation incomplete** [config.rs] — StorageConfig struct created with database_path field, but full validation logic in config.rs not visible in diff. Verify that path validation is performed at config load time, not just at database open time. Target: Story 2-2c or concurrent review.
+
+## Deferred from: code review of Story 5-1 (2026-04-24)
+
+- **Trait object vtable indirection cost vs <100ms latency goal** — Converting SqliteBackend to Arc<dyn StorageBackend> adds vtable overhead. This is pre-existing architecture choice (all subsystems use trait objects), not introduced by this story. Monitor in production to verify <100ms latency is maintained. If latency concerns arise, consider concrete Arc<SqliteBackend> for OPC UA reads.
+
+- **Pool cloning efficiency (double wrapping in Arc)** — SqliteBackend::with_pool(pool.clone()) then wrapped in Arc::new(). Double wrapping may be inefficient. This is pre-existing pattern (not introduced by this story). Candidate for refactoring: evaluate whether single Arc::clone() suffices or if separate pool instances are needed per subsystem.
+

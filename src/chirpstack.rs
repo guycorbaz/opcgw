@@ -874,7 +874,7 @@ impl ChirpstackPoller {
         let now_ts = SystemTime::now();
 
         // 1. Classify metric kind early
-        let kind = classify_metric_kind(metric.kind as i32);
+        let kind = classify_metric_kind(metric.kind);
 
         // Validate datasets and data arrays exist with at least one element
         if metric.datasets.is_empty() {

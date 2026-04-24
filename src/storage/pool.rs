@@ -167,7 +167,7 @@ impl ConnectionPool {
 
                 // Try REINDEX first
                 match Connection::open(path) {
-                    Ok(mut repair_conn) => {
+                    Ok(repair_conn) => {
                         if let Err(e) = repair_conn.execute_batch("REINDEX") {
                             tracing::warn!(
                                 database = path,

@@ -146,7 +146,7 @@ pub struct DeviceCommand {
 impl DeviceCommand {
     /// Validates that f_port is in the valid LoRaWAN range (1-223).
     pub fn validate_f_port(f_port: u8) -> bool {
-        f_port >= 1 && f_port <= 223
+        (1..=223).contains(&f_port)
     }
 
     /// Validates that payload size is within LoRaWAN limits.

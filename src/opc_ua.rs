@@ -21,6 +21,10 @@ use opcua::server::{
 };
 use opcua::types::{DataValue, DateTime, NodeId, Variant};
 
+// Constants for staleness detection (Story 5-2)
+const DEFAULT_STALE_THRESHOLD_SECS: u64 = 120;
+const STATUS_CODE_BAD_THRESHOLD_SECS: u64 = 86400; // 24 hours
+
 /// Structure for storing OpcUa server parameters
 pub struct OpcUa {
     /// Configuration for the OPC UA server
@@ -588,6 +592,7 @@ impl OpcUa {
                     let storage_clone = self.storage.clone();
                     let device_id = device.device_id.clone();
                     let chirpstack_metric_name = read_metric.chirpstack_metric_name.clone();
+                    let stale_threshold = self.config.opcua.stale_threshold_seconds.unwrap_or(DEFAULT_STALE_THRESHOLD_SECS);
                     manager
                         .inner()
                         .add_read_callback(read_metric_node.clone(), move |_, _, _| {
@@ -595,6 +600,7 @@ impl OpcUa {
                                 &storage_clone,
                                 device_id.clone().to_string(),
                                 chirpstack_metric_name.clone().to_string(),
+                                stale_threshold,
                             )
                         })
                 }
@@ -719,32 +725,38 @@ impl OpcUa {
     ///   - Current source and server timestamps
     /// * `Err(StatusCode)` - Error conditions:
     ///   - `BadDataUnavailable` - Metric not found for the specified device
-    ///   - `BadInternalError` - Storage lock acquisition failed
+    ///   - `BadInternalError` - Storage read failed (SQLite error, transient issue)
     ///
     /// # Error Handling
     ///
     /// - **Missing Metric**: Returns `BadDataUnavailable` when the requested metric doesn't exist
-    /// - **Storage Lock Failure**: Returns `BadInternalError` when unable to access storage
-    /// - All errors are logged with appropriate severity levels
+    /// - **Storage Failure**: Returns `BadInternalError` on SQLite read errors (BUSY, IO, etc.)
+    /// - All errors are logged with device and metric context for debugging
     ///
     /// # Thread Safety
     ///
-    /// This method safely handles concurrent access by acquiring a mutex lock on the
-    /// storage before performing read operations.
+    /// Lock-free access using StorageBackend trait. Queries SQLite directly without
+    /// acquiring mutex locks. Multiple concurrent reads do not block each other.
     ///
     /// # Logging Behavior
     ///
     /// * `trace!` - Method entry with device and metric identification
-    /// * `error!` - Missing metric or storage access failures
+    /// * `error!` - Missing metric or storage access failures (SQLite errors, etc.)
+    ///
+    /// # Errors
+    ///
+    /// Returns `BadDataUnavailable` if metric not found in storage.
+    /// Returns `BadInternalError` if StorageBackend method fails (SQLite read errors, timeouts).
     ///
     /// # Usage Context
     ///
-    /// This method is typically used as a callback function registered with the OPC UA
-    /// node manager for dynamic value resolution when clients read variable nodes.
+    /// This method is called as a callback when OPC UA clients read variable nodes.
+    /// It executes lock-free on each read operation for predictable latency (<100ms).
     fn get_value(
         storage: &Arc<dyn StorageBackend>,
         device_id: String,
         metric_name: String,
+        stale_threshold: u64,
     ) -> Result<DataValue, opcua::types::StatusCode> {
         trace!(
             device_id = %device_id,
@@ -755,12 +767,15 @@ impl OpcUa {
         match storage.get_metric_value(&device_id, &metric_name) {
             Ok(Some(metric_value)) => {
                 // Convert MetricType to OPC UA Variant
-                let variant = Self::convert_metric_to_variant(metric_value);
+                let variant = Self::convert_metric_to_variant(metric_value.clone());
 
-                // Create a DataValue with the variant and current timestamp
+                // Compute status code based on staleness (Story 5-2)
+                let status_code = Self::compute_status_code(&metric_value, stale_threshold);
+
+                // Create a DataValue with the variant and staleness status code
                 let data_value = DataValue {
                     value: Some(variant),
-                    status: Some(opcua::types::StatusCode::Good.bits().into()),
+                    status: Some(status_code.bits().into()),
                     source_timestamp: Some(DateTime::now()),
                     source_picoseconds: None,
                     server_timestamp: Some(DateTime::now()),
@@ -785,24 +800,25 @@ impl OpcUa {
         }
     }
 
-    /// Converts internal metric types to OPC UA Variant types.
+    /// Converts a MetricValue to an OPC UA Variant type.
     ///
-    /// This method performs type conversion from the application's internal `MetricType`
-    /// enumeration to the corresponding OPC UA `Variant` types, ensuring proper data
-    /// representation when exposing metrics through the OPC UA interface.
+    /// Extracts the metric's data type and value, performs type conversion to the
+    /// corresponding OPC UA `Variant` type for exposure through the OPC UA interface.
+    /// The metric's timestamp is preserved in the struct but not embedded in the Variant
+    /// (future enhancement: embed as OPC UA SourceTimestamp).
     ///
     /// # Type Mappings
     ///
-    /// | Internal Type | OPC UA Variant | Notes |
-    /// |---------------|----------------|--------|
-    /// | `MetricType::Int` | `Variant::Int32` | Converted with bounds checking |
-    /// | `MetricType::Float` | `Variant::Float` | Cast to f32 precision |
-    /// | `MetricType::String` | `Variant::String` | Direct conversion to OPC UA string |
-    /// | `MetricType::Bool` | `Variant::Boolean` | Direct boolean mapping |
+    /// | MetricValue data_type | OPC UA Variant | Notes |
+    /// |----------------------|----------------|--------|
+    /// | `MetricType::Int` | `Variant::Int32` | Converted with overflow checking; falls back to Int64 |
+    /// | `MetricType::Float` | `Variant::Double` | Parsed from string value |
+    /// | `MetricType::String` | `Variant::String` | Direct string conversion |
+    /// | `MetricType::Bool` | `Variant::Boolean` | Parsed from string "true"/"false" |
     ///
     /// # Arguments
     ///
-    /// * `metric_type` - The internal metric value to convert
+    /// * `metric` - A `MetricValue` struct containing `data_type`, `value` (string), and `timestamp`
     ///
     /// # Returns
     ///
@@ -833,6 +849,55 @@ impl OpcUa {
     /// let variant = Self::convert_metric_to_variant(int_metric);
     /// // variant is now Variant::Int32(42)
     /// ```
+
+    /// Checks for clock skew (future metric timestamp) and logs warning if detected.
+    ///
+    /// Returns true if clock skew detected (age_secs < 0), false otherwise.
+    fn has_clock_skew(age_secs: i64) -> bool {
+        if age_secs < 0 {
+            warn!("Metric timestamp in future (clock skew detected), treating as fresh");
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Computes OPC UA status code based on metric staleness.
+    ///
+    /// Maps metric age to OPC UA status codes (AC#3):
+    /// - `Good` (0x00000000) - metric within staleness threshold
+    /// - `Uncertain` (0x40000000) - metric outside threshold but <24 hours old
+    /// - `Bad` (0x80000000) - metric >24 hours old or never collected
+    ///
+    /// # Arguments
+    /// * `metric` - The metric value containing timestamp
+    /// * `threshold_secs` - Staleness threshold in seconds
+    ///
+    /// # Returns
+    /// `opcua::types::StatusCode` indicating data freshness
+    fn compute_status_code(
+        metric: &crate::storage::MetricValue,
+        threshold_secs: u64,
+    ) -> opcua::types::StatusCode {
+        let now = Utc::now();
+        let age_secs = (now - metric.timestamp).num_seconds();
+
+        if Self::has_clock_skew(age_secs) {
+            return opcua::types::StatusCode::Good;
+        }
+
+        let age = age_secs as u64;
+        if age <= threshold_secs {
+            opcua::types::StatusCode::Good
+        } else if age <= STATUS_CODE_BAD_THRESHOLD_SECS {
+            // Uncertain: outside threshold but <24 hours old (QL:LastUsableValue)
+            opcua::types::StatusCode::Uncertain
+        } else {
+            // Bad: very old (>24 hours)
+            opcua::types::StatusCode::Bad
+        }
+    }
+
     fn convert_metric_to_variant(metric: crate::storage::MetricValue) -> Variant {
         // NOTE: The metric.timestamp field is available but not currently used in the OPC UA Variant.
         // Future enhancement: embed timestamp in OPC UA node's SourceTimestamp attribute for better
@@ -900,10 +965,11 @@ impl OpcUa {
     /// * `numeric_range` - Numeric range specification for the data value
     ///
     /// # Returns
-    /// * `opcua::types::StatusCode::Good` - Command successfully queued
+    /// * `opcua::types::StatusCode::Good` - Command successfully queued to storage
     /// * `opcua::types::StatusCode::Bad` - No value provided in data_value
     /// * `opcua::types::StatusCode::BadTypeMismatch` - Data type conversion failed
-    /// * `opcua::types::StatusCode::BadInternalError` - Storage lock acquisition failed
+    /// * `opcua::types::StatusCode::BadOutOfRange` - Command payload bounds check failed
+    /// * `opcua::types::StatusCode::BadInternalError` - Storage queue_command() failed
     fn set_command(
         storage: &Arc<dyn StorageBackend>,
         device_id: &str,

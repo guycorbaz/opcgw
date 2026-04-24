@@ -63,12 +63,10 @@ pub use pool::ConnectionPool;
 use crate::config::{OpcMetricTypeConfig, AppConfig};
 use crate::utils::*;
 use chrono::{DateTime, Utc};
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, trace};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::mpsc;
 use rusqlite::types::{FromSql, ToSql, FromSqlResult, ValueRef};
 use rusqlite::Result as SqliteResult;
 
@@ -855,7 +853,7 @@ impl Storage {
 
         // Create an empty command queue
         debug!("Creating an empty command queue");
-        let mut device_command_queue = Vec::new();
+        let device_command_queue = Vec::new();
 
         // Process each application in the configuration
         for application in app_config.application_list.iter() {
@@ -1407,6 +1405,7 @@ impl Storage {
 mod tests {
     use super::*;
     use crate::storage;
+    use std::sync::Arc;
     use figment::{
         providers::{Format, Toml},
         Figment,

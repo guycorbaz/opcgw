@@ -127,7 +127,7 @@ impl SqliteBackend {
     pub fn with_pool(pool: Arc<ConnectionPool>) -> Result<Self, OpcGwError> {
         // Initialize schema on first connection
         let conn_guard = pool.checkout(Duration::from_secs(5))?;
-        schema::run_migrations(&*conn_guard)?;
+        schema::run_migrations(&conn_guard)?;
         drop(conn_guard);  // Return connection to pool
 
         let version = {
@@ -162,7 +162,7 @@ impl SqliteBackend {
     ) -> Result<Self, OpcGwError> {
         // Initialize schema on first connection
         let conn_guard = pool.checkout(Duration::from_secs(5))?;
-        schema::run_migrations(&*conn_guard)?;
+        schema::run_migrations(&conn_guard)?;
         drop(conn_guard);
 
         let version = {
@@ -287,7 +287,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
         device_id: &str,
         metric_name: &str,
     ) -> Result<Option<MetricType>, OpcGwError> {
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, device_id = %device_id, metric_name = %metric_name, "Pool checkout timeout");
                 e
@@ -342,7 +342,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
     }
 
     fn get_metric_value(&self, device_id: &str, metric_name: &str) -> Result<Option<MetricValue>, OpcGwError> {
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, device_id = %device_id, metric_name = %metric_name, "Pool checkout timeout");
                 e
@@ -417,7 +417,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
         metric_name: &str,
         value: MetricType,
     ) -> Result<(), OpcGwError> {
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, device_id = %device_id, metric_name = %metric_name, "Pool checkout timeout");
                 e
@@ -450,7 +450,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
     }
 
     fn get_status(&self) -> Result<ChirpstackStatus, OpcGwError> {
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, "Pool checkout timeout for get_status");
                 e
@@ -530,7 +530,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
     }
 
     fn update_status(&self, status: ChirpstackStatus) -> Result<(), OpcGwError> {
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, "Pool checkout timeout for update_status");
                 e
@@ -596,7 +596,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
             )));
         }
 
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, device_id = %command.device_id, "Pool checkout timeout for queue_command");
                 e
@@ -633,7 +633,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
     }
 
     fn get_pending_commands(&self) -> Result<Vec<DeviceCommand>, OpcGwError> {
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, "Pool checkout timeout for get_pending_commands");
                 e
@@ -697,7 +697,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
         status: CommandStatus,
         error_message: Option<String>,
     ) -> Result<(), OpcGwError> {
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, command_id = command_id, "Pool checkout timeout for update_command_status");
                 e
@@ -757,7 +757,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
     /// The UPSERT operation is atomic: either the entire row is inserted/replaced or the operation
     /// fails with no partial updates.
     fn upsert_metric_value(&self, device_id: &str, metric_name: &str, value: &MetricType, now_ts: std::time::SystemTime) -> Result<(), OpcGwError> {
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, device_id = %device_id, metric_name = %metric_name, "Pool checkout timeout for upsert_metric_value");
                 e
@@ -857,7 +857,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
         // Retry logic for pool exhaustion: exponential backoff (3 attempts)
         let max_retries = 3;
         let mut retry_count = 0;
-        let mut conn = loop {
+        let conn = loop {
             match self.pool.checkout(Duration::from_secs(5)) {
                 Ok(c) => break c,
                 Err(e) => {
@@ -923,7 +923,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
         // Retry logic for pool exhaustion: exponential backoff (3 attempts)
         let max_retries = 3;
         let mut retry_count = 0;
-        let mut conn = loop {
+        let conn = loop {
             match self.pool.checkout(Duration::from_secs(5)) {
                 Ok(c) => break c,
                 Err(e) => {
@@ -1002,7 +1002,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
     }
 
     fn load_all_metrics(&self) -> Result<Vec<MetricValue>, OpcGwError> {
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, "Pool checkout timeout for load_all_metrics");
                 e
@@ -1147,7 +1147,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
         let start = std::time::Instant::now();
 
         // Checkout connection from pool
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 error!(error = %e, "Pool checkout timeout for prune_metric_history");
                 e
@@ -1239,7 +1239,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
             tracing::warn!("Command validator not configured; skipping parameter validation");
         }
 
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, device_id = %command.device_id, "Pool checkout timeout for enqueue_command");
                 e
@@ -1306,7 +1306,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
 
         // Get the next pending command and update its status to Sent
         // Use IMMEDIATE to acquire write lock immediately, preventing race conditions
-        let mut tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| OpcGwError::Database(format!("Failed to start transaction: {}", e)))?;
 
         let command = tx.query_row(
@@ -1369,7 +1369,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
     }
 
     fn list_commands(&self, filter: &CommandFilter) -> Result<Vec<Command>, OpcGwError> {
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, "Pool checkout timeout for list_commands");
                 e
@@ -1445,7 +1445,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
     }
 
     fn get_queue_depth(&self) -> Result<usize, OpcGwError> {
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, "Pool checkout timeout for get_queue_depth");
                 e
@@ -1465,7 +1465,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
     }
 
     fn mark_command_sent(&self, command_id: u64, chirpstack_result_id: &str) -> Result<(), OpcGwError> {
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, command_id, "Pool checkout timeout for mark_command_sent");
                 e
@@ -1484,7 +1484,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
     }
 
     fn mark_command_confirmed(&self, command_id: u64) -> Result<(), OpcGwError> {
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, command_id, "Pool checkout timeout for mark_command_confirmed");
                 e
@@ -1507,7 +1507,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
     }
 
     fn mark_command_failed(&self, command_id: u64, error_message: &str) -> Result<(), OpcGwError> {
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, command_id, "Pool checkout timeout for mark_command_failed");
                 e
@@ -1539,7 +1539,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
     }
 
     fn find_pending_confirmations(&self) -> Result<Vec<Command>, OpcGwError> {
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, "Pool checkout timeout for find_pending_confirmations");
                 e
@@ -1566,7 +1566,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
                     })?,
                 enqueued_at: row.get::<_, Option<String>>(5)?
                     .and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc)))
-                    .unwrap_or_else(|| Utc::now()),
+                    .unwrap_or_else(Utc::now),
                 sent_at: row.get::<_, Option<String>>(6)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
                 confirmed_at: row.get::<_, Option<String>>(7)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
                 status: Self::status_from_string(&row.get::<_, String>(4)?),
@@ -1584,7 +1584,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
     }
 
     fn find_timed_out_commands(&self, ttl_secs: u32) -> Result<Vec<Command>, OpcGwError> {
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, ttl_secs, "Pool checkout timeout for find_timed_out_commands");
                 e
@@ -1614,7 +1614,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
                     })?,
                 enqueued_at: row.get::<_, Option<String>>(5)?
                     .and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc)))
-                    .unwrap_or_else(|| Utc::now()),
+                    .unwrap_or_else(Utc::now),
                 sent_at: row.get::<_, Option<String>>(6)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
                 confirmed_at: row.get::<_, Option<String>>(7)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
                 status: Self::status_from_string(&row.get::<_, String>(4)?),
@@ -1692,7 +1692,7 @@ impl SqliteBackend {
     /// * `Ok(u32)` - Number of rows deleted
     /// * `Err(OpcGwError)` - If database query fails
     pub fn prune_old_metrics(&self, retention_days: u32) -> Result<u32, OpcGwError> {
-        let mut conn = self.pool.checkout(Duration::from_secs(5))
+        let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
                 trace!(error = %e, retention_days = retention_days, "Pool checkout timeout for prune_old_metrics");
                 e

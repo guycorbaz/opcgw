@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-02
-last_updated: "2026-04-24 (Epic 5 In Progress: Story 5-1 created and ready-for-dev, comprehensive spec with 10 tasks)"
+last_updated: "2026-04-24 (Story 5-2 created and ready-for-dev: Stale data detection with comprehensive spec and 8 implementation tasks)"
 project: opcgw
 project_key: NOKEY
 tracking_system: file-system
@@ -99,8 +99,8 @@ development_status:
 
   # Epic 5: Operational Visibility (Phase A)
   epic-5: in-progress
-  5-1-opc-ua-server-refactoring-to-sqlite-backend: review
-  5-2-stale-data-detection-and-status-codes: backlog
+  5-1-opc-ua-server-refactoring-to-sqlite-backend: done
+  5-2-stale-data-detection-and-status-codes: ready-for-dev
   5-3-gateway-health-metrics-in-opc-ua: backlog
   epic-5-retrospective: optional
 

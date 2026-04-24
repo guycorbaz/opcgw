@@ -238,6 +238,14 @@ pub struct OpcUaConfig {
     /// Corresponding password for the username. Should be stored securely
     /// and can be overridden via environment variables.
     pub user_password: String,
+
+    /// Staleness threshold in seconds for OPC UA metric status codes.
+    ///
+    /// Metrics older than this threshold return `Uncertain` status code.
+    /// Metrics older than 24 hours return `Bad` status code.
+    /// Default: 2x polling frequency (e.g., 20s if polling every 10s).
+    /// Can be overridden via OPCGW_OPC_UA_STALE_THRESHOLD_SECONDS environment variable.
+    pub stale_threshold_seconds: Option<u64>,
 }
 
 /// ChirpStack application configuration.
@@ -672,6 +680,13 @@ impl AppConfig {
 
         if self.opcua.user_password.is_empty() {
             errors.push("opcua.user_password: must not be empty".to_string());
+        }
+
+        // Validate stale_threshold_seconds (Story 5-2)
+        if let Some(threshold) = self.opcua.stale_threshold_seconds {
+            if threshold == 0 || threshold > 86400 {
+                errors.push("opcua.stale_threshold_seconds: must be in range (0, 86400]".to_string());
+            }
         }
 
         // Validate application_list
