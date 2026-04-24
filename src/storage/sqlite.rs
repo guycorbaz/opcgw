@@ -341,6 +341,76 @@ impl crate::storage::StorageBackend for SqliteBackend {
         }
     }
 
+    fn get_metric_value(&self, device_id: &str, metric_name: &str) -> Result<Option<MetricValue>, OpcGwError> {
+        let mut conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, device_id = %device_id, metric_name = %metric_name, "Pool checkout timeout");
+                e
+            })?;
+
+        let result = conn
+            .query_row(
+                "SELECT value, data_type, timestamp FROM metric_values WHERE device_id = ?1 AND metric_name = ?2",
+                params![device_id, metric_name],
+                |row| {
+                    let value: String = row.get(0)?;
+                    let data_type_str: String = row.get(1)?;
+                    let timestamp_str: String = row.get(2)?;
+                    Ok((value, data_type_str, timestamp_str))
+                },
+            )
+            .optional()
+            .map_err(|e| {
+                OpcGwError::Database(format!(
+                    "Failed to query metric value for device {}, metric {}: {}",
+                    device_id, metric_name, e
+                ))
+            })?;
+
+        match result {
+            Some((value, data_type_str, timestamp_str)) => {
+                let data_type: MetricType = data_type_str.parse()
+                    .map_err(|e| {
+                        tracing::warn!(
+                            device_id = %device_id,
+                            metric_name = %metric_name,
+                            corrupted_type = %data_type_str,
+                            "Corrupted metric type in database"
+                        );
+                        OpcGwError::Database(format!(
+                            "Failed to parse metric type '{}' for {}.{}: {}",
+                            data_type_str, device_id, metric_name, e
+                        ))
+                    })?;
+
+                let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .map_err(|e| {
+                        OpcGwError::Database(format!(
+                            "Failed to parse timestamp '{}' for {}.{}: {}",
+                            timestamp_str, device_id, metric_name, e
+                        ))
+                    })?;
+
+                Ok(Some(MetricValue {
+                    device_id: device_id.to_string(),
+                    metric_name: metric_name.to_string(),
+                    value,
+                    timestamp,
+                    data_type,
+                }))
+            }
+            None => {
+                trace!(
+                    device_id = %device_id,
+                    metric_name = %metric_name,
+                    "Metric value not found"
+                );
+                Ok(None)
+            }
+        }
+    }
+
     fn set_metric(
         &self,
         device_id: &str,
@@ -876,8 +946,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
             })?;
 
         for metric in metrics {
-            let value_str = metric.value.to_string();
-            let data_type = metric.value.to_string();
+            let data_type_str = metric.data_type.to_string();
             let timestamp_rfc3339 = chrono::DateTime::<Utc>::from(metric.timestamp).to_rfc3339();
 
             // UPSERT for metric_values
@@ -886,7 +955,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
 
             conn.execute(
                 upsert_query,
-                params![&metric.device_id, &metric.metric_name, value_str, data_type, timestamp_rfc3339, timestamp_rfc3339],
+                params![&metric.device_id, &metric.metric_name, &metric.value, data_type_str, timestamp_rfc3339, timestamp_rfc3339],
             )
             .map_err(|e| {
                 if let Err(rollback_err) = conn.execute_batch("ROLLBACK") {
@@ -903,10 +972,9 @@ impl crate::storage::StorageBackend for SqliteBackend {
             let insert_query = "INSERT INTO metric_history (device_id, metric_name, value, data_type, timestamp, created_at)
                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
 
-            let value_type = metric.value.to_string();
             conn.execute(
                 insert_query,
-                params![&metric.device_id, &metric.metric_name, value_type, metric.value.to_string(), timestamp_rfc3339, history_timestamp],
+                params![&metric.device_id, &metric.metric_name, &metric.value, data_type_str, timestamp_rfc3339, history_timestamp],
             )
             .map_err(|e| {
                 if let Err(rollback_err) = conn.execute_batch("ROLLBACK") {
@@ -1562,6 +1630,53 @@ impl crate::storage::StorageBackend for SqliteBackend {
         debug!(count = commands.len(), ttl_secs, "Checked for timed-out commands");
         Ok(commands)
     }
+
+    fn update_gateway_status(&self, key: &str, value: String) -> Result<(), OpcGwError> {
+        let conn = self.pool.checkout(std::time::Duration::from_secs(5)).map_err(|e| {
+            OpcGwError::Storage(format!("Failed to get database connection for gateway status update: {}", e))
+        })?;
+
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
+
+        conn.execute(
+            "INSERT OR REPLACE INTO gateway_status (key, value, updated_at) VALUES (?, ?, ?)",
+            rusqlite::params![key, value, now],
+        ).map_err(|e| {
+            OpcGwError::Storage(format!("Failed to update gateway status: {}", e))
+        })?;
+
+        debug!(key = key, "Updated gateway status");
+        Ok(())
+    }
+
+    fn get_gateway_status(&self, key: &str) -> Result<Option<String>, OpcGwError> {
+        let conn = self.pool.checkout(std::time::Duration::from_secs(5)).map_err(|e| {
+            OpcGwError::Storage(format!("Failed to get database connection for gateway status read: {}", e))
+        })?;
+
+        let result = conn.query_row(
+            "SELECT value FROM gateway_status WHERE key = ?",
+            rusqlite::params![key],
+            |row| row.get::<_, String>(0),
+        );
+
+        match result {
+            Ok(value) => {
+                debug!(key = key, "Retrieved gateway status");
+                Ok(Some(value))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                debug!(key = key, "Gateway status key not found");
+                Ok(None)
+            }
+            Err(e) => {
+                Err(OpcGwError::Storage(format!(
+                    "Failed to retrieve gateway status: {}",
+                    e
+                )))
+            }
+        }
+    }
 }
 
 impl SqliteBackend {
@@ -1866,11 +1981,19 @@ mod tests {
 
         // Create batch of 10 metrics
         let batch: Vec<crate::storage::BatchMetricWrite> = (0..10)
-            .map(|i| crate::storage::BatchMetricWrite {
-                device_id: "device_batch_test".to_string(),
-                metric_name: format!("metric_{}", i),
-                value: if i % 2 == 0 { MetricType::Float } else { MetricType::Int },
-                timestamp: now,
+            .map(|i| {
+                let (value, data_type) = if i % 2 == 0 {
+                    (format!("{}.5", i), MetricType::Float)
+                } else {
+                    (format!("{}", i), MetricType::Int)
+                };
+                crate::storage::BatchMetricWrite {
+                    device_id: "device_batch_test".to_string(),
+                    metric_name: format!("metric_{}", i),
+                    value,
+                    data_type,
+                    timestamp: now,
+                }
             })
             .collect();
 
@@ -1899,7 +2022,8 @@ mod tests {
             .map(|i| crate::storage::BatchMetricWrite {
                 device_id: "device_atomic_test".to_string(),
                 metric_name: format!("metric_{}", i),
-                value: MetricType::Float,
+                value: format!("{}.5", i),
+                data_type: MetricType::Float,
                 timestamp: now,
             })
             .collect();
@@ -1940,17 +2064,18 @@ mod tests {
         let mut batch = Vec::new();
         for device_num in 0..100 {
             for type_num in 0..4 {
-                let value = match type_num {
-                    0 => MetricType::Float,
-                    1 => MetricType::Int,
-                    2 => MetricType::Bool,
-                    3 => MetricType::String,
-                    _ => MetricType::Float,
+                let (value, data_type) = match type_num {
+                    0 => (format!("{}.5", device_num), MetricType::Float),
+                    1 => (format!("{}", device_num), MetricType::Int),
+                    2 => ("1".to_string(), MetricType::Bool),
+                    3 => (format!("text_{}", device_num), MetricType::String),
+                    _ => (format!("{}.5", device_num), MetricType::Float),
                 };
                 batch.push(crate::storage::BatchMetricWrite {
                     device_id: format!("device_{}", device_num),
                     metric_name: format!("metric_{}", type_num),
                     value,
+                    data_type,
                     timestamp: now,
                 });
             }
@@ -2018,7 +2143,8 @@ mod tests {
             .map(|i| crate::storage::BatchMetricWrite {
                 device_id: "device_batch_rollback".to_string(),
                 metric_name: format!("metric_{}", i),
-                value: MetricType::Float,
+                value: format!("{}.5", i),
+                data_type: MetricType::Float,
                 timestamp: now,
             })
             .collect();

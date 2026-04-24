@@ -16,7 +16,9 @@ use tracing::{debug, info};
 /// Embedded migration SQL files via include_str!()
 /// No runtime file dependency — migrations are compiled into the binary
 const MIGRATION_V001: &str = include_str!("../../migrations/v001_initial.sql");
+const MIGRATION_V003: &str = include_str!("../../migrations/v003_make_payload_optional.sql");
 const MIGRATION_V004: &str = include_str!("../../migrations/v004_add_command_indexes.sql");
+const MIGRATION_V005: &str = include_str!("../../migrations/v005_gateway_status.sql");
 
 /// Run all pending migrations based on current schema version.
 ///
@@ -52,7 +54,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
     debug!(current_version, "Current schema version read");
 
     // Latest available schema version
-    const LATEST_VERSION: u32 = 4;
+    const LATEST_VERSION: u32 = 5;
 
     // Apply migrations in order
     if current_version < 1 {
@@ -122,11 +124,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
     if current_version < 3 {
         debug!("Applying migration v003_make_payload_optional");
 
-        // Read and execute the v003 migration SQL
-        // NOTE: This file must exist at compile time (migrations/v003_make_payload_optional.sql)
-        // If missing, the build will fail with file not found error
-        let v003_sql = include_str!("../../migrations/v003_make_payload_optional.sql");
-        conn.execute_batch(v003_sql)
+        conn.execute_batch(MIGRATION_V003)
             .map_err(|e| {
                 OpcGwError::Database(format!(
                     "Failed to execute migration v003_make_payload_optional: {}",
@@ -165,6 +163,28 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
             })?;
 
         info!(version = 4, "Applied migration v004_add_command_indexes");
+    }
+
+    if current_version < 5 {
+        debug!("Applying migration v005_gateway_status");
+
+        conn.execute_batch(MIGRATION_V005)
+            .map_err(|e| {
+                OpcGwError::Database(format!(
+                    "Failed to execute migration v005_gateway_status: {}",
+                    e
+                ))
+            })?;
+
+        conn.pragma_update(None, "user_version", &5u32.to_string())
+            .map_err(|e| {
+                OpcGwError::Database(format!(
+                    "Failed to set schema version to 5: {}",
+                    e
+                ))
+            })?;
+
+        info!(version = 5, "Applied migration v005_gateway_status");
     }
 
     // Verify final version
@@ -207,11 +227,11 @@ mod tests {
         let result = run_migrations(&conn);
         assert!(result.is_ok(), "Migration on fresh DB should succeed");
 
-        // Verify version was set to the latest (3)
+        // Verify version was set to the latest (5)
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read version");
-        assert_eq!(version, 4, "Schema version should be 4 (latest)");
+        assert_eq!(version, 5, "Schema version should be 5 (latest)");
 
         // Verify tables were created (excluding sqlite_sequence which is created automatically for AUTOINCREMENT)
         let table_count: i32 = conn
@@ -240,7 +260,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read version");
-        assert_eq!(version, 4, "Version should still be 4 (latest)");
+        assert_eq!(version, 5, "Version should still be 5 (latest)");
 
         // Cleanup
         let _ = fs::remove_file(&path);

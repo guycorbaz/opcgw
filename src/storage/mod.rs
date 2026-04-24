@@ -133,8 +133,10 @@ pub struct BatchMetricWrite {
     pub device_id: String,
     /// Metric name as defined in ChirpStack
     pub metric_name: String,
-    /// The metric value to store (Float, Int, Bool, String)
-    pub value: MetricType,
+    /// The metric value as a string (numeric value for Float/Int, boolean for Bool, text for String)
+    pub value: String,
+    /// The metric type (Int, Float, Bool, String)
+    pub data_type: MetricType,
     /// Timestamp when this metric was measured (system time)
     pub timestamp: std::time::SystemTime,
 }
@@ -161,6 +163,23 @@ pub trait StorageBackend: Send + Sync {
     /// - **Device not found**: The device_id references a non-existent device
     /// - **Metric not found**: The metric_name does not exist for the device
     fn get_metric(&self, device_id: &str, metric_name: &str) -> Result<Option<MetricType>, OpcGwError>;
+
+    /// Retrieves the complete metric value (type and data) for counter monotonic checking.
+    ///
+    /// This method is optimized for the counter monotonic check use case, returning
+    /// both the metric type and its numeric value for efficient comparison of counter resets.
+    ///
+    /// # Arguments
+    ///
+    /// * `device_id` - The unique identifier for the device
+    /// * `metric_name` - The name of the metric to retrieve
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(MetricValue))` - The metric with both type and value if found
+    /// * `Ok(None)` - If the device or metric does not exist
+    /// * `Err(OpcGwError)` - If an error occurs during retrieval
+    fn get_metric_value(&self, device_id: &str, metric_name: &str) -> Result<Option<MetricValue>, OpcGwError>;
 
     /// Updates the value of a specific metric for a device.
     ///
@@ -550,6 +569,41 @@ pub trait StorageBackend: Send + Sync {
     /// * `Ok(Vec<Command>)` - All timed-out commands (may be empty)
     /// * `Err(OpcGwError)` - If database error occurs
     fn find_timed_out_commands(&self, ttl_secs: u32) -> Result<Vec<Command>, OpcGwError>;
+
+    // ===== Gateway Status Key-Value Operations =====
+
+    /// Updates a gateway status key-value pair with RFC3339 timestamp.
+    ///
+    /// This method persists operational health metrics (e.g., last poll time, error counts)
+    /// to the gateway_status table. Uses INSERT OR REPLACE semantics for idempotency.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The status key (e.g., "last_successful_poll", "error_count", "chirpstack_available")
+    /// * `value` - The status value as string
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the status was successfully updated
+    /// * `Err(OpcGwError)` - If an error occurs during update
+    ///
+    /// # Error Cases
+    ///
+    /// - **Storage error**: Database connectivity issues, write failures
+    fn update_gateway_status(&self, key: &str, value: String) -> Result<(), OpcGwError>;
+
+    /// Retrieves a gateway status value by key.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The status key to retrieve
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(String))` - The status value if found
+    /// * `Ok(None)` - If the key does not exist
+    /// * `Err(OpcGwError)` - If an error occurs during retrieval
+    fn get_gateway_status(&self, key: &str) -> Result<Option<String>, OpcGwError>;
 }
 
 

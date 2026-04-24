@@ -289,12 +289,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Create SQLite backend for ChirpStack poller (Story 4-1: independent backend per task)
+    let poller_backend: Arc<dyn crate::storage::StorageBackend> = match crate::storage::SqliteBackend::with_pool(pool.clone()) {
+        Ok(backend) => Arc::new(backend),
+        Err(e) => {
+            error!(error = %e, "Failed to create SQLite backend for ChirpStack poller");
+            return Err(e.into());
+        }
+    };
+
     // Create chirpstack poller with restore barrier
     let mut chirpstack_poller =
         match ChirpstackPoller::new(
             &application_config,
-            storage.clone(),
-            pool.clone(),
+            poller_backend,
             cancel_token.clone(),
             Arc::clone(&restore_barrier),
         )

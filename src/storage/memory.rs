@@ -22,6 +22,8 @@ use std::sync::{Arc, Mutex};
 pub struct InMemoryBackend {
     /// Device metrics: device_id -> (metric_name -> MetricType)
     metrics: Arc<Mutex<HashMap<String, HashMap<String, MetricType>>>>,
+    /// Device metric values: device_id -> (metric_name -> MetricValue)
+    metric_values: Arc<Mutex<HashMap<String, HashMap<String, MetricValue>>>>,
     /// Command queue (legacy DeviceCommand storage)
     commands: Arc<Mutex<Vec<DeviceCommand>>>,
     /// High-level command queue (Story 3-1)
@@ -30,6 +32,8 @@ pub struct InMemoryBackend {
     command_id_counter: Arc<Mutex<u64>>,
     /// ChirpStack server status
     status: Arc<Mutex<ChirpstackStatus>>,
+    /// Gateway status key-value pairs (Story 4-1)
+    gateway_status: Arc<Mutex<HashMap<String, String>>>,
     /// Optional command validator (Story 3-2)
     validator: Option<Arc<CommandValidator>>,
 }
@@ -39,10 +43,12 @@ impl InMemoryBackend {
     pub fn new() -> Self {
         Self {
             metrics: Arc::new(Mutex::new(HashMap::new())),
+            metric_values: Arc::new(Mutex::new(HashMap::new())),
             commands: Arc::new(Mutex::new(Vec::new())),
             command_queue: Arc::new(Mutex::new(Vec::new())),
             command_id_counter: Arc::new(Mutex::new(0)),
             status: Arc::new(Mutex::new(ChirpstackStatus::default())),
+            gateway_status: Arc::new(Mutex::new(HashMap::new())),
             validator: None,
         }
     }
@@ -51,10 +57,12 @@ impl InMemoryBackend {
     pub fn with_validator(validator: Option<Arc<CommandValidator>>) -> Self {
         Self {
             metrics: Arc::new(Mutex::new(HashMap::new())),
+            metric_values: Arc::new(Mutex::new(HashMap::new())),
             commands: Arc::new(Mutex::new(Vec::new())),
             command_queue: Arc::new(Mutex::new(Vec::new())),
             command_id_counter: Arc::new(Mutex::new(0)),
             status: Arc::new(Mutex::new(ChirpstackStatus::default())),
+            gateway_status: Arc::new(Mutex::new(HashMap::new())),
             validator,
         }
     }
@@ -72,6 +80,13 @@ impl StorageBackend for InMemoryBackend {
         Ok(metrics
             .get(device_id)
             .and_then(|device_metrics| device_metrics.get(metric_name).copied()))
+    }
+
+    fn get_metric_value(&self, device_id: &str, metric_name: &str) -> Result<Option<MetricValue>, OpcGwError> {
+        let values = self.metric_values.lock().map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
+        Ok(values
+            .get(device_id)
+            .and_then(|device_values| device_values.get(metric_name).cloned()))
     }
 
     fn set_metric(&self, device_id: &str, metric_name: &str, value: MetricType) -> Result<(), OpcGwError> {
@@ -132,6 +147,9 @@ impl StorageBackend for InMemoryBackend {
             .entry(device_id.to_string())
             .or_insert_with(HashMap::new)
             .insert(metric_name.to_string(), *value);
+        drop(metrics);
+
+        // Note: InMemoryBackend stores MetricType enum, actual values stored via batch_write_metrics
         Ok(())
     }
 
@@ -142,8 +160,28 @@ impl StorageBackend for InMemoryBackend {
 
     fn batch_write_metrics(&self, metrics: Vec<crate::storage::BatchMetricWrite>) -> Result<(), OpcGwError> {
         // InMemoryBackend: batch insert all metrics (no transaction tracking)
+        let mut type_map = self.metrics.lock().map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
+        let mut value_map = self.metric_values.lock().map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
+
         for metric in metrics {
-            self.upsert_metric_value(&metric.device_id, &metric.metric_name, &metric.value, metric.timestamp)?;
+            // Store type
+            type_map
+                .entry(metric.device_id.clone())
+                .or_insert_with(HashMap::new)
+                .insert(metric.metric_name.clone(), metric.data_type);
+
+            // Store value with metadata
+            let metric_value = MetricValue {
+                device_id: metric.device_id.clone(),
+                metric_name: metric.metric_name.clone(),
+                value: metric.value,
+                timestamp: chrono::DateTime::<chrono::Utc>::from(metric.timestamp),
+                data_type: metric.data_type,
+            };
+            value_map
+                .entry(metric.device_id.clone())
+                .or_insert_with(HashMap::new)
+                .insert(metric.metric_name.clone(), metric_value);
         }
         Ok(())
     }
@@ -337,6 +375,21 @@ impl StorageBackend for InMemoryBackend {
             .collect();
 
         Ok(commands)
+    }
+
+    fn update_gateway_status(&self, key: &str, value: String) -> Result<(), OpcGwError> {
+        let mut status_map = self.gateway_status.lock()
+            .map_err(|_| OpcGwError::Storage("Failed to acquire lock on gateway_status".to_string()))?;
+
+        status_map.insert(key.to_string(), value);
+        Ok(())
+    }
+
+    fn get_gateway_status(&self, key: &str) -> Result<Option<String>, OpcGwError> {
+        let status_map = self.gateway_status.lock()
+            .map_err(|_| OpcGwError::Storage("Failed to acquire lock on gateway_status".to_string()))?;
+
+        Ok(status_map.get(key).cloned())
     }
 }
 
