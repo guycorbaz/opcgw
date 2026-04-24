@@ -733,6 +733,7 @@ impl ChirpstackPoller {
     /// ```
     async fn poll_metrics(&mut self) -> Result<(), OpcGwError> {
         debug!("Polling chirpstack metrics");
+        let poll_start = Instant::now();
 
         // Process command queue
         self.process_command_queue().await?;
@@ -812,6 +813,24 @@ impl ChirpstackPoller {
                     }
                 }
             }
+        }
+
+        // Log poll cycle latency (Story 4-3)
+        let poll_duration = poll_start.elapsed();
+        let interval_duration = Duration::from_secs(self.config.chirpstack.polling_frequency);
+
+        if poll_duration > interval_duration {
+            warn!(
+                cycle_duration_secs = poll_duration.as_secs_f64(),
+                interval_secs = self.config.chirpstack.polling_frequency,
+                "Poll cycle latency exceeded interval"
+            );
+        } else {
+            debug!(
+                cycle_duration_secs = poll_duration.as_secs_f64(),
+                interval_secs = self.config.chirpstack.polling_frequency,
+                "Poll cycle completed within interval"
+            );
         }
 
         Ok(())
@@ -1063,6 +1082,180 @@ impl ChirpstackPoller {
         };
     }
 
+    /// Fetches all applications with pagination support (Story 4-3).
+    ///
+    /// Automatically handles pagination by making multiple gRPC requests until
+    /// all applications are retrieved. Uses the configured page size.
+    /// Respects cancellation token for graceful shutdown (AC#5).
+    ///
+    /// # Returns
+    ///
+    /// `Result<Vec<ApplicationDetail>, OpcGwError>` - All applications across all pages
+    ///
+    /// # Errors
+    ///
+    /// Returns error on gRPC client or request failure. Logs page-level errors.
+    async fn fetch_all_applications(&self) -> Result<Vec<ApplicationDetail>, OpcGwError> {
+        // Check cancellation before starting
+        if self.cancel_token.is_cancelled() {
+            info!("Pagination cancelled before fetch_all_applications");
+            return Ok(Vec::new());
+        }
+        debug!("Fetching all applications with pagination");
+        let page_size = self.config.chirpstack.list_page_size;
+        let mut all_applications = Vec::new();
+        let mut offset = 0u32;
+        let mut pages_fetched = 0u32;
+        const MAX_PAGES: u32 = 10_000; // DoS prevention: limit maximum pages per request
+        let application_client = self.create_application_client().await?;
+
+        loop {
+            // Check for cancellation token at each iteration (AC#5: no blocking)
+            if self.cancel_token.is_cancelled() {
+                info!(pages_fetched = pages_fetched, "Pagination cancelled mid-loop; returning collected data");
+                break;
+            }
+
+            // DoS prevention: limit maximum pages (Story 4-3)
+            if pages_fetched >= MAX_PAGES {
+                error!(pages_fetched = pages_fetched, limit = MAX_PAGES, "Maximum page limit reached in pagination; stopping to prevent DoS");
+                break;
+            }
+
+            pages_fetched += 1;
+            let page_start = Instant::now();
+            debug!(page = pages_fetched, offset = offset, limit = page_size, "Fetching applications page");
+
+            let request = Request::new(ListApplicationsRequest {
+                limit: page_size,
+                offset,
+                search: String::new(),
+                tenant_id: self.config.chirpstack.tenant_id.clone(),
+            });
+
+            match application_client.clone().list(request).await {
+                Ok(response) => {
+                    let page_duration = page_start.elapsed();
+                    let response_inner = response.into_inner();
+                    let result_count = response_inner.result.len() as u32;
+                    all_applications.extend(self.convert_to_applications(response_inner));
+
+                    debug!(page = pages_fetched, duration_ms = page_duration.as_millis(), "Applications page fetch completed");
+
+                    if result_count < page_size {
+                        break;
+                    }
+
+                    offset = offset.saturating_add(page_size);
+                }
+                Err(e) => {
+                    let page_duration = page_start.elapsed();
+                    warn!(page = pages_fetched, duration_ms = page_duration.as_millis(), error = %e, "Failed to fetch applications page; skipping and continuing with collected data");
+                    break;
+                }
+            }
+        }
+
+        info!(
+            applications_count = all_applications.len(),
+            apps_pages = pages_fetched,
+            "Completed pagination for applications"
+        );
+        Ok(all_applications)
+    }
+
+    /// Fetches all devices for a given application with pagination support (Story 4-3).
+    ///
+    /// Automatically handles pagination by making multiple gRPC requests until
+    /// all devices are retrieved. Uses the configured page size.
+    /// Respects cancellation token for graceful shutdown (AC#5).
+    ///
+    /// # Arguments
+    ///
+    /// * `application_id` - The ChirpStack application ID
+    ///
+    /// # Returns
+    ///
+    /// `Result<Vec<DeviceListDetail>, OpcGwError>` - All devices across all pages
+    async fn fetch_all_devices_for_app(
+        &self,
+        application_id: String,
+    ) -> Result<Vec<DeviceListDetail>, OpcGwError> {
+        // Check cancellation before starting
+        if self.cancel_token.is_cancelled() {
+            info!(application_id = %application_id, "Pagination cancelled before fetch_all_devices_for_app");
+            return Ok(Vec::new());
+        }
+
+        debug!(application_id = %application_id, "Fetching all devices with pagination");
+        let page_size = self.config.chirpstack.list_page_size;
+        let mut all_devices = Vec::new();
+        let mut offset = 0u32;
+        let mut pages_fetched = 0u32;
+        const MAX_PAGES: u32 = 10_000; // DoS prevention: limit maximum pages per request
+        let device_client = self.create_device_client().await?;
+
+        loop {
+            // Check for cancellation token at each iteration (AC#5: no blocking)
+            if self.cancel_token.is_cancelled() {
+                info!(application_id = %application_id, pages_fetched = pages_fetched, "Pagination cancelled mid-loop; returning collected data");
+                break;
+            }
+
+            // DoS prevention: limit maximum pages (Story 4-3)
+            if pages_fetched >= MAX_PAGES {
+                error!(application_id = %application_id, pages_fetched = pages_fetched, limit = MAX_PAGES, "Maximum page limit reached in pagination; stopping to prevent DoS");
+                break;
+            }
+
+            pages_fetched += 1;
+            let page_start = Instant::now();
+            debug!(application_id = %application_id, page = pages_fetched, offset = offset, limit = page_size, "Fetching devices page");
+
+            let request = Request::new(ListDevicesRequest {
+                limit: page_size,
+                offset,
+                search: String::new(),
+                application_id: application_id.clone(),
+                multicast_group_id: String::new(),
+                device_profile_id: String::new(),
+                order_by: 0,
+                order_by_desc: false,
+                tags: HashMap::new(),
+            });
+
+            match device_client.clone().list(request).await {
+                Ok(response) => {
+                    let page_duration = page_start.elapsed();
+                    let response_inner = response.into_inner();
+                    let result_count = response_inner.result.len() as u32;
+                    all_devices.extend(self.convert_to_devices(response_inner));
+
+                    debug!(application_id = %application_id, page = pages_fetched, duration_ms = page_duration.as_millis(), "Devices page fetch completed");
+
+                    if result_count < page_size {
+                        break;
+                    }
+
+                    offset = offset.saturating_add(page_size);
+                }
+                Err(e) => {
+                    let page_duration = page_start.elapsed();
+                    warn!(application_id = %application_id, page = pages_fetched, duration_ms = page_duration.as_millis(), error = %e, "Failed to fetch devices page; skipping and continuing with collected data");
+                    break;
+                }
+            }
+        }
+
+        debug!(
+            application_id = %application_id,
+            devices_count = all_devices.len(),
+            devices_pages = pages_fetched,
+            "Completed pagination for devices"
+        );
+        Ok(all_devices)
+    }
+
     /// Retrieves the list of applications from the ChirpStack server.
     ///
     /// Sends a request to the ChirpStack ApplicationService to obtain a list of all
@@ -1094,37 +1287,15 @@ impl ChirpstackPoller {
         &self,
     ) -> Result<Vec<ApplicationDetail>, OpcGwError> {
         debug!("Get list of chirpstack applications");
-        //trace!("Create request");
-        let request = Request::new(ListApplicationsRequest {
-            limit: 100, // Can be adjusted according to needs, but what does it means ?
-            offset: 0,
-            search: String::new(),
-            tenant_id: self.config.chirpstack.tenant_id.clone(), // We work on only one tenant defined in parameter file
-        });
-        //trace!(request = ?request, "Request created");
-        let application_client = self.create_application_client().await?;
-        //trace!("Send request");
-        let response = application_client
-            .clone()
-            .list(request)
-            .await
-            .map_err(|e| {
-                OpcGwError::ChirpStack(format!(
-                    "Error when collecting chirpstack application list: {}",
-                    e
-                ))
-            })?;
-        trace!("Convert result");
-
-        let applications = self.convert_to_applications(response.into_inner());
-        Ok(applications)
+        self.fetch_all_applications().await
     }
 
     /// Retrieves the list of devices for a specific application.
     ///
     /// Sends a request to the ChirpStack DeviceService to obtain a list of all
     /// devices within the specified application. This provides device metadata
-    /// including DevEUI, name, and description.
+    /// including DevEUI, name, and description. Uses pagination internally
+    /// to handle deployments with more than the page size limit.
     ///
     /// # Arguments
     ///
@@ -1158,35 +1329,7 @@ impl ChirpstackPoller {
     ) -> Result<Vec<DeviceListDetail>, OpcGwError> {
         debug!("Get list of chirpstack devices");
         trace!(application_id = ?application_id, "For chirpstack application");
-        trace!("Create request");
-
-        let request = Request::new(ListDevicesRequest {
-            limit: 100,
-            offset: 0,
-            search: String::new(),
-            application_id,
-            multicast_group_id: String::new(),
-            device_profile_id: String::new(),
-            order_by: 0,
-            order_by_desc: false,
-            tags: HashMap::new(),
-        });
-        //trace!(request = ?request, "Request created");
-        let device_client = self.create_device_client().await?;
-        trace!("Send request");
-        let response = device_client
-            .clone()
-            //.expect("Device client is not initialized")
-            .list(request)
-            .await
-            .map_err(|e: Status| {
-                OpcGwError::ChirpStack(format!(
-                    "Error when collecting chirpstack devices list: {e}"
-                ))
-            })?;
-        trace!("Convert result");
-        let devices: Vec<DeviceListDetail> = self.convert_to_devices(response.into_inner());
-        Ok(devices)
+        self.fetch_all_devices_for_app(application_id).await
     }
 
     /// Retrieves device metrics from the ChirpStack server.

@@ -129,6 +129,14 @@ pub struct ChirpstackPollerConfig {
     /// Time to wait between consecutive connection retry attempts
     /// when the ChirpStack server is unavailable.
     pub delay: u64,
+
+    /// Page size for pagination in list API calls (Story 4-3).
+    ///
+    /// Number of items per page when fetching applications and devices.
+    /// Valid range: 1-1000. Default: 100 if not specified.
+    /// Can be overridden via environment variable: `OPCGW_CHIRPSTACK__LIST_PAGE_SIZE`
+    #[serde(default = "default_list_page_size")]
+    pub list_page_size: u32,
 }
 
 /// OPC UA server configuration parameters.
@@ -397,6 +405,11 @@ fn default_prune_interval() -> u32 {
     60
 }
 
+/// Default page size for pagination (Story 4-3)
+fn default_list_page_size() -> u32 {
+    100
+}
+
 fn default_command_delivery_poll_interval() -> u64 {
     5
 }
@@ -633,6 +646,11 @@ impl AppConfig {
 
         if self.chirpstack.delay == 0 {
             errors.push("chirpstack.delay: must be greater than 0".to_string());
+        }
+
+        // Validate page size for pagination (Story 4-3)
+        if self.chirpstack.list_page_size < 1 || self.chirpstack.list_page_size > 1000 {
+            errors.push("chirpstack.list_page_size: must be in range [1-1000]".to_string());
         }
 
         // Validate OpcUaConfig

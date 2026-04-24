@@ -22,6 +22,9 @@ polling_frequency = 10
 retry = 10
 # Delay in sec between two retry
 delay = 10
+# Page size for pagination in list API calls (Story 4-3)
+# Default: 100 (valid range: 1-1000)
+list_page_size = 100
 
 
 # OPC UA parameters
