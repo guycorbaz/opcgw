@@ -456,77 +456,52 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 e
             })?;
 
-        let available: Option<String> = conn
-            .query_row(
-                "SELECT value FROM gateway_status WHERE key = 'server_available'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| {
-                OpcGwError::Database(format!("Failed to query server_available: {}", e))
-            })?;
+        // Query the gateway_status table (id=1) for health metrics
+        let result = conn.query_row(
+            "SELECT last_poll_timestamp, error_count, chirpstack_available FROM gateway_status WHERE id = 1",
+            [],
+            |row| {
+                let timestamp_str: Option<String> = row.get(0)?;
+                let error_count: i32 = row.get(1)?;
+                let available: bool = row.get(2)?;
+                Ok((timestamp_str, error_count, available))
+            },
+        );
 
-        let last_poll_time: Option<String> = conn
-            .query_row(
-                "SELECT value FROM gateway_status WHERE key = 'last_poll_time'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| {
-                OpcGwError::Database(format!("Failed to query last_poll_time: {}", e))
-            })?;
-
-        let error_count: Option<String> = conn
-            .query_row(
-                "SELECT value FROM gateway_status WHERE key = 'error_count'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| {
-                OpcGwError::Database(format!("Failed to query error_count: {}", e))
-            })?;
-
-        let server_available = available
-            .as_ref()
-            .map(|v| v.to_lowercase() == "true")
-            .unwrap_or(false);
-        let last_poll = last_poll_time.and_then(|ts| {
-            match DateTime::parse_from_rfc3339(&ts) {
-                Ok(dt) => Some(dt.with_timezone(&Utc)),
-                Err(e) => {
-                    tracing::warn!(
-                        corrupted_timestamp = %ts,
-                        error = %e,
-                        "Failed to parse last_poll_time timestamp from database"
-                    );
-                    None
-                }
-            }
-        });
-        let errors = error_count
-            .and_then(|c| {
-                match c.parse::<u32>() {
-                    Ok(count) => Some(count),
-                    Err(e) => {
-                        tracing::warn!(
-                            corrupted_value = %c,
-                            error = %e,
-                            "Failed to parse error_count from database"
-                        );
-                        None
+        match result {
+            Ok((timestamp_str, error_count, available)) => {
+                let last_poll = timestamp_str.and_then(|ts| {
+                    match DateTime::parse_from_rfc3339(&ts) {
+                        Ok(dt) => Some(dt.with_timezone(&Utc)),
+                        Err(e) => {
+                            tracing::warn!(
+                                corrupted_timestamp = %ts,
+                                error = %e,
+                                "Failed to parse last_poll_timestamp from database"
+                            );
+                            None
+                        }
                     }
-                }
-            })
-            .unwrap_or(0);
+                });
 
-        Ok(ChirpstackStatus {
-            server_available,
-            last_poll_time: last_poll,
-            error_count: errors,
-        })
+                Ok(ChirpstackStatus {
+                    server_available: available,
+                    last_poll_time: last_poll,
+                    error_count: error_count,
+                })
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                // Gateway status row doesn't exist; return defaults
+                Ok(ChirpstackStatus {
+                    server_available: false,
+                    last_poll_time: None,
+                    error_count: 0,
+                })
+            }
+            Err(e) => {
+                Err(OpcGwError::Database(format!("Failed to query gateway status: {}", e)))
+            }
+        }
     }
 
     fn update_status(&self, status: ChirpstackStatus) -> Result<(), OpcGwError> {
@@ -536,46 +511,17 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 e
             })?;
 
-        let available = if status.server_available { "true" } else { "false" };
-        let error_count = status.error_count.to_string();
-
-        conn.execute_batch("BEGIN TRANSACTION")
-            .map_err(|e| {
-                OpcGwError::Database(format!("Failed to begin transaction: {}", e))
-            })?;
+        // Map ChirpstackStatus to health metrics
+        let timestamp_str = status.last_poll_time.map(|t| format_rfc3339(&t));
 
         conn.execute(
-                "INSERT OR REPLACE INTO gateway_status (key, value, updated_at) VALUES ('server_available', ?1, datetime('now'))",
-                params![available],
-            )
-            .map_err(|e| {
-                let _ = conn.execute_batch("ROLLBACK");
-                OpcGwError::Database(format!("Failed to update server_available: {}", e))
-            })?;
-
-        conn.execute(
-                "INSERT OR REPLACE INTO gateway_status (key, value, updated_at) VALUES ('last_poll_time', ?1, datetime('now'))",
-                params![status.last_poll_time.map(|t| t.to_rfc3339())],
-            )
-            .map_err(|e| {
-                let _ = conn.execute_batch("ROLLBACK");
-                OpcGwError::Database(format!("Failed to update last_poll_time: {}", e))
-            })?;
-
-        conn.execute(
-                "INSERT OR REPLACE INTO gateway_status (key, value, updated_at) VALUES ('error_count', ?1, datetime('now'))",
-                params![error_count],
-            )
-            .map_err(|e| {
-                let _ = conn.execute_batch("ROLLBACK");
-                OpcGwError::Database(format!("Failed to update error_count: {}", e))
-            })?;
-
-        conn.execute_batch("COMMIT")
-            .map_err(|e| {
-                let _ = conn.execute_batch("ROLLBACK");
-                OpcGwError::Database(format!("Failed to commit transaction: {}", e))
-            })?;
+            "INSERT OR REPLACE INTO gateway_status (id, last_poll_timestamp, error_count, chirpstack_available) \
+             VALUES (1, ?, ?, ?)",
+            params![timestamp_str, status.error_count, status.server_available],
+        )
+        .map_err(|e| {
+            OpcGwError::Database(format!("Failed to update gateway status: {}", e))
+        })?;
 
         debug!("Updated gateway status");
         Ok(())
@@ -1631,47 +1577,73 @@ impl crate::storage::StorageBackend for SqliteBackend {
         Ok(commands)
     }
 
-    fn update_gateway_status(&self, key: &str, value: String) -> Result<(), OpcGwError> {
+    fn update_gateway_status(
+        &self,
+        last_poll_timestamp: Option<DateTime<Utc>>,
+        error_count: i32,
+        chirpstack_available: bool,
+    ) -> Result<(), OpcGwError> {
         let conn = self.pool.checkout(std::time::Duration::from_secs(5)).map_err(|e| {
             OpcGwError::Storage(format!("Failed to get database connection for gateway status update: {}", e))
         })?;
 
-        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
+        // Format timestamp if present
+        let timestamp_str = last_poll_timestamp.map(|ts| format_rfc3339(&ts));
 
+        // SQL uses CASE WHEN to conditionally update timestamp only if new one is provided
         conn.execute(
-            "INSERT OR REPLACE INTO gateway_status (key, value, updated_at) VALUES (?, ?, ?)",
-            rusqlite::params![key, value, now],
+            "INSERT OR REPLACE INTO gateway_status (id, last_poll_timestamp, error_count, chirpstack_available) \
+             VALUES (1, CASE WHEN ? IS NOT NULL THEN ? ELSE (SELECT last_poll_timestamp FROM gateway_status WHERE id = 1) END, ?, ?)",
+            params![timestamp_str, timestamp_str, error_count, chirpstack_available],
         ).map_err(|e| {
-            OpcGwError::Storage(format!("Failed to update gateway status: {}", e))
+            OpcGwError::Storage(format!("Failed to update gateway health status: {}", e))
         })?;
 
-        debug!(key = key, "Updated gateway status");
+        debug!(
+            last_poll_timestamp = ?last_poll_timestamp,
+            error_count = error_count,
+            chirpstack_available = chirpstack_available,
+            "Updated gateway health status"
+        );
         Ok(())
     }
 
-    fn get_gateway_status(&self, key: &str) -> Result<Option<String>, OpcGwError> {
+    fn get_gateway_health_metrics(&self) -> Result<(Option<DateTime<Utc>>, i32, bool), OpcGwError> {
         let conn = self.pool.checkout(std::time::Duration::from_secs(5)).map_err(|e| {
             OpcGwError::Storage(format!("Failed to get database connection for gateway status read: {}", e))
         })?;
 
+        // Query the gateway_status row (id=1)
         let result = conn.query_row(
-            "SELECT value FROM gateway_status WHERE key = ?",
-            rusqlite::params![key],
-            |row| row.get::<_, String>(0),
+            "SELECT last_poll_timestamp, error_count, chirpstack_available FROM gateway_status WHERE id = 1",
+            [],
+            |row| {
+                let timestamp_str: Option<String> = row.get(0)?;
+                let timestamp = timestamp_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc)));
+                let error_count: i32 = row.get(1)?;
+                let available: bool = row.get(2)?;
+                Ok((timestamp, error_count, available))
+            },
         );
 
         match result {
-            Ok(value) => {
-                debug!(key = key, "Retrieved gateway status");
-                Ok(Some(value))
+            Ok((timestamp, error_count, available)) => {
+                trace!(
+                    timestamp = ?timestamp,
+                    error_count = error_count,
+                    available = available,
+                    "Retrieved gateway health metrics"
+                );
+                Ok((timestamp, error_count, available))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => {
-                debug!(key = key, "Gateway status key not found");
-                Ok(None)
+                // First startup: return sensible defaults
+                debug!("Gateway health metrics not found; returning defaults for first startup");
+                Ok((None, 0, false))
             }
             Err(e) => {
                 Err(OpcGwError::Storage(format!(
-                    "Failed to retrieve gateway status: {}",
+                    "Failed to retrieve gateway health metrics: {}",
                     e
                 )))
             }
@@ -3755,5 +3727,177 @@ mod tests {
         assert_eq!(commands[0].command_name, "persist_test");
 
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_update_gateway_status_persists() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        let timestamp = Utc::now();
+        let error_count = 5;
+        let available = true;
+
+        // Update gateway health status
+        backend
+            .update_gateway_status(Some(timestamp), error_count, available)
+            .expect("Should update gateway status");
+
+        // Read it back and verify
+        let (ts, count, avail) = backend
+            .get_gateway_health_metrics()
+            .expect("Should read gateway health metrics");
+
+        assert!(ts.is_some(), "Timestamp should be present");
+        assert_eq!(count, error_count, "Error count should match");
+        assert_eq!(avail, available, "Availability should match");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_get_health_value_handles_null_timestamp() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        // On first startup (no row), should return defaults
+        let (ts, count, avail) = backend
+            .get_gateway_health_metrics()
+            .expect("Should handle missing gateway_status gracefully");
+
+        assert!(ts.is_none(), "Timestamp should be None on first startup");
+        assert_eq!(count, 0, "Error count should default to 0");
+        assert_eq!(avail, false, "Availability should default to false");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_error_count_increments_across_polls() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        let timestamp = Utc::now();
+
+        // First poll: 2 errors
+        backend
+            .update_gateway_status(Some(timestamp), 2, true)
+            .expect("Should update");
+
+        // Verify
+        let (_, count1, _) = backend
+            .get_gateway_health_metrics()
+            .expect("Should read");
+        assert_eq!(count1, 2, "Error count should be 2");
+
+        // Second poll: 5 errors (cumulative)
+        backend
+            .update_gateway_status(Some(timestamp), 5, true)
+            .expect("Should update");
+
+        // Verify
+        let (_, count2, _) = backend
+            .get_gateway_health_metrics()
+            .expect("Should read");
+        assert_eq!(count2, 5, "Error count should be 5 (cumulative)");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_chirpstack_available_flag() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        let timestamp = Utc::now();
+
+        // Successful poll
+        backend
+            .update_gateway_status(Some(timestamp), 0, true)
+            .expect("Should update");
+
+        let (_, _, avail1) = backend
+            .get_gateway_health_metrics()
+            .expect("Should read");
+        assert!(avail1, "Should be available after successful poll");
+
+        // Failed poll
+        backend
+            .update_gateway_status(None, 10, false)
+            .expect("Should update");
+
+        let (_, _, avail2) = backend
+            .get_gateway_health_metrics()
+            .expect("Should read");
+        assert!(!avail2, "Should be unavailable after failed poll");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_null_timestamp_preserves_last_successful_poll() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        let timestamp1 = Utc::now();
+
+        // Successful poll with timestamp
+        backend
+            .update_gateway_status(Some(timestamp1), 0, true)
+            .expect("Should update");
+
+        let (ts1, _, _) = backend
+            .get_gateway_health_metrics()
+            .expect("Should read");
+        assert!(ts1.is_some(), "Timestamp should be set");
+
+        // Failed poll with None timestamp (should preserve previous timestamp)
+        backend
+            .update_gateway_status(None, 1, false)
+            .expect("Should update");
+
+        let (ts2, _, _) = backend
+            .get_gateway_health_metrics()
+            .expect("Should read");
+        assert_eq!(ts1, ts2, "Timestamp should be preserved when None is passed");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_cold_start_timestamp_initialization() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        // Cold-start scenario 1: First poll succeeds with timestamp
+        let timestamp1 = Utc::now();
+        backend
+            .update_gateway_status(Some(timestamp1), 0, true)
+            .expect("Should update on first successful poll");
+
+        let (ts1, count1, avail1) = backend
+            .get_gateway_health_metrics()
+            .expect("Should read");
+        assert!(ts1.is_some(), "Timestamp should be set after successful poll");
+        assert_eq!(count1, 0, "Error count should be 0");
+        assert!(avail1, "Should be available");
+
+        // Cold-start scenario 2 (new backend): First poll fails (no timestamp update)
+        let path2 = temp_backend_path();
+        let backend2 = SqliteBackend::new(&path2).expect("Should create second backend");
+
+        backend2
+            .update_gateway_status(None, 1, false)
+            .expect("Should update on first failed poll");
+
+        let (ts2, count2, avail2) = backend2
+            .get_gateway_health_metrics()
+            .expect("Should read");
+        assert!(ts2.is_none(), "Timestamp should be NULL after failed first poll");
+        assert_eq!(count2, 1, "Error count should be 1");
+        assert!(!avail2, "Should be unavailable");
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&path2);
     }
 }

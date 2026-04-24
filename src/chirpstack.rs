@@ -735,8 +735,15 @@ impl ChirpstackPoller {
         debug!("Polling chirpstack metrics");
         let poll_start = Instant::now();
 
+        // Track health metrics during this poll cycle (Story 5-3)
+        let mut error_count: i32 = 0;
+        let mut chirpstack_available = true;
+
         // Process command queue
         self.process_command_queue().await?;
+
+        // Capture poll start timestamp after command queue succeeds (Story 5-3 AC#4)
+        let poll_start_timestamp = chrono::DateTime::<Utc>::from(SystemTime::now());
 
         // Collect all metrics for batch write
         let mut batch_metrics: Vec<crate::storage::BatchMetricWrite> = Vec::new();
@@ -750,29 +757,42 @@ impl ChirpstackPoller {
         }
         debug!(device_count = device_ids.len(), "Found devices");
 
-        // Get metrics from server for each device
+        // Get metrics from server for each device (Story 5-3: track errors per device, don't abort)
         for dev_id in device_ids {
-            let dev_metrics = self
+            match self
                 .get_device_metrics_from_server(
                     dev_id.clone(),
                     1,
                     1,
                 )
-                .await?;
+                .await
+            {
+                Ok(dev_metrics) => {
+                    // Collect metrics from this device for batch write
+                    for metric in dev_metrics.metrics.values() {
+                        trace!("Got chirpstack metric for device {}", dev_id);
+                        trace!(metric = ?metric, "Metric details");
 
-            // Collect metrics from this device for batch write
-            for metric in dev_metrics.metrics.values() {
-                trace!("Got chirpstack metric for device {}", dev_id);
-                trace!(metric = ?metric, "Metric details");
-
-                // Prepare metric for batch write (validate type and create BatchMetricWrite)
-                if let Some(batch_metric) = self.prepare_metric_for_batch(&dev_id, metric) {
-                    batch_metrics.push(batch_metric);
+                        // Prepare metric for batch write (validate type and create BatchMetricWrite)
+                        if let Some(batch_metric) = self.prepare_metric_for_batch(&dev_id, metric) {
+                            batch_metrics.push(batch_metric);
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Track error per device and continue to next device (Story 5-3 AC#5)
+                    error!(error = ?e, device_id = %dev_id, "Failed to get metrics for device");
+                    error_count += 1;
+                    // Check if this is a ChirpStack connectivity error
+                    if matches!(e, OpcGwError::ChirpStack(_)) {
+                        chirpstack_available = false;
+                    }
                 }
             }
         }
 
         // Batch write all collected metrics in a single transaction with retry logic
+        let mut batch_write_successful = true;
         if !batch_metrics.is_empty() {
             debug!(count = batch_metrics.len(), "Batch writing metrics from poll cycle");
 
@@ -783,23 +803,16 @@ impl ChirpstackPoller {
                 attempt += 1;
                 match self.backend.batch_write_metrics(batch_metrics.clone()) {
                     Ok(_) => {
-                        // Update gateway status after successful batch write
-                        let now_ts = SystemTime::now();
-                        let timestamp_rfc3339 = chrono::DateTime::<Utc>::from(now_ts).to_rfc3339();
-
-                        // Update status with non-fatal error tolerance (metrics written even if status fails)
-                        if let Err(e) = self.backend.update_gateway_status("last_poll_time", timestamp_rfc3339) {
-                            error!(error = %e, "Failed to update last_poll_time in gateway_status (non-fatal)");
-                        }
-                        if let Err(e) = self.backend.update_gateway_status("server_available", "true".to_string()) {
-                            error!(error = %e, "Failed to update server_available in gateway_status (non-fatal)");
-                        }
+                        debug!("Batch write succeeded");
                         break;
                     }
                     Err(e) => {
+                        batch_write_successful = false;
                         if attempt >= max_retries {
                             error!(error = %e, attempt, "Failed to batch write metrics after {} retries", max_retries);
-                            return Err(e);
+                            // Storage errors don't affect ChirpStack availability flag (they're local issues, not remote)
+                            // Only set unavailability on ChirpStack connectivity errors (handled in device fetch loop)
+                            break;
                         }
 
                         // Exponential backoff: 1s, 5s, 30s (Story 2-5b pattern)
@@ -813,6 +826,23 @@ impl ChirpstackPoller {
                     }
                 }
             }
+        }
+
+        // Update gateway health status at end of poll cycle (Story 5-3 AC#3, AC#4, AC#5, AC#6)
+        // Use the poll start timestamp if we have any metrics OR if poll was partially successful
+        let timestamp_for_update = if batch_write_successful || !batch_metrics.is_empty() {
+            Some(poll_start_timestamp)
+        } else {
+            None // Poll failed completely, don't update timestamp
+        };
+
+        // Update health metrics with non-fatal error tolerance (metrics written even if status fails)
+        if let Err(e) = self.backend.update_gateway_status(
+            timestamp_for_update,
+            error_count,
+            chirpstack_available,
+        ) {
+            error!(error = %e, "Failed to update gateway health status (non-fatal)");
         }
 
         // Log poll cycle latency (Story 4-3)
@@ -1944,8 +1974,12 @@ mod tests {
 
         // Verify poller can call backend trait methods
         // (This is a smoke test; detailed method calls are tested elsewhere)
-        let status = backend.get_gateway_status("test_key");
-        assert!(status.is_ok(), "Backend trait methods should be accessible from poller");
+        let result = backend.update_gateway_status(
+            Some(chrono::Utc::now()),
+            0,
+            true,
+        );
+        assert!(result.is_ok(), "Backend trait methods should be accessible from poller");
     }
 
     #[test]

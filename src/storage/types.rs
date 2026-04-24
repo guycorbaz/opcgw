@@ -231,8 +231,8 @@ pub struct ChirpstackStatus {
     pub server_available: bool,
     /// Timestamp of the last successful poll
     pub last_poll_time: Option<DateTime<Utc>>,
-    /// Number of errors encountered since last successful connection
-    pub error_count: u32,
+    /// Number of errors encountered since last successful connection (wraps at i32::MAX)
+    pub error_count: i32,
 }
 
 #[cfg(test)]

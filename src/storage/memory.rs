@@ -10,9 +10,27 @@ use crate::storage::types::{ChirpstackStatus, CommandStatus, DeviceCommand, Metr
 use crate::storage::StorageBackend;
 use crate::command_validation::CommandValidator;
 use crate::utils::OpcGwError;
-use chrono::Utc;
+use chrono::{Utc, DateTime};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+/// Gateway health metrics for in-memory storage
+#[derive(Clone, Debug)]
+struct GatewayHealthMetrics {
+    last_poll_timestamp: Option<DateTime<Utc>>,
+    error_count: i32,
+    chirpstack_available: bool,
+}
+
+impl Default for GatewayHealthMetrics {
+    fn default() -> Self {
+        Self {
+            last_poll_timestamp: None,
+            error_count: 0,
+            chirpstack_available: false,
+        }
+    }
+}
 
 /// In-memory storage backend for testing
 ///
@@ -32,8 +50,8 @@ pub struct InMemoryBackend {
     command_id_counter: Arc<Mutex<u64>>,
     /// ChirpStack server status
     status: Arc<Mutex<ChirpstackStatus>>,
-    /// Gateway status key-value pairs (Story 4-1)
-    gateway_status: Arc<Mutex<HashMap<String, String>>>,
+    /// Gateway health metrics (Story 5-3)
+    health_metrics: Arc<Mutex<GatewayHealthMetrics>>,
     /// Optional command validator (Story 3-2)
     validator: Option<Arc<CommandValidator>>,
 }
@@ -48,7 +66,7 @@ impl InMemoryBackend {
             command_queue: Arc::new(Mutex::new(Vec::new())),
             command_id_counter: Arc::new(Mutex::new(0)),
             status: Arc::new(Mutex::new(ChirpstackStatus::default())),
-            gateway_status: Arc::new(Mutex::new(HashMap::new())),
+            health_metrics: Arc::new(Mutex::new(GatewayHealthMetrics::default())),
             validator: None,
         }
     }
@@ -62,7 +80,7 @@ impl InMemoryBackend {
             command_queue: Arc::new(Mutex::new(Vec::new())),
             command_id_counter: Arc::new(Mutex::new(0)),
             status: Arc::new(Mutex::new(ChirpstackStatus::default())),
-            gateway_status: Arc::new(Mutex::new(HashMap::new())),
+            health_metrics: Arc::new(Mutex::new(GatewayHealthMetrics::default())),
             validator,
         }
     }
@@ -377,19 +395,34 @@ impl StorageBackend for InMemoryBackend {
         Ok(commands)
     }
 
-    fn update_gateway_status(&self, key: &str, value: String) -> Result<(), OpcGwError> {
-        let mut status_map = self.gateway_status.lock()
-            .map_err(|_| OpcGwError::Storage("Failed to acquire lock on gateway_status".to_string()))?;
+    fn update_gateway_status(
+        &self,
+        last_poll_timestamp: Option<DateTime<Utc>>,
+        error_count: i32,
+        chirpstack_available: bool,
+    ) -> Result<(), OpcGwError> {
+        let mut metrics = self.health_metrics.lock()
+            .map_err(|_| OpcGwError::Storage("Failed to acquire lock on health_metrics".to_string()))?;
 
-        status_map.insert(key.to_string(), value);
+        // Only update timestamp if provided (None means poll failed, don't update)
+        if last_poll_timestamp.is_some() {
+            metrics.last_poll_timestamp = last_poll_timestamp;
+        }
+        metrics.error_count = error_count;
+        metrics.chirpstack_available = chirpstack_available;
+
         Ok(())
     }
 
-    fn get_gateway_status(&self, key: &str) -> Result<Option<String>, OpcGwError> {
-        let status_map = self.gateway_status.lock()
-            .map_err(|_| OpcGwError::Storage("Failed to acquire lock on gateway_status".to_string()))?;
+    fn get_gateway_health_metrics(&self) -> Result<(Option<DateTime<Utc>>, i32, bool), OpcGwError> {
+        let metrics = self.health_metrics.lock()
+            .map_err(|_| OpcGwError::Storage("Failed to acquire lock on health_metrics".to_string()))?;
 
-        Ok(status_map.get(key).cloned())
+        Ok((
+            metrics.last_poll_timestamp,
+            metrics.error_count,
+            metrics.chirpstack_available,
+        ))
     }
 }
 

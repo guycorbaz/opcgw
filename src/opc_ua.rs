@@ -695,6 +695,76 @@ impl OpcUa {
                 })
             },
         );
+
+        // Add Gateway health metrics folder (Story 5-3)
+        let gateway_folder = NodeId::new(ns, "Gateway");
+        address_space.add_folder(
+            &gateway_folder,
+            "Gateway",
+            "Gateway Health Metrics",
+            &NodeId::objects_folder_id(),
+        );
+
+        // Add LastPollTimestamp variable
+        let last_poll_node = NodeId::new(ns, "LastPollTimestamp");
+        let _ = address_space.add_variables(
+            vec![Variable::new(
+                &last_poll_node,
+                "LastPollTimestamp",
+                "UTC timestamp of the most recent successful poll cycle",
+                Variant::String("".into()), // Initial value, will be overwritten by callback
+            )],
+            &gateway_folder,
+        );
+
+        // Add ErrorCount variable
+        let error_count_node = NodeId::new(ns, "ErrorCount");
+        let _ = address_space.add_variables(
+            vec![Variable::new(
+                &error_count_node,
+                "ErrorCount",
+                "Cumulative error count since gateway startup",
+                Variant::Int32(0),
+            )],
+            &gateway_folder,
+        );
+
+        // Add ChirpStackAvailable variable
+        let chirpstack_available_node = NodeId::new(ns, "ChirpStackAvailable");
+        let _ = address_space.add_variables(
+            vec![Variable::new(
+                &chirpstack_available_node,
+                "ChirpStackAvailable",
+                "Current state of ChirpStack connection (true = available)",
+                Variant::Boolean(false),
+            )],
+            &gateway_folder,
+        );
+
+        // Register read callbacks for health variables
+        let storage_clone = self.storage.clone();
+        manager.inner().add_read_callback(
+            last_poll_node.clone(),
+            move |_, _, _| {
+                Self::get_health_value(&storage_clone, "last_poll_timestamp".to_string())
+            },
+        );
+
+        let storage_clone = self.storage.clone();
+        manager.inner().add_read_callback(
+            error_count_node.clone(),
+            move |_, _, _| {
+                Self::get_health_value(&storage_clone, "error_count".to_string())
+            },
+        );
+
+        let storage_clone = self.storage.clone();
+        manager.inner().add_read_callback(
+            chirpstack_available_node.clone(),
+            move |_, _, _| {
+                Self::get_health_value(&storage_clone, "chirpstack_available".to_string())
+            },
+        );
     }
 
     /// Retrieves and converts a metric value from storage into an OPC UA DataValue.
@@ -795,6 +865,91 @@ impl OpcUa {
             }
             Err(e) => {
                 error!(error = %e, device_id = %device_id, metric_name = %metric_name, "Failed to read metric from storage");
+                Err(opcua::types::StatusCode::BadInternalError)
+            }
+        }
+    }
+
+    /// Retrieves and converts a gateway health metric into an OPC UA DataValue.
+    ///
+    /// Reads health metrics (last poll timestamp, error count, ChirpStack availability) from
+    /// storage and converts them into OPC UA DataValues for exposure through the OPC UA interface.
+    ///
+    /// # Health Metrics
+    ///
+    /// The metric_name parameter determines which health value to return:
+    /// - "last_poll_timestamp" - Returns DateTime of last successful poll (or NULL if none)
+    /// - "error_count" - Returns cumulative error count as Int32
+    /// - "chirpstack_available" - Returns boolean availability flag
+    ///
+    /// # Arguments
+    ///
+    /// * `storage` - Thread-safe reference to the storage backend
+    /// * `metric_name` - The health metric to retrieve
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(DataValue)` - Successfully retrieved and converted health metric with:
+    ///   - Converted variant value (or None for NULL timestamps)
+    ///   - Good status code (health metrics don't have staleness like device metrics)
+    ///   - Current source and server timestamps
+    /// * `Err(StatusCode)` - Error conditions:
+    ///   - `BadInternalError` - Storage read failed
+    ///   - `BadDataUnavailable` - Unknown metric name requested
+    ///
+    /// # Special Cases
+    ///
+    /// - **Missing gateway_status**: Returns sensible defaults (None timestamp, 0 errors, false availability)
+    /// - **NULL timestamp**: Returns NULL variant (indicating never successfully polled yet)
+    /// - **First startup**: If no poll has succeeded, timestamp is NULL/Null variant
+    fn get_health_value(
+        storage: &Arc<dyn StorageBackend>,
+        metric_name: String,
+    ) -> Result<DataValue, opcua::types::StatusCode> {
+        trace!(metric_name = %metric_name, "Get health value");
+
+        match storage.get_gateway_health_metrics() {
+            Ok((timestamp_opt, error_count, available)) => {
+                // Build variant based on requested metric
+                let value = match metric_name.as_str() {
+                    "last_poll_timestamp" => {
+                        // Convert timestamp to ISO 8601 string, or None if no successful poll yet (true NULL)
+                        match timestamp_opt {
+                            Some(ts) => Some(Variant::String(ts.to_rfc3339().into())),
+                            None => None, // NULL = no poll yet (OPC UA null value)
+                        }
+                    }
+                    "error_count" => {
+                        // Check for overflow at i32::MAX
+                        if error_count >= i32::MAX {
+                            warn!(
+                                error_count = error_count,
+                                "Gateway error count approaching or exceeding i32::MAX; values will wrap"
+                            );
+                        }
+                        Some(Variant::Int32(error_count))
+                    }
+                    "chirpstack_available" => Some(Variant::Boolean(available)),
+                    _ => {
+                        error!(metric_name = %metric_name, "Unknown health metric");
+                        return Err(opcua::types::StatusCode::BadDataUnavailable);
+                    }
+                };
+
+                // Health variables always have Good status (no staleness checking)
+                let data_value = DataValue {
+                    value,
+                    status: Some(opcua::types::StatusCode::Good.bits().into()),
+                    source_timestamp: Some(DateTime::now()),
+                    source_picoseconds: None,
+                    server_timestamp: Some(DateTime::now()),
+                    server_picoseconds: None,
+                };
+
+                Ok(data_value)
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to read health metrics from storage");
                 Err(opcua::types::StatusCode::BadInternalError)
             }
         }

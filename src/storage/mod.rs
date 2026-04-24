@@ -568,40 +568,77 @@ pub trait StorageBackend: Send + Sync {
     /// * `Err(OpcGwError)` - If database error occurs
     fn find_timed_out_commands(&self, ttl_secs: u32) -> Result<Vec<Command>, OpcGwError>;
 
-    // ===== Gateway Status Key-Value Operations =====
+    // ===== Gateway Health Metrics Operations =====
 
-    /// Updates a gateway status key-value pair with RFC3339 timestamp.
+    /// Updates gateway health metrics (last poll timestamp, error count, ChirpStack availability).
     ///
-    /// This method persists operational health metrics (e.g., last poll time, error counts)
-    /// to the gateway_status table. Uses INSERT OR REPLACE semantics for idempotency.
+    /// This method persists operational health information to the gateway_status table.
+    /// Called after each poll cycle by the ChirpStack poller to maintain current health state.
     ///
     /// # Arguments
     ///
-    /// * `key` - The status key (e.g., "last_successful_poll", "error_count", "chirpstack_available")
-    /// * `value` - The status value as string
+    /// * `last_poll_timestamp` - UTC timestamp of the start of the most recent **successful** poll cycle.
+    ///   `None` indicates the poll cycle failed; the timestamp should not be updated in this case.
+    /// * `error_count` - Cumulative count of errors (per-device failures) since gateway startup.
+    ///   Never resets; survives restarts via persistent storage.
+    /// * `chirpstack_available` - Boolean flag: `true` if most recent poll succeeded,
+    ///   `false` if ChirpStack was unreachable during the poll cycle.
     ///
     /// # Returns
     ///
-    /// * `Ok(())` - If the status was successfully updated
+    /// * `Ok(())` - If all metrics were successfully updated
     /// * `Err(OpcGwError)` - If an error occurs during update
     ///
     /// # Error Cases
     ///
     /// - **Storage error**: Database connectivity issues, write failures
-    fn update_gateway_status(&self, key: &str, value: String) -> Result<(), OpcGwError>;
+    /// - **Missing table**: gateway_status table doesn't exist or is corrupted
+    ///
+    /// # Semantics
+    ///
+    /// - **Timestamp handling**: If `last_poll_timestamp` is `None`, the database timestamp
+    ///   is left unchanged (preserving the last successful poll time).
+    /// - **Idempotency**: Calling multiple times with the same values produces the same result.
+    /// - **Atomicity**: Either all three metrics are updated or none are (single row UPDATE or INSERT).
+    fn update_gateway_status(
+        &self,
+        last_poll_timestamp: Option<DateTime<Utc>>,
+        error_count: i32,
+        chirpstack_available: bool,
+    ) -> Result<(), OpcGwError>;
 
-    /// Retrieves a gateway status value by key.
+    /// Retrieves a gateway health metric value by name.
+    ///
+    /// Reads from the gateway_status table and returns the requested health metric.
+    /// Used by OPC UA server to provide real-time health visibility to clients.
     ///
     /// # Arguments
     ///
-    /// * `key` - The status key to retrieve
+    /// * `metric_name` - The health metric to retrieve:
+    ///   - "last_poll_timestamp" - Last successful poll timestamp (DateTime string or NULL)
+    ///   - "error_count" - Cumulative error count (i32)
+    ///   - "chirpstack_available" - ChirpStack connection state (bool)
     ///
     /// # Returns
     ///
-    /// * `Ok(Some(String))` - The status value if found
-    /// * `Ok(None)` - If the key does not exist
-    /// * `Err(OpcGwError)` - If an error occurs during retrieval
-    fn get_gateway_status(&self, key: &str) -> Result<Option<String>, OpcGwError>;
+    /// * `Ok((timestamp_opt, error_count, available))` - Health metrics tuple
+    /// * `Err(OpcGwError)` - If database query fails
+    ///
+    /// # Error Cases
+    ///
+    /// - **Storage error**: Database connectivity issues, query failures
+    /// - **Missing table**: gateway_status table doesn't exist
+    /// - **Corrupted data**: Values cannot be parsed into expected types
+    ///
+    /// # Semantics
+    ///
+    /// - **First startup**: If gateway_status row doesn't exist, returns sensible defaults:
+    ///   - timestamp: None
+    ///   - error_count: 0
+    ///   - available: false (conservative default)
+    /// - **NULL handling**: NULL timestamps are treated as "never polled yet"
+    /// - **Non-blocking**: Lock-free reads using SQLite WAL mode
+    fn get_gateway_health_metrics(&self) -> Result<(Option<DateTime<Utc>>, i32, bool), OpcGwError>;
 }
 
 

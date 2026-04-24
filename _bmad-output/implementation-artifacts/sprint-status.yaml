@@ -1,5 +1,5 @@
 # generated: 2026-04-02
-# last_updated: 2026-04-20 (Story 2-3a complete: UPSERT with tests and documentation)
+# last_updated: 2026-04-24 (Story 5-3 code review complete: all patches applied, 153 tests passing)
 # project: opcgw
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-02
-last_updated: "2026-04-24 (Story 5-2 code review complete + all 8 fixes applied; Story 5-3 created and ready-for-dev: Gateway health metrics in OPC UA)"
+last_updated: "2026-04-24 (Story 5-3 code review complete: all 7 patches applied, 153 tests passing, ready to merge)"
 project: opcgw
 project_key: NOKEY
 tracking_system: file-system
@@ -101,7 +101,7 @@ development_status:
   epic-5: in-progress
   5-1-opc-ua-server-refactoring-to-sqlite-backend: done
   5-2-stale-data-detection-and-status-codes: done
-  5-3-gateway-health-metrics-in-opc-ua: ready-for-dev
+  5-3-gateway-health-metrics-in-opc-ua: done
   epic-5-retrospective: optional
 
   # Epic 6: Security Hardening (Phase A)
