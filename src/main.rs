@@ -315,8 +315,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
+    // Create SQLite backend for OPC UA server (Story 5-1: independent backend per task)
+    let opcua_backend: Arc<dyn crate::storage::StorageBackend> = match crate::storage::SqliteBackend::with_pool(pool.clone()) {
+        Ok(backend) => Arc::new(backend),
+        Err(e) => {
+            error!(error = %e, "Failed to create SQLite backend for OPC UA server");
+            return Err(e.into());
+        }
+    };
+
     // Create OPC UA server
-    let opc_ua = OpcUa::new(&application_config, storage.clone(), pool.clone(), cancel_token.clone());
+    let opc_ua = OpcUa::new(&application_config, opcua_backend, cancel_token.clone());
 
     // Signal poller that restore is complete (Task 11)
     info!("Metric restore phase complete; signaling poller to start");

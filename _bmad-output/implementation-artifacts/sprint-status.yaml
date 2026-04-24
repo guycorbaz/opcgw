@@ -99,7 +99,7 @@ development_status:
 
   # Epic 5: Operational Visibility (Phase A)
   epic-5: in-progress
-  5-1-opc-ua-server-refactoring-to-sqlite-backend: ready-for-dev
+  5-1-opc-ua-server-refactoring-to-sqlite-backend: review
   5-2-stale-data-detection-and-status-codes: backlog
   5-3-gateway-health-metrics-in-opc-ua: backlog
   epic-5-retrospective: optional

@@ -2,7 +2,7 @@
 // Copyright (c) [2024] [Guy Corbaz]
 
 use crate::config::{AppConfig, DeviceCommandCfg};
-use crate::storage::{Storage, CommandStatus, ConnectionPool};
+use crate::storage::{CommandStatus, StorageBackend};
 use crate::utils::*;
 use chrono::Utc;
 use tracing::{debug, error, info, trace, warn};
@@ -25,10 +25,8 @@ use opcua::types::{DataValue, DateTime, NodeId, Variant};
 pub struct OpcUa {
     /// Configuration for the OPC UA server
     config: AppConfig,
-    /// Storage for the OPC UA server
-    storage: Arc<std::sync::Mutex<Storage>>,
-    /// Shared connection pool for per-task SQLite access
-    pool: Arc<ConnectionPool>,
+    /// Storage backend for metric reads (Arc<dyn StorageBackend> for lock-free access)
+    storage: Arc<dyn StorageBackend>,
     /// IP address and port for the OPC UA server
     host_ip_address: String,
     /// Port for the OPC UA server
@@ -47,8 +45,8 @@ impl OpcUa {
     ///
     /// * `config` - A reference to the application configuration containing OPC UA
     ///   server settings and other application parameters
-    /// * `storage` - An `Arc<Mutex<Storage>>` providing thread-safe access to the
-    ///   shared storage system for device metrics and data
+    /// * `storage` - An `Arc<dyn StorageBackend>` providing lock-free access to the
+    ///   storage system for device metrics and data (uses internal Mutex for SQLite access)
     ///
     /// # Returns
     ///
@@ -57,16 +55,15 @@ impl OpcUa {
     /// # Examples
     ///
     /// ```rust
-    /// use std::sync::{Arc, Mutex};
+    /// use std::sync::Arc;
     ///
     /// let config = AppConfig::new().expect("Failed to load config");
-    /// let storage = Arc::new(Mutex::new(Storage::new()));
-    /// let opcua_server = OpcUa::new(&config, storage);
+    /// let storage = Arc::new(opcgw::storage::SqliteBackend::new(&config)?);
+    /// let opcua_server = OpcUa::new(&config, storage, cancel_token);
     /// ```
     pub fn new(
         config: &AppConfig,
-        storage: Arc<std::sync::Mutex<Storage>>,
-        pool: Arc<ConnectionPool>,
+        storage: Arc<dyn StorageBackend>,
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> Self {
         trace!("Create new OPC UA server structure");
@@ -90,7 +87,6 @@ impl OpcUa {
         OpcUa {
             config: config.clone(),
             storage,
-            pool,
             host_ip_address,
             host_port,
             cancel_token,
@@ -678,27 +674,19 @@ impl OpcUa {
         );
 
         // Add callback for command status variable (Task 6)
-        let storage_clone = self.storage.clone();
+        // No lock needed - just return a static response
         manager.inner().add_read_callback(
             status_query_node.clone(),
             move |_, _, _| {
-                match storage_clone.lock() {
-                    Ok(storage) => {
-                        let response = "Command status query endpoint - use OPC UA method calls for specific command".to_string();
-                        Ok(DataValue {
-                            value: Some(Variant::String(response.into())),
-                            status: Some(opcua::types::StatusCode::Good.bits().into()),
-                            source_timestamp: Some(DateTime::now()),
-                            source_picoseconds: None,
-                            server_timestamp: Some(DateTime::now()),
-                            server_picoseconds: None,
-                        })
-                    }
-                    Err(e) => {
-                        error!(error = %e, "Failed to lock storage for command status query");
-                        Err(opcua::types::StatusCode::BadInternalError)
-                    }
-                }
+                let response = "Command status query endpoint - use OPC UA method calls for specific command".to_string();
+                Ok(DataValue {
+                    value: Some(Variant::String(response.into())),
+                    status: Some(opcua::types::StatusCode::Good.bits().into()),
+                    source_timestamp: Some(DateTime::now()),
+                    source_picoseconds: None,
+                    server_timestamp: Some(DateTime::now()),
+                    server_picoseconds: None,
+                })
             },
         );
     }
@@ -754,7 +742,7 @@ impl OpcUa {
     /// This method is typically used as a callback function registered with the OPC UA
     /// node manager for dynamic value resolution when clients read variable nodes.
     fn get_value(
-        storage: &Arc<std::sync::Mutex<Storage>>,
+        storage: &Arc<dyn StorageBackend>,
         device_id: String,
         metric_name: String,
     ) -> Result<DataValue, opcua::types::StatusCode> {
@@ -764,38 +752,34 @@ impl OpcUa {
             "Get value for device and metric"
         );
 
-        match storage.lock() {
-            Ok(mut storage_guard) => {
-                match storage_guard.get_metric_value(&device_id, &metric_name) {
-                    Some(metric_value) => {
-                        // Convert MetricType to OPC UA Variant
-                        let variant = Self::convert_metric_to_variant(metric_value);
+        match storage.get_metric_value(&device_id, &metric_name) {
+            Ok(Some(metric_value)) => {
+                // Convert MetricType to OPC UA Variant
+                let variant = Self::convert_metric_to_variant(metric_value);
 
-                        // Create a DataValue with the variant and current timestamp
-                        let data_value = DataValue {
-                            value: Some(variant),
-                            status: Some(opcua::types::StatusCode::Good.bits().into()),
-                            source_timestamp: Some(DateTime::now()),
-                            source_picoseconds: None,
-                            server_timestamp: Some(DateTime::now()),
-                            server_picoseconds: None,
-                        };
+                // Create a DataValue with the variant and current timestamp
+                let data_value = DataValue {
+                    value: Some(variant),
+                    status: Some(opcua::types::StatusCode::Good.bits().into()),
+                    source_timestamp: Some(DateTime::now()),
+                    source_picoseconds: None,
+                    server_timestamp: Some(DateTime::now()),
+                    server_picoseconds: None,
+                };
 
-                        Ok(data_value)
-                    }
-                    None => {
-                        error!(
-                            device_id = %device_id,
-                            metric_name = %metric_name,
-                            "Unknown metric for device"
-                        );
-                        // Return appropriate StatusCode error
-                        Err(opcua::types::StatusCode::BadDataUnavailable)
-                    }
-                }
+                Ok(data_value)
+            }
+            Ok(None) => {
+                error!(
+                    device_id = %device_id,
+                    metric_name = %metric_name,
+                    "Unknown metric for device"
+                );
+                // Return appropriate StatusCode error
+                Err(opcua::types::StatusCode::BadDataUnavailable)
             }
             Err(e) => {
-                error!(error = %e, "Impossible to lock storage");
+                error!(error = %e, device_id = %device_id, metric_name = %metric_name, "Failed to read metric from storage");
                 Err(opcua::types::StatusCode::BadInternalError)
             }
         }
@@ -849,7 +833,7 @@ impl OpcUa {
     /// let variant = Self::convert_metric_to_variant(int_metric);
     /// // variant is now Variant::Int32(42)
     /// ```
-    fn convert_metric_to_variant(metric: crate::storage::MetricValueInternal) -> Variant {
+    fn convert_metric_to_variant(metric: crate::storage::MetricValue) -> Variant {
         // NOTE: The metric.timestamp field is available but not currently used in the OPC UA Variant.
         // Future enhancement: embed timestamp in OPC UA node's SourceTimestamp attribute for better
         // temporal accuracy in OPC UA clients.
@@ -921,7 +905,7 @@ impl OpcUa {
     /// * `opcua::types::StatusCode::BadTypeMismatch` - Data type conversion failed
     /// * `opcua::types::StatusCode::BadInternalError` - Storage lock acquisition failed
     fn set_command(
-        storage: &Arc<std::sync::Mutex<Storage>>,
+        storage: &Arc<dyn StorageBackend>,
         device_id: &str,
         command: &DeviceCommandCfg,
         data_value: DataValue,
@@ -991,7 +975,7 @@ impl OpcUa {
                     return opcua::types::StatusCode::BadOutOfRange;
                 }
 
-                let command_to_send = crate::storage::DeviceCommandInternal {
+                let command_to_send = crate::storage::DeviceCommand {
                     id: 0, // Will be assigned by storage when queued
                     device_id: device_id.to_string(),
                     payload,
@@ -1000,14 +984,14 @@ impl OpcUa {
                     created_at: Utc::now(),
                     error_message: None,
                 };
-                // Add command to storage
-                match storage.lock() {
-                    Ok(mut storage_guard) => {
-                        storage_guard.push_command(command_to_send);
+                // Queue command to storage (no lock needed, StorageBackend handles concurrency)
+                match storage.queue_command(command_to_send) {
+                    Ok(()) => {
+                        debug!(device_id = %device_id, f_port = %f_port, "Command queued successfully");
                         opcua::types::StatusCode::Good
                     }
                     Err(e) => {
-                        error!(error = %e, "Impossible to lock storage");
+                        error!(error = %e, device_id = %device_id, "Failed to queue command");
                         opcua::types::StatusCode::BadInternalError
                     }
                 }
