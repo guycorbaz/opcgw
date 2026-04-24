@@ -27,11 +27,14 @@ Expose gateway health metrics (last poll timestamp, error count, ChirpStack conn
 - **Verification:** Browse OPC UA server with FUXA or UaExpert, verify Gateway folder and three variables exist and are readable
 
 ### AC#2: Data Source from gateway_status Table
-- All health values are read from the SQLite `gateway_status` table (already created in Story 2-2a)
-- `gateway_status` table has three key columns: `last_poll_timestamp`, `error_count`, `chirpstack_available`
+- All health values are read from the SQLite `gateway_status` table (created in Story 2-2a)
+- `gateway_status` table schema:
+  - `id` (Integer Primary Key) — Single row (always id=1) for gateway-wide status
+  - `last_poll_timestamp` (DateTime, nullable) — UTC timestamp of last successful poll
+  - `error_count` (Integer) — Cumulative error count since startup
+  - `chirpstack_available` (Boolean) — Current connection state
 - Health variables are populated at OPC UA server startup from gateway_status table
 - Health variables are updated every poll cycle (via poller writing to gateway_status)
-- No additional database schema changes needed (gateway_status already exists)
 - **Verification:** Add logging in get_value() to confirm gateway_status reads; verify table values match OPC UA variables
 
 ### AC#3: Updates with Every Poll Cycle
@@ -45,17 +48,29 @@ Expose gateway health metrics (last poll timestamp, error count, ChirpStack conn
 ### AC#4: LastPollTimestamp Semantics
 - `LastPollTimestamp` captures the timestamp of the **start** of the most recent **successful** poll cycle
 - Successful = all devices polled and metrics updated in gateway_status table
-- Failed polls do NOT update `LastPollTimestamp` (still shows the last successful one)
-- Timestamp is in UTC and includes date + time (DateTime format, not just date)
-- If gateway has never successfully polled yet (startup before first poll), timestamp is NULL/empty
+- Failed polls do NOT update `LastPollTimestamp` (preserves the last successful timestamp)
+- Timestamp format: ISO 8601 with UTC timezone and millisecond precision (e.g., `2026-04-24T15:30:45.123Z`)
+- If gateway has never successfully polled yet (startup before first poll):
+  - Database value: NULL
+  - OPC UA representation: `DataValue { variant: Null, status: Good }`
+  - FUXA display: empty/blank (not an error, just no data yet)
 - **Verification:** Verify timestamp updates after each successful poll, frozen during failures
 
 ### AC#5: ErrorCount Semantics
-- `ErrorCount` is cumulative since gateway startup (never resets)
-- Incremented on per-device or per-metric errors (not once per poll, but per individual error)
+- `ErrorCount` is cumulative since gateway startup (never resets; survives restarts via gateway_status)
+- Tracking mechanism:
+  - Poller maintains local `error_count` field (reset only at process startup, persisted to gateway_status)
+  - Incremented **per-device** on individual device/metric failures (not once per poll, not per-metric)
+  - Example logic:
+    ```
+    for each device:
+      if fetch_device_metrics(device) fails:
+        error_count += 1
+        continue to next device
+    ```
+  - On poller startup: read baseline error_count from gateway_status, continue incrementing from there
 - Errors include: ChirpStack API failures, parsing errors, timeout errors, storage write failures
 - Counter wraps at i32 max (unlikely in practice, but handled gracefully)
-- Error count is persisted in gateway_status and survives gateway restart
 - **Verification:** Simulate various error conditions (bad device ID, API timeout), watch counter increment
 
 ### AC#6: ChirpStackAvailable Semantics
@@ -73,13 +88,16 @@ Expose gateway health metrics (last poll timestamp, error count, ChirpStack conn
 - No new blocking operations introduced
 - **Verification:** Benchmark health variable reads alongside metric reads; verify <100ms total
 
-### AC#8: Graceful Handling of Missing Data
-- If gateway_status table is empty (first startup, no successful polls yet):
-  - `LastPollTimestamp` returns NULL/empty (not an error)
-  - `ErrorCount` returns 0 (or NULL if not yet initialized)
-  - `ChirpStackAvailable` returns false (conservative default)
-- OPC UA clients handle NULL/empty timestamps gracefully (no crashes)
-- **Verification:** Start fresh gateway, verify health variables are readable but empty/false
+### AC#8: First-Startup and NULL Handling
+- On first-startup (no gateway_status row yet), behavior is well-defined:
+  - `LastPollTimestamp`: Returns `DataValue { variant: Null, status: Good }` (FUXA displays as blank)
+  - `ErrorCount`: Returns `Int32(0)` (no errors yet)
+  - `ChirpStackAvailable`: Returns `Boolean(false)` (conservative default until first poll succeeds)
+- OPC UA clients handle these values gracefully:
+  - NULL timestamps don't cause crashes (OPC UA spec allows Null variants)
+  - Zero error count and false availability are readable, sensible defaults
+  - Values are fully readable; no errors returned from OPC UA
+- **Verification:** Start fresh gateway, verify health variables are readable with expected initial values
 
 ### AC#9: Documentation & Code Quality
 - New health variables documented in OPC UA build_address_space() method
@@ -177,13 +195,35 @@ The `gateway_status` table exists in SQLite (created in Story 2-2a) with columns
 - Log updates to gateway_status for debugging
 
 **`src/storage/mod.rs`** — Trait Extension:
-- Add optional method `update_gateway_status()` to StorageBackend trait
-- Document health metric semantics in doc comments
+- Add method to StorageBackend trait with exact signature:
+  ```rust
+  fn update_gateway_status(
+    &mut self,
+    last_poll_timestamp: Option<DateTime<Utc>>,
+    error_count: i32,
+    chirpstack_available: bool,
+  ) -> Result<(), OpcGwError>;
+  ```
+- Document: `last_poll_timestamp = None` means poll failed (don't update timestamp)
 
 **`src/storage/sqlite.rs`** — Extended:
-- Implement `update_gateway_status()` with single `UPDATE` statement
-- Handle NULL timestamps and first-startup case gracefully
-- Add inline comments for health status update logic
+- Implement `update_gateway_status()` with SQL:
+  ```sql
+  UPDATE gateway_status 
+  SET last_poll_timestamp = CASE WHEN ? IS NOT NULL THEN ? ELSE last_poll_timestamp END,
+      error_count = ?,
+      chirpstack_available = ?
+  WHERE id = 1;
+  ```
+  OR on first row not found:
+  ```sql
+  INSERT INTO gateway_status (id, last_poll_timestamp, error_count, chirpstack_available)
+  VALUES (1, ?, ?, ?);
+  ```
+- Ensure gateway_status table has `PRIMARY KEY (id)` for O(1) lookup
+- Execution time: <1ms (indexed single-row update)
+- Use prepared statement (parameterized query, never format!)
+- Idempotent: multiple calls with same values produce same result
 
 ### New Files
 
@@ -387,9 +427,27 @@ The `gateway_status` table exists in SQLite (created in Story 2-2a) with columns
 
 ## Implementation Notes
 
-### Poller Error Tracking
+### Monitoring & Alerting Guidance for Operators
 
-The poller will track errors at two levels:
+Once Story 5-3 is deployed, SCADA operators can use gateway health metrics to monitor system status:
+
+**Recommended FUXA Dashboards & Thresholds:**
+- **ErrorCount growth rate**: Alert if increasing >10 errors/minute (indicates persistent poller problems)
+- **ChirpStackAvailable**: Alert immediately when false (connection lost — critical event)
+- **LastPollTimestamp**: Alert if frozen >2x polling frequency (e.g., >20s at 10s polling — poller hung or crashed)
+
+**Alert Severity Mapping:**
+- **CRITICAL** (page oncall): ChirpStackAvailable = false for >5 minutes
+- **WARNING** (email/log): ErrorCount growth >10 errors/minute for sustained period (10+ minutes)
+- **INFO** (dashboard display): LastPollTimestamp aged >2x polling frequency (informational only)
+
+**Example interpretation:**
+- ErrorCount incrementing slowly (1-2/hour): normal, occasional transient failures
+- ErrorCount incrementing rapidly (10+/minute): likely persistent problem (bad device config, network issue, ChirpStack instability)
+
+### Poller Error Count Tracking
+
+The poller tracks and persists error_count to provide visibility into collection reliability:
 
 1. **Per-request errors** — Individual device/metric failures (increment counter)
 2. **Poll-cycle failure** — ChirpStack service unreachable (set availability flag)
@@ -407,8 +465,28 @@ Poll cycle end (t=0.5s)
 Next poll cycle (t=10s)
   - ChirpStack service down → cannot reach gRPC endpoint
   - set chirpstack_available = false
-  - error_count += 100 (arbitrary, all devices fail)
-  - update_gateway_status(t=10s, error_count=101, chirpstack_available=false)
+  - error_count += 100 (all devices fail, increment per device)
+  - update_gateway_status(timestamp=None, error_count=101, chirpstack_available=false)
+```
+
+### Error Recovery: update_gateway_status() Failure
+
+If `update_gateway_status()` itself fails (rare, but must be handled):
+
+**Scenario:** Poll cycle succeeds (all metrics updated), but writing health status to SQLite fails (disk full, permission error, etc.)
+
+**Behavior:**
+- Log warning: "Failed to update gateway health status: {error}"
+- Continue to next poll cycle (do NOT crash or halt poller)
+- Consequence: health variables may be stale, but device metrics continue updating in metric_values table
+
+**Rationale:** Health metrics are diagnostic metadata; losing them is acceptable. Device metrics are the mission-critical data; losing them is unacceptable. Poller must keep running even if health tracking fails.
+
+**Code Pattern:**
+```rust
+if let Err(e) = storage.update_gateway_status(timestamp, error_count, available) {
+  warn!(error = %e, "Failed to update gateway health status; continuing");
+}
 ```
 
 ### Health Variables Display in FUXA
@@ -455,5 +533,19 @@ A: Graceful degradation: if expected columns are missing, get_health_value() ret
 A: No. Error count is cumulative since startup. On restart, the persistent gateway_status value becomes the baseline. For long-running deployments, error_count may grow very large, but wraps at i32::MAX gracefully.
 
 **Q: How does health monitoring interact with metrics staleness detection (Story 5-2)?**  
-A: Independently. LastPollTimestamp tells when the last *poll attempt* completed, not whether individual metrics are fresh. Individual metrics have their own timestamps (in metric_values table) and staleness status. A stale metric doesn't affect the health variables — it just shows up as Uncertain status in FUXA.
+A: Independently. LastPollTimestamp tells when the last *poll attempt* completed, not whether individual metrics are fresh. 
+
+**Example scenario:**
+- LastPollTimestamp = 2026-04-24 15:30:00 (5 minutes ago, successful poll)
+- ErrorCount = 0 (no errors in collection)
+- ChirpStackAvailable = true (connected)
+- But individual device metrics may show Uncertain status if they haven't been updated within their staleness threshold (e.g., a device went offline after poll succeeded)
+
+**Interpretation:** Gateway and collection healthy, but specific device is offline. Operator sees clear picture: health metrics good, but device metrics uncertain.
+
+**Relationship:**
+- Health metrics = gateway/poller status (meta-data)
+- Device metrics = individual sensor freshness (via Story 5-2 staleness codes)
+- These are independent; stale metric doesn't affect health variables
+- FUXA shows both: health folder at top level, device metrics by application (allows holistic view)
 
