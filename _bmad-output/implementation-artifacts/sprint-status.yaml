@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-02
-last_updated: "2026-04-24 (Story 4-3: Complete - Code review passed, 6 critical/high patches applied, ready to merge)"
+last_updated: "2026-04-24 (Epic 4 Complete: Scalable Data Collection - All 3 stories done, security audit passed, retrospective complete)"
 project: opcgw
 project_key: NOKEY
 tracking_system: file-system
@@ -90,12 +90,12 @@ development_status:
   epic-3-retrospective: done
 
   # Epic 4: Scalable Data Collection (Phase A)
-  epic-4: in-progress
+  epic-4: done
   4-1-poller-refactoring-to-sqlite-backend: done
   4-2-support-all-chirpstack-metric-types: done
   4-3-api-pagination-for-large-deployments: done
   4-4-auto-recovery-from-chirpstack-outages: backlog
-  epic-4-retrospective: optional
+  epic-4-retrospective: done
 
   # Epic 5: Operational Visibility (Phase A)
   epic-5: backlog
