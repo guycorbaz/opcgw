@@ -13,6 +13,7 @@
     </author>
     <copyright>
       <year>2024</year>
+      <year>2026</year>
       <holder>Guy Corbaz</holder>
     </copyright>
     <legalnotice>
@@ -25,9 +26,32 @@
         <authorinitials>GC</authorinitials>
         <revremark>Initial release of opcgw user manual</revremark>
       </revision>
+      <revision>
+        <revnumber>2.0.0</revnumber>
+        <date>2026-04-27</date>
+        <authorinitials>GC</authorinitials>
+        <revremark>Comprehensive update covering Epics 2-6: SQLite-backed persistence
+        (WAL mode, connection pool), command queue with delivery confirmation,
+        gRPC pagination, support for all metric types, gateway health metrics in
+        OPC UA, stale-data status codes (Good/Uncertain/Bad), structured logging
+        with microsecond timestamps + correlation IDs, configurable verbosity,
+        performance-budget warnings, and remote-diagnostic operation taxonomy.
+        Configuration chapter rewritten against actual TOML keys; new chapters
+        on Logging &amp; Observability and Operational Monitoring; new appendices
+        for configuration reference, OPC UA address space, and operation
+        names.</revremark>
+      </revision>
     </revhistory>
     <abstract>
-      <para>opcgw is a Rust-based gateway that bridges ChirpStack LoRaWAN Network Server with OPC UA clients for industrial automation and SCADA systems. This manual provides comprehensive guidance on installation, configuration, operation, and troubleshooting of the opcgw gateway.</para>
+      <para>opcgw is a Rust-based gateway that bridges ChirpStack LoRaWAN
+      Network Server with OPC UA clients for industrial automation and SCADA
+      systems. It polls device metrics from ChirpStack at configurable
+      intervals, persists them in a local SQLite database (WAL mode for
+      concurrent reads), exposes them via OPC UA 1.04 with stale-data status
+      codes, and accepts downlink commands from OPC UA clients with
+      end-to-end delivery confirmation. This manual provides comprehensive
+      guidance on installation, configuration, operation, observability, and
+      troubleshooting.</para>
     </abstract>
   </bookinfo>
 
@@ -39,59 +63,214 @@
 
       <section id="sec-what-is-opcgw">
         <title>What is opcgw?</title>
-        <para>opcgw (OPC Gateway) is a middleware application that bridges the gap between LoRaWAN sensor networks and industrial automation systems. It provides seamless integration between:</para>
+        <para>opcgw (OPC Gateway) is a middleware application that bridges the
+        gap between LoRaWAN sensor networks and industrial automation
+        systems. It provides bidirectional integration between:</para>
         <itemizedlist>
           <listitem>
-            <para><emphasis>ChirpStack LoRaWAN Network Server</emphasis> — Manages LoRaWAN devices and gathers metrics from distributed IoT sensors</para>
+            <para><emphasis>ChirpStack LoRaWAN Network Server</emphasis> —
+            Manages LoRaWAN devices, gathers uplink metrics from distributed
+            IoT sensors, and accepts downlink commands.</para>
           </listitem>
           <listitem>
-            <para><emphasis>OPC UA Servers</emphasis> — Presents data to SCADA systems, industrial controllers, and human-machine interfaces</para>
+            <para><emphasis>OPC UA Clients</emphasis> — SCADA systems,
+            industrial controllers, and human-machine interfaces that consume
+            metrics in real time and issue commands.</para>
           </listitem>
         </itemizedlist>
-        <para>The gateway continuously polls device metrics from ChirpStack, stores them in a local SQLite database, and exposes them via OPC UA for real-time consumption by industrial clients.</para>
+        <para>The gateway continuously polls device metrics from ChirpStack,
+        persists them in a local SQLite database with WAL-mode concurrency,
+        exposes the current values plus gateway health as OPC UA variables,
+        and queues outbound commands for reliable delivery.</para>
       </section>
 
       <section id="sec-key-features">
         <title>Key Features</title>
         <itemizedlist>
           <listitem>
-            <para><emphasis>Real-time Data Collection</emphasis> — Continuous polling of metrics from ChirpStack at configurable intervals</para>
+            <para><emphasis>Real-time data collection</emphasis> — Polls
+            metrics from ChirpStack at configurable intervals; supports
+            counter, gauge, and absolute metric kinds plus the boolean,
+            integer, float, and string OPC UA types.</para>
           </listitem>
           <listitem>
-            <para><emphasis>Persistent Storage</emphasis> — SQLite-backed storage with UPSERT semantics for current metrics and append-only audit logs for historical data</para>
+            <para><emphasis>Persistent storage</emphasis> — SQLite-backed
+            current-value table (UPSERT semantics) plus an append-only
+            <literal>metric_history</literal> table for historical analysis.
+            WAL mode plus a per-task connection pool eliminates the prior
+            in-memory <literal>Mutex</literal> bottleneck.</para>
           </listitem>
           <listitem>
-            <para><emphasis>OPC UA Server</emphasis> — Native OPC UA 1.04 endpoint for seamless SCADA integration</para>
+            <para><emphasis>Reliable command delivery</emphasis> — A
+            SQLite-backed FIFO command queue with parameter validation,
+            ChirpStack downlink integration, and three-state delivery
+            tracking (<literal>Pending</literal> →
+            <literal>Sent</literal> → <literal>Confirmed</literal> /
+            <literal>Failed</literal>) with configurable confirmation
+            timeout.</para>
           </listitem>
           <listitem>
-            <para><emphasis>Graceful Degradation</emphasis> — Continues operation even during database corruption, access failures, or partial data loss</para>
+            <para><emphasis>OPC UA 1.04 server</emphasis> — Native endpoint
+            built on <literal>async-opcua</literal> exposing every
+            configured metric plus a synthetic <literal>Gateway</literal>
+            folder containing health metrics
+            (<literal>LastPollTimestamp</literal>,
+            <literal>error_count</literal>,
+            <literal>chirpstack_available</literal>).</para>
           </listitem>
           <listitem>
-            <para><emphasis>Comprehensive Logging</emphasis> — Structured logging via tracing for operational visibility and debugging</para>
+            <para><emphasis>Stale-data status codes</emphasis> — Each OPC UA
+            read returns a status code derived from the metric's age:
+            <literal>Good</literal> (within threshold),
+            <literal>Uncertain</literal> (older but within 24 h), or
+            <literal>Bad</literal> (older than 24 h). Operators see freshness
+            without parsing timestamps.</para>
           </listitem>
           <listitem>
-            <para><emphasis>Data Retention Policies</emphasis> — Automatic pruning of historical data based on retention configuration</para>
+            <para><emphasis>Graceful degradation</emphasis> — Continues
+            operating when ChirpStack is unreachable, when SQLite reports
+            <literal>SQLITE_BUSY</literal>, when a poll cycle partially
+            fails, or when individual devices return errors. Per-cycle
+            error counts and outage signals are surfaced in logs and via
+            OPC UA health metrics.</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>Structured observability</emphasis> — All log
+            output is structured (key=value), uses microsecond UTC
+            timestamps, and carries a per-OPC-UA-read
+            <literal>request_id</literal> that propagates through storage
+            and staleness checks. Per-operation budget warnings fire when
+            <literal>opc_ua_read</literal> &gt; 100 ms,
+            <literal>storage_query</literal> &gt; 10 ms, or
+            <literal>batch_write</literal> &gt; 500 ms.</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>Configurable verbosity</emphasis> — The global
+            log level is controlled by the CLI <literal>-d</literal>
+            count, the <literal>OPCGW_LOG_LEVEL</literal> environment
+            variable, or the <literal>[logging].level</literal> TOML key
+            (precedence in that order). Per-module log files capture at
+            <literal>TRACE</literal> independently for post-mortem
+            analysis.</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>Data retention policies</emphasis> — Automatic
+            pruning of historical metrics based on a retention window;
+            command history is purged on its own retention schedule.</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>gRPC pagination</emphasis> — Large device
+            fleets are paginated through the ChirpStack
+            <literal>List</literal> APIs with a configurable page size,
+            preventing single-RPC overflows.</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>Cancellation-aware shutdown</emphasis> — The
+            poller, OPC UA server, and pruner all share a
+            <literal>CancellationToken</literal>; <literal>Ctrl-C</literal>
+            (or <literal>SIGTERM</literal>) initiates a graceful drain
+            with bounded latency.</para>
           </listitem>
         </itemizedlist>
       </section>
 
       <section id="sec-system-architecture">
         <title>System Architecture</title>
-        <para>opcgw follows a modular architecture with clear separation of concerns:</para>
+        <para>opcgw follows a modular, message-passing architecture with a
+        shared SQLite-backed storage layer. The poller, OPC UA server, and
+        pruner each hold their own
+        <literal>Arc&lt;dyn StorageBackend&gt;</literal> handle and
+        coordinate via SQLite WAL mode rather than a Rust mutex.</para>
+
         <itemizedlist>
           <listitem>
-            <para><emphasis>Poller Module</emphasis> (chirpstack.rs) — Authenticates to ChirpStack gRPC API, polls metrics at regular intervals, transforms data into internal format</para>
+            <para><emphasis>Poller module</emphasis>
+            (<filename>src/chirpstack.rs</filename>) — Authenticates to the
+            ChirpStack gRPC API, polls metrics on a fixed cadence, classifies
+            the metric kind (counter/gauge/absolute/unknown), validates
+            values against the configured target type, and writes the
+            cycle's metrics to SQLite as a single batched transaction.
+            Tracks per-cycle error counts and emits a
+            <literal>chirpstack_outage</literal> warning on the first
+            connectivity failure of a cycle.</para>
           </listitem>
           <listitem>
-            <para><emphasis>Storage Layer</emphasis> (storage module) — Abstracts database backend with pluggable implementations (in-memory for testing, SQLite for production)</para>
+            <para><emphasis>Storage layer</emphasis>
+            (<filename>src/storage/</filename>) — Abstracted behind the
+            <literal>StorageBackend</literal> trait with two implementations:
+            <literal>SqliteBackend</literal> (production) and
+            <literal>InMemoryBackend</literal> (test-only). The SQLite
+            implementation uses a connection pool so each async task gets its
+            own <literal>rusqlite::Connection</literal>, enabling concurrent
+            readers and a single writer at the database level. Schema
+            migrations run at startup. SQLite errors classified as
+            <literal>DatabaseBusy</literal> or <literal>DatabaseLocked</literal>
+            emit a <literal>storage_query</literal> warning labelled
+            <literal>SQLITE_BUSY</literal> with a sibling
+            <literal>sqlite_error_code</literal> field for
+            differentiation.</para>
           </listitem>
           <listitem>
-            <para><emphasis>OPC UA Server</emphasis> (opc_ua.rs) — Exposes metrics as OPC UA variables, handles subscription requests</para>
+            <para><emphasis>OPC UA server</emphasis>
+            (<filename>src/opc_ua.rs</filename>) — Builds the address space
+            from the <literal>[[application]]</literal> sections in the
+            configuration file, exposes each metric as a
+            <literal>Variant</literal> with a staleness-derived
+            <literal>StatusCode</literal>, and exposes the synthetic
+            <literal>Gateway</literal> folder. Per-metric staleness
+            transitions are tracked in a
+            <literal>DashMap&lt;(device_id, metric_name), StatusCode&gt;</literal>
+            for lock-free concurrent reads. Each read is wrapped in an
+            <literal>info_span!</literal> so downstream
+            <literal>storage_query</literal> and
+            <literal>staleness_check</literal> logs inherit a
+            <literal>request_id</literal> for correlation.</para>
           </listitem>
           <listitem>
-            <para><emphasis>Configuration System</emphasis> (config.rs) — TOML-based configuration with environment variable overrides</para>
+            <para><emphasis>Configuration system</emphasis>
+            (<filename>src/config.rs</filename>) — TOML-based
+            (<literal>figment</literal>) with environment-variable overrides
+            using the <literal>OPCGW_</literal> prefix and
+            <literal>__</literal> as the nested-key separator. A two-phase
+            init reads the <literal>[logging]</literal> block before tracing
+            initialises so log-directory and verbosity decisions reach the
+            file appender from the very first message.</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>Logging system</emphasis>
+            (<filename>src/main.rs</filename>) — <literal>tracing</literal>
+            subscriber with a console layer (stderr) plus five daily-rolling
+            file appenders: a root <filename>opc_ua_gw.log</filename> and
+            four per-module files
+            (<filename>chirpstack.log</filename>,
+            <filename>opc_ua.log</filename>,
+            <filename>storage.log</filename>,
+            <filename>config.log</filename>). All formatted with microsecond
+            UTC timestamps via <literal>ChronoUtc</literal>.</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>Command queue</emphasis>
+            (<filename>src/command_validation.rs</filename> + storage layer)
+            — OPC UA write requests are validated against the
+            <literal>[[application.device.command]]</literal> schemas,
+            persisted to a SQLite-backed FIFO queue, dequeued by the poller,
+            sent to ChirpStack via downlink, and tracked through delivery
+            confirmation with a configurable timeout.</para>
           </listitem>
         </itemizedlist>
+
+        <para>Data flow:</para>
+        <programlisting>ChirpStack gRPC API
+        │ poll
+        ▼
+  ChirpstackPoller ──── batch_write_metrics() ──▶ SqliteBackend (WAL)
+                                                       │
+                                                       │ get_metric_value()
+                                                       ▼
+                                                   OpcUa Server ──▶ OPC UA clients
+                                                       ▲                 │
+                                                       │ queue_command() │ writes
+                                                       ◀─────────────────┘</programlisting>
       </section>
   </chapter>
 
@@ -107,25 +286,38 @@
           <varlistentry>
             <term>Processor</term>
             <listitem>
-              <para>Any 64-bit processor (x86-64, ARM64) with 2+ cores recommended for production</para>
+              <para>Any 64-bit processor (x86-64, ARM64). Two or more cores
+              recommended for production so the poller, OPC UA server, and
+              storage pruner can run on independent tokio worker
+              threads.</para>
             </listitem>
           </varlistentry>
           <varlistentry>
             <term>Memory</term>
             <listitem>
-              <para>Minimum 512 MB RAM; 2 GB recommended for deployments with 100+ devices</para>
+              <para>Minimum 512 MB RAM; 2 GB recommended for deployments with
+              100+ devices. The SQLite WAL plus per-module log buffering
+              dominate memory usage at steady state; per-metric overhead is
+              negligible.</para>
             </listitem>
           </varlistentry>
           <varlistentry>
             <term>Storage</term>
             <listitem>
-              <para>Minimum 100 MB free disk space; 1 GB recommended if retaining historical data</para>
+              <para>Minimum 100 MB free disk for the binary, configuration,
+              and a small SQLite database. Allocate at least 1 GB for
+              production deployments retaining 30 days of historical
+              metrics with a 10 second polling interval. Log files (one root
+              plus four per-module daily-rolling files) typically add 10-100
+              MB/day depending on the configured verbosity.</para>
             </listitem>
           </varlistentry>
           <varlistentry>
             <term>Network</term>
             <listitem>
-              <para>Network connectivity to ChirpStack server (gRPC port 8080) and OPC UA clients</para>
+              <para>Outbound TCP to the ChirpStack gRPC endpoint
+              (typically port 8080) and inbound TCP for OPC UA clients
+              (default port 4855).</para>
             </listitem>
           </varlistentry>
         </variablelist>
@@ -135,16 +327,28 @@
         <title>Software Requirements</title>
         <itemizedlist>
           <listitem>
-            <para><emphasis>OS:</emphasis> Linux (Debian, Ubuntu, CentOS), macOS, or Windows with Docker</para>
+            <para><emphasis>OS</emphasis> — Linux (Debian, Ubuntu, CentOS,
+            Alpine), macOS, or Windows with Docker. The reference deployment
+            uses Linux containers.</para>
           </listitem>
           <listitem>
-            <para><emphasis>Rust:</emphasis> v1.87.0 or later (if building from source)</para>
+            <para><emphasis>Rust toolchain</emphasis> — version 1.94.0 or
+            later when building from source. The release binary has no Rust
+            runtime requirement.</para>
           </listitem>
           <listitem>
-            <para><emphasis>ChirpStack:</emphasis> v4.0 or later with gRPC API enabled</para>
+            <para><emphasis>SQLite</emphasis> — bundled via
+            <literal>rusqlite</literal>'s <literal>bundled</literal>
+            feature; no separate SQLite installation is needed.</para>
           </listitem>
           <listitem>
-            <para><emphasis>Network:</emphasis> Firewall rules allowing inbound connections to OPC UA port (default 4855)</para>
+            <para><emphasis>ChirpStack</emphasis> — version 4.0 or later
+            with the gRPC API enabled and an API token issued for the
+            target tenant.</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>Firewall</emphasis> — outbound to ChirpStack
+            (gRPC), inbound to OPC UA clients (port 4855 by default).</para>
           </listitem>
         </itemizedlist>
       </section>
@@ -158,44 +362,66 @@
 
       <section id="sec-docker-installation">
         <title>Installation via Docker (Recommended)</title>
-        <para>Docker installation is the quickest way to get opcgw running without compiling from source.</para>
+        <para>Docker installation is the quickest way to get opcgw running
+        without compiling from source. The provided
+        <filename>docker-compose.yml</filename> mounts a configuration
+        directory, a data directory for the SQLite database and PKI
+        certificates, and a log directory for the daily-rolling
+        files.</para>
 
         <procedure>
           <title>Docker Installation Steps</title>
           <step>
-            <para>Ensure Docker is installed on your system. Visit Docker documentation for installation instructions.</para>
+            <para>Install Docker. Visit
+            <ulink url="https://docs.docker.com/get-docker/">docker.com</ulink>
+            for instructions for your platform.</para>
           </step>
           <step>
-            <para>Create a configuration directory:</para>
-            <screen>mkdir -p ~/opcgw-config</screen>
+            <para>Clone the repository (or copy
+            <filename>docker-compose.yml</filename>):</para>
+            <screen>git clone https://github.com/guycorbaz/opcgw.git
+cd opcgw</screen>
           </step>
           <step>
-            <para>Prepare the configuration file (see Configuration section)</para>
+            <para>Edit <filename>config/config.toml</filename> to point at
+            your ChirpStack server and define your applications, devices,
+            and metrics (see Chapter 4).</para>
           </step>
           <step>
-            <para>Run the Docker container:</para>
+            <para>Start the gateway:</para>
+            <screen>docker compose up</screen>
+            <para>Or run a one-shot container:</para>
             <screen>docker run -d \
   --name opcgw \
   -p 4855:4855 \
-  -v ~/opcgw-config:/app/config \
-  -v opcgw-db:/app/data \
+  -v $(pwd)/config:/app/config:ro \
+  -v opcgw-data:/app/data \
+  -v opcgw-logs:/app/log \
   guycorbaz/opcgw:latest</screen>
           </step>
           <step>
-            <para>Verify the container is running:</para>
-            <screen>docker logs opcgw</screen>
+            <para>Inspect the startup output:</para>
+            <screen>docker logs -f opcgw</screen>
           </step>
         </procedure>
 
         <note>
-          <title>Docker Volumes</title>
-          <para>The Docker image uses two volumes:</para>
+          <title>Container Volumes</title>
+          <para>The container exposes three mount points:</para>
           <itemizedlist>
             <listitem>
-              <para><filename>/app/config</filename> — Configuration files (TOML, logging setup)</para>
+              <para><filename>/app/config</filename> — configuration files,
+              read-only at runtime.</para>
             </listitem>
             <listitem>
-              <para><filename>/app/data</filename> — SQLite database files and PKI certificates</para>
+              <para><filename>/app/data</filename> — SQLite database files
+              (<filename>opcgw.db</filename>,
+              <filename>opcgw.db-wal</filename>) and the PKI directory.</para>
+            </listitem>
+            <listitem>
+              <para><filename>/app/log</filename> — daily-rolling log files
+              (set <literal>OPCGW_LOG_DIR=/app/log</literal> or
+              <literal>[logging].dir = "/app/log"</literal>).</para>
             </listitem>
           </itemizedlist>
         </note>
@@ -203,7 +429,8 @@
 
       <section id="sec-source-installation">
         <title>Building from Source</title>
-        <para>If you prefer to build opcgw from source or need platform-specific optimizations:</para>
+        <para>Use a from-source build when you need platform-specific
+        optimizations, debug symbols, or a custom Rust toolchain.</para>
 
         <procedure>
           <title>Build from Source Steps</title>
@@ -213,25 +440,30 @@
 cd opcgw</screen>
           </step>
           <step>
-            <para>Ensure Rust is installed (v1.87.0+):</para>
+            <para>Verify the Rust toolchain (1.94.0 or later):</para>
             <screen>rustc --version</screen>
           </step>
           <step>
-            <para>Build the project:</para>
+            <para>Build a release binary:</para>
             <screen>cargo build --release</screen>
           </step>
           <step>
-            <para>The compiled binary will be at <filename>target/release/opcgw</filename></para>
+            <para>The compiled binary is at
+            <filename>target/release/opcgw</filename>.</para>
           </step>
           <step>
-            <para>Run the gateway:</para>
+            <para>Run the gateway with an explicit configuration
+            path:</para>
             <screen>./target/release/opcgw -c config/config.toml</screen>
           </step>
         </procedure>
 
         <note>
           <title>Build Time</title>
-          <para>Release builds may take 5-10 minutes depending on your system and internet connection. Debug builds are faster but unoptimized.</para>
+          <para>Release builds take roughly 5-10 minutes on a first compile
+          (the protocol-buffer code is generated at build time via
+          <literal>tonic-build</literal>). Subsequent incremental builds are
+          measured in seconds.</para>
         </note>
       </section>
     </chapter>
@@ -244,70 +476,417 @@ cd opcgw</screen>
 
       <section id="sec-config-overview">
         <title>Configuration Overview</title>
-        <para>opcgw uses TOML configuration files for all settings. The main configuration file is typically located at <filename>config/config.toml</filename>. Environment variables can override TOML settings.</para>
+        <para>opcgw is configured through a single TOML file (typically
+        <filename>config/config.toml</filename>). Every value can be
+        overridden by an environment variable. The location of the
+        configuration file is resolved in this order:</para>
+        <orderedlist>
+          <listitem>
+            <para>The <literal>-c PATH</literal> CLI flag.</para>
+          </listitem>
+          <listitem>
+            <para>The <literal>CONFIG_PATH</literal> environment
+            variable.</para>
+          </listitem>
+          <listitem>
+            <para>Default: the
+            <literal>OPCGW_CONFIG_PATH/config.toml</literal> directory,
+            where <literal>OPCGW_CONFIG_PATH</literal> defaults to
+            <filename>config</filename>.</para>
+          </listitem>
+        </orderedlist>
+
+        <para>Environment variable overrides use the
+        <literal>OPCGW_</literal> prefix. Nested keys use
+        <literal>__</literal> (double underscore) as the separator. For
+        example, <literal>[chirpstack].polling_frequency</literal> can be
+        overridden by <literal>OPCGW_CHIRPSTACK__POLLING_FREQUENCY=30</literal>.
+        Two convenience aliases bypass the nesting convention:</para>
+        <itemizedlist>
+          <listitem>
+            <para><literal>OPCGW_LOG_DIR</literal> — quick override for
+            <literal>[logging].dir</literal>, read directly in
+            <filename>main.rs</filename> before tracing initialises.</para>
+          </listitem>
+          <listitem>
+            <para><literal>OPCGW_LOG_LEVEL</literal> — quick override for
+            <literal>[logging].level</literal>, read directly in
+            <filename>main.rs</filename>.</para>
+          </listitem>
+        </itemizedlist>
       </section>
 
       <section id="sec-global-config">
-        <title>Global Configuration</title>
-        <para>The <literal>[global]</literal> section contains general gateway settings:</para>
+        <title>[global] — Global Settings</title>
+        <para>The <literal>[global]</literal> section currently carries a
+        single flag:</para>
         <programlisting language="ini">[global]
-# Log level: trace, debug, info, warn, error
-log_level = "info"
+# Verbose internal debug output (currently a no-op operationally;
+# reserved for future debug-only behaviours that should not depend on
+# the tracing log level).
+debug = true</programlisting>
+        <para>All log-related configuration lives under the dedicated
+        <literal>[logging]</literal> section described next.</para>
+      </section>
 
-# OPC UA endpoint URL (default: opc.tcp://localhost:4855)
-opc_ua_endpoint = "opc.tcp://0.0.0.0:4855"
+      <section id="sec-logging-config">
+        <title>[logging] — Logging</title>
+        <para>The <literal>[logging]</literal> section configures the file
+        log directory and the global verbosity level. Both keys are
+        optional; sensible defaults apply when omitted.</para>
 
-# Data retention in days (0 = no pruning)
-retention_days = 30</programlisting>
+        <programlisting language="ini">[logging]
+# Directory where per-module daily-rolling log files are written.
+# Default: "./log"
+dir = "/var/log/opcgw"
+
+# Global default log level: trace, debug, info, warn, error.
+# Default: "info"
+level = "info"</programlisting>
+
+        <variablelist>
+          <varlistentry>
+            <term>dir</term>
+            <listitem>
+              <para>Directory containing the five daily-rolling log files
+              (<filename>opc_ua_gw.log</filename>,
+              <filename>chirpstack.log</filename>,
+              <filename>opc_ua.log</filename>,
+              <filename>storage.log</filename>,
+              <filename>config.log</filename>). The directory is created
+              with parents at startup if it does not already exist; if the
+              configured directory is not writable, opcgw falls back to
+              <filename>./log</filename> and emits a stderr warning.</para>
+            </listitem>
+          </varlistentry>
+          <varlistentry>
+            <term>level</term>
+            <listitem>
+              <para>Default verbosity for the console (stderr) and the root
+              <filename>opc_ua_gw.log</filename>. Per-module log files
+              capture at <literal>TRACE</literal> independently of this
+              value, so even at <literal>level = "error"</literal> you still
+              get full per-module traces in
+              <filename>chirpstack.log</filename> and friends.</para>
+            </listitem>
+          </varlistentry>
+        </variablelist>
+
+        <para>Verbosity precedence (highest first):</para>
+        <orderedlist>
+          <listitem>
+            <para>CLI <literal>-d</literal> count
+            (<literal>-d</literal> = debug, <literal>-dd</literal> = trace,
+            <literal>-ddd</literal> = trace, etc.).</para>
+          </listitem>
+          <listitem>
+            <para><literal>OPCGW_LOG_LEVEL</literal> environment
+            variable.</para>
+          </listitem>
+          <listitem>
+            <para><literal>OPCGW_LOGGING__LEVEL</literal> figment-style
+            override.</para>
+          </listitem>
+          <listitem>
+            <para><literal>[logging].level</literal> in the TOML
+            file.</para>
+          </listitem>
+          <listitem>
+            <para>Hard-coded default: <literal>info</literal>.</para>
+          </listitem>
+        </orderedlist>
+
+        <para>Level semantics:</para>
+        <table frame="all">
+          <title>Log levels and their use cases</title>
+          <tgroup cols="3">
+            <thead>
+              <row>
+                <entry>Level</entry>
+                <entry>Use case</entry>
+                <entry>Volume (10 dev, 1 Hz)</entry>
+              </row>
+            </thead>
+            <tbody>
+              <row>
+                <entry><literal>trace</literal></entry>
+                <entry>Deepest debugging — every operation, every span entry</entry>
+                <entry>very high</entry>
+              </row>
+              <row>
+                <entry><literal>debug</literal></entry>
+                <entry>Production troubleshooting — key decisions, timings, IDs</entry>
+                <entry>moderate</entry>
+              </row>
+              <row>
+                <entry><literal>info</literal></entry>
+                <entry>Normal operations — cycle starts/ends, state transitions</entry>
+                <entry>low (default)</entry>
+              </row>
+              <row>
+                <entry><literal>warn</literal></entry>
+                <entry>Anomalies and retries that succeeded — early warning</entry>
+                <entry>sparse</entry>
+              </row>
+              <row>
+                <entry><literal>error</literal></entry>
+                <entry>Unrecoverable conditions only — silent if healthy</entry>
+                <entry>silent (healthy)</entry>
+              </row>
+            </tbody>
+          </tgroup>
+        </table>
+
+        <para>See <xref linkend="ch-logging"/> for the operations reference,
+        diagnostic patterns, and the symptom cookbook.</para>
       </section>
 
       <section id="sec-chirpstack-config">
-        <title>ChirpStack Configuration</title>
-        <para>The <literal>[chirpstack]</literal> section configures connection to your ChirpStack server:</para>
+        <title>[chirpstack] — ChirpStack Connection</title>
         <programlisting language="ini">[chirpstack]
-# ChirpStack server address (gRPC endpoint)
-server_address = "chirpstack.example.com:8080"
+# ChirpStack server address (gRPC endpoint, http:// or https://)
+server_address = "http://chirpstack.example.com:8080"
 
-# API authentication token (obtain from ChirpStack)
+# API token issued by ChirpStack. NEVER commit a real token to VCS;
+# use OPCGW_CHIRPSTACK__API_TOKEN at deploy time.
 api_token = "your_api_token_here"
 
-# Tenant ID (UUID)
+# Tenant UUID
 tenant_id = "ffffffff-ffff-ffff-ffff-ffffffffffff"
 
-# Poll interval in seconds
-poll_interval_secs = 30
+# Polling frequency in seconds (default: 10)
+polling_frequency = 10
 
-# Maximum retries on connection failure
-max_retries = 3
+# Connection retries when ChirpStack is unreachable (default: 10)
+retry = 10
 
-# Request timeout in seconds
-request_timeout_secs = 10</programlisting>
+# Delay (seconds) between two retries (default: 10)
+delay = 10
+
+# Page size for pagination in list APIs (default: 100, range 1-1000)
+list_page_size = 100</programlisting>
 
         <warning>
           <title>API Token Security</title>
-          <para>Never commit the API token to version control. Use environment variable overrides for sensitive credentials:</para>
-          <screen>export CHIRPSTACK_API_TOKEN="your_secret_token"</screen>
+          <para>The <literal>api_token</literal> grants full ChirpStack
+          access. Do not commit production tokens. Override at deploy
+          time:</para>
+          <screen>export OPCGW_CHIRPSTACK__API_TOKEN="your_secret_token"</screen>
+          <para>The token is never written to log output (a security
+          regression test in the suite asserts this).</para>
         </warning>
       </section>
 
-      <section id="sec-opc-ua-config">
-        <title>OPC UA Configuration</title>
-        <para>The <literal>[opcua]</literal> section configures the OPC UA server:</para>
+      <section id="sec-opcua-config">
+        <title>[opcua] — OPC UA Server</title>
         <programlisting language="ini">[opcua]
-# OPC UA server endpoint
-endpoint = "opc.tcp://0.0.0.0:4855"
+# Application identity (mandatory)
+application_name = "Chirpstack OPC UA Gateway"
+application_uri  = "urn:chirpstack:opcua:gateway"
+product_uri      = "urn:chirpstack:opcua:gateway"
 
-# Server name
-server_name = "opcgw"
+# Diagnostics output from the OPC UA stack itself
+diagnostics_enabled = true
 
-# Product URI
-product_uri = "https://github.com/guycorbaz/opcgw"
+# Optional: TCP hello timeout (default 5 s)
+# hello_timeout = 10
 
-# Enable PKI/security (true = requires certificates)
-pki_enabled = false
+# Optional: bind address (default: first interface IP)
+# host_ip_address = "0.0.0.0"
 
-# PKI directory (contains certs and keys)
-pki_dir = "./pki"</programlisting>
+# Optional: TCP port (default: 4840 for OPC UA, this project ships 4855)
+# host_port = 4855
+
+# PKI configuration (relative paths are resolved under pki_dir)
+create_sample_keypair = true
+certificate_path      = "own/cert.der"
+private_key_path      = "private/private.pem"
+trust_client_cert     = true
+check_cert_time       = true
+pki_dir               = "./pki"
+
+# User authentication (single-user only at this time)
+user_name     = "user1"
+user_password = "user1"
+
+# Staleness threshold in seconds (Story 5-2)
+# Metrics older than this return Uncertain in OPC UA;
+# older than 24 h return Bad. Default: 120 (2 x default polling_frequency).
+# Range: 1-86400. Override: OPCGW_OPCUA__STALE_THRESHOLD_SECONDS
+stale_threshold_seconds = 120</programlisting>
+
+        <variablelist>
+          <varlistentry>
+            <term>stale_threshold_seconds</term>
+            <listitem>
+              <para>Drives the OPC UA <literal>StatusCode</literal>
+              returned with each metric read. See
+              <xref linkend="sec-staleness-status-codes"/>.</para>
+            </listitem>
+          </varlistentry>
+          <varlistentry>
+            <term>create_sample_keypair</term>
+            <listitem>
+              <para>When <literal>true</literal>, opcgw generates a
+              self-signed certificate at first start. Set to
+              <literal>false</literal> in production once you have provided
+              real certificates under <literal>pki_dir</literal>.</para>
+            </listitem>
+          </varlistentry>
+        </variablelist>
+
+        <warning>
+          <title>OPC UA Security</title>
+          <para>The current build supports a single user/password and a
+          basic PKI surface. Anonymous and certificate-only flows are not
+          yet exposed. Plan production deployments behind a network boundary
+          until Epic 7 (security hardening) lands.</para>
+        </warning>
+      </section>
+
+      <section id="sec-command-delivery-config">
+        <title>[command_delivery] — Command Queue</title>
+        <programlisting language="ini">[command_delivery]
+# Polling interval for ChirpStack delivery confirmations (default 5 s)
+status_poll_interval_secs = 5
+
+# Maximum time to wait for ChirpStack to confirm a Sent command (default 60 s).
+# Commands still pending after this become Failed.
+confirmation_timeout_secs = 60
+
+# Frequency of the timeout-detection scan (default 10 s)
+timeout_check_interval_secs = 10
+
+# Retention period for completed commands (default 7 days).
+# Confirmed/Failed commands are purged after this window.
+history_retention_days = 7</programlisting>
+      </section>
+
+      <section id="sec-application-config">
+        <title>[[application]] — Devices and Metrics</title>
+        <para>The address space exposed via OPC UA mirrors the configured
+        application → device → metric hierarchy. Each application is an
+        array entry under <literal>[[application]]</literal> and may contain
+        any number of devices and metrics.</para>
+
+        <programlisting language="ini">[[application]]
+application_id   = "ae2012c2-75a1-407d-98ab-1520fb511edf"
+application_name = "Arrosage"
+
+  [[application.device]]
+  device_name = "Niveau_citerne"
+  device_id   = "a840418371886840"            # DevEUI
+
+    [[application.device.read_metric]]
+    metric_name             = "Niveau_cit"     # OPC UA browse name
+    chirpstack_metric_name  = "Water_deep_cm"  # ChirpStack metric key
+    metric_type             = "Float"          # Bool | Int | Float | String
+    metric_unit             = "cm"             # optional, OPC UA EU info
+
+  [[application.device]]
+  device_name = "Vanne01"
+  device_id   = "524d1e0a02243201"
+
+    [[application.device.read_metric]]
+    metric_name            = "Status_v01"
+    chirpstack_metric_name = "valveStatusCode"
+    metric_type            = "Int"
+
+    [[application.device.command]]
+    command_name      = "Open_close_valve01"
+    command_id        = 1
+    command_confirmed = true     # request ChirpStack delivery confirmation
+    command_port      = 10       # downlink fPort</programlisting>
+
+        <itemizedlist>
+          <listitem>
+            <para><literal>application_id</literal> must match a real
+            ChirpStack application UUID — opcgw uses it to scope the
+            <literal>List</literal> calls.</para>
+          </listitem>
+          <listitem>
+            <para><literal>device_id</literal> must match the DevEUI of a
+            real device.</para>
+          </listitem>
+          <listitem>
+            <para>
+            <literal>[[application.device.read_metric]]</literal> declares
+            uplink metrics; <literal>metric_type</literal> drives the OPC UA
+            <literal>Variant</literal> type
+            (<literal>Bool</literal> →
+            <literal>Variant::Boolean</literal>,
+            <literal>Int</literal> → <literal>Variant::Int32</literal>,
+            <literal>Float</literal> →
+            <literal>Variant::Double</literal>,
+            <literal>String</literal> →
+            <literal>Variant::String</literal>).</para>
+          </listitem>
+          <listitem>
+            <para>
+            <literal>[[application.device.command]]</literal> declares a
+            downlink command surface. OPC UA writes against the
+            corresponding node enqueue a downlink with the configured
+            <literal>command_id</literal> and <literal>command_port</literal>;
+            when <literal>command_confirmed = true</literal> the queue
+            tracks delivery state and times out per the
+            <literal>[command_delivery]</literal> settings.</para>
+          </listitem>
+        </itemizedlist>
+
+        <note>
+          <title>Constraints</title>
+          <para>Each TOML must contain at least one application, each
+          application at least one device, each device at least one read
+          metric (commands are optional). Metric names must be unique
+          within a device.</para>
+        </note>
+      </section>
+
+      <section id="sec-config-env-overrides">
+        <title>Environment Variable Overrides</title>
+        <para>Every TOML key can be overridden via environment variables.
+        The convention:</para>
+        <variablelist>
+          <varlistentry>
+            <term><literal>OPCGW_&lt;SECTION&gt;__&lt;KEY&gt;</literal></term>
+            <listitem>
+              <para>Standard nested-key override. Examples:</para>
+              <itemizedlist>
+                <listitem><para><literal>OPCGW_CHIRPSTACK__API_TOKEN</literal></para></listitem>
+                <listitem><para><literal>OPCGW_OPCUA__USER_PASSWORD</literal></para></listitem>
+                <listitem><para><literal>OPCGW_OPCUA__STALE_THRESHOLD_SECONDS</literal></para></listitem>
+                <listitem><para><literal>OPCGW_LOGGING__LEVEL</literal></para></listitem>
+              </itemizedlist>
+            </listitem>
+          </varlistentry>
+          <varlistentry>
+            <term><literal>OPCGW_LOG_DIR</literal>,
+            <literal>OPCGW_LOG_LEVEL</literal></term>
+            <listitem>
+              <para>Convenience aliases read directly during the
+              tracing-bootstrap phase, before the full TOML is loaded.</para>
+            </listitem>
+          </varlistentry>
+          <varlistentry>
+            <term><literal>CONFIG_PATH</literal></term>
+            <listitem>
+              <para>Overrides the path to <filename>config.toml</filename>
+              when <literal>-c</literal> is not passed on the command
+              line.</para>
+            </listitem>
+          </varlistentry>
+        </variablelist>
+
+        <note>
+          <title>Why two aliases for log dir/level?</title>
+          <para>The <literal>[logging]</literal> block needs to be readable
+          before the full configuration is parsed (otherwise the file
+          appender cannot start). The convenience aliases are read by a
+          standalone bootstrap step; the standard
+          <literal>OPCGW_LOGGING__*</literal> overrides are picked up later
+          when the full <literal>AppConfig</literal> loads. Both forms are
+          supported; the alias wins if both are set.</para>
+        </note>
       </section>
     </chapter>
 
@@ -317,58 +896,123 @@ pki_dir = "./pki"</programlisting>
   <chapter id="ch-startup">
     <title>Starting the Gateway</title>
 
+      <section id="sec-cli-flags">
+        <title>Command-Line Flags</title>
+        <variablelist>
+          <varlistentry>
+            <term><literal>-c PATH</literal>, <literal>--config PATH</literal></term>
+            <listitem>
+              <para>Override the configuration file path. Wins over
+              <literal>CONFIG_PATH</literal> and the default.</para>
+            </listitem>
+          </varlistentry>
+          <varlistentry>
+            <term><literal>-d</literal></term>
+            <listitem>
+              <para>Increase verbosity. <literal>-d</literal> ⇒
+              <literal>debug</literal>; <literal>-dd</literal> or more ⇒
+              <literal>trace</literal>. Wins over every other verbosity
+              source.</para>
+            </listitem>
+          </varlistentry>
+          <varlistentry>
+            <term><literal>-h</literal>, <literal>--help</literal></term>
+            <listitem>
+              <para>Print the help text and exit.</para>
+            </listitem>
+          </varlistentry>
+          <varlistentry>
+            <term><literal>-V</literal>, <literal>--version</literal></term>
+            <listitem>
+              <para>Print the version and exit.</para>
+            </listitem>
+          </varlistentry>
+        </variablelist>
+      </section>
+
       <section id="sec-startup-verification">
         <title>Startup Verification</title>
-        <para>After starting opcgw, verify that it is running correctly by checking the logs. Look for messages indicating:</para>
+        <para>A successful start emits a sequence of structured log lines
+        with microsecond UTC timestamps. Look for these checkpoints:</para>
         <orderedlist>
           <listitem>
-            <para>Connection to ChirpStack server established</para>
+            <para>Tracing initialised
+            (<literal>logging_init</literal>).</para>
           </listitem>
           <listitem>
-            <para>OPC UA server started on the configured endpoint</para>
+            <para>Configuration loaded
+            (<literal>operation = "config_loaded"</literal> at
+            <literal>info</literal>).</para>
           </listitem>
           <listitem>
-            <para>Initial metric polling completed</para>
+            <para>SQLite connection pool ready and migrations applied.</para>
+          </listitem>
+          <listitem>
+            <para>ChirpStack gRPC channel connected
+            (<literal>operation = "chirpstack_connect"</literal>,
+            <literal>success = true</literal>).</para>
+          </listitem>
+          <listitem>
+            <para>OPC UA server bound to its endpoint and address space
+            built.</para>
+          </listitem>
+          <listitem>
+            <para>First poll cycle completes
+            (<literal>operation = "poll_cycle_start"</literal> followed by
+            per-device <literal>device_polled</literal> debug lines).</para>
           </listitem>
         </orderedlist>
 
         <example>
           <title>Expected Startup Log Output</title>
           <programlisting>
-2026-04-20T12:34:56.789Z  INFO opcgw: Starting opcgw v1.0.0
-2026-04-20T12:34:56.890Z  INFO chirpstack: Connecting to chirpstack.example.com:8080
-2026-04-20T12:34:57.123Z  INFO chirpstack: Connected to ChirpStack server
-2026-04-20T12:34:57.234Z  INFO opcua: Starting OPC UA server on opc.tcp://0.0.0.0:4855
-2026-04-20T12:34:57.456Z  INFO opcua: OPC UA server started successfully
-2026-04-20T12:34:58.567Z  INFO chirpstack: Poll cycle 1: 15 devices, 60 metrics collected
+2026-04-27T12:34:56.123456Z  INFO opcgw: tracing initialised level=info dir=./log
+2026-04-27T12:34:56.234567Z  INFO opcgw::config: operation="config_loaded" applications=4 devices=12 metrics=42
+2026-04-27T12:34:56.300100Z  INFO opcgw::storage::sqlite: schema_version=5 migrations_applied=0
+2026-04-27T12:34:56.501020Z  INFO opcgw::chirpstack: operation="chirpstack_connect" attempt=1 endpoint=http://... timeout_secs=0
+2026-04-27T12:34:56.612030Z  INFO opcgw::chirpstack: operation="chirpstack_connect" attempt=1 latency_ms=110 success=true
+2026-04-27T12:34:56.700400Z  INFO opcgw::opc_ua: OPC UA server started endpoint=opc.tcp://0.0.0.0:4855
+2026-04-27T12:34:57.001234Z  INFO opcgw::chirpstack: operation="poll_cycle_start" device_count=12
           </programlisting>
         </example>
       </section>
 
       <section id="sec-graceful-shutdown">
         <title>Graceful Shutdown</title>
-        <para>The gateway supports graceful shutdown via SIGTERM signal. On shutdown, it will:</para>
+        <para>opcgw treats <literal>Ctrl-C</literal> and
+        <literal>SIGTERM</literal> equivalently: a single
+        <literal>CancellationToken</literal> is shared across the poller, OPC
+        UA server, and pruner; on signal it cancels all three and the main
+        task <literal>.await</literal>s their drain.</para>
         <orderedlist>
           <listitem>
-            <para>Stop accepting new OPC UA client connections</para>
+            <para>Inbound OPC UA connections are refused; existing sessions
+            are allowed to close in their own time.</para>
           </listitem>
           <listitem>
-            <para>Allow existing clients to disconnect gracefully</para>
+            <para>The active poll cycle finishes its in-flight batch
+            transaction (<literal>txn_commit</literal>) so no metrics are
+            lost.</para>
           </listitem>
           <listitem>
-            <para>Flush all pending database writes</para>
+            <para>SQLite connections are returned to the pool and dropped;
+            the WAL is checkpointed.</para>
           </listitem>
           <listitem>
-            <para>Close the database connection</para>
+            <para>tracing's non-blocking appenders flush their buffers via
+            their guard objects (held until <literal>main()</literal>
+            returns).</para>
           </listitem>
         </orderedlist>
 
-        <para>To gracefully stop the gateway:</para>
-        <screen>kill -TERM &lt;pid&gt;</screen>
-
         <warning>
           <title>Force Shutdown</title>
-          <para>Avoid using SIGKILL (-9) as it may leave the database in an inconsistent state. Always prefer SIGTERM for graceful shutdown.</para>
+          <para>Avoid <literal>SIGKILL</literal> (<literal>kill -9</literal>).
+          The SQLite database is journaled and will recover, but in-flight
+          downlink commands marked <literal>Sent</literal> may need manual
+          inspection; log lines buffered in the non-blocking appender at
+          the moment of the kill are lost. Always prefer
+          <literal>SIGTERM</literal>.</para>
         </warning>
       </section>
     </chapter>
@@ -379,115 +1023,683 @@ pki_dir = "./pki"</programlisting>
   <chapter id="ch-operation">
       <title>Daily Operation</title>
 
-      <section id="sec-monitoring-metrics">
-        <title>Monitoring Metrics</title>
-        <para>Monitor these key indicators during normal operation:</para>
+      <section id="sec-monitoring-overview">
+        <title>What to Monitor</title>
+        <para>The gateway exposes its own health both in the OPC UA address
+        space and through structured log lines. For a typical production
+        deployment, the two-source approach is:</para>
+        <itemizedlist>
+          <listitem>
+            <para><emphasis>Live health</emphasis> — read the
+            <literal>Gateway</literal> folder via OPC UA from your SCADA
+            front-end. See <xref linkend="sec-gateway-folder"/>.</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>Diagnostics</emphasis> — tail the per-module
+            log files or aggregate them through your log shipper. See
+            <xref linkend="ch-logging"/>.</para>
+          </listitem>
+        </itemizedlist>
+      </section>
+
+      <section id="sec-gateway-folder">
+        <title>The Gateway Folder in OPC UA</title>
+        <para>Under the configured root, opcgw publishes a synthetic
+        <literal>Gateway</literal> folder containing three health
+        variables:</para>
         <variablelist>
           <varlistentry>
-            <term>Poll Latency</term>
+            <term><literal>LastPollTimestamp</literal>
+            (<literal>String</literal>, RFC 3339)</term>
             <listitem>
-              <para>Time to complete a full metric poll cycle. Should be &lt; poll_interval_secs.</para>
+              <para>Time of the last successful poll cycle. The value is
+              <literal>NULL</literal> (OPC UA <literal>Variant::Empty</literal>)
+              until the first cycle completes; reading it before that emits
+              a <literal>warn</literal> log line with
+              <literal>warning="no_data_yet"</literal>.</para>
             </listitem>
           </varlistentry>
           <varlistentry>
-            <term>Connected Devices</term>
+            <term><literal>error_count</literal>
+            (<literal>Int32</literal>)</term>
             <listitem>
-              <para>Number of devices with recent metric updates. Should match expected device count.</para>
+              <para>Cumulative per-cycle error count carried in the
+              persisted gateway status row. Saturates at
+              <literal>i32::MAX</literal>; a saturation read emits a
+              warning. Spikes between consecutive cycles
+              (<literal>delta &gt;= 5</literal>) emit
+              <literal>operation = "error_spike"</literal>.</para>
             </listitem>
           </varlistentry>
           <varlistentry>
-            <term>Database Size</term>
+            <term><literal>chirpstack_available</literal>
+            (<literal>Boolean</literal>)</term>
             <listitem>
-              <para>Monitor SQLite database file size. Should grow slowly if retention is configured.</para>
+              <para><literal>true</literal> when the most recent poll cycle
+              succeeded for at least one device, <literal>false</literal>
+              otherwise. The first per-cycle ChirpStack failure also emits
+              <literal>operation = "chirpstack_outage"</literal>.</para>
+            </listitem>
+          </varlistentry>
+        </variablelist>
+        <para>All three reads are subject to the same staleness logic as
+        regular metrics; under normal operation they return
+        <literal>Good</literal>.</para>
+      </section>
+
+      <section id="sec-staleness-status-codes">
+        <title>Stale-Data Status Codes</title>
+        <para>Every metric read returns a value plus an OPC UA
+        <literal>StatusCode</literal> derived from the metric's age relative
+        to <literal>[opcua].stale_threshold_seconds</literal>:</para>
+        <table frame="all">
+          <title>Metric staleness mapping</title>
+          <tgroup cols="3">
+            <thead>
+              <row>
+                <entry>Age</entry>
+                <entry>StatusCode</entry>
+                <entry>Operator interpretation</entry>
+              </row>
+            </thead>
+            <tbody>
+              <row>
+                <entry>≤ <literal>stale_threshold_seconds</literal></entry>
+                <entry><literal>Good</literal></entry>
+                <entry>Fresh, trustworthy reading</entry>
+              </row>
+              <row>
+                <entry>between threshold and 24 h</entry>
+                <entry><literal>Uncertain</literal></entry>
+                <entry>Last-known value still served, but stale</entry>
+              </row>
+              <row>
+                <entry>&gt; 24 h</entry>
+                <entry><literal>Bad</literal></entry>
+                <entry>Decisively stale; treat the value as suspect</entry>
+              </row>
+            </tbody>
+          </tgroup>
+        </table>
+        <para>Transitions between status codes emit
+        <literal>operation = "staleness_transition"</literal>:
+        in-flight transitions at <literal>info</literal>, the cold-start
+        first observation at <literal>debug</literal> (so restarts of a
+        large stale fleet do not flood the alert pipeline). Metrics whose
+        age sits within ±5 s of the threshold also emit
+        <literal>operation = "staleness_boundary"</literal> at
+        <literal>debug</literal> for diagnosability.</para>
+      </section>
+
+      <section id="sec-monitoring-metrics">
+        <title>Operational KPIs</title>
+        <variablelist>
+          <varlistentry>
+            <term>Poll latency</term>
+            <listitem>
+              <para>Time to complete a full metric poll cycle. Should remain
+              below <literal>polling_frequency</literal>. Watch the per-cycle
+              duration in the
+              <literal>operation = "poll_cycle_complete"</literal> log line
+              and the budget warning if
+              <literal>operation = "batch_write"</literal> exceeds
+              500 ms.</para>
             </listitem>
           </varlistentry>
           <varlistentry>
-            <term>OPC UA Connections</term>
+            <term>Connected devices</term>
             <listitem>
-              <para>Number of active OPC UA client connections. Monitor for unexpected spikes.</para>
+              <para>Devices producing successful reads in the most recent
+              cycle. The
+              <literal>device_polled success=true</literal> count tells you
+              the live fleet; a sudden drop is a signal to investigate
+              ChirpStack or radio coverage.</para>
+            </listitem>
+          </varlistentry>
+          <varlistentry>
+            <term>Database size</term>
+            <listitem>
+              <para>SQLite database file size growth. The pruner enforces
+              the historical retention window — if the database is growing
+              faster than expected, check the
+              <literal>operation = "prune_metric_history"</literal>
+              line.</para>
+            </listitem>
+          </varlistentry>
+          <varlistentry>
+            <term>OPC UA read latency</term>
+            <listitem>
+              <para>Per-read budget is 100 ms. The gateway emits a
+              <literal>warn</literal> with
+              <literal>exceeded_budget = true</literal> on any read past
+              that bound; the Story 6-1 microbench measured p95 around
+              11 µs at 1 kHz read rate, so budget exceedance is a strong
+              signal of contention.</para>
+            </listitem>
+          </varlistentry>
+          <varlistentry>
+            <term>Storage query latency</term>
+            <listitem>
+              <para>Per-query budget is 10 ms. Persistent
+              <literal>SQLITE_BUSY</literal> warnings indicate write
+              contention or pool sizing problems.</para>
             </listitem>
           </varlistentry>
         </variablelist>
       </section>
+
+      <section id="sec-command-monitoring">
+        <title>Command Queue Monitoring</title>
+        <para>Downlink commands traverse three states:</para>
+        <orderedlist>
+          <listitem>
+            <para><literal>Pending</literal> — Enqueued by an OPC UA
+            write; not yet sent to ChirpStack.</para>
+          </listitem>
+          <listitem>
+            <para><literal>Sent</literal> — ChirpStack accepted the
+            downlink. If <literal>command_confirmed = true</literal>, the
+            gateway polls for confirmation every
+            <literal>status_poll_interval_secs</literal>.</para>
+          </listitem>
+          <listitem>
+            <para><literal>Confirmed</literal> /
+            <literal>Failed</literal> — Terminal states. A
+            <literal>Sent</literal> command that does not transition within
+            <literal>confirmation_timeout_secs</literal> becomes
+            <literal>Failed</literal>.</para>
+          </listitem>
+        </orderedlist>
+        <para>Use the SQLite database to inspect queue state directly
+        when needed:</para>
+        <screen>sqlite3 data/opcgw.db \
+  "SELECT command_id, status, created_at, sent_at, confirmed_at, error_message
+   FROM commands ORDER BY created_at DESC LIMIT 20;"</screen>
+      </section>
     </chapter>
 
   <!-- ============================================ -->
-  <!-- CHAPTER 7: TROUBLESHOOTING -->
+  <!-- CHAPTER 7: LOGGING & OBSERVABILITY -->
+  <!-- ============================================ -->
+  <chapter id="ch-logging">
+      <title>Logging and Observability</title>
+
+      <section id="sec-logging-architecture">
+        <title>Architecture</title>
+        <para>opcgw uses the <literal>tracing</literal> crate end-to-end.
+        Every log line is structured (<literal>key=value</literal> fields
+        plus a free-text message), carries a microsecond UTC timestamp via
+        <literal>ChronoUtc</literal>, and may carry a
+        <literal>request_id</literal> if it was emitted inside an OPC UA
+        read span.</para>
+        <para>Five appenders are wired by default:</para>
+        <table frame="all">
+          <title>Log destinations</title>
+          <tgroup cols="3">
+            <thead>
+              <row>
+                <entry>Sink</entry>
+                <entry>Captures</entry>
+                <entry>Level filter</entry>
+              </row>
+            </thead>
+            <tbody>
+              <row>
+                <entry>Console (stderr)</entry>
+                <entry>Everything from every module</entry>
+                <entry>Configurable (<literal>[logging].level</literal>)</entry>
+              </row>
+              <row>
+                <entry><filename>opc_ua_gw.log</filename></entry>
+                <entry>Everything from every module</entry>
+                <entry>Configurable</entry>
+              </row>
+              <row>
+                <entry><filename>chirpstack.log</filename></entry>
+                <entry>Target <literal>opcgw::chirpstack</literal></entry>
+                <entry><literal>TRACE</literal> (always)</entry>
+              </row>
+              <row>
+                <entry><filename>opc_ua.log</filename></entry>
+                <entry>Targets <literal>opcgw::opc_ua</literal>,
+                <literal>async_opcua</literal></entry>
+                <entry><literal>TRACE</literal> /
+                <literal>DEBUG</literal></entry>
+              </row>
+              <row>
+                <entry><filename>storage.log</filename></entry>
+                <entry>Target <literal>opcgw::storage</literal></entry>
+                <entry><literal>TRACE</literal> (always)</entry>
+              </row>
+              <row>
+                <entry><filename>config.log</filename></entry>
+                <entry>Target <literal>opcgw::config</literal></entry>
+                <entry><literal>TRACE</literal> (always)</entry>
+              </row>
+            </tbody>
+          </tgroup>
+        </table>
+        <para>All file appenders are daily-rolling. The level filter on
+        per-module files is not configurable — operators always have the
+        full per-module trace available even when the console is at
+        <literal>error</literal>.</para>
+      </section>
+
+      <section id="sec-correlation-ids">
+        <title>Request Correlation</title>
+        <para>Each OPC UA read is wrapped in an
+        <literal>info_span!</literal> with a freshly generated
+        <literal>request_id</literal> (UUID v4). All log lines emitted while
+        that span is active inherit the field — including
+        <literal>storage_query</literal> records from the SQLite layer and
+        <literal>staleness_check</literal> records inside the OPC UA
+        callback. To trace one client read end-to-end at
+        <literal>debug</literal>:</para>
+        <screen>grep request_id=&lt;uuid&gt; opc_ua_gw.log</screen>
+        <para>The expected order is
+        <literal>opc_ua_read</literal> entry →
+        <literal>storage_query</literal> →
+        <literal>staleness_check</literal> →
+        <literal>opc_ua_read</literal> exit.</para>
+      </section>
+
+      <section id="sec-perf-budgets">
+        <title>Performance Budgets</title>
+        <para>Three hot paths emit a structured
+        <literal>warn</literal> with
+        <literal>exceeded_budget = true</literal> when their wall-clock
+        latency crosses a fixed threshold. The thresholds are constants in
+        <filename>src/utils.rs</filename>:</para>
+        <table frame="all">
+          <title>Budgets</title>
+          <tgroup cols="3">
+            <thead>
+              <row>
+                <entry>Operation</entry>
+                <entry>Budget</entry>
+                <entry>Field set on overrun</entry>
+              </row>
+            </thead>
+            <tbody>
+              <row>
+                <entry><literal>opc_ua_read</literal></entry>
+                <entry>100 ms</entry>
+                <entry><literal>duration_ms, budget_ms=100,
+                exceeded_budget=true</literal></entry>
+              </row>
+              <row>
+                <entry><literal>storage_query</literal></entry>
+                <entry>10 ms</entry>
+                <entry><literal>latency_ms, budget_ms=10,
+                exceeded_budget=true, query_type=...</literal></entry>
+              </row>
+              <row>
+                <entry><literal>batch_write</literal></entry>
+                <entry>500 ms</entry>
+                <entry><literal>latency_ms, budget_ms=500,
+                exceeded_budget=true, metrics_count=...</literal></entry>
+              </row>
+            </tbody>
+          </tgroup>
+        </table>
+        <para>Below budget the same call sites stay at
+        <literal>debug</literal>, so steady-state operation does not flood
+        the warn channel.</para>
+      </section>
+
+      <section id="sec-operations-reference">
+        <title>Operation Names — At a Glance</title>
+        <para>Every load-bearing log line carries an
+        <literal>operation = "&lt;name&gt;"</literal> field. The full
+        reference (including expected fields, level, and remediation tips)
+        lives in <filename>docs/logging.md</filename>; the table below is a
+        quick lookup of the most common names.</para>
+
+        <table frame="all">
+          <title>Common operation names</title>
+          <tgroup cols="3">
+            <thead>
+              <row>
+                <entry>Operation</entry>
+                <entry>Emitted by</entry>
+                <entry>Level</entry>
+              </row>
+            </thead>
+            <tbody>
+              <row>
+                <entry><literal>poll_cycle_start</literal></entry>
+                <entry>poller, every cycle</entry>
+                <entry><literal>info</literal></entry>
+              </row>
+              <row>
+                <entry><literal>device_polled</literal></entry>
+                <entry>poller, per device</entry>
+                <entry><literal>debug</literal></entry>
+              </row>
+              <row>
+                <entry><literal>device_poll</literal></entry>
+                <entry>poller, on per-device failure</entry>
+                <entry><literal>warn</literal></entry>
+              </row>
+              <row>
+                <entry><literal>chirpstack_connect</literal></entry>
+                <entry>poller, gRPC channel and probe paths</entry>
+                <entry><literal>info</literal> /
+                <literal>warn</literal></entry>
+              </row>
+              <row>
+                <entry><literal>chirpstack_request</literal></entry>
+                <entry>poller, on
+                <literal>DeadlineExceeded</literal>,
+                <literal>Unavailable</literal>,
+                <literal>Cancelled</literal></entry>
+                <entry><literal>warn</literal></entry>
+              </row>
+              <row>
+                <entry><literal>chirpstack_outage</literal></entry>
+                <entry>poller, first per-cycle ChirpStack failure</entry>
+                <entry><literal>warn</literal></entry>
+              </row>
+              <row>
+                <entry><literal>error_spike</literal></entry>
+                <entry>poller, when error_count delta ≥ 5</entry>
+                <entry><literal>warn</literal></entry>
+              </row>
+              <row>
+                <entry><literal>retry_schedule</literal></entry>
+                <entry>poller, on TCP probe retry</entry>
+                <entry><literal>info</literal></entry>
+              </row>
+              <row>
+                <entry><literal>metric_parse</literal></entry>
+                <entry>poller, invalid boolean encoding</entry>
+                <entry><literal>warn</literal></entry>
+              </row>
+              <row>
+                <entry><literal>batch_write</literal></entry>
+                <entry>poller, every batch flush</entry>
+                <entry><literal>debug</literal> /
+                <literal>warn</literal></entry>
+              </row>
+              <row>
+                <entry><literal>storage_query</literal></entry>
+                <entry>storage layer, every query
+                (<literal>StorageOpLog::Drop</literal>)</entry>
+                <entry><literal>debug</literal> /
+                <literal>warn</literal></entry>
+              </row>
+              <row>
+                <entry><literal>txn_begin</literal>,
+                <literal>txn_commit</literal>,
+                <literal>txn_rollback</literal></entry>
+                <entry>storage layer, transaction boundaries</entry>
+                <entry><literal>trace</literal></entry>
+              </row>
+              <row>
+                <entry><literal>opc_ua_read</literal></entry>
+                <entry>OPC UA server, every metric read</entry>
+                <entry><literal>info</literal> span</entry>
+              </row>
+              <row>
+                <entry><literal>staleness_check</literal></entry>
+                <entry>OPC UA server, every metric read</entry>
+                <entry><literal>debug</literal></entry>
+              </row>
+              <row>
+                <entry><literal>staleness_transition</literal></entry>
+                <entry>OPC UA server, on status code change</entry>
+                <entry><literal>info</literal>
+                (<literal>debug</literal> on first observation)</entry>
+              </row>
+              <row>
+                <entry><literal>staleness_boundary</literal></entry>
+                <entry>OPC UA server, ±5 s of threshold</entry>
+                <entry><literal>debug</literal></entry>
+              </row>
+              <row>
+                <entry><literal>health_metric_read</literal></entry>
+                <entry>OPC UA server, Gateway folder reads</entry>
+                <entry><literal>debug</literal>
+                (<literal>warn</literal> on no-data-yet)</entry>
+              </row>
+              <row>
+                <entry><literal>gateway_status_init</literal></entry>
+                <entry>OPC UA server, first uninitialised read</entry>
+                <entry><literal>info</literal>
+                (once per process)</entry>
+              </row>
+            </tbody>
+          </tgroup>
+        </table>
+
+        <para>Future operations reserved for Story 4-4 (auto-recovery from
+        ChirpStack outages):
+        <literal>recovery_attempt</literal>,
+        <literal>recovery_complete</literal>,
+        <literal>recovery_failed</literal>.</para>
+      </section>
+  </chapter>
+
+  <!-- ============================================ -->
+  <!-- CHAPTER 8: TROUBLESHOOTING -->
   <!-- ============================================ -->
   <chapter id="ch-troubleshooting">
     <title>Troubleshooting</title>
 
-      <section id="sec-common-issues">
-        <title>Common Issues and Solutions</title>
+      <section id="sec-symptom-cookbook">
+        <title>Symptom Cookbook</title>
+        <para>Each subsection below pairs a symptom an operator can observe
+        with the structured log lines that diagnose it and the
+        corrective action.</para>
 
         <section id="sec-issue-chirpstack-connection">
-          <title>Cannot Connect to ChirpStack</title>
-          <para><emphasis>Symptoms:</emphasis> Logs show connection failures to ChirpStack server</para>
-          <para><emphasis>Solutions:</emphasis></para>
+          <title>Cannot connect to ChirpStack</title>
+          <para><emphasis>Log signature:</emphasis>
+          <literal>operation="chirpstack_connect"</literal> with
+          <literal>success=false</literal>, repeated; or a single
+          <literal>operation="chirpstack_outage"</literal> on the first
+          per-cycle failure.</para>
           <orderedlist>
             <listitem>
-              <para>Verify ChirpStack server address and port are correct in configuration</para>
+              <para>Confirm the configured
+              <literal>server_address</literal> resolves and the gRPC port
+              is reachable:
+              <command>nc -vz chirpstack.example.com 8080</command>.</para>
             </listitem>
             <listitem>
-              <para>Confirm ChirpStack is running: <command>curl http://chirpstack.example.com:8080</command></para>
+              <para>Validate the API token. A 16/Unauthenticated tonic code
+              would surface as a generic
+              <literal>OpcGwError::ChirpStack(...)</literal>; cross-check by
+              hitting ChirpStack directly with
+              <command>grpcurl -H "Authorization: Bearer $TOKEN" \
+chirpstack:8080 list</command>.</para>
             </listitem>
             <listitem>
-              <para>Check network connectivity: <command>ping chirpstack.example.com</command></para>
-            </listitem>
-            <listitem>
-              <para>Verify firewall rules allow outbound connections to port 8080</para>
-            </listitem>
-            <listitem>
-              <para>Test gRPC connectivity: <command>grpcurl -plaintext list chirpstack.example.com:8080</command></para>
-            </listitem>
-            <listitem>
-              <para>Verify API token is valid and has appropriate permissions</para>
+              <para>Inspect <literal>last_successful_poll</literal> in the
+              <literal>chirpstack_outage</literal> warn line: a long gap
+              indicates a sustained outage. Story 4-4 will introduce
+              automatic reconnection; until then, the poller continues
+              attempting on its normal cadence.</para>
             </listitem>
           </orderedlist>
         </section>
 
-        <section id="sec-issue-database-corruption">
-          <title>Database Corruption or Access Errors</title>
-          <para><emphasis>Symptoms:</emphasis> Errors accessing the SQLite database, "database disk image malformed"</para>
-          <para><emphasis>Solutions:</emphasis></para>
+        <section id="sec-issue-error-spike">
+          <title>Sudden burst of errors</title>
+          <para><emphasis>Log signature:</emphasis>
+          <literal>operation="error_spike"</literal> with
+          <literal>delta &gt;= 5</literal>.</para>
           <orderedlist>
             <listitem>
-              <para>Stop the gateway gracefully</para>
+              <para>Cross-reference the surrounding
+              <literal>device_poll</literal> warns to identify the affected
+              devices.</para>
             </listitem>
             <listitem>
-              <para>Check disk space: <command>df -h</command></para>
+              <para>If a single fleet-wide gateway, check ChirpStack itself.
+              If a localised group, check the radio path
+              (<literal>rssi</literal>, <literal>snr</literal> in ChirpStack
+              UI).</para>
             </listitem>
             <listitem>
-              <para>Backup the database: <command>cp data/opcgw.db data/opcgw.db.backup</command></para>
+              <para>The spike is informational only — it does not gate
+              further polling.</para>
+            </listitem>
+          </orderedlist>
+        </section>
+
+        <section id="sec-issue-sqlite-busy">
+          <title>SQLite busy / locked warnings</title>
+          <para><emphasis>Log signature:</emphasis>
+          <literal>operation="storage_query" error="SQLITE_BUSY"
+          sqlite_error_code=DatabaseBusy</literal> (or
+          <literal>DatabaseLocked</literal>).</para>
+          <orderedlist>
+            <listitem>
+              <para>The <literal>sqlite_error_code</literal> field
+              distinguishes <literal>DatabaseBusy</literal> (waiting on a
+              lock) from <literal>DatabaseLocked</literal> (cross-connection
+              write contention).</para>
             </listitem>
             <listitem>
-              <para>Verify database integrity: <command>sqlite3 data/opcgw.db "PRAGMA integrity_check;"</command></para>
+              <para>WAL mode and the per-task connection pool make rare
+              <literal>SQLITE_BUSY</literal> tolerable. Sustained busy
+              warnings under steady load suggest pool undersizing or a
+              long-running write — verify the
+              <literal>operation = "batch_write"</literal> latencies.</para>
             </listitem>
             <listitem>
-              <para>If corrupted, the gateway will automatically recreate on startup with graceful degradation</para>
+              <para>Run integrity check during a maintenance window:
+              <command>sqlite3 data/opcgw.db "PRAGMA integrity_check;"</command>.</para>
+            </listitem>
+          </orderedlist>
+        </section>
+
+        <section id="sec-issue-budget-exceeded">
+          <title>Performance budgets exceeded</title>
+          <para><emphasis>Log signature:</emphasis> any of
+          <literal>opc_ua_read</literal>,
+          <literal>storage_query</literal>, or
+          <literal>batch_write</literal> with
+          <literal>exceeded_budget=true</literal>.</para>
+          <orderedlist>
+            <listitem>
+              <para>Capture the <literal>request_id</literal> on an
+              <literal>opc_ua_read</literal> warn and grep the file logs for
+              the full read-path trace.</para>
+            </listitem>
+            <listitem>
+              <para>If the bottleneck is
+              <literal>storage_query</literal>, check
+              <literal>query_type</literal> and the
+              <literal>SQLITE_BUSY</literal> rate at the same time.</para>
+            </listitem>
+            <listitem>
+              <para>If <literal>batch_write</literal> is slow, the
+              cumulative per-cycle metric count
+              (<literal>metrics_count</literal>) plus disk I/O contention
+              are the usual culprits.</para>
+            </listitem>
+          </orderedlist>
+        </section>
+
+        <section id="sec-issue-no-data-yet">
+          <title>OPC UA client sees NULL <literal>LastPollTimestamp</literal></title>
+          <para><emphasis>Log signature:</emphasis>
+          <literal>operation="health_metric_read" metric="LastPollTimestamp"
+          warning="no_data_yet"</literal>; once-per-process
+          <literal>operation="gateway_status_init"</literal>.</para>
+          <orderedlist>
+            <listitem>
+              <para>This is normal during startup, before the first poll
+              cycle has completed. The gateway is healthy.</para>
+            </listitem>
+            <listitem>
+              <para>If it persists past one polling interval, the first
+              cycle is failing — see
+              <xref linkend="sec-issue-chirpstack-connection"/>.</para>
             </listitem>
           </orderedlist>
         </section>
 
         <section id="sec-issue-no-opc-clients">
-          <title>OPC UA Clients Cannot Connect</title>
-          <para><emphasis>Symptoms:</emphasis> OPC UA client connection attempts are refused</para>
-          <para><emphasis>Solutions:</emphasis></para>
+          <title>OPC UA clients cannot connect</title>
           <orderedlist>
             <listitem>
-              <para>Verify OPC UA server is running: Check logs for "OPC UA server started"</para>
+              <para>Verify the OPC UA server bound successfully — search
+              the log for
+              <literal>"OPC UA server started"</literal>.</para>
             </listitem>
             <listitem>
-              <para>Check firewall rules allow inbound on OPC UA port (default 4855)</para>
+              <para>Confirm the port is listening:
+              <command>ss -tlnp sport = :4855</command> (or
+              <command>netstat -tlnp | grep 4855</command>).</para>
             </listitem>
             <listitem>
-              <para>Verify client is connecting to correct endpoint: <literal>opc.tcp://gateway-host:4855</literal></para>
+              <para>Confirm the firewall permits inbound connections to
+              the configured port.</para>
             </listitem>
             <listitem>
-              <para>Test local connectivity: <command>netstat -tlnp | grep 4855</command></para>
+              <para>If PKI is enabled, confirm the client certificate is
+              under <filename>pki_dir/trusted/</filename>. Rejected
+              certificates land in <filename>pki_dir/rejected/</filename>;
+              copy them across explicitly to trust them.</para>
+            </listitem>
+          </orderedlist>
+        </section>
+
+        <section id="sec-issue-stale-metrics">
+          <title>OPC UA clients see Uncertain or Bad status</title>
+          <para><emphasis>Log signature:</emphasis>
+          <literal>operation="staleness_transition" status_code=Uncertain</literal>
+          (or <literal>Bad</literal>); possibly
+          <literal>operation="staleness_boundary"</literal> for metrics
+          flickering near the threshold.</para>
+          <orderedlist>
+            <listitem>
+              <para>Map the affected metric to its device and check that
+              the device is producing uplinks (ChirpStack UI).</para>
             </listitem>
             <listitem>
-              <para>If PKI is enabled, verify client certificates are in trusted store</para>
+              <para>Verify <literal>polling_frequency</literal> against
+              <literal>stale_threshold_seconds</literal>: the latter should
+              be at least 2× the former so transient missed cycles do not
+              flap the status.</para>
+            </listitem>
+            <listitem>
+              <para>For a fleet-wide
+              <literal>Uncertain</literal> wave that resolves on its own,
+              suspect a brief ChirpStack outage; cross-check
+              <literal>chirpstack_outage</literal> in the same time
+              window.</para>
+            </listitem>
+          </orderedlist>
+        </section>
+
+        <section id="sec-issue-database-corruption">
+          <title>Database integrity errors</title>
+          <para><emphasis>Log signature:</emphasis>
+          <literal>OpcGwError::Storage</literal> with messages mentioning
+          <literal>"disk image malformed"</literal>.</para>
+          <orderedlist>
+            <listitem>
+              <para>Stop the gateway gracefully
+              (<literal>SIGTERM</literal>) so the WAL is checkpointed.</para>
+            </listitem>
+            <listitem>
+              <para>Back up the database before any recovery action:
+              <command>cp -p data/opcgw.db data/opcgw.db.backup</command>.</para>
+            </listitem>
+            <listitem>
+              <para>Run the SQLite integrity check:
+              <command>sqlite3 data/opcgw.db "PRAGMA integrity_check;"</command>.
+              If it returns <literal>ok</literal>, the issue may have been
+              transient; restart the gateway.</para>
+            </listitem>
+            <listitem>
+              <para>If integrity is broken, the gateway will recreate the
+              schema on next start — but historical metrics are lost. Plan
+              backups accordingly.</para>
             </listitem>
           </orderedlist>
         </section>
@@ -495,53 +1707,345 @@ pki_dir = "./pki"</programlisting>
     </chapter>
 
   <!-- ============================================ -->
-  <!-- CHAPTER 8: MAINTENANCE -->
+  <!-- CHAPTER 9: MAINTENANCE -->
   <!-- ============================================ -->
   <chapter id="ch-maintenance">
     <title>Maintenance</title>
 
       <section id="sec-database-maintenance">
         <title>Database Maintenance</title>
-        <para>Regular database maintenance ensures optimal performance:</para>
+        <para>SQLite is largely self-maintaining under WAL mode. Two
+        operations are worth scheduling:</para>
 
         <procedure>
-          <title>Database Optimization</title>
+          <title>Optimise (low-impact, online)</title>
           <step>
-            <para>Stop the gateway gracefully</para>
-          </step>
-          <step>
-            <para>Optimize the database:</para>
+            <para>Trigger SQLite's auto-tuner without stopping the gateway:</para>
             <screen>sqlite3 data/opcgw.db "PRAGMA optimize;"</screen>
           </step>
           <step>
-            <para>Check database integrity:</para>
-            <screen>sqlite3 data/opcgw.db "PRAGMA integrity_check;"</screen>
+            <para>The pragma analyses indexes that have changed
+            significantly and rebuilds plan statistics — runs in
+            milliseconds on the production-sized database.</para>
+          </step>
+        </procedure>
+
+        <procedure>
+          <title>Integrity check (offline)</title>
+          <step>
+            <para>Stop opcgw with <literal>SIGTERM</literal>.</para>
           </step>
           <step>
-            <para>Restart the gateway</para>
+            <para>Run:</para>
+            <screen>sqlite3 data/opcgw.db "PRAGMA integrity_check;"</screen>
+            <para>Expected output: <literal>ok</literal>.</para>
+          </step>
+          <step>
+            <para>Restart opcgw.</para>
           </step>
         </procedure>
       </section>
 
       <section id="sec-historical-data-pruning">
-        <title>Historical Data Pruning</title>
-        <para>If data retention is enabled, old historical data is automatically pruned based on the <literal>retention_days</literal> configuration. To manually control pruning:</para>
+        <title>Historical Metric Pruning</title>
+        <para>The <literal>metric_history</literal> table is append-only and
+        grows linearly with poll volume. opcgw runs a background pruner that
+        deletes rows older than the configured retention window.
+        Pruning is logged as
+        <literal>operation = "prune_metric_history"</literal>; the line
+        carries the cutoff timestamp and the row count deleted.</para>
         <itemizedlist>
           <listitem>
-            <para>Set <literal>retention_days = 0</literal> to disable automatic pruning</para>
+            <para>The retention window is read from the same TOML used at
+            startup; no environment override.</para>
           </listitem>
           <listitem>
-            <para>Monitor database size to ensure pruning is working</para>
+            <para>Pruning is throttled by an internal retry-back-off so
+            transient SQLite contention does not delay the next poll
+            cycle.</para>
           </listitem>
           <listitem>
-            <para>Historical metrics are preserved in <literal>metric_history</literal> table</para>
+            <para>To disable pruning, set the retention to a value larger
+            than your operational horizon (the pruner has no
+            "off" setting; setting retention to a long window achieves the
+            same effect).</para>
           </listitem>
         </itemizedlist>
+      </section>
+
+      <section id="sec-command-history-pruning">
+        <title>Command History Retention</title>
+        <para>Completed commands (<literal>Confirmed</literal> or
+        <literal>Failed</literal>) are retained for
+        <literal>[command_delivery].history_retention_days</literal>. The
+        pruner runs alongside the metric pruner; both share the same retry
+        and back-off logic.</para>
+      </section>
+
+      <section id="sec-log-rotation">
+        <title>Log Rotation</title>
+        <para>All five log appenders are daily-rolling: at UTC midnight a
+        new file is created with the date suffix. opcgw does not delete old
+        log files automatically; manage retention with your platform's
+        standard tooling
+        (<literal>logrotate</literal>, <literal>journald</literal>,
+        Docker's logging driver, or a cron job under
+        <filename>opcgw.cron.d</filename>).</para>
       </section>
     </chapter>
 
   <!-- ============================================ -->
-  <!-- APPENDIX: GLOSSARY -->
+  <!-- APPENDIX A: CONFIGURATION REFERENCE -->
+  <!-- ============================================ -->
+  <appendix id="app-config-reference">
+    <title>Configuration Reference</title>
+    <para>Quick-lookup table for every TOML key. See
+    <xref linkend="ch-configuration"/> for narrative descriptions and
+    examples.</para>
+
+    <table frame="all">
+      <title>Configuration keys</title>
+      <tgroup cols="4">
+        <thead>
+          <row>
+            <entry>Section.Key</entry>
+            <entry>Type</entry>
+            <entry>Default</entry>
+            <entry>Override</entry>
+          </row>
+        </thead>
+        <tbody>
+          <row>
+            <entry><literal>global.debug</literal></entry>
+            <entry>bool</entry>
+            <entry><literal>false</literal></entry>
+            <entry><literal>OPCGW_GLOBAL__DEBUG</literal></entry>
+          </row>
+          <row>
+            <entry><literal>logging.dir</literal></entry>
+            <entry>path</entry>
+            <entry><literal>./log</literal></entry>
+            <entry><literal>OPCGW_LOG_DIR</literal>,
+            <literal>OPCGW_LOGGING__DIR</literal></entry>
+          </row>
+          <row>
+            <entry><literal>logging.level</literal></entry>
+            <entry>enum</entry>
+            <entry><literal>info</literal></entry>
+            <entry><literal>OPCGW_LOG_LEVEL</literal>,
+            <literal>OPCGW_LOGGING__LEVEL</literal>, CLI
+            <literal>-d</literal></entry>
+          </row>
+          <row>
+            <entry><literal>chirpstack.server_address</literal></entry>
+            <entry>URL</entry>
+            <entry>—</entry>
+            <entry><literal>OPCGW_CHIRPSTACK__SERVER_ADDRESS</literal></entry>
+          </row>
+          <row>
+            <entry><literal>chirpstack.api_token</literal></entry>
+            <entry>string</entry>
+            <entry>—</entry>
+            <entry><literal>OPCGW_CHIRPSTACK__API_TOKEN</literal></entry>
+          </row>
+          <row>
+            <entry><literal>chirpstack.tenant_id</literal></entry>
+            <entry>UUID</entry>
+            <entry>—</entry>
+            <entry><literal>OPCGW_CHIRPSTACK__TENANT_ID</literal></entry>
+          </row>
+          <row>
+            <entry><literal>chirpstack.polling_frequency</literal></entry>
+            <entry>seconds</entry>
+            <entry><literal>10</literal></entry>
+            <entry><literal>OPCGW_CHIRPSTACK__POLLING_FREQUENCY</literal></entry>
+          </row>
+          <row>
+            <entry><literal>chirpstack.retry</literal></entry>
+            <entry>int</entry>
+            <entry><literal>10</literal></entry>
+            <entry><literal>OPCGW_CHIRPSTACK__RETRY</literal></entry>
+          </row>
+          <row>
+            <entry><literal>chirpstack.delay</literal></entry>
+            <entry>seconds</entry>
+            <entry><literal>10</literal></entry>
+            <entry><literal>OPCGW_CHIRPSTACK__DELAY</literal></entry>
+          </row>
+          <row>
+            <entry><literal>chirpstack.list_page_size</literal></entry>
+            <entry>int</entry>
+            <entry><literal>100</literal></entry>
+            <entry><literal>OPCGW_CHIRPSTACK__LIST_PAGE_SIZE</literal></entry>
+          </row>
+          <row>
+            <entry><literal>opcua.application_name</literal></entry>
+            <entry>string</entry>
+            <entry>—</entry>
+            <entry>—</entry>
+          </row>
+          <row>
+            <entry><literal>opcua.application_uri</literal></entry>
+            <entry>URI</entry>
+            <entry>—</entry>
+            <entry>—</entry>
+          </row>
+          <row>
+            <entry><literal>opcua.product_uri</literal></entry>
+            <entry>URI</entry>
+            <entry>—</entry>
+            <entry>—</entry>
+          </row>
+          <row>
+            <entry><literal>opcua.diagnostics_enabled</literal></entry>
+            <entry>bool</entry>
+            <entry><literal>false</literal></entry>
+            <entry><literal>OPCGW_OPCUA__DIAGNOSTICS_ENABLED</literal></entry>
+          </row>
+          <row>
+            <entry><literal>opcua.host_ip_address</literal></entry>
+            <entry>IP</entry>
+            <entry>first interface</entry>
+            <entry><literal>OPCGW_OPCUA__HOST_IP_ADDRESS</literal></entry>
+          </row>
+          <row>
+            <entry><literal>opcua.host_port</literal></entry>
+            <entry>port</entry>
+            <entry><literal>4855</literal></entry>
+            <entry><literal>OPCGW_OPCUA__HOST_PORT</literal></entry>
+          </row>
+          <row>
+            <entry><literal>opcua.create_sample_keypair</literal></entry>
+            <entry>bool</entry>
+            <entry><literal>false</literal></entry>
+            <entry>—</entry>
+          </row>
+          <row>
+            <entry><literal>opcua.certificate_path</literal></entry>
+            <entry>path</entry>
+            <entry>—</entry>
+            <entry>—</entry>
+          </row>
+          <row>
+            <entry><literal>opcua.private_key_path</literal></entry>
+            <entry>path</entry>
+            <entry>—</entry>
+            <entry>—</entry>
+          </row>
+          <row>
+            <entry><literal>opcua.trust_client_cert</literal></entry>
+            <entry>bool</entry>
+            <entry><literal>false</literal></entry>
+            <entry>—</entry>
+          </row>
+          <row>
+            <entry><literal>opcua.check_cert_time</literal></entry>
+            <entry>bool</entry>
+            <entry><literal>true</literal></entry>
+            <entry>—</entry>
+          </row>
+          <row>
+            <entry><literal>opcua.pki_dir</literal></entry>
+            <entry>path</entry>
+            <entry><literal>./pki</literal></entry>
+            <entry>—</entry>
+          </row>
+          <row>
+            <entry><literal>opcua.user_name</literal></entry>
+            <entry>string</entry>
+            <entry>—</entry>
+            <entry><literal>OPCGW_OPCUA__USER_NAME</literal></entry>
+          </row>
+          <row>
+            <entry><literal>opcua.user_password</literal></entry>
+            <entry>string</entry>
+            <entry>—</entry>
+            <entry><literal>OPCGW_OPCUA__USER_PASSWORD</literal></entry>
+          </row>
+          <row>
+            <entry><literal>opcua.stale_threshold_seconds</literal></entry>
+            <entry>seconds</entry>
+            <entry><literal>120</literal></entry>
+            <entry><literal>OPCGW_OPCUA__STALE_THRESHOLD_SECONDS</literal></entry>
+          </row>
+          <row>
+            <entry><literal>command_delivery.status_poll_interval_secs</literal></entry>
+            <entry>seconds</entry>
+            <entry><literal>5</literal></entry>
+            <entry>—</entry>
+          </row>
+          <row>
+            <entry><literal>command_delivery.confirmation_timeout_secs</literal></entry>
+            <entry>seconds</entry>
+            <entry><literal>60</literal></entry>
+            <entry>—</entry>
+          </row>
+          <row>
+            <entry><literal>command_delivery.timeout_check_interval_secs</literal></entry>
+            <entry>seconds</entry>
+            <entry><literal>10</literal></entry>
+            <entry>—</entry>
+          </row>
+          <row>
+            <entry><literal>command_delivery.history_retention_days</literal></entry>
+            <entry>days</entry>
+            <entry><literal>7</literal></entry>
+            <entry>—</entry>
+          </row>
+        </tbody>
+      </tgroup>
+    </table>
+  </appendix>
+
+  <!-- ============================================ -->
+  <!-- APPENDIX B: OPC UA ADDRESS SPACE -->
+  <!-- ============================================ -->
+  <appendix id="app-opcua-address-space">
+    <title>OPC UA Address Space</title>
+    <para>Browsing the configured root yields:</para>
+    <programlisting>Objects/
+└── opcgw/
+    ├── Gateway/
+    │   ├── LastPollTimestamp     (String, RFC 3339 or NULL)
+    │   ├── error_count           (Int32)
+    │   └── chirpstack_available  (Boolean)
+    └── &lt;application_name&gt;/        (one folder per [[application]])
+        └── &lt;device_name&gt;/         (one folder per [[application.device]])
+            ├── &lt;metric_name&gt;       (Variant per [[..read_metric]].metric_type)
+            └── &lt;command_name&gt;      (writable, per [[..command]])</programlisting>
+    <para>Every read returns a <literal>StatusCode</literal>. For uplink
+    metrics it is derived from the metric's age (Good / Uncertain / Bad).
+    For Gateway-folder reads it is always <literal>Good</literal>, except
+    that <literal>LastPollTimestamp</literal> may be <literal>NULL</literal>
+    (still reported with <literal>Good</literal> status — the
+    <literal>NULL</literal> value itself is the signal).</para>
+  </appendix>
+
+  <!-- ============================================ -->
+  <!-- APPENDIX C: OPERATION NAMES -->
+  <!-- ============================================ -->
+  <appendix id="app-operation-names">
+    <title>Operation Names</title>
+    <para>The complete reference of <literal>operation = ...</literal>
+    values, expected fields, level, and remediation tips lives in
+    <filename>docs/logging.md</filename>. A condensed table appears in
+    <xref linkend="sec-operations-reference"/>. When adding a new
+    operation, register it in <filename>docs/logging.md</filename> first so
+    the log-analysis side has a contract to honour.</para>
+    <para>Reserved operation names (planned for future stories, not
+    yet emitted):</para>
+    <itemizedlist>
+      <listitem>
+        <para><literal>recovery_attempt</literal>,
+        <literal>recovery_complete</literal>,
+        <literal>recovery_failed</literal> — Story 4-4 auto-recovery
+        from ChirpStack outages.</para>
+      </listitem>
+    </itemizedlist>
+  </appendix>
+
+  <!-- ============================================ -->
+  <!-- APPENDIX D: GLOSSARY -->
   <!-- ============================================ -->
   <appendix id="app-glossary">
     <title>Glossary</title>
@@ -549,37 +2053,101 @@ pki_dir = "./pki"</programlisting>
       <varlistentry>
         <term>ChirpStack</term>
         <listitem>
-          <para>Open-source LoRaWAN Network Server that manages devices and collects metrics</para>
+          <para>Open-source LoRaWAN Network Server that manages devices and
+          collects metrics.</para>
         </listitem>
       </varlistentry>
       <varlistentry>
-        <term>LoRaWAN</term>
+        <term>DashMap</term>
         <listitem>
-          <para>Long-Range Wide-Area Network protocol for low-power IoT devices</para>
+          <para>Sharded concurrent hash map used by opcgw's OPC UA server
+          to track per-metric staleness state without serialising reads on
+          a single mutex.</para>
         </listitem>
       </varlistentry>
       <varlistentry>
-        <term>OPC UA</term>
+        <term>DevEUI</term>
         <listitem>
-          <para>OPC Unified Architecture, a machine-to-machine communication protocol for industrial automation</para>
+          <para>Globally unique 64-bit identifier for a LoRaWAN end-device,
+          used as the <literal>device_id</literal> in opcgw
+          configuration.</para>
         </listitem>
       </varlistentry>
       <varlistentry>
-        <term>SCADA</term>
+        <term>Gateway folder</term>
         <listitem>
-          <para>Supervisory Control and Data Acquisition system for monitoring and controlling industrial processes</para>
+          <para>Synthetic OPC UA folder under the configured root
+          containing the gateway's own health metrics
+          (<literal>LastPollTimestamp</literal>,
+          <literal>error_count</literal>,
+          <literal>chirpstack_available</literal>).</para>
         </listitem>
       </varlistentry>
       <varlistentry>
         <term>gRPC</term>
         <listitem>
-          <para>Remote Procedure Call framework built on HTTP/2 for high-performance APIs</para>
+          <para>Remote-procedure-call framework built on HTTP/2 used by
+          ChirpStack's API.</para>
         </listitem>
       </varlistentry>
       <varlistentry>
-        <term>SQLite</term>
+        <term>LoRaWAN</term>
         <listitem>
-          <para>Lightweight embedded SQL database engine used for opcgw storage</para>
+          <para>Long-Range Wide-Area Network protocol for low-power IoT
+          devices.</para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term>OPC UA</term>
+        <listitem>
+          <para>OPC Unified Architecture, a machine-to-machine
+          communication standard for industrial automation.</para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term><literal>request_id</literal></term>
+        <listitem>
+          <para>Per-OPC-UA-read UUID v4 emitted as a tracing-span field;
+          all log lines emitted while the span is active inherit it,
+          enabling end-to-end correlation by simple
+          <literal>grep</literal>.</para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term>SCADA</term>
+        <listitem>
+          <para>Supervisory Control and Data Acquisition system for
+          monitoring and controlling industrial processes.</para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term>SQLite WAL mode</term>
+        <listitem>
+          <para>Write-Ahead Logging journaling mode that allows multiple
+          readers to operate concurrently with a single writer. opcgw
+          enables WAL at startup; it is the foundation of the lock-free
+          read path.</para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term><literal>StatusCode</literal></term>
+        <listitem>
+          <para>OPC UA per-read status indicator. opcgw maps metric
+          freshness to <literal>Good</literal>,
+          <literal>Uncertain</literal>, or <literal>Bad</literal>.</para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term><literal>tracing</literal></term>
+        <listitem>
+          <para>The Rust crate providing structured, span-aware logging.
+          opcgw emits all log output through it.</para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term>WAL</term>
+        <listitem>
+          <para>Write-Ahead Log — see SQLite WAL mode.</para>
         </listitem>
       </varlistentry>
     </variablelist>

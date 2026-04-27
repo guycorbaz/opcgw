@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-02
-last_updated: "2026-04-27 (Story 6-3 code review complete after 3 iterations: clippy-clean, DashMap migration, 5 helpers extracted, 12 tests rewritten/added, all HIGH/MEDIUM findings resolved; 476 tests pass; flipped to done)"
+last_updated: "2026-04-27 (Epic 6 retrospective complete; user manual rewritten to v2.0 covering Epics 2-6; Epic 7 Security Hardening cleared to start)"
 project: opcgw
 project_key: NOKEY
 tracking_system: file-system
@@ -106,11 +106,11 @@ development_status:
   epic-5-retrospective: done
 
   # Epic 6: Production Observability & Diagnostics (Phase A)
-  epic-6: in-progress
+  epic-6: done
   6-1-comprehensive-logging-infrastructure: done
   6-2-configurable-log-verbosity: done
   6-3-remote-diagnostics-for-known-failures: done
-  epic-6-retrospective: optional
+  epic-6-retrospective: done
 
   # Epic 7: Security Hardening (Phase A)
   epic-7: backlog

@@ -59,23 +59,31 @@ pandoc --from docbook --to epub \
 ## Manual Sections
 
 ### Part 1: Introduction (Chapters 1-2)
-- Chapter 1: Overview of opcgw, architecture, key features
+- Chapter 1: Overview, key features, system architecture, data flow
 - Chapter 2: System requirements (hardware, software, network)
 
 ### Part 2: Installation and Setup (Chapters 3-5)
 - Chapter 3: Installation via Docker or source
-- Chapter 4: Configuration guide (ChirpStack, OPC UA, logging)
-- Chapter 5: Startup verification and graceful shutdown
+- Chapter 4: Configuration guide ([global], [logging], [chirpstack],
+  [opcua], [command_delivery], [[application]] hierarchy)
+- Chapter 5: Command-line flags, startup verification, graceful shutdown
 
-### Part 3: Operation and Monitoring (Chapters 6-8)
-- Chapter 6: Daily operation and health checks
-- Chapter 7: Troubleshooting guide with common issues
-- Chapter 8: Maintenance procedures (database, pruning, logs)
+### Part 3: Operation and Observability (Chapters 6-8)
+- Chapter 6: Daily operation — Gateway folder in OPC UA, stale-data
+  status codes, KPIs, command queue monitoring
+- Chapter 7: Logging and observability — five-appender architecture,
+  request_id correlation, performance budgets, common operations table
+- Chapter 8: Troubleshooting symptom cookbook —
+  ChirpStack outage, error spike, SQLITE_BUSY, budget exceedance,
+  no-data-yet, OPC UA connect failures, stale metrics, DB integrity
 
-### Part 4: Appendices
-- Complete configuration reference
-- Error codes and messages
-- Glossary of terms
+### Part 4: Maintenance and Reference (Chapter 9 + Appendices)
+- Chapter 9: Database maintenance, historical metric pruning,
+  command history retention, log rotation
+- Appendix A: Configuration reference table (every TOML key + override)
+- Appendix B: OPC UA address space layout
+- Appendix C: Operation names — pointer to docs/logging.md
+- Appendix D: Glossary
 
 ## Editing the Manual
 
@@ -121,12 +129,31 @@ xmllint --schema /usr/share/xml/docbook/xml5.2/xsd/docbook.xsd \
 
 ## Version History
 
-- **v1.0** (2026-04-20) — Initial release covering all essential topics for opcgw v1.0
-  - Installation procedures (Docker and source)
-  - Complete configuration reference
-  - Operation and troubleshooting guides
-  - Maintenance procedures
-  - API reference and examples
+- **v2.0** (2026-04-27) — Comprehensive update covering Epics 2-6
+  - Configuration chapter rewritten against the actual TOML schema
+    (the v1.0 manual documented placeholder keys that did not match
+    the implementation).
+  - Added Epic 2 deliverables: SQLite WAL persistence, per-task
+    connection pool, batched writes, historical pruning.
+  - Added Epic 3 deliverables: SQLite-backed FIFO command queue with
+    parameter validation and three-state delivery tracking.
+  - Added Epic 4 deliverables: gRPC pagination via `list_page_size`,
+    multi-type metric support (Bool/Int/Float/String), counter/gauge/
+    absolute kind handling.
+  - Added Epic 5 deliverables: Gateway folder in OPC UA
+    (`LastPollTimestamp`, `error_count`, `chirpstack_available`),
+    stale-data status codes (Good/Uncertain/Bad).
+  - Added Epic 6 deliverables: structured tracing with microsecond
+    timestamps, configurable verbosity (CLI/env/TOML precedence chain),
+    per-module log files, `request_id` correlation, performance-budget
+    warnings, full operation-name taxonomy.
+  - New Chapter 7 (Logging & Observability) and rewritten Chapter 8
+    (Troubleshooting) with a symptom cookbook.
+  - New appendices: configuration reference table, OPC UA address
+    space layout, operation names.
+
+- **v1.0** (2026-04-20) — Initial release covering essential topics for
+  opcgw v1.0 (configuration keys partly placeholder; superseded by v2.0).
 
 ## License
 
