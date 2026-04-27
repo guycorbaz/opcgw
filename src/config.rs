@@ -447,6 +447,11 @@ impl Default for StorageConfig {
 ///
 /// Controls how command parameters are validated before enqueuing.
 #[derive(Debug, Deserialize, Clone)]
+// `CommandValidationConfig` is scaffolded for the Epic 7 command-validation
+// pipeline; the fields are deserialized today but not yet consumed by any
+// runtime code path. Allow `dead_code` at the struct so the config surface
+// stays stable for operators while the wiring lands in a later story.
+#[allow(dead_code)]
 pub struct CommandValidationConfig {
     /// Schema cache TTL in seconds.
     ///
@@ -499,6 +504,36 @@ impl Default for CommandValidationConfig {
     }
 }
 
+/// Logging configuration parameters (Story 6-1, extended in Story 6-2).
+///
+/// Holds knobs that control where logs are written and what verbosity
+/// level is used. Both fields can be overridden through two parallel
+/// env-var conventions: the short forms `OPCGW_LOG_DIR` / `OPCGW_LOG_LEVEL`
+/// (read directly during the bootstrap phase, before figment parses the
+/// full `AppConfig`) and the figment-style nested forms
+/// `OPCGW_LOGGING__DIR` / `OPCGW_LOGGING__LEVEL` (merged via the
+/// `OPCGW_` prefix with `split("__")`). The short forms take precedence
+/// over the nested forms when both are set.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct LoggingConfig {
+    /// Directory where per-module daily-rolling log files are written.
+    ///
+    /// Precedence: `OPCGW_LOG_DIR` env > `OPCGW_LOGGING__DIR` env >
+    /// `[logging].dir` in TOML > `./log`.
+    pub dir: Option<String>,
+
+    /// Global default log level applied to the console layer and the root
+    /// file appender (`opc_ua_gw.log`).
+    ///
+    /// Precedence (highest first): CLI `-d` count > `OPCGW_LOG_LEVEL` env >
+    /// `OPCGW_LOGGING__LEVEL` env > `[logging].level` in TOML > `info`.
+    /// Per-module file appenders (`chirpstack.log`, `opc_ua.log`,
+    /// `storage.log`, `config.log`) capture at TRACE for their respective
+    /// targets independently of this value.
+    pub level: Option<String>,
+}
+
 /// Main application configuration structure.
 ///
 /// Contains all configuration sections required to run the OPC UA ChirpStack Gateway.
@@ -523,6 +558,10 @@ pub struct AppConfig {
     /// Command validation configuration.
     #[serde(default)]
     pub command_validation: CommandValidationConfig,
+
+    /// Logging configuration (Story 6-1). Optional — falls back to defaults when absent.
+    #[serde(default)]
+    pub logging: Option<LoggingConfig>,
 
     /// List of ChirpStack applications and devices to monitor.
     #[serde(rename = "application")]
@@ -574,6 +613,11 @@ impl AppConfig {
     /// println!("ChirpStack server: {}", config.chirpstack.server_address);
     /// println!("OPC UA port: {:?}", config.opcua.host_port);
     /// ```
+    // `AppConfig::new` is the historical entry point used before the two-phase
+    // bootstrap landed in Story 6-2; `main.rs` now calls `AppConfig::from_path`
+    // directly. Kept as a courtesy API for callers that want CONFIG_PATH-only
+    // resolution without surfacing the path themselves.
+    #[allow(dead_code)]
     pub fn new() -> Result<Self, OpcGwError> {
         debug!("Creating new AppConfig instance");
 
@@ -581,12 +625,22 @@ impl AppConfig {
         let config_path = std::env::var("CONFIG_PATH")
             .unwrap_or_else(|_| format!("{}/config.toml", OPCGW_CONFIG_PATH));
 
+        Self::from_path(&config_path)
+    }
+
+    /// Same as [`AppConfig::new`] but takes the configuration file path
+    /// explicitly. Used by `main.rs` so the CLI `-c FILE` flag (or the
+    /// `CONFIG_PATH` env var) drives both the bootstrap-phase TOML peek
+    /// and the full configuration load from a single resolved path.
+    pub fn from_path(config_path: &str) -> Result<Self, OpcGwError> {
         trace!(config_path = %config_path, "Loading configuration");
 
         // Load and merge configuration from multiple sources
+        // `split("__")` enables nested-key overrides like `OPCGW_LOGGING__DIR` → `logging.dir`
+        // (matches the convention referenced in this module's doc comment).
         let config: AppConfig = Figment::new()
-            .merge(Toml::file(&config_path))
-            .merge(Env::prefixed("OPCGW_").global())
+            .merge(Toml::file(config_path))
+            .merge(Env::prefixed("OPCGW_").split("__").global())
             .extract()
             .map_err(|e| {
                 // Provide more context about what failed
@@ -860,6 +914,8 @@ impl AppConfig {
     ///     None => println!("Device not found"),
     /// }
     /// ```
+    // Lookup helper retained for downstream wiring (Epic 9 web UI, etc.).
+    #[allow(dead_code)]
     pub fn get_device_name(&self, device_id: &String) -> Option<String> {
         debug!(device_id = %device_id, "Looking up device name");
 
@@ -1394,5 +1450,328 @@ mod tests {
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("server_address"));
         assert!(error_msg.contains("http://") || error_msg.contains("https://"));
+    }
+
+    /// Story 6-1: figment must merge `[logging]` from TOML when present.
+    #[test]
+    fn test_logging_config_loaded_from_toml() {
+        let toml = r#"
+            [global]
+            debug = true
+            [chirpstack]
+            server_address = "http://localhost:8080"
+            api_token = "x"
+            tenant_id = "t"
+            polling_frequency = 10
+            retry = 1
+            delay = 1
+            [opcua]
+            application_name = "A"
+            application_uri = "urn:a"
+            product_uri = "urn:p"
+            diagnostics_enabled = false
+            create_sample_keypair = false
+            certificate_path = "c"
+            private_key_path = "k"
+            trust_client_cert = true
+            check_cert_time = false
+            pki_dir = "pki"
+            user_name = "u"
+            user_password = "p"
+            [logging]
+            dir = "/var/log/opcgw"
+            level = "info"
+            [[application]]
+            application_name = "App"
+            application_id = "app1"
+            [[application.device]]
+            device_id = "dev1"
+            device_name = "Dev"
+            [[application.device.read_metric]]
+            metric_name = "m"
+            chirpstack_metric_name = "m"
+            metric_type = "Float"
+        "#;
+        let config: AppConfig = Figment::new()
+            .merge(Toml::string(toml))
+            .extract()
+            .expect("toml parses");
+        let logging = config.logging.expect("[logging] section parsed");
+        assert_eq!(logging.dir.as_deref(), Some("/var/log/opcgw"));
+        assert_eq!(logging.level.as_deref(), Some("info"));
+    }
+
+    /// Story 6-2: round-trip test for `[logging].level` — proves the field
+    /// added in 6-1 deserialises correctly when set to a valid value. The
+    /// `parse_log_level` validation runs at startup; this test only checks
+    /// the figment / serde wiring.
+    #[test]
+    fn test_logging_level_loaded_from_toml() {
+        let toml = r#"
+            [global]
+            debug = true
+            [chirpstack]
+            server_address = "http://localhost:8080"
+            api_token = "x"
+            tenant_id = "t"
+            polling_frequency = 10
+            retry = 1
+            delay = 1
+            [opcua]
+            application_name = "A"
+            application_uri = "urn:a"
+            product_uri = "urn:p"
+            diagnostics_enabled = false
+            create_sample_keypair = false
+            certificate_path = "c"
+            private_key_path = "k"
+            trust_client_cert = true
+            check_cert_time = false
+            pki_dir = "pki"
+            user_name = "u"
+            user_password = "p"
+            [logging]
+            dir = "/var/log/opcgw"
+            level = "debug"
+            [[application]]
+            application_name = "App"
+            application_id = "app1"
+            [[application.device]]
+            device_id = "dev1"
+            device_name = "Dev"
+            [[application.device.read_metric]]
+            metric_name = "m"
+            chirpstack_metric_name = "m"
+            metric_type = "Float"
+        "#;
+        let config: AppConfig = Figment::new()
+            .merge(Toml::string(toml))
+            .extract()
+            .expect("toml parses");
+        let logging = config.logging.expect("[logging] section parsed");
+        assert_eq!(logging.level.as_deref(), Some("debug"));
+        assert_eq!(logging.dir.as_deref(), Some("/var/log/opcgw"));
+    }
+
+    /// Story 6-1 (review patch D2): regression — adding `.split("__")` to the
+    /// figment env provider must not break the project's pre-existing intent
+    /// that nested env-var overrides like `OPCGW_CHIRPSTACK__SERVER_ADDRESS`
+    /// reach the right field. The doc comment claimed this worked even before
+    /// the split was added; this test pins the contract.
+    #[test]
+    fn test_chirpstack_nested_env_override() {
+        let toml = r#"
+            [global]
+            debug = true
+            [chirpstack]
+            server_address = "http://from-toml:8080"
+            api_token = "x"
+            tenant_id = "t"
+            polling_frequency = 10
+            retry = 1
+            delay = 1
+            [opcua]
+            application_name = "A"
+            application_uri = "urn:a"
+            product_uri = "urn:p"
+            diagnostics_enabled = false
+            create_sample_keypair = false
+            certificate_path = "c"
+            private_key_path = "k"
+            trust_client_cert = true
+            check_cert_time = false
+            pki_dir = "pki"
+            user_name = "u"
+            user_password = "p"
+            [[application]]
+            application_name = "App"
+            application_id = "app1"
+            [[application.device]]
+            device_id = "dev1"
+            device_name = "Dev"
+            [[application.device.read_metric]]
+            metric_name = "m"
+            chirpstack_metric_name = "m"
+            metric_type = "Float"
+        "#;
+        temp_env::with_var(
+            "OPCGW_CHIRPSTACK__SERVER_ADDRESS",
+            Some("http://from-env:9090"),
+            || {
+                let config: AppConfig = Figment::new()
+                    .merge(Toml::string(toml))
+                    .merge(Env::prefixed("OPCGW_").split("__").global())
+                    .extract()
+                    .expect("env override parses");
+                assert_eq!(
+                    config.chirpstack.server_address, "http://from-env:9090",
+                    "OPCGW_CHIRPSTACK__SERVER_ADDRESS env var must override TOML"
+                );
+            },
+        );
+    }
+
+    /// Story 6-1 (review patch D2): same regression on a sensitive field —
+    /// `OPCGW_OPCUA__USER_PASSWORD` must override the TOML value. Pins the
+    /// security-relevant override path so future figment changes can't
+    /// silently break it.
+    #[test]
+    fn test_opcua_nested_env_override_sensitive_field() {
+        let toml = r#"
+            [global]
+            debug = true
+            [chirpstack]
+            server_address = "http://localhost:8080"
+            api_token = "x"
+            tenant_id = "t"
+            polling_frequency = 10
+            retry = 1
+            delay = 1
+            [opcua]
+            application_name = "A"
+            application_uri = "urn:a"
+            product_uri = "urn:p"
+            diagnostics_enabled = false
+            create_sample_keypair = false
+            certificate_path = "c"
+            private_key_path = "k"
+            trust_client_cert = true
+            check_cert_time = false
+            pki_dir = "pki"
+            user_name = "u"
+            user_password = "from-toml"
+            [[application]]
+            application_name = "App"
+            application_id = "app1"
+            [[application.device]]
+            device_id = "dev1"
+            device_name = "Dev"
+            [[application.device.read_metric]]
+            metric_name = "m"
+            chirpstack_metric_name = "m"
+            metric_type = "Float"
+        "#;
+        temp_env::with_var("OPCGW_OPCUA__USER_PASSWORD", Some("from-env"), || {
+            let config: AppConfig = Figment::new()
+                .merge(Toml::string(toml))
+                .merge(Env::prefixed("OPCGW_").split("__").global())
+                .extract()
+                .expect("env override parses");
+            assert_eq!(config.opcua.user_password, "from-env");
+        });
+    }
+
+    /// Story 6-1 (review patch): `OPCGW_LOG_DIR=""` (empty string) must NOT
+    /// override the TOML value. Direct-read path in `main.rs::resolve_log_dir`
+    /// uses `.filter(|s| !s.trim().is_empty())`; this test pins the same
+    /// behaviour at the figment level for the nested form.
+    #[test]
+    fn test_logging_dir_env_empty_string_falls_through() {
+        let toml = r#"
+            [global]
+            debug = true
+            [chirpstack]
+            server_address = "http://localhost:8080"
+            api_token = "x"
+            tenant_id = "t"
+            polling_frequency = 10
+            retry = 1
+            delay = 1
+            [opcua]
+            application_name = "A"
+            application_uri = "urn:a"
+            product_uri = "urn:p"
+            diagnostics_enabled = false
+            create_sample_keypair = false
+            certificate_path = "c"
+            private_key_path = "k"
+            trust_client_cert = true
+            check_cert_time = false
+            pki_dir = "pki"
+            user_name = "u"
+            user_password = "p"
+            [logging]
+            dir = "/from-toml"
+            [[application]]
+            application_name = "App"
+            application_id = "app1"
+            [[application.device]]
+            device_id = "dev1"
+            device_name = "Dev"
+            [[application.device.read_metric]]
+            metric_name = "m"
+            chirpstack_metric_name = "m"
+            metric_type = "Float"
+        "#;
+        // figment treats env "" as set; the bootstrap path in main.rs guards
+        // against this with `.filter(|s| !s.trim().is_empty())`. We verify
+        // the helper itself in main.rs tests below; this test documents that
+        // figment alone does NOT filter empty strings.
+        temp_env::with_var("OPCGW_LOGGING__DIR", Some(""), || {
+            let config: AppConfig = Figment::new()
+                .merge(Toml::string(toml))
+                .merge(Env::prefixed("OPCGW_").split("__").global())
+                .extract()
+                .expect("env override parses");
+            assert_eq!(
+                config.logging.unwrap().dir.as_deref(),
+                Some(""),
+                "figment by itself doesn't filter empty env values — main.rs::resolve_log_dir must"
+            );
+        });
+    }
+
+    /// Story 6-1: figment env override path `OPCGW_LOGGING__DIR` works.
+    /// Uses temp-env to avoid cross-test races on the shared env.
+    #[test]
+    fn test_logging_dir_env_override() {
+        let toml = r#"
+            [global]
+            debug = true
+            [chirpstack]
+            server_address = "http://localhost:8080"
+            api_token = "x"
+            tenant_id = "t"
+            polling_frequency = 10
+            retry = 1
+            delay = 1
+            [opcua]
+            application_name = "A"
+            application_uri = "urn:a"
+            product_uri = "urn:p"
+            diagnostics_enabled = false
+            create_sample_keypair = false
+            certificate_path = "c"
+            private_key_path = "k"
+            trust_client_cert = true
+            check_cert_time = false
+            pki_dir = "pki"
+            user_name = "u"
+            user_password = "p"
+            [logging]
+            dir = "/from-toml"
+            [[application]]
+            application_name = "App"
+            application_id = "app1"
+            [[application.device]]
+            device_id = "dev1"
+            device_name = "Dev"
+            [[application.device.read_metric]]
+            metric_name = "m"
+            chirpstack_metric_name = "m"
+            metric_type = "Float"
+        "#;
+        temp_env::with_var("OPCGW_LOGGING__DIR", Some("/from-env"), || {
+            let config: AppConfig = Figment::new()
+                .merge(Toml::string(toml))
+                .merge(Env::prefixed("OPCGW_").split("__").global())
+                .extract()
+                .expect("env override parses");
+            assert_eq!(
+                config.logging.unwrap().dir.as_deref(),
+                Some("/from-env"),
+                "env var must override TOML value"
+            );
+        });
     }
 }

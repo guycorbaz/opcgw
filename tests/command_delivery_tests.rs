@@ -61,7 +61,7 @@ fn test_mark_command_sent_updates_status_and_timestamp() {
     let cmd = &commands[0];
     assert_eq!(cmd.status, CommandStatus::Sent);
     assert!(cmd.sent_at.is_some(), "sent_at should be set");
-    assert_eq!(cmd.chirpstack_result_id.as_ref().map(|s| s.as_str()), Some("chirpstack_123"));
+    assert_eq!(cmd.chirpstack_result_id.as_deref(), Some("chirpstack_123"));
 
     let _ = fs::remove_file(&path);
 }
@@ -145,7 +145,7 @@ fn test_mark_command_failed_with_error_message() {
     assert_eq!(commands.len(), 1);
     let cmd = &commands[0];
     assert_eq!(cmd.status, CommandStatus::Failed);
-    assert_eq!(cmd.error_message.as_ref().map(|s| s.as_str()), Some("Confirmation timeout"));
+    assert_eq!(cmd.error_message.as_deref(), Some("Confirmation timeout"));
 
     let _ = fs::remove_file(&path);
 }
@@ -382,7 +382,7 @@ fn test_chirpstack_result_id_mapping() {
 
     assert_eq!(commands.len(), 1);
     assert_eq!(
-        commands[0].chirpstack_result_id.as_ref().map(|s| s.as_str()),
+        commands[0].chirpstack_result_id.as_deref(),
         Some(cs_result_id)
     );
 
@@ -426,7 +426,7 @@ fn test_error_message_persistence() {
     }).expect("Should list commands");
 
     assert_eq!(commands.len(), 1);
-    assert_eq!(commands[0].error_message.as_ref().map(|s| s.as_str()), Some(error_msg));
+    assert_eq!(commands[0].error_message.as_deref(), Some(error_msg));
 
     let _ = fs::remove_file(&path);
 }

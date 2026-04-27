@@ -11,7 +11,6 @@ use opcgw::command_validation::{
 };
 use opcgw::utils::OpcGwError;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 // ============================================================================
 // AC#1: Command Schema Binding

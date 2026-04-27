@@ -55,6 +55,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
     debug!(current_version, "Current schema version read");
 
     // Latest available schema version
+    #[allow(dead_code)]
     const LATEST_VERSION: u32 = 5;
 
     // Apply migrations in order
@@ -312,7 +313,7 @@ mod tests {
                     [],
                     |row| row.get(0),
                 )
-                .expect(&format!("Failed to check for table {}", table));
+                .unwrap_or_else(|_| panic!("Failed to check for table {}", table));
             assert!(exists, "Table {} should exist", table);
         }
 

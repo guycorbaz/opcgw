@@ -5,6 +5,11 @@
 //!
 //! Validates staleness detection logic, status code mapping, and configuration loading.
 
+// See `tests/opc_ua_sqlite_backend_tests.rs` for the rationale on
+// `assertions_on_constants`. The sentinel asserts here document staleness
+// invariants validated through code review rather than runtime.
+#![allow(clippy::assertions_on_constants)]
+
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, Utc};

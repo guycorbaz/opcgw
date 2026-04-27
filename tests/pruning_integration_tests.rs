@@ -8,6 +8,11 @@
 //! - Database lock contention
 //! - Missing/corrupted retention_config
 //! - Retention window boundary precision
+
+// See `tests/opc_ua_sqlite_backend_tests.rs` for the rationale; the sentinel
+// `assert!(elapsed_secs < ...)` checks in this file document timing
+// invariants that the type system already enforces.
+#![allow(clippy::assertions_on_constants)]
 //! - Performance under 5M+ row loads
 //! - Graceful degradation and error handling
 
@@ -70,7 +75,7 @@ fn create_rows_with_timestamps(
         let metric_name = format!("metric_{}", i % 5); // 5 different metrics
         let metric_value = MetricType::Float;
 
-        backend.set_metric(&device_id, &metric_name, metric_value.clone())?;
+        backend.set_metric(&device_id, &metric_name, metric_value)?;
         backend.append_metric_history(
             &device_id,
             &metric_name,
@@ -124,7 +129,7 @@ async fn test_concurrent_polling_and_pruning() {
                     let device_id = format!("device_{}", cycle * 1000 + i);
                     let metric_name = "temp";
                     let metric_value = MetricType::Float;
-                    let _ = write_backend.set_metric(&device_id, metric_name, metric_value.clone());
+                    let _ = write_backend.set_metric(&device_id, metric_name, metric_value);
                     let _ = write_backend.append_metric_history(
                         &device_id,
                         metric_name,
@@ -344,7 +349,7 @@ async fn test_retention_boundary_precision() {
         let metric = MetricType::Float;
 
         // Row exactly at cutoff (should NOT be deleted per AC#4)
-        let _ = setup_backend.set_metric("device_cutoff", "metric", metric.clone());
+        let _ = setup_backend.set_metric("device_cutoff", "metric", metric);
         let _ = setup_backend.append_metric_history(
             "device_cutoff",
             "metric",
@@ -353,7 +358,7 @@ async fn test_retention_boundary_precision() {
         );
 
         // Row before cutoff (should be deleted)
-        let _ = setup_backend.set_metric("device_before", "metric", metric.clone());
+        let _ = setup_backend.set_metric("device_before", "metric", metric);
         let _ = setup_backend.append_metric_history(
             "device_before",
             "metric",
@@ -362,7 +367,7 @@ async fn test_retention_boundary_precision() {
         );
 
         // Row after cutoff (should NOT be deleted)
-        let _ = setup_backend.set_metric("device_after", "metric", metric.clone());
+        let _ = setup_backend.set_metric("device_after", "metric", metric);
         let _ = setup_backend.append_metric_history(
             "device_after",
             "metric",
@@ -448,7 +453,7 @@ async fn test_pruning_performance_5m_rows() {
 
     // Verify: ~2M rows deleted
     assert!(
-        deleted_count >= 1_900_000 && deleted_count <= 2_100_000,
+        (1_900_000..=2_100_000).contains(&deleted_count),
         "Should delete approximately 2M rows (got {})",
         deleted_count
     );
@@ -482,7 +487,7 @@ async fn test_pruning_interval_timing() {
         let prune_backend = Arc::clone(&backend);
         let start = Instant::now();
 
-        task::spawn_blocking(move || {
+        let _prune_outcome = task::spawn_blocking(move || {
             prune_backend.prune_metric_history()
         })
         .await
@@ -624,7 +629,7 @@ async fn test_pruning_30_day_simulation() {
                 let device_id = format!("device_{}", i % 100);
                 let metric_name = "load_avg";
 
-                let _ = write_backend.set_metric(&device_id, metric_name, metric.clone());
+                let _ = write_backend.set_metric(&device_id, metric_name, metric);
                 let _ = write_backend.append_metric_history(
                     &device_id,
                     metric_name,
@@ -645,7 +650,7 @@ async fn test_pruning_30_day_simulation() {
         .ok();
 
         // Advance simulation time by 1 hour
-        sim_time = sim_time + ChronoDuration::hours(1);
+        sim_time += ChronoDuration::hours(1);
 
         // Small delay to make test runnable
         tokio::time::sleep(Duration::from_millis(10)).await;

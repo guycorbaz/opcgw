@@ -8,6 +8,14 @@
 //! - Stores device metrics collected from ChirpStack
 //! - Provides data access for the OPC UA server
 //! - Maintains ChirpStack server status information
+
+// Several methods on the legacy `Storage` struct (`mark_command_sent`,
+// `mark_command_confirmed`, `dump_storage`, `get_device_command_queue`,
+// etc.) are scaffolded for migration paths that are still in flight as the
+// project moves to the SqliteBackend trait-object model. Allow `dead_code`
+// at module scope so the scaffold doesn't fail clippy while the migration
+// is being staged.
+#![allow(dead_code)]
 //! - Manages device and metric lifecycle
 //!
 //! # Architecture
@@ -65,7 +73,6 @@ use crate::utils::*;
 use chrono::{DateTime, Utc};
 use tracing::{debug, error, trace};
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::collections::HashMap;
 use rusqlite::types::{FromSql, ToSql, FromSqlResult, ValueRef};
 use rusqlite::Result as SqliteResult;
@@ -815,6 +822,7 @@ pub struct Storage {
     ///
     /// This configuration is cloned during storage initialization and used
     /// for device lookups and validation operations.
+    #[allow(dead_code)]
     config: AppConfig,
 
     /// Current status of the ChirpStack server connection.
@@ -1441,7 +1449,7 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage;
+    
     use std::sync::Arc;
     use figment::{
         providers::{Format, Toml},
@@ -1520,7 +1528,7 @@ mod tests {
 
         // Test status retrieval methods
         assert_eq!(storage.get_chirpstack_status(), chirpstack_status);
-        assert_eq!(storage.get_chirpstack_available(), false);
+        assert!(!storage.get_chirpstack_available());
         assert_eq!(storage.get_chirpstack_status().error_count, 1);
     }
 
@@ -1616,7 +1624,7 @@ mod tests {
         };
 
         // This should NOT panic — graceful handling of missing device
-        storage.set_metric_value(&no_device_id, &no_metric, value);
+        let _ = storage.set_metric_value(&no_device_id, &no_metric, value);
         // Verify the device was not implicitly created
         assert!(storage.get_device(&no_device_id).is_none());
     }
@@ -1656,7 +1664,7 @@ mod tests {
         };
 
         // Test setting and getting metric value
-        storage.set_metric_value(&device_id, &metric, value.clone());
+        let _ = storage.set_metric_value(&device_id, &metric, value.clone());
         let retrieved = storage.get_metric_value(&device_id, &metric);
         assert!(retrieved.is_some());
         let retrieved_val = retrieved.unwrap();

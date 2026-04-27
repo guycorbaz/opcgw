@@ -63,6 +63,17 @@ The build script (`build.rs`) compiles Protocol Buffer definitions from `proto/c
 
 The project is v1.0.0 and under active development. Basic polling, storage, configuration, and OPC UA server setup are implemented. OPC UA address space construction is partially complete. Data type conversions, real-time subscriptions, and write-back to ChirpStack are not yet implemented. See `doc/planning.md` for the roadmap.
 
+## Documentation Sync
+
+**Before every commit, verify that `README.md` is up to date with the latest developments.** Specifically:
+
+- Reflect any new feature, configuration knob, env var, CLI flag, or behavioural change introduced by the commit.
+- Update the **Planning** section in `README.md` so its epic / story status mirrors `_bmad-output/implementation-artifacts/sprint-status.yaml` (mark stories `done` / `in-progress` / `review` / `ready-for-dev` / `backlog` as appropriate).
+- If the commit changes the public configuration surface (`config/config.toml`, env vars, log directory layout, etc.), update the corresponding section in `README.md` in the same commit.
+- If `README.md` does not yet exist or is out of sync, fix it as part of the commit — do not defer.
+
+This rule applies to every commit, including bug fixes and refactors. The goal is that `README.md` is always a faithful entry-point for someone newly cloning the repo.
+
 ## Issue Management
 
 All bugs, known failures, change requests, and other work items must be managed via GitHub issues. This ensures:
@@ -72,6 +83,40 @@ All bugs, known failures, change requests, and other work items must be managed 
 - Integration with pull requests and code review
 
 Do not implement fixes or changes without a corresponding GitHub issue.
+
+**On every commit, verify which GitHub issues are addressed by the change.** Specifically:
+
+- Inspect the diff and identify any GitHub issues the commit fixes, partially addresses, or relates to.
+- Reference each addressed issue in the commit message using GitHub's linking keywords (`Fixes #N`, `Closes #N`, `Refs #N`) so the issue tracker stays in sync with the code history.
+- If a commit modifies behaviour that has no tracking issue, stop and open one before committing — do not bypass the issue tracker.
+- This check applies to every commit, including bug fixes, refactors, and documentation updates.
+
+## Code Review & Story Validation Loop Discipline
+
+Code reviews and story-validation runs (`bmad-code-review`, `bmad-validate-prd`, `bmad-check-implementation-readiness`, etc.) **must be looped until only LOW-priority findings remain**. Concretely:
+
+- After triage, if **any** `decision-needed`, `HIGH`, or `MEDIUM` finding is still open (not patched, not explicitly accepted by the user as a deferred follow-up), the workflow does **not** flip the story to `done`. It either stays `in-progress` (if patches are pending) or is re-run after fixes.
+- The loop terminates when one of these is true:
+  1. Zero findings, **or**
+  2. Only `LOW` severity findings remain, **or**
+  3. The user has explicitly accepted each remaining HIGH/MEDIUM finding by marking it deferred with a documented one-line reason in `deferred-work.md`.
+- "Accepted as deferred" requires the user's **explicit** decision per finding — never default to deferring HIGH/MEDIUM issues to clear the loop.
+- After applying patches in a code-review iteration, **re-run the review** (or at minimum re-run the affected reviewer layer) to catch any regressions or newly surfaced issues from the fixes themselves. Don't trust a single pass after a non-trivial patch round.
+- Story status flips to `done` only when the loop has terminated under one of the three conditions above **and** a fresh `cargo test` + `cargo clippy --all-targets -- -D warnings` run is clean.
+
+This applies to both code reviews of dev-story output and validation runs of PRDs / architecture / epic specs.
+
+## BMad Workflow Commit & Push Discipline
+
+To keep the working tree aligned with sprint status and avoid mixing multiple stories' diffs into a single review (which makes adversarial code review noisy and triage harder), every BMad workflow run **must** end with the appropriate git action:
+
+- **After implementing a story** (status flips `in-progress` → `review`): create a commit with the story's deliverables. Commit message starts with the story key (e.g. `Story 6-3: Remote Diagnostics for Known Failures - Implementation Complete`). Do **not** start the next story until this commit lands.
+- **After a code review** (status flips `review` → `done`, or review fixes are applied): create a follow-up commit capturing the review fixes (or a "Code Review Complete" commit when no fixes were needed). Commit message starts with the story key and notes review outcome.
+- **After an epic retrospective** (`epic-N-retrospective` flips to `done`): create the retrospective commit **and** `git push` to the remote. The push is the checkpoint that makes the closed epic visible to the team.
+- **Do not skip the retrospective.** When the last story in an epic flips to `done`, the very next BMad action must be the retrospective workflow — not starting the next epic. If sprint-status shows `epic-N-retrospective: optional` after all its stories are `done`, treat it as **required**, run it, and flip it to `done`.
+- **Each commit covers exactly one story (or one retrospective).** Never bundle two stories into one commit, even when the work is small — it breaks per-story review and per-story rollback.
+
+This rule applies to every BMad workflow that produces code or specification changes (`bmad-dev-story`, `bmad-code-review`, `bmad-retrospective`, `bmad-quick-dev`, etc.).
 
 ## Security & Quality Assurance
 

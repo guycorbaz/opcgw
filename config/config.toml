@@ -3,6 +3,44 @@
 debug = true
 
 
+# Logging configuration (Story 6-1, level extended in Story 6-2)
+#
+# All values here may be overridden via environment variables:
+#   OPCGW_LOG_DIR        — quick override for `dir` (read directly in main)
+#   OPCGW_LOG_LEVEL      — quick override for `level` (read directly in main)
+#   OPCGW_LOGGING__DIR   — figment-style override for `[logging].dir`
+#   OPCGW_LOGGING__LEVEL — figment-style override for `[logging].level`
+#
+# `level` precedence (highest first): CLI `-d` count > OPCGW_LOG_LEVEL >
+# OPCGW_LOGGING__LEVEL > [logging].level > "info" default.
+#
+# `level` controls only the global console (stderr) and the root file
+# appender (`opc_ua_gw.log`). The per-module file appenders below capture
+# at TRACE for their respective targets *independently* of this value:
+#   - chirpstack.log → opcgw::chirpstack    (TRACE)
+#   - opc_ua.log     → opcgw::opc_ua        (TRACE) + async_opcua (DEBUG)
+#   - storage.log    → opcgw::storage       (TRACE)
+#   - config.log     → opcgw::config        (TRACE)
+# So even at `level = "error"` you still get full traces in the per-module
+# files; `level` only changes what reaches the console and `opc_ua_gw.log`.
+#
+# Level semantics (AC#3 — pick the lowest level that surfaces what you need):
+#   | Level | Use case                                                       | Volume (10 dev, 1 Hz) |
+#   |-------|----------------------------------------------------------------|-----------------------|
+#   | trace | Deepest debugging — every operation, every span entry          | very high             |
+#   | debug | Production troubleshooting — key decisions, timings, IDs       | moderate              |
+#   | info  | Normal operations — cycle starts/ends, state transitions       | low (default)         |
+#   | warn  | Anomalies and retries that succeeded — early warning signal    | sparse                |
+#   | error | Unrecoverable conditions only — silent if healthy              | silent (healthy)      |
+#
+#[logging]
+# Directory where per-module daily-rolling log files are written.
+# Default: "./log"
+#dir = "/var/log/opcgw"
+# Global default log level: trace, debug, info, warn, error.
+#level = "info"
+
+
 [chirpstack]
 
 # Chirpstack erver address

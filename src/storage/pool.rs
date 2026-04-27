@@ -403,6 +403,11 @@ pub struct ConnectionGuard {
 
 impl ConnectionGuard {
     /// Get reference to the underlying SQLite connection.
+    ///
+    /// Inherent method (not the `AsRef` trait); kept for the existing call
+    /// sites that use `guard.as_ref()` directly to obtain a `&Connection`
+    /// without spelling out the trait import.
+    #[allow(clippy::should_implement_trait)]
     pub fn as_ref(&self) -> &Connection {
         unsafe {
             self.pool
@@ -413,6 +418,10 @@ impl ConnectionGuard {
     }
 
     /// Get mutable reference to the underlying SQLite connection.
+    ///
+    /// Inherent method (not the `AsMut` trait); see `as_ref` above for
+    /// rationale.
+    #[allow(clippy::should_implement_trait)]
     pub fn as_mut(&mut self) -> &mut Connection {
         unsafe {
             self.pool
@@ -534,7 +543,7 @@ mod tests {
         let pool = Arc::new(ConnectionPool::new(&path, 3).expect("Should create pool"));
 
         let mut handles = vec![];
-        for i in 0..3 {
+        for _i in 0..3 {
             let pool = Arc::clone(&pool);
             let handle = thread::spawn(move || {
                 let _guard = pool
@@ -566,7 +575,7 @@ mod tests {
 
         // Create a table for testing
         {
-            let mut conn = pool.checkout(Duration::from_secs(5)).expect("Should checkout");
+            let conn = pool.checkout(Duration::from_secs(5)).expect("Should checkout");
             conn.execute(
                 "CREATE TABLE test_data (id INTEGER PRIMARY KEY, value TEXT)",
                 [],
@@ -583,7 +592,7 @@ mod tests {
         // Writer thread: start transaction and hold it
         let write_pool = Arc::clone(&pool);
         let write_handle = thread::spawn(move || {
-            let mut conn = write_pool.checkout(Duration::from_secs(5)).expect("Should checkout");
+            let conn = write_pool.checkout(Duration::from_secs(5)).expect("Should checkout");
             conn.execute_batch("BEGIN TRANSACTION").expect("Should begin");
             conn.execute(
                 "UPDATE test_data SET value = 'modified' WHERE id = 1",
@@ -600,7 +609,7 @@ mod tests {
         let read_pool = Arc::clone(&pool);
         let read_handle = thread::spawn(move || {
             read_barrier.wait();
-            let mut conn = read_pool.checkout(Duration::from_secs(5)).expect("Should checkout");
+            let conn = read_pool.checkout(Duration::from_secs(5)).expect("Should checkout");
             let value: String = conn.query_row(
                 "SELECT value FROM test_data WHERE id = 1",
                 [],
@@ -654,7 +663,7 @@ mod tests {
 
         // Initialize status table
         {
-            let mut conn = pool.checkout(Duration::from_secs(5)).expect("Should checkout");
+            let conn = pool.checkout(Duration::from_secs(5)).expect("Should checkout");
             conn.execute(
                 "CREATE TABLE gateway_status (key TEXT PRIMARY KEY, value TEXT)",
                 [],
@@ -667,7 +676,7 @@ mod tests {
 
         let update_pool = Arc::clone(&pool);
         let update_handle = thread::spawn(move || {
-            let mut conn = update_pool.checkout(Duration::from_secs(5)).expect("Should checkout");
+            let conn = update_pool.checkout(Duration::from_secs(5)).expect("Should checkout");
             conn.execute_batch("BEGIN TRANSACTION").expect("Should begin");
             conn.execute(
                 "UPDATE gateway_status SET value = '42' WHERE key = 'counter'",
@@ -682,7 +691,7 @@ mod tests {
 
         // Now read should see the new value
         let read_pool = Arc::clone(&pool);
-        let mut conn = read_pool.checkout(Duration::from_secs(5)).expect("Should checkout");
+        let conn = read_pool.checkout(Duration::from_secs(5)).expect("Should checkout");
         let value: String = conn.query_row(
             "SELECT value FROM gateway_status WHERE key = 'counter'",
             [],
@@ -706,7 +715,7 @@ mod tests {
 
         // Initialize test table
         {
-            let mut conn = pool.checkout(Duration::from_secs(5)).expect("Should checkout");
+            let conn = pool.checkout(Duration::from_secs(5)).expect("Should checkout");
             conn.execute(
                 "CREATE TABLE metrics (id INTEGER PRIMARY KEY, value REAL)",
                 [],
@@ -728,7 +737,7 @@ mod tests {
         // Other connection should still work
         let other_pool = Arc::clone(&pool);
         let other_handle = thread::spawn(move || {
-            let mut conn = other_pool.checkout(Duration::from_secs(5)).expect("Should checkout");
+            let conn = other_pool.checkout(Duration::from_secs(5)).expect("Should checkout");
             conn.execute(
                 "INSERT INTO metrics (id, value) VALUES (1, 3.14)",
                 [],
@@ -756,7 +765,7 @@ mod tests {
 
         // Initialize table
         {
-            let mut conn = pool.checkout(Duration::from_secs(5)).expect("Should checkout");
+            let conn = pool.checkout(Duration::from_secs(5)).expect("Should checkout");
             conn.execute(
                 "CREATE TABLE perf_test (id INTEGER PRIMARY KEY, value INTEGER)",
                 [],
@@ -772,10 +781,10 @@ mod tests {
             let thread_pool = Arc::clone(&pool);
             let handle = thread::spawn(move || {
                 for i in 0..ops_per_thread {
-                    let mut conn = thread_pool.checkout(Duration::from_secs(5)).expect("Should checkout");
+                    let conn = thread_pool.checkout(Duration::from_secs(5)).expect("Should checkout");
                     conn.execute(
                         "INSERT INTO perf_test (id, value) VALUES (NULL, ?1)",
-                        [i as i32],
+                        [i],
                     ).expect("Should insert");
                 }
             });
@@ -837,7 +846,7 @@ mod tests {
 
     #[test]
     fn test_corrupted_database_deleted_and_recreated() {
-        use std::sync::Arc;
+        
 
         let path = temp_db_path();
 
@@ -878,7 +887,7 @@ mod tests {
 
     #[test]
     fn test_valid_database_untouched() {
-        use std::sync::Arc;
+        
 
         let path = temp_db_path();
 
@@ -914,7 +923,7 @@ mod tests {
 
     #[test]
     fn test_pool_starts_with_empty_state_after_recovery() {
-        use std::sync::Arc;
+        
 
         let path = temp_db_path();
 
@@ -952,7 +961,7 @@ mod tests {
 
     #[test]
     fn test_pool_multiple_sizes_with_corrupt_recovery() {
-        use std::sync::Arc;
+        
 
         let path = temp_db_path();
 

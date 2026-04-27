@@ -6,6 +6,11 @@
 //! Provides a thread-safe in-memory implementation of the StorageBackend trait
 //! for use in unit tests and scenarios where persistence is not required.
 
+// `InMemoryBackend` is the test-only StorageBackend retained for future tests
+// and reference implementation. None of the production code constructs it
+// today, so clippy flags it as unused — allow at module scope.
+#![allow(dead_code)]
+
 use crate::storage::types::{ChirpstackStatus, CommandStatus, DeviceCommand, MetricType, MetricValue, Command, CommandFilter};
 use crate::storage::StorageBackend;
 use crate::command_validation::CommandValidator;
@@ -16,21 +21,13 @@ use std::sync::{Arc, Mutex};
 
 /// Gateway health metrics for in-memory storage
 #[derive(Clone, Debug)]
+#[derive(Default)]
 struct GatewayHealthMetrics {
     last_poll_timestamp: Option<DateTime<Utc>>,
     error_count: i32,
     chirpstack_available: bool,
 }
 
-impl Default for GatewayHealthMetrics {
-    fn default() -> Self {
-        Self {
-            last_poll_timestamp: None,
-            error_count: 0,
-            chirpstack_available: false,
-        }
-    }
-}
 
 /// In-memory storage backend for testing
 ///
@@ -475,7 +472,7 @@ mod tests {
 
         backend.update_status(new_status.clone()).unwrap();
         let retrieved = backend.get_status().unwrap();
-        assert_eq!(retrieved.server_available, true);
+        assert!(retrieved.server_available);
     }
 
     #[test]
@@ -657,7 +654,7 @@ mod tests {
             chirpstack_result_id: None,
         };
 
-        let mut cmd2 = Command {
+        let cmd2 = Command {
             id: 0,
             device_id: "device_2".to_string(),
             metric_id: "temperature".to_string(),
@@ -754,7 +751,7 @@ mod tests {
     fn test_list_commands_filter_by_command_name_contains() {
         let backend = InMemoryBackend::new();
 
-        for (i, name) in vec!["set_temperature", "set_mode", "get_status"].iter().enumerate() {
+        for (i, name) in ["set_temperature", "set_mode", "get_status"].iter().enumerate() {
             let cmd = Command {
                 id: 0,
                 device_id: "device_1".to_string(),

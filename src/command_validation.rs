@@ -6,6 +6,12 @@
 //! Provides schema-driven validation of command parameters before enqueuing.
 //! Ensures that commands match device command definitions and enforces type safety.
 
+// Module is scaffolded for Epic 7 / Epic 9 wiring (validation flow not yet
+// connected end-to-end). Allow dead_code at module scope so the scaffold
+// stays without per-item annotations; reassess when the validation flow
+// gets its first real call site.
+#![allow(dead_code)]
+
 use serde_json::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -105,15 +111,14 @@ impl CommandSchema {
                 ParameterType::Float {
                     decimal_places: Some(places),
                     ..
-                } => {
+                }
                     // Validate decimal places is in safe range
-                    if *places > 20 {
+                    if *places > 20 => {
                         return Err(format!(
                             "Float parameter '{}' decimal_places {} exceeds safe limit of 20",
                             param.name, places
                         ));
                     }
-                }
                 _ => {}
             }
         }
@@ -287,9 +292,13 @@ fn validate_parameter_value(param_def: &ParameterDef, value: &Value) -> Result<(
     }
 }
 
+/// `(schemas, last-refresh)` entries kept in `CommandSchemaCache`. Aliased so
+/// the storage type stays under clippy's `type_complexity` threshold.
+type SchemaCacheEntries = HashMap<String, (Vec<CommandSchema>, SystemTime)>;
+
 /// Caches command schemas with TTL-based expiration
 pub struct CommandSchemaCache {
-    schemas: Arc<Mutex<HashMap<String, (Vec<CommandSchema>, SystemTime)>>>,
+    schemas: Arc<Mutex<SchemaCacheEntries>>,
     ttl: Duration,
 }
 
@@ -345,6 +354,7 @@ impl CommandSchemaCache {
 pub struct CommandValidator {
     schema_cache: CommandSchemaCache,
     device_schemas: HashMap<String, Vec<CommandSchema>>,
+    #[allow(dead_code)]
     strict_precision_mode: bool,
 }
 

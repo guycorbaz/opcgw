@@ -6,6 +6,13 @@
 //! This module defines the fundamental data types used by the storage layer,
 //! providing type safety and clear semantics for metrics, commands, and gateway state.
 
+// Several types in this module (`CommandFilter`, `ChirpstackStatus`,
+// `compute_hash`) are declared for completeness of the storage data model
+// and are referenced from downstream stories that have not yet wired them
+// into runtime code paths. Allow `dead_code` at module scope rather than
+// dropping the types — they are part of the documented API surface.
+#![allow(dead_code)]
+
 use chrono::{DateTime, Utc};
 use std::fmt;
 use serde::{Deserialize, Serialize};

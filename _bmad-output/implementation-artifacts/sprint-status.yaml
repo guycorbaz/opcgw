@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-02
-last_updated: "2026-04-24 (Story 5-3 code review complete: all 7 patches applied, 153 tests passing, ready to merge)"
+last_updated: "2026-04-27 (Story 6-3 code review complete after 3 iterations: clippy-clean, DashMap migration, 5 helpers extracted, 12 tests rewritten/added, all HIGH/MEDIUM findings resolved; 476 tests pass; flipped to done)"
 project: opcgw
 project_key: NOKEY
 tracking_system: file-system
@@ -94,39 +94,60 @@ development_status:
   4-1-poller-refactoring-to-sqlite-backend: done
   4-2-support-all-chirpstack-metric-types: done
   4-3-api-pagination-for-large-deployments: done
+  # Deferred to Phase B per epic-4 retrospective (line 125); absorb into a Phase B resilience epic when planning starts. Not blocking Epic 6.
   4-4-auto-recovery-from-chirpstack-outages: backlog
   epic-4-retrospective: done
 
   # Epic 5: Operational Visibility (Phase A)
-  epic-5: in-progress
+  epic-5: done
   5-1-opc-ua-server-refactoring-to-sqlite-backend: done
   5-2-stale-data-detection-and-status-codes: done
   5-3-gateway-health-metrics-in-opc-ua: done
-  epic-5-retrospective: optional
+  epic-5-retrospective: done
 
-  # Epic 6: Security Hardening (Phase A)
-  epic-6: backlog
-  6-1-credential-management-via-environment-variables: backlog
-  6-2-opc-ua-security-endpoints-and-authentication: backlog
-  6-3-connection-limiting: backlog
+  # Epic 6: Production Observability & Diagnostics (Phase A)
+  epic-6: in-progress
+  6-1-comprehensive-logging-infrastructure: done
+  6-2-configurable-log-verbosity: done
+  6-3-remote-diagnostics-for-known-failures: done
   epic-6-retrospective: optional
 
-  # Epic 7: Real-Time Subscriptions & Historical Data (Phase B)
+  # Epic 7: Security Hardening (Phase A)
   epic-7: backlog
-  7-1-async-opcua-subscription-spike: backlog
-  7-2-opc-ua-subscription-support: backlog
-  7-3-historical-data-access-via-opc-ua: backlog
-  7-4-threshold-based-alarm-conditions: backlog
+  7-1-credential-management-via-environment-variables: backlog
+  7-2-opc-ua-security-endpoints-and-authentication: backlog
+  7-3-connection-limiting: backlog
   epic-7-retrospective: optional
 
-  # Epic 8: Web Configuration & Hot-Reload (Phase B)
+  # Epic 8: Real-Time Subscriptions & Historical Data (Phase B)
   epic-8: backlog
-  8-1-axum-web-server-and-basic-authentication: backlog
-  8-2-gateway-status-dashboard: backlog
-  8-3-live-metric-values-display: backlog
-  8-4-application-crud-via-web-ui: backlog
-  8-5-device-and-metric-mapping-crud-via-web-ui: backlog
-  8-6-command-crud-via-web-ui: backlog
-  8-7-configuration-hot-reload: backlog
-  8-8-dynamic-opc-ua-address-space-mutation: backlog
+  8-1-async-opcua-subscription-spike: backlog
+  8-2-opc-ua-subscription-support: backlog
+  8-3-historical-data-access-via-opc-ua: backlog
+  8-4-threshold-based-alarm-conditions: backlog
   epic-8-retrospective: optional
+
+  # Epic 9: Web Configuration & Hot-Reload (Phase B)
+  epic-9: backlog
+  9-1-axum-web-server-and-basic-authentication: backlog
+  9-2-gateway-status-dashboard: backlog
+  9-3-live-metric-values-display: backlog
+  9-4-application-crud-via-web-ui: backlog
+  9-5-device-and-metric-mapping-crud-via-web-ui: backlog
+  9-6-command-crud-via-web-ui: backlog
+  9-7-configuration-hot-reload: backlog
+  9-8-dynamic-opc-ua-address-space-mutation: backlog
+  epic-9-retrospective: optional
+
+---
+
+## Next Session Checklist for Story 5-3
+
+Before marking complete, verify:
+- [ ] Manual smoke test with fresh database
+- [ ] OPC UA client can browse Gateway folder
+- [ ] Migration v006 works on production-like data
+- [ ] cargo clippy clean
+- [ ] No regressions in other OPC UA variables
+
+Ready to continue anytime. All code changes are in place and tested.

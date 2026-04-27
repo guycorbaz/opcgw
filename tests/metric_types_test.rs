@@ -195,7 +195,7 @@ fn test_kind_overrides_config_type() {
 
     // Even if config might suggest Bool, kind-driven conversion would use Float for GAUGE
     // This test verifies the kind value is correctly extracted
-    let kind_int = gauge_metric.kind as i32;
+    let kind_int = gauge_metric.kind;
     assert_eq!(kind_int, 2);
 }
 

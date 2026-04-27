@@ -55,3 +55,44 @@
 
 - **Pool cloning efficiency (double wrapping in Arc)** — SqliteBackend::with_pool(pool.clone()) then wrapped in Arc::new(). Double wrapping may be inefficient. This is pre-existing pattern (not introduced by this story). Candidate for refactoring: evaluate whether single Arc::clone() suffices or if separate pool instances are needed per subsystem.
 
+
+## Deferred from: code review of story-6.1 (2026-04-27)
+
+- **Unbounded growth of `last_status` HashMap** [src/opc_ua.rs] — bounded by configured device×metric matrix today; revisit when Epic 9 introduces dynamic config reload (Blind+Edge).
+- **AC#10 `cargo clippy --all-targets -- -D warnings` not clean project-wide** — 58 pre-existing dead-code/unused-import warnings on `main` HEAD. Open a separate cleanup story.
+- **SQLITE_BUSY `warn!` not emitted at storage layer** [src/storage/sqlite.rs] — covered today by parent retry `warn!` in `chirpstack.rs::poll_metrics`. AC#6 wording demands storage-layer `warn!`.
+- **`info_span!` + `let _enter = span.enter()` is fragile if function ever becomes async** [src/opc_ua.rs:get_value, get_health_value] — currently sync-only; rewrite to `span.in_scope(|| ...)` if any `.await` is added inside.
+- **`batch_metrics.clone()` on every retry attempt** [src/chirpstack.rs:822-848] — pre-existing pattern; performance optimisation only.
+- **AC#5 `errors` field name vs AC#7 canonical-list `error` (singular) inconsistency** — spec ambiguity; track in 6-2 spec review or open a docs issue.
+- **`error_count == i32::MAX` only catches saturated state once before wrapping in release** [src/opc_ua.rs:get_health_value] — proper fix is `saturating_add` at the increment site, not a comparison change. Open follow-up issue scoped to gateway health-metric overflow handling.
+
+## Deferred from: code review of story-6.2 (2026-04-27)
+
+- **`prepare_log_dir` fallback returns `"./log"` even when `create_dir_all("./log")` fails** [src/main.rs:152-178] — pre-existing from Story 6-1. Both fallback branches use `let _ = std::fs::create_dir_all("./log")` and return `"./log"` regardless of success. Read-only FS, `./log` existing as a file, or permission denied would all leave the non-blocking writer to fail silently. Probe + nested fallback (e.g., `/tmp/opcgw-log`) needed.
+- **Stale `#[allow(dead_code)]` on `LoggingConfig`** [src/config.rs:132] — struct now has runtime consumers via `peek_logging_config` and `AppConfig`. Blanket allow will mask future genuine dead fields. Remove or scope to specific fields.
+- **Init-time stderr warnings (invalid env, invalid config, log-dir fallback) never reach log files** [src/main.rs:127-130, 137-141, 156-160, 172] — by design (tracing not yet initialised at that point). Fix is buffer-and-replay: collect warnings into a `Vec<String>` during the bootstrap phase, then replay them via `warn!` immediately after `.init()`. Deferred as a design follow-up; affects post-mortem from log files only.
+- **No automated test asserts the format of the post-init `logging_init` info line** [src/main.rs:308-313] — `docs/logging.md` advertises this line as the operator-visible signal; only verified by smoke test in Dev Notes. Capturing requires a test-only `Layer` that records events; out of scope for 6-2.
+- **Test gap: `[logging].level = "INFO"` (uppercase in TOML)** [src/config.rs] — implementation lowercases internally so it works, but the contract isn't pinned by a test. One-line addition to existing config tests.
+- **Test gap: `[logging]` block with `dir` only and no `level`** [src/config.rs] — no test exercises the `LoggingConfig { dir: Some(_), level: None }` path. Common operator config; deserves coverage.
+
+## Deferred from: code review of story-6-3-remote-diagnostics-for-known-failures (2026-04-27)
+
+- **`error_delta` oscillation re-fires spike warn** [src/chirpstack.rs:996-1004] — no hysteresis or debounce; oscillating error counts (0→6→0→6) re-trigger the warn every odd cycle. Design enhancement, not a bug.
+- **`last_status` cache grows unboundedly** [src/opc_ua.rs:1462,1631-1641] — no TTL/LRU; long-running gateways with rotating device IDs accumulate map entries. Bounded eviction enhancement (also flagged in 6-1 review under a similar formulation).
+- **`gateway_status_init` is per-process not per-instance** [src/opc_ua.rs:1456-1459] — spec authorizes process-wide latching; document the limitation in `docs/logging.md` so operators understand test/restart semantics.
+- **NaN/Inf boolean parse falls into "invalid boolean" branch** [src/chirpstack.rs:1175-1200] — message technically correct; cosmetic refinement only.
+- **`peek_logging_config` swallows TOML parse errors silently** [src/main.rs:745-752] — 6-2 carryover; downstream `AppConfig::from_path` does surface the error.
+- **`prepare_log_dir` falls back to `./log` even when `create_dir_all("./log")` itself fails** [src/main.rs:853-879] — 6-2 carryover (already in 6-2 deferred list above).
+- **`Channel::connect()` has no explicit timeout** [src/chirpstack.rs:317-365] — pre-existing infrastructure; out of 6-3's instrumentation-only scope. Story 4-4 territory.
+- **`chirpstack_outage` reads `last_successful_poll` after the cycle has potentially updated it** [src/chirpstack.rs:892-901,1010-1015] — cycle-local consistency drift; minor.
+- **`log_dir` mismatch warning compares strings without canonicalisation** [src/main.rs:376-395] — 6-2 carryover; produces false-positive "restart to apply" when paths are equivalent but not byte-identical.
+- **`parse_log_level` eprintln may echo ANSI escape sequences from env** [src/main.rs:782-792] — 6-2 carryover; terminal injection via crafted `OPCGW_LOG_LEVEL`.
+- **`NonBlocking` guards drop ordering** [src/main.rs:248-310] — 6-1 carryover; tracing-appender contract requires guards live to end of `main`.
+- **Span re-entrancy in `OpcUa::get_value` via `add_read_callback`** [src/opc_ua.rs:608-625] — pre-existing; no recursion in current code, but `let _enter = span.enter()` is fragile if `get_value` ever becomes async (already in 6-1 deferred list).
+- **`ChronoUtc` non-monotonic across NTP step-backward** [src/main.rs:307-320] — system-level; document as known limitation. Augment with monotonic counter only if grep-by-timestamp ordering becomes a real operator pain point.
+- **Other tonic codes (`Unauthenticated`, `ResourceExhausted`) not classified** [src/chirpstack.rs:1708-1755] — follow-up enhancement; not on 6-3's instrumentation path.
+- **`rollback_err` not classified as SQLITE_BUSY** [src/storage/sqlite.rs:2882-2898] — cascading busy on rollback path silently swallowed; minor.
+- **`STORAGE_QUERY_BUDGET_MS` excludes commit/rollback paths** [src/storage/sqlite.rs:62-93] — slow commits never surface as `exceeded_budget=true`. Wrap commit/rollback in `StorageOpLog` or compare elapsed against the budget there.
+- **Far-future `metric.timestamp` clock-skew handling** [src/opc_ua.rs:893-983] — current code treats negative ages as fresh, hiding the anomaly. Rare but worth a `clock_skew_extreme` debug for diagnosability.
+- **`extract_request_ids` cursor advance after closing quote** [src/opc_ua.rs:2003-2032] — works for current emit format; brittle if quoting changes.
+- **`microsecond_timestamp_format_matches_pattern` test missing monotonicity assertion** [src/main.rs:1378-1413] — AC#2 is about ordering, not just digit count. Add a monotonic-pair assertion alongside the regex.

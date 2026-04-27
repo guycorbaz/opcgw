@@ -111,32 +111,33 @@ metric_unit = "%"
 
 **For complete configuration details**, see the [Configuration Reference](https://guycorbaz.github.io/opcgw/configuration/).
 
-## Project Status
+## Planning
 
-### Current Version: 2.0.0
+**Current Version:** 2.0.0 — last updated 2026-04-27.
 
-**Completed** (Epic 1: Crash-Free Gateway Foundation)
-- ✅ Updated dependencies & Rust toolchain (1.94.0)
-- ✅ Logging migration (log4rs → tracing)
-- ✅ Comprehensive error handling
-- ✅ Graceful shutdown with CancellationToken
-- ✅ Configuration validation
-- ✅ CI/CD pipelines (PR testing + Docker builds)
+The roadmap is tracked in [`_bmad-output/implementation-artifacts/sprint-status.yaml`](./_bmad-output/implementation-artifacts/sprint-status.yaml). The table below mirrors the current state of every epic; story-level detail lives in the sprint status file and the per-story documents under `_bmad-output/implementation-artifacts/`.
 
-**In Development** (Epic 2: Data Persistence)
-- 🔄 SQLite backend for historical data
-- 🔄 Metric persistence and batch writes
-- 🔄 Command queue for write-back to devices
+| Epic | Status | Scope |
+|------|--------|-------|
+| **Epic 1 — Crash-Free Gateway Foundation** | ✅ done | Dependency refresh + Rust 1.94, `log4rs → tracing` migration, comprehensive error handling, graceful shutdown via `CancellationToken`, configuration validation. |
+| **Epic 2 — Data Persistence** | ✅ done | `StorageBackend` trait, SQLite backend with WAL mode + per-task connection pool, batch writes, append-only history table, startup restore, graceful degradation, retention pruning. |
+| **Epic 3 — Reliable Command Execution** | ✅ done | SQLite-backed FIFO command queue, parameter validation, command-delivery status reporting (sent / confirmed / failed / timed-out). |
+| **Epic 4 — Scalable Data Collection** | ✅ done (4-4 deferred to Phase B) | Poller refactored onto `StorageBackend`, support for all ChirpStack metric types, gRPC pagination. Story 4-4 (auto-recovery from ChirpStack outages) is deferred to a Phase B resilience epic. |
+| **Epic 5 — Operational Visibility** | ✅ done | OPC UA server refactored onto SQLite backend, stale-data detection with OPC UA `Good`/`Uncertain`/`Bad` status codes, gateway health metrics (last poll timestamp, error count, ChirpStack availability) exposed under the `Gateway` folder. |
+| **Epic 6 — Production Observability & Diagnostics** | 🔄 in-progress (retrospective pending) | **6-1 done** (structured logging, correlation IDs on every OPC UA read, staleness-transition logs, poller-cycle structured logs, storage-query timing, configurable log directory via `OPCGW_LOG_DIR` and `[logging].dir`); **6-2 done** (configurable log verbosity via `OPCGW_LOG_LEVEL` and `[logging].level`); **6-3 done** (microsecond UTC timestamps; performance-budget warnings on `opc_ua_read`/`storage_query`/`batch_write`; data-anomaly logs — NULL `last_poll_timestamp`, staleness-boundary, error-count spike; ChirpStack `chirpstack_connect` / `chirpstack_outage` / `retry_schedule` diagnostics; edge-case logs — `gateway_status_init`, `chirpstack_request` timeout, `metric_parse`; transient-failure logs — `device_poll`, SQLITE_BUSY (with `sqlite_error_code` sibling field for differentiating BUSY/LOCKED); end-to-end `request_id` correlation verified via integration test; expanded operations reference + symptom cookbook in `docs/logging.md`. Code review complete in 3 iterations: clippy-clean across the workspace, `Mutex<HashMap>` staleness cache replaced with `DashMap` for lock-free concurrent reads, 5 helpers extracted (`maybe_emit_error_spike`, `maybe_emit_chirpstack_outage`, `validate_bool_metric_value`, `classify_and_log_grpc_error`, `format_last_successful_poll`) so synthetic tests now drive production paths; 188 lib + 209 bin + 79 integration tests pass). |
+| **Epic 7 — Security Hardening** | 📋 backlog | Credential management via environment variables (no secrets in TOML), OPC UA security endpoints + authentication, connection limiting. |
+| **Epic 8 — Real-Time Subscriptions & Historical Data (Phase B)** | 📋 backlog | `async-opcua` subscription spike, OPC UA subscription support, historical-data access via OPC UA, threshold-based alarm conditions. |
+| **Epic 9 — Web Configuration & Hot-Reload (Phase B)** | 📋 backlog | Axum web server + basic auth, gateway status dashboard, live metric values, application/device/metric/command CRUD via web UI, configuration hot-reload, dynamic OPC UA address-space mutation. |
 
-**Planned** (Epics 3-8)
-- Reliable command execution
-- Scalable data collection (pagination, auto-recovery)
-- Operational visibility (health metrics, stale data detection)
-- Security hardening (credential management, TLS)
-- Real-time subscriptions & historical data access
-- Web dashboard & hot-reload configuration
+### How to read this section
 
-See [Roadmap](https://guycorbaz.github.io/opcgw/features/#roadmap) for details.
+- **Status legend:** ✅ done · 🔄 in-progress · 📋 backlog (and 📝 ready-for-dev / 👀 review for individual stories).
+- **Phase A** covers Epics 1–7 — production hardening of the existing one-way (read) gateway.
+- **Phase B** covers Epics 8–9 — adds real-time subscriptions, historical data access, and a web admin surface. Story 4-4 is deferred to a Phase B resilience epic.
+- For the canonical, machine-readable view, see [`sprint-status.yaml`](./_bmad-output/implementation-artifacts/sprint-status.yaml). The sprint-status file is the source of truth; this table is updated alongside it.
+- Per-story details, acceptance criteria, dev notes, and review findings live in `_bmad-output/implementation-artifacts/<epic>-<story>-<slug>.md`.
+
+A long-form roadmap with marketing-friendly language is available at [Roadmap](https://guycorbaz.github.io/opcgw/features/#roadmap).
 
 ## Use Cases
 
@@ -147,6 +148,22 @@ See [Roadmap](https://guycorbaz.github.io/opcgw/features/#roadmap) for details.
 - ⚡ **Renewable Energy**: Solar + battery microgrid optimization
 
 → See [Real-World Use Cases](https://guycorbaz.github.io/opcgw/usecases/) for detailed scenarios.
+
+## Logging
+
+opcgw is built on `tracing` with per-module file appenders and a stderr console layer. The global verbosity is configurable at runtime — no rebuild required.
+
+```bash
+# Set verbosity for a single run
+OPCGW_LOG_LEVEL=debug ./target/release/opcgw
+
+# Or persist in config.toml
+[logging]
+level = "debug"
+dir = "/var/log/opcgw"
+```
+
+Valid levels: `trace`, `debug`, `info` (default), `warn`, `error`. Per-module file appenders capture independently of the global level — see [`docs/logging.md`](./docs/logging.md) for the operator-facing reference, including the structured-field schema, correlation-ID tracing, and the env-var override convention.
 
 ## Architecture
 

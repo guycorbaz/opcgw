@@ -256,7 +256,7 @@ mod tests {
         let page_size = 100u32;
 
         // Offsets: 0, 100, 200
-        let offsets = vec![0u32, 100u32, 200u32];
+        let offsets = [0u32, 100u32, 200u32];
 
         for (page_num, &offset) in offsets.iter().enumerate() {
             let response = mock_list_devices_response(total, page_size, offset);

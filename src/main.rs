@@ -16,7 +16,10 @@
 //! # Configuration
 //!
 //! The application uses a configuration file and supports command-line arguments
-//! for customization. Logging is configured via log4rs.
+//! for customization. Logging is built on top of `tracing` + `tracing-subscriber`
+//! with per-module daily-rolling file appenders and a stderr console layer.
+//! The output directory is resolved from (in order): the `OPCGW_LOG_DIR` env var,
+//! `[logging].dir` in `config.toml`, then the default `./log`.
 
 mod chirpstack;
 mod command_validation;
@@ -36,15 +39,172 @@ pub mod chirpstack_api {
 use crate::chirpstack::ChirpstackPoller;
 use crate::storage::{Storage, ConnectionPool, StorageBackend, MetricValueInternal};
 use clap::Parser;
-use config::AppConfig;
+use config::{AppConfig, LoggingConfig};
+use figment::{providers::{Env, Format, Toml}, Figment};
 use tracing::{debug, error, info, trace, warn};
 use tracing_appender::non_blocking;
+use tracing_subscriber::fmt::time::ChronoUtc;
 use tracing_subscriber::{filter, fmt, layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use tokio_util::sync::CancellationToken;
 use opc_ua::OpcUa;
 use std::sync::{Mutex, Barrier};
 use std::{path::PathBuf, sync::Arc};
-use std::time::Duration;
+
+/// Logging-only peek of the TOML config used during the bootstrap phase
+/// (before `AppConfig::new()` is called). Lets us resolve `[logging].dir`
+/// without paying for full config validation, so config-load errors can
+/// still reach the file appender via `error!`.
+#[derive(serde::Deserialize)]
+struct LoggingPeek {
+    logging: Option<LoggingConfig>,
+}
+
+/// Best-effort one-shot peek of `[logging]` from the TOML file plus the
+/// figment-style env overlay (`OPCGW_LOGGING__DIR`, `OPCGW_LOGGING__LEVEL`).
+/// A parse error returns `None`; the full `AppConfig::new()` call later
+/// will surface the underlying error via tracing once the subscriber
+/// is up. Shared between `resolve_log_dir` and `resolve_log_level`
+/// (Story 6-2) so the file is only read once during bootstrap.
+///
+/// Merging the `OPCGW_` env layer here mirrors `AppConfig::new()` and
+/// ensures the long-form figment env vars also influence the bootstrap
+/// resolvers (the short forms `OPCGW_LOG_DIR` / `OPCGW_LOG_LEVEL` are
+/// still consulted by the resolvers themselves and take precedence).
+fn peek_logging_config(config_path: &str) -> Option<LoggingConfig> {
+    Figment::new()
+        .merge(Toml::file(config_path))
+        .merge(Env::prefixed("OPCGW_").split("__").global())
+        .extract::<LoggingPeek>()
+        .ok()
+        .and_then(|p| p.logging)
+}
+
+/// Resolve the log directory in precedence order: `OPCGW_LOG_DIR` env >
+/// `[logging].dir` (TOML or `OPCGW_LOGGING__DIR` env, merged by the peek) >
+/// `./log`. Returns the resolved directory and a short tag identifying the
+/// source (`"env"`, `"config"`, `"default"`) so callers can suppress the
+/// post-init divergence warning when an override was the intended winner.
+///
+/// Empty / whitespace-only env values are treated as unset (Story 6-1
+/// review patch).
+fn resolve_log_dir(peeked: Option<&LoggingConfig>) -> (String, &'static str) {
+    let from_env = std::env::var("OPCGW_LOG_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    if let Some(dir) = from_env {
+        return (dir, "env");
+    }
+    let from_toml = peeked
+        .and_then(|l| l.dir.clone())
+        .filter(|s| !s.trim().is_empty());
+    if let Some(dir) = from_toml {
+        return (dir, "config");
+    }
+    ("./log".to_string(), "default")
+}
+
+/// Story 6-2, AC#1: parse a log-level string into a `LevelFilter`.
+///
+/// Accepts the five canonical values case-insensitively: `trace`, `debug`,
+/// `info`, `warn`, `error`. Any other input returns `Err(original_input)`
+/// — callers should fall back to `LevelFilter::INFO` and surface a
+/// stderr warning (tracing isn't initialised yet at that point).
+fn parse_log_level(input: &str) -> Result<filter::LevelFilter, String> {
+    match input.trim().to_lowercase().as_str() {
+        "trace" => Ok(filter::LevelFilter::TRACE),
+        "debug" => Ok(filter::LevelFilter::DEBUG),
+        "info" => Ok(filter::LevelFilter::INFO),
+        "warn" => Ok(filter::LevelFilter::WARN),
+        "error" => Ok(filter::LevelFilter::ERROR),
+        _ => Err(input.to_string()),
+    }
+}
+
+/// Story 6-2, AC#1 / AC#4: resolve the global log level using the
+/// precedence chain `-d` CLI count > `OPCGW_LOG_LEVEL` env >
+/// `[logging].level` (peeked from TOML or the figment env overlay) >
+/// `LevelFilter::INFO`. Returns the resolved level and a short tag
+/// identifying the source (`"cli"`, `"env"`, `"config"`, `"default"`)
+/// so the post-init log line can surface where it came from.
+///
+/// CLI mapping: `cli_debug == 0` means no override (fall through to env);
+/// `1` → DEBUG; `2+` → TRACE. The CLI flag only escalates verbosity, never
+/// suppresses it.
+///
+/// Invalid values at the env or config layer fall through with a single
+/// stderr warning — startup never aborts. Empty / whitespace-only values
+/// at either layer are treated as unset (matches the `OPCGW_LOG_DIR`
+/// empty-string handling). The level filter, once installed in the
+/// subscriber, is checked at runtime by the `tracing` macros — a single
+/// branch per call site, well below profiler resolution.
+fn resolve_log_level(
+    cli_debug: u8,
+    peeked: Option<&LoggingConfig>,
+) -> (filter::LevelFilter, &'static str) {
+    match cli_debug {
+        0 => {}
+        1 => return (filter::LevelFilter::DEBUG, "cli"),
+        _ => return (filter::LevelFilter::TRACE, "cli"),
+    }
+    if let Ok(s) = std::env::var("OPCGW_LOG_LEVEL") {
+        if !s.trim().is_empty() {
+            match parse_log_level(&s) {
+                Ok(lf) => return (lf, "env"),
+                Err(_) => {
+                    eprintln!(
+                        "Warning: Invalid OPCGW_LOG_LEVEL='{}' (valid: trace, debug, info, warn, error). Using config or default.",
+                        s
+                    );
+                }
+            }
+        }
+    }
+    if let Some(level_str) = peeked.and_then(|l| l.level.as_deref()) {
+        if !level_str.trim().is_empty() {
+            match parse_log_level(level_str) {
+                Ok(lf) => return (lf, "config"),
+                Err(_) => {
+                    eprintln!(
+                        "Warning: Invalid [logging].level='{}' in config.toml (valid: trace, debug, info, warn, error). Falling back to default.",
+                        level_str
+                    );
+                }
+            }
+        }
+    }
+    (filter::LevelFilter::INFO, "default")
+}
+
+/// Ensure the log directory exists and is writable. On failure, falls back
+/// to `./log` and writes a diagnostic to stderr (tracing isn't up yet).
+/// Returns the final directory that callers should use for appenders.
+fn prepare_log_dir(requested: String) -> String {
+    if let Err(e) = std::fs::create_dir_all(&requested) {
+        eprintln!(
+            "opcgw: cannot create log directory '{}' ({}); falling back to './log'",
+            requested, e
+        );
+        let _ = std::fs::create_dir_all("./log");
+        return "./log".to_string();
+    }
+    // Probe writability so we fail fast instead of silently dropping logs
+    // through tracing-appender's non-blocking writer thread.
+    let probe = std::path::Path::new(&requested).join(".opcgw-write-probe");
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            requested
+        }
+        Err(e) => {
+            eprintln!(
+                "opcgw: log directory '{}' is not writable ({}); falling back to './log'",
+                requested, e
+            );
+            let _ = std::fs::create_dir_all("./log");
+            "./log".to_string()
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -87,37 +247,75 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse arguments
-    let _args = Args::parse();
+    let args = Args::parse();
+
+    // Story 6-1, AC#1 (review patch D1): two-phase init.
+    //   Phase 1 — peek `[logging].dir` from TOML *without* full validation,
+    //             resolve `log_dir` (OPCGW_LOG_DIR env > peek > default), and
+    //             bring up tracing so any subsequent error has a file appender
+    //             to land in.
+    //   Phase 2 — call `AppConfig::new()`; failures are logged via `error!`,
+    //             which reaches both stderr and the per-module appenders.
+    //
+    // Config path precedence: CLI `-c FILE` > `CONFIG_PATH` env > default.
+    // The chosen path drives both the bootstrap peek and `AppConfig::new()`.
+    let config_path = args
+        .config
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .or_else(|| std::env::var("CONFIG_PATH").ok())
+        .unwrap_or_else(|| format!("{}/config.toml", crate::utils::OPCGW_CONFIG_PATH));
+    // Single TOML+env peek shared by the dir + level resolvers (Story 6-2).
+    let peeked = peek_logging_config(&config_path);
+    let (log_dir_requested, log_dir_source) = resolve_log_dir(peeked.as_ref());
+    let log_dir = prepare_log_dir(log_dir_requested);
+    // Story 6-2, AC#1 / AC#4: resolve global log level
+    // (CLI `-d` > OPCGW_LOG_LEVEL env > [logging].level > default INFO).
+    let (log_level, log_level_source) = resolve_log_level(args.debug, peeked.as_ref());
+
+    let init_start = std::time::Instant::now();
 
     // Configure tracing subscriber with per-module file appenders (daily rotation)
     let (chirpstack_writer, _guard1) =
-        non_blocking(tracing_appender::rolling::daily("log", "chirpstack.log"));
+        non_blocking(tracing_appender::rolling::daily(&log_dir, "chirpstack.log"));
     let (opcua_writer, _guard2) =
-        non_blocking(tracing_appender::rolling::daily("log", "opc_ua.log"));
+        non_blocking(tracing_appender::rolling::daily(&log_dir, "opc_ua.log"));
     let (root_writer, _guard3) =
-        non_blocking(tracing_appender::rolling::daily("log", "opc_ua_gw.log"));
+        non_blocking(tracing_appender::rolling::daily(&log_dir, "opc_ua_gw.log"));
     let (storage_writer, _guard4) =
-        non_blocking(tracing_appender::rolling::daily("log", "storage.log"));
+        non_blocking(tracing_appender::rolling::daily(&log_dir, "storage.log"));
     let (config_writer, _guard5) =
-        non_blocking(tracing_appender::rolling::daily("log", "config.log"));
+        non_blocking(tracing_appender::rolling::daily(&log_dir, "config.log"));
+
+    // Story 6-3, AC#2: microsecond-precision UTC timestamps so concurrent
+    // events (e.g. opc_ua_read vs. batch_write) get distinct timestamps and
+    // chronological ordering is reconstructable from `grep`. Same format on
+    // every layer (console + root + per-module files) so cross-file
+    // correlation works.
+    let micro_ts = || ChronoUtc::new("%Y-%m-%dT%H:%M:%S%.6fZ".to_string());
 
     tracing_subscriber::registry()
-        // Console layer: all modules at debug
+        // Console layer: stderr so container log drivers capture it.
+        // Story 6-2: filter level resolved via OPCGW_LOG_LEVEL > [logging].level > INFO.
+        // Per-module Targets filters below remain independent (AC#2).
         .with(
             fmt::layer()
-                .with_writer(std::io::stdout)
-                .with_filter(filter::LevelFilter::DEBUG),
+                .with_writer(std::io::stderr)
+                .with_timer(micro_ts())
+                .with_filter(log_level),
         )
-        // Root file layer: all modules at debug
+        // Root file layer: same global level as the console.
         .with(
             fmt::layer()
                 .with_writer(root_writer)
-                .with_filter(filter::LevelFilter::DEBUG),
+                .with_timer(micro_ts())
+                .with_filter(log_level),
         )
         // Per-module file layers with per-layer target filters
         .with(
             fmt::layer()
                 .with_writer(chirpstack_writer)
+                .with_timer(micro_ts())
                 .with_filter(
                     filter::Targets::new()
                         .with_target("opcgw::chirpstack", tracing::Level::TRACE),
@@ -126,6 +324,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(
             fmt::layer()
                 .with_writer(opcua_writer)
+                .with_timer(micro_ts())
                 .with_filter(
                     filter::Targets::new()
                         .with_target("opcgw::opc_ua", tracing::Level::TRACE)
@@ -135,6 +334,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(
             fmt::layer()
                 .with_writer(storage_writer)
+                .with_timer(micro_ts())
                 .with_filter(
                     filter::Targets::new()
                         .with_target("opcgw::storage", tracing::Level::TRACE),
@@ -143,6 +343,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(
             fmt::layer()
                 .with_writer(config_writer)
+                .with_timer(micro_ts())
                 .with_filter(
                     filter::Targets::new()
                         .with_target("opcgw::config", tracing::Level::TRACE),
@@ -150,16 +351,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
+    let init_ms = init_start.elapsed().as_millis();
+    info!(log_dir = %log_dir, tracing_init_ms = init_ms, "tracing subscriber initialised");
+    // Story 6-2, AC#1: surface which level the subscriber actually applied,
+    // and where it came from. If OPCGW_LOG_LEVEL=error, this line itself is
+    // suppressed — that's the contract.
+    info!(
+        operation = "logging_init",
+        level = %log_level,
+        source = log_level_source,
+        "Resolved global log level"
+    );
     info!("starting opcgw");
 
-    // Create a new configuration and load its parameters
-    let application_config = match AppConfig::new() {
+    // Phase 2: now that tracing is up, load the full config from the same
+    // path the bootstrap peek used. Any failure here reaches the file
+    // appenders via `error!` (review patch D1).
+    let application_config = match AppConfig::from_path(&config_path) {
         Ok(config) => Arc::new(config),
         Err(e) => {
             error!(error = %e, "Failed to load configuration");
             return Err(e.into());
         }
     };
+
+    // If bootstrap fell back to the default *and* the fully-loaded config
+    // names a different `[logging].dir`, the operator needs to restart with
+    // the proper directory accessible. We only warn in that genuine
+    // mismatch case — overrides via env or `[logging].dir` are the
+    // intended winners and shouldn't trigger a "restart to apply" warning.
+    if log_dir_source == "default" {
+        if let Some(cfg_dir) = application_config
+            .logging
+            .as_ref()
+            .and_then(|l| l.dir.as_deref())
+        {
+            if cfg_dir != log_dir {
+                warn!(
+                    bootstrap_log_dir = %log_dir,
+                    config_log_dir = %cfg_dir,
+                    "config [logging].dir differs from bootstrap log_dir (bootstrap used default); restart to apply"
+                );
+            }
+        }
+    }
 
     // Log startup confirmation with key parameters
     let total_devices: usize = application_config
@@ -456,7 +691,7 @@ mod tests {
 
     #[test]
     fn test_metric_restore_from_database() {
-        use crate::storage::{StorageBackend, MetricType, MetricValueInternal};
+        use crate::storage::{StorageBackend, MetricType};
         use std::fs;
 
         // Create a temporary database
@@ -502,5 +737,390 @@ mod tests {
         }
 
         let _ = fs::remove_file(&db_path);
+    }
+
+    // ===== Story 6-2 tests =====
+
+    use super::{parse_log_level, resolve_log_level};
+    use crate::config::LoggingConfig;
+    use tracing_subscriber::filter::LevelFilter;
+
+    /// Story 6-2, AC#1: every canonical lowercase value parses to its
+    /// matching `LevelFilter`.
+    #[test]
+    fn parse_log_level_lowercase() {
+        assert_eq!(parse_log_level("trace").unwrap(), LevelFilter::TRACE);
+        assert_eq!(parse_log_level("debug").unwrap(), LevelFilter::DEBUG);
+        assert_eq!(parse_log_level("info").unwrap(), LevelFilter::INFO);
+        assert_eq!(parse_log_level("warn").unwrap(), LevelFilter::WARN);
+        assert_eq!(parse_log_level("error").unwrap(), LevelFilter::ERROR);
+    }
+
+    /// Story 6-2, AC#1: parsing is case-insensitive.
+    #[test]
+    fn parse_log_level_uppercase_and_mixed() {
+        assert_eq!(parse_log_level("TRACE").unwrap(), LevelFilter::TRACE);
+        assert_eq!(parse_log_level("Debug").unwrap(), LevelFilter::DEBUG);
+        assert_eq!(parse_log_level("iNfO").unwrap(), LevelFilter::INFO);
+        assert_eq!(parse_log_level("WARN").unwrap(), LevelFilter::WARN);
+        assert_eq!(parse_log_level("ERROR").unwrap(), LevelFilter::ERROR);
+        // Whitespace is trimmed.
+        assert_eq!(parse_log_level("  info  ").unwrap(), LevelFilter::INFO);
+    }
+
+    /// Story 6-2, AC#1: invalid values return `Err(original)` and never
+    /// match a real level.
+    #[test]
+    fn parse_log_level_invalid() {
+        assert!(parse_log_level("verbose").is_err());
+        assert!(parse_log_level("").is_err());
+        assert!(parse_log_level("DEBUG_MORE").is_err());
+        assert!(parse_log_level("1").is_err());
+        // The error preserves the original input for downstream messages.
+        assert_eq!(
+            parse_log_level("verbose").err().as_deref(),
+            Some("verbose")
+        );
+    }
+
+    /// Story 6-2, AC#4: precedence — env > config > default. Uses
+    /// `temp_env::with_var` to scope env mutations safely under
+    /// parallel `cargo test` (the dev-dep was added in Story 6-1).
+    #[test]
+    fn resolve_log_level_precedence_env_wins() {
+        let cfg = LoggingConfig {
+            dir: None,
+            level: Some("warn".to_string()),
+        };
+        temp_env::with_var("OPCGW_LOG_LEVEL", Some("debug"), || {
+            let (lf, source) = resolve_log_level(0, Some(&cfg));
+            assert_eq!(lf, LevelFilter::DEBUG);
+            assert_eq!(source, "env");
+        });
+    }
+
+    #[test]
+    fn resolve_log_level_precedence_config_used_when_env_unset() {
+        let cfg = LoggingConfig {
+            dir: None,
+            level: Some("warn".to_string()),
+        };
+        // Use temp_env to *unset* the env var even if the host has it set.
+        temp_env::with_var("OPCGW_LOG_LEVEL", None::<&str>, || {
+            let (lf, source) = resolve_log_level(0, Some(&cfg));
+            assert_eq!(lf, LevelFilter::WARN);
+            assert_eq!(source, "config");
+        });
+    }
+
+    #[test]
+    fn resolve_log_level_default_when_both_absent() {
+        temp_env::with_var("OPCGW_LOG_LEVEL", None::<&str>, || {
+            let (lf, source) = resolve_log_level(0, None);
+            assert_eq!(lf, LevelFilter::INFO);
+            assert_eq!(source, "default");
+        });
+    }
+
+    /// Story 6-2, AC#4: invalid env value falls through to config (with
+    /// stderr warning, which we don't assert on directly here).
+    #[test]
+    fn resolve_log_level_invalid_env_falls_through_to_config() {
+        let cfg = LoggingConfig {
+            dir: None,
+            level: Some("warn".to_string()),
+        };
+        temp_env::with_var("OPCGW_LOG_LEVEL", Some("verbose"), || {
+            let (lf, source) = resolve_log_level(0, Some(&cfg));
+            assert_eq!(lf, LevelFilter::WARN);
+            assert_eq!(source, "config");
+        });
+    }
+
+    /// Story 6-2, AC#4: invalid env AND invalid config → default INFO.
+    #[test]
+    fn resolve_log_level_both_invalid_falls_to_default() {
+        let cfg = LoggingConfig {
+            dir: None,
+            level: Some("loud".to_string()),
+        };
+        temp_env::with_var("OPCGW_LOG_LEVEL", Some("verbose"), || {
+            let (lf, source) = resolve_log_level(0, Some(&cfg));
+            assert_eq!(lf, LevelFilter::INFO);
+            assert_eq!(source, "default");
+        });
+    }
+
+    /// Story 6-2, AC#6: a `trace!` call site costs effectively nothing when
+    /// the subscriber's max level is above TRACE. `tracing` macros do a
+    /// runtime level check against the installed subscriber's filter — a
+    /// single branch per call site, well below profiler resolution — so no
+    /// manual caching is needed. (Compile-time short-circuit only kicks in
+    /// when `tracing/release_max_level_*` features are set, which this
+    /// project does not enable.) Marked `#[ignore]` — invoke explicitly:
+    ///
+    /// ```text
+    /// cargo test --release --bin opcgw bench_trace_at_error_level -- --ignored --nocapture
+    /// ```
+    ///
+    /// The bench runs 100 000 iterations of two tight loops:
+    ///   1. `trace!("…")` (filtered out by the ERROR subscriber set up below).
+    ///   2. an empty loop body.
+    ///
+    /// In release mode the no-op loop is constant-folded to ~0 ns, so the
+    /// ratio is meaningless; what matters is the absolute `trace!` cost,
+    /// which has measured at ~0.46 ns/iter.
+    #[test]
+    #[ignore]
+    fn bench_trace_at_error_level() {
+        use tracing::trace;
+        use tracing_subscriber::filter::LevelFilter;
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::{fmt, Layer};
+
+        // Iter-3 review pending #5 resolution: scope the ERROR-level
+        // subscriber to this bench via `tracing::subscriber::with_default`
+        // instead of `try_init`. The previous best-effort `try_init`
+        // returned the *globally-installed* subscriber when another test
+        // had already set one — so the bench could end up measuring full
+        // emission cost (under a TRACE subscriber) instead of filter-skip
+        // cost. The scoped subscriber guarantees the bench measures
+        // exactly the configured ERROR-level filter.
+        //
+        // NOTE (iter-3 regression check): `with_default` does NOT propagate
+        // the subscriber to spawned threads. The bench loop below is
+        // single-threaded — keep it that way. If a future refactor adds
+        // `std::thread::spawn` or `tokio::spawn` inside this scope, those
+        // threads will fall back to the global default subscriber and the
+        // bench number will silently revert to measuring full emission
+        // cost instead of the filter-skip path.
+        let bench_subscriber = tracing_subscriber::registry().with(
+            fmt::layer()
+                .with_writer(std::io::sink)
+                .with_filter(LevelFilter::ERROR),
+        );
+
+        tracing::subscriber::with_default(bench_subscriber, || {
+            const ITERS: usize = 100_000;
+
+            // Warm up
+            for _ in 0..1_000 {
+                trace!(target: "opcgw::bench", x = 1, "noop");
+            }
+
+            let t_trace = std::time::Instant::now();
+            for i in 0..ITERS {
+                trace!(target: "opcgw::bench", iter = i, "should not be emitted");
+            }
+            let trace_ns = t_trace.elapsed().as_nanos();
+
+            let t_noop = std::time::Instant::now();
+            let mut sink: u64 = 0;
+            for i in 0..ITERS {
+                sink = sink.wrapping_add(i as u64);
+            }
+            let noop_ns = t_noop.elapsed().as_nanos();
+            // Use sink so the optimiser can't elide the loop entirely.
+            std::hint::black_box(sink);
+
+            let trace_per = trace_ns as f64 / ITERS as f64;
+            let noop_per = noop_ns as f64 / ITERS as f64;
+            eprintln!("=== Story 6-2 AC#6 microbench ===");
+            eprintln!("iterations: {}", ITERS);
+            eprintln!("trace! @ ERROR level: {:.2} ns/iter (total {} ns)", trace_per, trace_ns);
+            eprintln!("no-op loop:           {:.2} ns/iter (total {} ns)", noop_per, noop_ns);
+            eprintln!(
+                "ratio: {:.2}× (trace / no-op) — should be small in release mode",
+                if noop_per > 0.0 { trace_per / noop_per } else { f64::INFINITY }
+            );
+        });
+    }
+
+    /// Story 6-2, AC#4: empty env var is treated as unset (matches the
+    /// `OPCGW_LOG_DIR` empty-string handling).
+    #[test]
+    fn resolve_log_level_empty_env_treated_as_unset() {
+        let cfg = LoggingConfig {
+            dir: None,
+            level: Some("error".to_string()),
+        };
+        temp_env::with_var("OPCGW_LOG_LEVEL", Some(""), || {
+            let (lf, source) = resolve_log_level(0, Some(&cfg));
+            assert_eq!(lf, LevelFilter::ERROR);
+            assert_eq!(source, "config");
+        });
+    }
+
+    /// Empty `[logging].level = ""` (post-figment-merge result of an unset
+    /// or empty `OPCGW_LOGGING__LEVEL`) is treated as unset and falls
+    /// through cleanly to the default — no warning with empty quotes.
+    #[test]
+    fn resolve_log_level_empty_config_treated_as_unset() {
+        let cfg = LoggingConfig {
+            dir: None,
+            level: Some("".to_string()),
+        };
+        temp_env::with_var("OPCGW_LOG_LEVEL", None::<&str>, || {
+            let (lf, source) = resolve_log_level(0, Some(&cfg));
+            assert_eq!(lf, LevelFilter::INFO);
+            assert_eq!(source, "default");
+        });
+    }
+
+    /// Same for whitespace-only config level — symmetric with env handling.
+    #[test]
+    fn resolve_log_level_whitespace_config_treated_as_unset() {
+        let cfg = LoggingConfig {
+            dir: None,
+            level: Some("   ".to_string()),
+        };
+        temp_env::with_var("OPCGW_LOG_LEVEL", None::<&str>, || {
+            let (lf, source) = resolve_log_level(0, Some(&cfg));
+            assert_eq!(lf, LevelFilter::INFO);
+            assert_eq!(source, "default");
+        });
+    }
+
+    /// CLI `-d` (count=1) overrides env and config, mapping to DEBUG.
+    #[test]
+    fn resolve_log_level_cli_single_d_maps_to_debug() {
+        let cfg = LoggingConfig {
+            dir: None,
+            level: Some("error".to_string()),
+        };
+        temp_env::with_var("OPCGW_LOG_LEVEL", Some("warn"), || {
+            let (lf, source) = resolve_log_level(1, Some(&cfg));
+            assert_eq!(lf, LevelFilter::DEBUG);
+            assert_eq!(source, "cli");
+        });
+    }
+
+    /// CLI `-dd` (count=2+) maps to TRACE and overrides everything.
+    #[test]
+    fn resolve_log_level_cli_double_d_maps_to_trace() {
+        let cfg = LoggingConfig {
+            dir: None,
+            level: Some("error".to_string()),
+        };
+        temp_env::with_var("OPCGW_LOG_LEVEL", Some("warn"), || {
+            let (lf, source) = resolve_log_level(2, Some(&cfg));
+            assert_eq!(lf, LevelFilter::TRACE);
+            assert_eq!(source, "cli");
+        });
+        temp_env::with_var("OPCGW_LOG_LEVEL", Some("warn"), || {
+            let (lf, source) = resolve_log_level(5, Some(&cfg));
+            assert_eq!(lf, LevelFilter::TRACE);
+            assert_eq!(source, "cli");
+        });
+    }
+
+    /// CLI count of 0 is "no override" — fall through to the env/config chain.
+    #[test]
+    fn resolve_log_level_cli_zero_does_not_override() {
+        let cfg = LoggingConfig {
+            dir: None,
+            level: Some("error".to_string()),
+        };
+        temp_env::with_var("OPCGW_LOG_LEVEL", None::<&str>, || {
+            let (lf, source) = resolve_log_level(0, Some(&cfg));
+            assert_eq!(lf, LevelFilter::ERROR);
+            assert_eq!(source, "config");
+        });
+    }
+
+    // ===== resolve_log_dir source-tag tests =====
+
+    use super::resolve_log_dir;
+
+    #[test]
+    fn resolve_log_dir_env_wins() {
+        let cfg = LoggingConfig {
+            dir: Some("/from-config".to_string()),
+            level: None,
+        };
+        temp_env::with_var("OPCGW_LOG_DIR", Some("/from-env"), || {
+            let (dir, source) = resolve_log_dir(Some(&cfg));
+            assert_eq!(dir, "/from-env");
+            assert_eq!(source, "env");
+        });
+    }
+
+    #[test]
+    fn resolve_log_dir_config_used_when_env_unset() {
+        let cfg = LoggingConfig {
+            dir: Some("/from-config".to_string()),
+            level: None,
+        };
+        temp_env::with_var("OPCGW_LOG_DIR", None::<&str>, || {
+            let (dir, source) = resolve_log_dir(Some(&cfg));
+            assert_eq!(dir, "/from-config");
+            assert_eq!(source, "config");
+        });
+    }
+
+    #[test]
+    fn resolve_log_dir_default_when_both_absent() {
+        temp_env::with_var("OPCGW_LOG_DIR", None::<&str>, || {
+            let (dir, source) = resolve_log_dir(None);
+            assert_eq!(dir, "./log");
+            assert_eq!(source, "default");
+        });
+    }
+
+    // ===== Story 6-3 tests =====
+
+    /// Story 6-3, AC#2: the format string we hand to `ChronoUtc::new` produces
+    /// six-digit microsecond precision in UTC. Verifies the formatter through
+    /// the actual `FormatTime` trait used by the subscriber, not by re-running
+    /// `chrono::Utc::now().format(...)` directly — this is the integration
+    /// surface the AC requires.
+    #[test]
+    fn microsecond_timestamp_format_matches_pattern() {
+        
+        use tracing_subscriber::fmt::format::Writer;
+        use tracing_subscriber::fmt::time::{ChronoUtc, FormatTime};
+
+        let timer = ChronoUtc::new("%Y-%m-%dT%H:%M:%S%.6fZ".to_string());
+        let mut buf = String::new();
+        let mut w = Writer::new(&mut buf);
+        timer.format_time(&mut w).expect("format_time");
+
+        // Expected shape: `YYYY-MM-DDTHH:MM:SS.ffffffZ` — find the dot, then
+        // assert exactly six digits, then `Z`.
+        let dot = buf.find('.').unwrap_or_else(|| {
+            panic!("microsecond timestamp must contain a '.', got {buf:?}")
+        });
+        let after = &buf[dot + 1..];
+        assert!(
+            after.ends_with('Z'),
+            "microsecond timestamp must end with 'Z', got {buf:?}"
+        );
+        let micros = &after[..after.len() - 1];
+        assert_eq!(
+            micros.len(),
+            6,
+            "expected exactly 6 fractional digits (\\d{{6}}), got {micros:?} in {buf:?}"
+        );
+        assert!(
+            micros.chars().all(|c| c.is_ascii_digit()),
+            "fractional component must be all ASCII digits, got {micros:?}"
+        );
+
+        // Sanity: the date portion before 'T' is exactly `YYYY-MM-DD`.
+        let t_pos = buf.find('T').expect("must have 'T' separator");
+        assert_eq!(t_pos, 10, "date prefix must be 10 chars, got {buf:?}");
+    }
+
+    #[test]
+    fn resolve_log_dir_empty_env_falls_through() {
+        let cfg = LoggingConfig {
+            dir: Some("/from-config".to_string()),
+            level: None,
+        };
+        temp_env::with_var("OPCGW_LOG_DIR", Some(""), || {
+            let (dir, source) = resolve_log_dir(Some(&cfg));
+            assert_eq!(dir, "/from-config");
+            assert_eq!(source, "config");
+        });
     }
 }

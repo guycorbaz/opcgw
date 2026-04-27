@@ -186,6 +186,34 @@ pub const OPCGW_CP_RESPONSE_TIME_NAME: &str = "ResponseTime";
 pub const OPCGW_CP_ID: &str = "cp0";
 
 // =============================================================================
+// Performance Budgets (Story 6-3, AC#3)
+// =============================================================================
+//
+// Each budget is the wall-clock latency above which a `debug!` operation log
+// is upgraded to `warn!` with `exceeded_budget=true`. The numbers come from
+// Epic 5's per-subsystem budgets — they are diagnostics, not hard limits, so
+// crossing them is a "look at me" signal rather than an error. Centralised
+// here so the thresholds match across `opc_ua.rs`, `chirpstack.rs`, and
+// `storage/sqlite.rs` and any future tuning happens in one place.
+
+/// OPC UA read budget per Epic 5 Story 5-1: a single read should complete in
+/// well under 100 ms. Crossing this threshold from a hot path indicates
+/// contention on the shared SQLite backend or an unexpectedly slow
+/// staleness/health computation.
+pub const OPC_UA_READ_BUDGET_MS: u64 = 100;
+
+/// SQLite query budget. Most reads/writes against the WAL-mode backend
+/// finish in under 1 ms; 10 ms is a generous ceiling that surfaces lock
+/// contention, large result sets, or an under-tuned `busy_handler` without
+/// firing on every cycle.
+pub const STORAGE_QUERY_BUDGET_MS: u64 = 10;
+
+/// Batch-write budget: an end-of-cycle batch covering ~100 metrics should
+/// complete in well under 500 ms even on slower disks. Above this we want a
+/// `warn!` so it shows up in production logs without `OPCGW_LOG_LEVEL=debug`.
+pub const BATCH_WRITE_BUDGET_MS: u64 = 500;
+
+// =============================================================================
 // Error Types
 // =============================================================================
 
