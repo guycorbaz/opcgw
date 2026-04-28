@@ -26,8 +26,8 @@ private_key_path = "private/private.pem"
 trust_client_cert = true
 check_cert_time = true
 pki_dir = "./pki"
-user_name = "user1"
-user_password = "user1"
+user_name = "test-user"
+user_password = "test-pass"
 
 #
 # List of application that have to be displayed in OPC UA

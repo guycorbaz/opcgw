@@ -804,6 +804,18 @@ impl AppConfig {
             ));
         }
 
+        // Story 7-2 (AC#4): NFR9 — the OPC UA private-key file must be at
+        // mode 0o600. The check accumulates into the same `errors` vec so a
+        // misconfigured operator sees ALL violations in one go (not one
+        // error, fix, restart, see the next error, fix, restart…).
+        if let Err(msg) = crate::security::validate_private_key_permissions(
+            &self.opcua.pki_dir,
+            &self.opcua.private_key_path,
+            self.opcua.create_sample_keypair,
+        ) {
+            errors.push(msg);
+        }
+
         // Validate stale_threshold_seconds (Story 5-2)
         if let Some(threshold) = self.opcua.stale_threshold_seconds {
             if threshold == 0 || threshold > 86400 {
@@ -1538,7 +1550,11 @@ mod tests {
             application_uri = "urn:a"
             product_uri = "urn:p"
             diagnostics_enabled = false
-            create_sample_keypair = false
+            # Story 7-2 (AC#4): `true` so the test's fake `private_key_path = "k"`
+            # is treated as "missing, will be auto-created" rather than failing
+            # NFR9's startup file-existence check. None of these fixtures
+            # exercise keypair behaviour — that lives in src/security.rs::tests.
+            create_sample_keypair = true
             certificate_path = "c"
             private_key_path = "k"
             trust_client_cert = true
@@ -1590,7 +1606,11 @@ mod tests {
             application_uri = "urn:a"
             product_uri = "urn:p"
             diagnostics_enabled = false
-            create_sample_keypair = false
+            # Story 7-2 (AC#4): `true` so the test's fake `private_key_path = "k"`
+            # is treated as "missing, will be auto-created" rather than failing
+            # NFR9's startup file-existence check. None of these fixtures
+            # exercise keypair behaviour — that lives in src/security.rs::tests.
+            create_sample_keypair = true
             certificate_path = "c"
             private_key_path = "k"
             trust_client_cert = true
@@ -1643,7 +1663,11 @@ mod tests {
             application_uri = "urn:a"
             product_uri = "urn:p"
             diagnostics_enabled = false
-            create_sample_keypair = false
+            # Story 7-2 (AC#4): `true` so the test's fake `private_key_path = "k"`
+            # is treated as "missing, will be auto-created" rather than failing
+            # NFR9's startup file-existence check. None of these fixtures
+            # exercise keypair behaviour — that lives in src/security.rs::tests.
+            create_sample_keypair = true
             certificate_path = "c"
             private_key_path = "k"
             trust_client_cert = true
@@ -1700,7 +1724,11 @@ mod tests {
             application_uri = "urn:a"
             product_uri = "urn:p"
             diagnostics_enabled = false
-            create_sample_keypair = false
+            # Story 7-2 (AC#4): `true` so the test's fake `private_key_path = "k"`
+            # is treated as "missing, will be auto-created" rather than failing
+            # NFR9's startup file-existence check. None of these fixtures
+            # exercise keypair behaviour — that lives in src/security.rs::tests.
+            create_sample_keypair = true
             certificate_path = "c"
             private_key_path = "k"
             trust_client_cert = true
@@ -1750,7 +1778,11 @@ mod tests {
             application_uri = "urn:a"
             product_uri = "urn:p"
             diagnostics_enabled = false
-            create_sample_keypair = false
+            # Story 7-2 (AC#4): `true` so the test's fake `private_key_path = "k"`
+            # is treated as "missing, will be auto-created" rather than failing
+            # NFR9's startup file-existence check. None of these fixtures
+            # exercise keypair behaviour — that lives in src/security.rs::tests.
+            create_sample_keypair = true
             certificate_path = "c"
             private_key_path = "k"
             trust_client_cert = true
@@ -1808,7 +1840,11 @@ mod tests {
             application_uri = "urn:a"
             product_uri = "urn:p"
             diagnostics_enabled = false
-            create_sample_keypair = false
+            # Story 7-2 (AC#4): `true` so the test's fake `private_key_path = "k"`
+            # is treated as "missing, will be auto-created" rather than failing
+            # NFR9's startup file-existence check. None of these fixtures
+            # exercise keypair behaviour — that lives in src/security.rs::tests.
+            create_sample_keypair = true
             certificate_path = "c"
             private_key_path = "k"
             trust_client_cert = true
@@ -1864,7 +1900,11 @@ mod tests {
             application_uri = "urn:a"
             product_uri = "urn:p"
             diagnostics_enabled = false
-            create_sample_keypair = false
+            # Story 7-2 (AC#4): `true` so the test's fake `private_key_path = "k"`
+            # is treated as "missing, will be auto-created" rather than failing
+            # NFR9's startup file-existence check. None of these fixtures
+            # exercise keypair behaviour — that lives in src/security.rs::tests.
+            create_sample_keypair = true
             certificate_path = "c"
             private_key_path = "k"
             trust_client_cert = true
@@ -1920,7 +1960,11 @@ mod tests {
             application_uri = "urn:a"
             product_uri = "urn:p"
             diagnostics_enabled = false
-            create_sample_keypair = false
+            # Story 7-2 (AC#4): `true` so the test's fake `private_key_path = "k"`
+            # is treated as "missing, will be auto-created" rather than failing
+            # NFR9's startup file-existence check. None of these fixtures
+            # exercise keypair behaviour — that lives in src/security.rs::tests.
+            create_sample_keypair = true
             certificate_path = "c"
             private_key_path = "k"
             trust_client_cert = true
@@ -1977,7 +2021,11 @@ mod tests {
             application_uri = "urn:a"
             product_uri = "urn:p"
             diagnostics_enabled = false
-            create_sample_keypair = false
+            # Story 7-2 (AC#4): `true` so the test's fake `private_key_path = "k"`
+            # is treated as "missing, will be auto-created" rather than failing
+            # NFR9's startup file-existence check. None of these fixtures
+            # exercise keypair behaviour — that lives in src/security.rs::tests.
+            create_sample_keypair = true
             certificate_path = "c"
             private_key_path = "k"
             trust_client_cert = true

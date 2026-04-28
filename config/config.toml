@@ -79,7 +79,16 @@ diagnostics_enabled = true
 #hello_timeout = 10
 #host_ip_address = "localhost"
 #host_port = 9090
-create_sample_keypair = true
+# OPC UA self-signed-keypair generation (Story 7-2, AC#6).
+#
+# Production: false. Provision your keypair manually under pki/own/cert.der
+# and pki/private/private.pem (file mode 0o600, directory mode 0o700).
+# See docs/security.md.
+#
+# Development override: set this to `true` to have async-opcua auto-generate
+# a self-signed keypair on first run. Only use in development; release
+# builds with this set to `true` emit a startup warning.
+create_sample_keypair = false
 certificate_path = "own/cert.der"
 private_key_path = "private/private.pem"
 trust_client_cert = true

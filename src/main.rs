@@ -25,6 +25,8 @@ mod chirpstack;
 mod command_validation;
 mod config;
 mod opc_ua;
+mod opc_ua_auth;
+mod security;
 mod storage;
 mod utils;
 
@@ -374,6 +376,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(e.into());
         }
     };
+
+    // Story 7-2 (AC#6): warn — but do not block — when a release build
+    // ships with `create_sample_keypair = true`. Operators legitimately
+    // running release-mode dev builds with auto-generated keypairs should
+    // be allowed; the warning is the operational pressure that nudges
+    // production deployments toward manually-provisioned certs.
+    if let Some(message) = security::warn_if_create_sample_keypair_in_release(
+        application_config.opcua.create_sample_keypair,
+        !cfg!(debug_assertions),
+    ) {
+        warn!(
+            event = "create_sample_keypair_in_release",
+            mitigation = "Set create_sample_keypair = false and provision keypair manually for production deployments. See docs/security.md.",
+            "{}",
+            message
+        );
+    }
 
     // If bootstrap fell back to the default *and* the fully-loaded config
     // names a different `[logging].dir`, the operator needs to restart with

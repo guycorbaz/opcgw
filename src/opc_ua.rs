@@ -172,6 +172,13 @@ impl OpcUa {
             + &self.host_port.to_string()
             + "/";
 
+        // Story 7-2 (AC#5 / FR45): make sure the PKI directory layout
+        // exists with the right modes before async-opcua's
+        // `ServerBuilder::pki_dir(...)` call. Missing directories used to
+        // surface as opaque async-opcua handshake failures later; now they
+        // either auto-create or fail fast with an actionable error.
+        crate::security::ensure_pki_directories(&self.config.opcua.pki_dir)?;
+
         debug!("Creating server builder");
         let server_builder = ServerBuilder::new()
             .application_name(self.config.opcua.application_name.clone())
@@ -192,7 +199,15 @@ impl OpcUa {
 
         let server_builder = self.configure_network(server_builder);
         let server_builder = self.configure_key(server_builder);
+        // Story 7-2: `configure_user_token` is still required so the
+        // server-config validator (`async_opcua::config::ServerEndpoint::validate`)
+        // can resolve every endpoint's `user_token_ids` against the
+        // `user_tokens` map. With `with_authenticator` wired, the password
+        // field passed in the `ServerUserToken` is **decorative** —
+        // `OpcgwAuthManager` is the actual gatekeeper.
         let server_builder = self.configure_user_token(server_builder);
+        let server_builder = server_builder
+            .with_authenticator(crate::opc_ua_auth::OpcgwAuthManager::new(&self.config).into_arc());
         let server_builder = self.configure_end_points(server_builder);
 
         debug!("Creating server");
@@ -334,7 +349,10 @@ impl OpcUa {
     ///
     /// # Authentication Details
     ///
-    /// * **Token ID**: Fixed identifier "user1" for the authentication token
+    /// * **Token ID**: `OPCUA_USER_TOKEN_ID` (`default-user`) — the constant
+    ///   referenced by every endpoint in `configure_end_points`. Story 7-2
+    ///   decoupled this token id from any operator's actual username so a
+    ///   future multi-user expansion can introduce additional ids cleanly.
     /// * **Username**: Retrieved from `config.opcua.user_name`
     /// * **Password**: Retrieved from `config.opcua.user_password`
     /// * **X.509 Certificate**: Not used (set to `None`)
@@ -364,7 +382,7 @@ impl OpcUa {
     fn configure_user_token(&self, server_builder: ServerBuilder) -> ServerBuilder {
         trace!("Configure user token");
         server_builder.add_user_token(
-            "user1",
+            OPCUA_USER_TOKEN_ID,
             ServerUserToken {
                 user: self.config.opcua.user_name.to_string(),
                 pass: Some(self.config.opcua.user_password.to_string()),
@@ -402,7 +420,8 @@ impl OpcUa {
     ///
     /// All endpoints share the following settings:
     /// - Path: "/" (root path)
-    /// - Authorized User Token: "user1"
+    /// - Authorized User Token: `OPCUA_USER_TOKEN_ID` (`default-user`,
+    ///   Story 7-2 — see `src/utils.rs` for the rationale)
     /// - No password-specific security policy
     ///
     /// # Arguments
@@ -437,7 +456,7 @@ impl OpcUa {
                     security_mode: "None".to_string(),
                     security_level: 0,
                     password_security_policy: None,
-                    user_token_ids: BTreeSet::from(["user1".to_string()]),
+                    user_token_ids: BTreeSet::from([OPCUA_USER_TOKEN_ID.to_string()]),
                 },
             )
             .add_endpoint(
@@ -448,7 +467,7 @@ impl OpcUa {
                     security_mode: "Sign".to_string(),
                     security_level: 3,
                     password_security_policy: None,
-                    user_token_ids: BTreeSet::from(["user1".to_string()]),
+                    user_token_ids: BTreeSet::from([OPCUA_USER_TOKEN_ID.to_string()]),
                 },
             )
             .add_endpoint(
@@ -459,7 +478,7 @@ impl OpcUa {
                     security_mode: "SignAndEncrypt".to_string(),
                     security_level: 13,
                     password_security_policy: None,
-                    user_token_ids: BTreeSet::from(["user1".to_string()]),
+                    user_token_ids: BTreeSet::from([OPCUA_USER_TOKEN_ID.to_string()]),
                 },
             )
     }
@@ -2174,7 +2193,12 @@ mod tests {
             application_uri = "urn:a"
             product_uri = "urn:p"
             diagnostics_enabled = false
-            create_sample_keypair = false
+            # Story 7-2 (AC#4): `true` so the fake `private_key_path = "k"`
+            # is treated as "missing, will be auto-created" rather than
+            # failing NFR9's startup file-existence check. Story 7-1
+            # secret-redaction concern is unchanged — the keypair flag is
+            # incidental.
+            create_sample_keypair = true
             certificate_path = "c"
             private_key_path = "k"
             trust_client_cert = true
@@ -2247,7 +2271,12 @@ mod tests {
             application_uri = "urn:a"
             product_uri = "urn:p"
             diagnostics_enabled = false
-            create_sample_keypair = false
+            # Story 7-2 (AC#4): `true` so the fake `private_key_path = "k"`
+            # is treated as "missing, will be auto-created" rather than
+            # failing NFR9's startup file-existence check. Story 7-1
+            # secret-redaction concern is unchanged — the keypair flag is
+            # incidental.
+            create_sample_keypair = true
             certificate_path = "c"
             private_key_path = "k"
             trust_client_cert = true
@@ -2334,7 +2363,12 @@ mod tests {
             application_uri = "urn:a"
             product_uri = "urn:p"
             diagnostics_enabled = false
-            create_sample_keypair = false
+            # Story 7-2 (AC#4): `true` so the fake `private_key_path = "k"`
+            # is treated as "missing, will be auto-created" rather than
+            # failing NFR9's startup file-existence check. Story 7-1
+            # secret-redaction concern is unchanged — the keypair flag is
+            # incidental.
+            create_sample_keypair = true
             certificate_path = "c"
             private_key_path = "k"
             trust_client_cert = true

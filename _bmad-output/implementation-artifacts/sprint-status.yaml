@@ -1,5 +1,5 @@
 # generated: 2026-04-02
-# last_updated: 2026-04-28 (Story 7-1 ready for code review)
+# last_updated: 2026-04-28 (Story 7-2 review — OPC UA security hardening implementation complete)
 # project: opcgw
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-02
-last_updated: "2026-04-28 (Story 7-1 code review complete, status done — example.toml IDs scrubbed, compose env :?err guards, security.md migration safety net; Epic 7 in progress)"
+last_updated: "2026-04-28 (Story 7-2 review — implementation complete: OpcgwAuthManager + sanitised audit logging, NFR9 file-perm check, FR45 PKI auto-create, create_sample_keypair flip; 520 tests pass / 0 fail / 7 ignored, clippy clean)"
 project: opcgw
 project_key: NOKEY
 tracking_system: file-system
@@ -115,7 +115,7 @@ development_status:
   # Epic 7: Security Hardening (Phase A)
   epic-7: in-progress
   7-1-credential-management-via-environment-variables: done
-  7-2-opc-ua-security-endpoints-and-authentication: backlog
+  7-2-opc-ua-security-endpoints-and-authentication: review
   7-3-connection-limiting: backlog
   epic-7-retrospective: optional
 

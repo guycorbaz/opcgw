@@ -115,9 +115,16 @@ diagnostics_enabled = true
 # IP port for the server
 # This field is optional. Default value is 4840
 #host_port = 9090
-# Activate/deacivate keypair certificate generation.
-# This is normallly turned off in operation
-create_sample_keypair = true
+# OPC UA self-signed-keypair generation (Story 7-2, AC#6).
+#
+# Production: false. Provision your keypair manually under pki/own/cert.der
+# and pki/private/private.pem (file mode 0o600, directory mode 0o700).
+# See docs/security.md.
+#
+# Development override: set this to `true` to have async-opcua auto-generate
+# a self-signed keypair on first run. Only use in development; release
+# builds with this set to `true` emit a startup warning.
+create_sample_keypair = false
 # Path of the certificate below pki_dir
 certificate_path = "own/cert.der"
  # Path of the private key below pki_dir

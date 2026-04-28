@@ -192,6 +192,21 @@ pub const PLACEHOLDER_PREFIX: &str = "REPLACE_ME_WITH_";
 /// rather than duplicating the literal.
 pub const REDACTED_PLACEHOLDER: &str = "***REDACTED***";
 
+// =============================================================================
+// OPC UA Security Constants (Story 7-2)
+// =============================================================================
+
+/// Internal token id registered against every OPC UA endpoint and resolved by
+/// `OpcgwAuthManager` to the configured `[opcua].user_name` /
+/// `[opcua].user_password` (Story 7-2, AC#1).
+///
+/// Decoupled from the operator's actual username so a future multi-user
+/// expansion can introduce additional ids (e.g. `"power-user"`,
+/// `"readonly-user"`) without renaming this baseline. The token id is
+/// internal to async-opcua's user-policy table — not surfaced to clients in
+/// any user-facing string — so renaming is a non-breaking change.
+pub const OPCUA_USER_TOKEN_ID: &str = "default-user";
+
 /// Internal device identifier for ChirpStack server monitoring.
 ///
 /// This identifier is used internally by the gateway to track and store

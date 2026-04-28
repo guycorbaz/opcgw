@@ -296,11 +296,205 @@ header before logging) is tracked as a follow-up GitHub issue.
 
 ---
 
+## OPC UA security endpoints and authentication
+
+Story 7-2 hardens the OPC UA server's exposure surface so a default
+deployment is safe to expose on a LAN. The endpoint plumbing was already
+in place from earlier epics; Story 7-2 pins the contract by tests, adds
+a custom audit-trail authenticator, enforces filesystem permissions on
+the private key, and ships a sane `create_sample_keypair` default.
+
+### Endpoint matrix
+
+The gateway advertises **three** endpoints on the same path (`/`) and
+the same TCP port (4840 by default):
+
+| Endpoint id              | Security policy | Security mode      | Security level | Intended use                                                            |
+|--------------------------|-----------------|--------------------|----------------|-------------------------------------------------------------------------|
+| `null`                   | `None`          | `None`             | 0              | Development and first-run smoke tests on trusted LANs / behind VPN.     |
+| `basic256_sign`          | `Basic256`      | `Sign`             | 3              | Signed traffic, no encryption — useful when LAN traffic must remain inspectable. |
+| `basic256_sign_encrypt`  | `Basic256`      | `SignAndEncrypt`   | 13             | **Production default.** Highest level the gateway advertises today.     |
+
+Endpoint ids and security levels are pinned by the integration test
+`tests/opc_ua_security_endpoints.rs::test_three_endpoints_accept_correct_credentials`
+— changes to `configure_end_points` in `src/opc_ua.rs` that drift any of
+the three tuples will fail this test.
+
+### User-token model
+
+The gateway uses a **single user/password** (Story 7-2 Out of Scope:
+multi-user RBAC). Configure via:
+
+| Field                   | Env var                       | Notes                                                      |
+|-------------------------|-------------------------------|------------------------------------------------------------|
+| `[opcua].user_name`     | `OPCGW_OPCUA__USER_NAME`      | Display name.                                              |
+| `[opcua].user_password` | `OPCGW_OPCUA__USER_PASSWORD`  | **Always set via env var** — the placeholder in the shipped TOML is rejected at startup. |
+
+Internally the user-token id is `default-user`
+(`crate::utils::OPCUA_USER_TOKEN_ID`). It is decoupled from the operator's
+configured `user_name` so a future multi-user expansion has a clean
+single-tenant baseline.
+
+### PKI directory layout
+
+`pki_dir` (default `./pki`) must contain four subdirectories:
+
+```
+pki/
+├── own/         # 0o755   — server's own certificate (cert.der)
+├── private/     # 0o700   — server's private key (private.pem, mode 0o600)
+├── trusted/     # 0o755   — client certificates accepted without prompt
+└── rejected/    # 0o755   — client certificates rejected on first connect
+```
+
+If any subdirectory is missing, `OpcUa::create_server` auto-creates it
+with the correct mode (`src/security.rs::ensure_pki_directories`).
+Loose modes on `private/` are tightened to `0o700` automatically.
+
+The `private/*.pem` file mode is checked at startup. **The gateway
+refuses to start** if any private-key file is not at `0o600` (NFR9).
+Error text includes the observed mode and the `chmod` recipe.
+
+### Production setup recipe
+
+```bash
+# 1. Generate a self-signed keypair (or supply a CA-signed equivalent).
+openssl req -x509 -newkey rsa:4096 -nodes -days 3650 \
+  -keyout pki/private/private.pem -out pki/own/cert.der -outform DER \
+  -subj "/CN=opcgw" -addext "subjectAltName=URI:urn:chirpstack:opcua:gateway"
+
+# 2. Tighten file/directory permissions.
+chmod 600 pki/private/private.pem
+chmod 700 pki/private
+
+# 3. Set create_sample_keypair = false in config/config.toml (the
+#    shipped default since Story 7-2 — verify it has not been flipped).
+
+# 4. Inject the OPC UA password via env var.
+export OPCGW_OPCUA__USER_PASSWORD='your-real-password-here'
+
+# 5. Start the gateway and confirm the boot log shows
+#    `event="pki_dir_initialised"` events with the correct modes.
+cargo run --release
+grep 'pki_dir_initialised' log/opc_ua_gw.log
+```
+
+### Upgrading from Story 7-1
+
+Story 7-1 left `pki/private/private.pem` at mode `0o644` (async-opcua's
+auto-generation default). Story 7-2's startup file-permission check is a
+**hard error** — a Story-7-1 deployment will refuse to start until the
+operator runs:
+
+```bash
+find pki/private -type f -name '*.pem' -exec chmod 600 {} \;
+chmod 700 pki/private
+```
+
+The fail-closed behaviour is intentional: silently running with a
+world-readable private key is worse than refusing to start.
+
+### Audit trail
+
+Every failed OPC UA authentication emits a structured `warn!` event in
+`log/opc_ua.log`:
+
+```
+2026-04-28T14:22:18.041234Z  WARN opcgw::opc_ua_auth: OPC UA authentication failed event="opcua_auth_failed" user="alice" endpoint="/"
+```
+
+The submitted username is **sanitised** (control characters escaped,
+truncated to 64 chars) before logging so a malicious client cannot
+inject fake log lines or ANSI escapes. The attempted password is **never
+logged**.
+
+**Source IP is not in the auth event** — async-opcua 0.17.1's
+`AuthManager` trait does not receive the peer's `SocketAddr`. NFR12 is
+satisfied via two-event correlation: async-opcua emits an `info!` event
+on connection accept that includes the peer address, then milliseconds
+later the gateway emits the auth-failed event. Operators correlate by
+timestamp:
+
+```bash
+# Step 1: find auth failures.
+grep 'event="opcua_auth_failed"' log/opc_ua.log
+
+# Step 2: find the matching accept event (typically <100ms before).
+grep 'Accept new connection from' log/opc_ua.log | tail -50
+# 2026-04-28T14:22:18.039012Z  INFO opcua_server::server: Accept new connection from 192.168.1.42:54321 (3)
+```
+
+The audit-event redaction matrix:
+
+| Field               | Logged?   | Notes                                                |
+|---------------------|-----------|------------------------------------------------------|
+| `user`              | yes       | Sanitised — control chars escaped, capped at 64 chars |
+| `endpoint`          | yes       | Endpoint path (always `/`)                           |
+| `attempted_password`| **never** | Hard rule — no level, no redaction placeholder       |
+| `source_ip`         | no (correlate) | Carried by async-opcua's accept event             |
+
+A first-class source-IP-in-the-auth-event is tracked as an upstream
+follow-up against async-opcua (see
+`_bmad-output/implementation-artifacts/deferred-work.md`).
+
+### Verifying OPC UA security
+
+A small smoke-test client ships under `examples/opcua_client_smoke.rs`:
+
+```bash
+# Connect to None endpoint with valid credentials.
+cargo run --example opcua_client_smoke -- \
+    --endpoint none --user opcua-user --password "$OPCGW_OPCUA__USER_PASSWORD"
+# Expected: prints "Session established on endpoint=None" and exits 0.
+
+# Connect to Basic256 SignAndEncrypt with valid credentials.
+cargo run --example opcua_client_smoke -- \
+    --endpoint sign-encrypt --user opcua-user --password "$OPCGW_OPCUA__USER_PASSWORD"
+# Expected: prints "Session established on endpoint=Basic256/SignAndEncrypt" and exits 0.
+
+# Wrong password — expect failure + a warn line in log/opc_ua.log.
+cargo run --example opcua_client_smoke -- \
+    --endpoint none --user opcua-user --password wrong
+# Expected: exits with non-zero status. Tail log/opc_ua.log:
+#   grep 'event="opcua_auth_failed"' log/opc_ua.log
+```
+
+### Docker deployment
+
+When `pki/` is mounted as a Docker volume, **host-side file permissions
+are authoritative**. The container's UID must own (or have the right
+group on) the mounted files. The `ensure_pki_directories` chmod runs
+inside the container — it only succeeds if the container user can `chmod`
+the host files, which is typically true when the host volume is owned by
+the container's UID. If you run rootless Docker or with a non-default UID
+mapping, ensure the UID alignment before mounting.
+
+### Anti-patterns
+
+- **Do not** run with `create_sample_keypair = true` in production. The
+  shipped default since Story 7-2 is `false`. Release builds emit a
+  startup `warn!` if the flag is `true`.
+- **Do not** leave `private/*.pem` at `0o644`. The startup check is a
+  hard error — fix the mode rather than relaxing the check.
+- **Do not** configure the `null` endpoint as the only available
+  endpoint on a network reachable from outside the LAN. Operators on
+  the same trust domain can use it; remote clients should always go
+  through `basic256_sign_encrypt`.
+- **Do not** add multi-user support, mTLS, or rate-limiting failed
+  attempts as part of casual changes — those are tracked separately
+  (see `_bmad-output/implementation-artifacts/deferred-work.md` and the
+  follow-up GitHub issues opened with Story 7-2).
+
+---
+
 ## References
 
 - Story 7-1 spec: `_bmad-output/implementation-artifacts/7-1-credential-management-via-environment-variables.md`
+- Story 7-2 spec: `_bmad-output/implementation-artifacts/7-2-opc-ua-security-endpoints-and-authentication.md`
 - PRD requirements: FR42 (env-var injection), NFR7 (no secrets in logs),
   NFR8 (no real credentials in default config), NFR24 (env override for
-  all secrets) in `_bmad-output/planning-artifacts/prd.md`
+  all secrets), FR19 (multi-policy OPC UA endpoints), FR20 (OPC UA user
+  auth), FR45 (PKI layout), NFR9 (private-key 0o600), NFR12 (failed-auth
+  audit trail) in `_bmad-output/planning-artifacts/prd.md`
 - Configuration reference: [`docs/configuration.md`](configuration.md)
 - Deferred follow-ups: `_bmad-output/implementation-artifacts/deferred-work.md`

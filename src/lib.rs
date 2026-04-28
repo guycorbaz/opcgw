@@ -9,5 +9,7 @@ pub mod chirpstack;
 pub mod command_validation;
 pub mod config;
 pub mod opc_ua;
+pub mod opc_ua_auth;
+pub mod security;
 pub mod storage;
 pub mod utils;
