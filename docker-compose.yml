@@ -9,6 +9,15 @@ services:
     restart: always
     ports:
       - "4855:4855"
+    # Secret credentials are injected via env vars (Story 7-1, AC#6).
+    # Compose reads `.env` from this directory and substitutes the values
+    # below into the container's environment. The `:?` form fails compose
+    # parsing immediately if the variable is unset, instead of silently
+    # passing an empty string through to the gateway. See docs/security.md
+    # and `.env.example` for the canonical recipe.
+    environment:
+      - OPCGW_CHIRPSTACK__API_TOKEN=${OPCGW_CHIRPSTACK__API_TOKEN:?missing — copy .env.example to .env and set this variable, see docs/security.md}
+      - OPCGW_OPCUA__USER_PASSWORD=${OPCGW_OPCUA__USER_PASSWORD:?missing — copy .env.example to .env and set this variable, see docs/security.md}
     volumes:
       - ./log:/usr/local/bin/log
       - ./config:/usr/local/bin/config

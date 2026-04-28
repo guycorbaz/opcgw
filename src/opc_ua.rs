@@ -2299,4 +2299,92 @@ mod tests {
             "user_password leaked into logs during AppConfig::from_path"
         );
     }
+
+    /// Story 7-1, AC#4: belt-and-braces against careless `?config` logging
+    /// anywhere in the binary. We force-format the entire `AppConfig` at
+    /// `trace` level, then assert that
+    ///   1. neither sentinel survives in the captured log buffer, and
+    ///   2. the `***REDACTED***` placeholder *does* appear, so a broken
+    ///      `Debug` impl can't trivially make this test pass.
+    /// Without assertion 3 a future change that drops the redaction
+    /// (e.g. removes the manual `Debug` impl and reverts to `derive`) would
+    /// silently still satisfy the two negative assertions only if the
+    /// sentinel happens to contain redacted-looking output — but the
+    /// positive assertion catches the real failure mode where the redaction
+    /// path stops firing.
+    #[test]
+    #[traced_test]
+    fn secrets_not_logged_when_full_config_debug_formatted() {
+        const SENTINEL_TOKEN: &str = "TESTSECRET-FORCED-DEBUG-API-TOKEN";
+        const SENTINEL_PASSWORD: &str = "TESTSECRET-FORCED-DEBUG-USER-PASSWORD";
+
+        let toml_string = format!(
+            r#"
+            [global]
+            debug = true
+            [chirpstack]
+            server_address = "http://localhost:8080"
+            api_token = "{token}"
+            tenant_id = "t"
+            polling_frequency = 10
+            retry = 1
+            delay = 1
+            [opcua]
+            application_name = "A"
+            application_uri = "urn:a"
+            product_uri = "urn:p"
+            diagnostics_enabled = false
+            create_sample_keypair = false
+            certificate_path = "c"
+            private_key_path = "k"
+            trust_client_cert = true
+            check_cert_time = false
+            pki_dir = "pki"
+            user_name = "u"
+            user_password = "{password}"
+            [[application]]
+            application_name = "App"
+            application_id = "app1"
+            [[application.device]]
+            device_id = "dev1"
+            device_name = "Dev"
+            [[application.device.read_metric]]
+            metric_name = "m"
+            chirpstack_metric_name = "m"
+            metric_type = "Float"
+            "#,
+            token = SENTINEL_TOKEN,
+            password = SENTINEL_PASSWORD
+        );
+
+        let tmp_path = std::env::temp_dir().join(format!(
+            "opcgw_forced_debug_{}.toml",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&tmp_path, toml_string).expect("write temp config");
+        let config = crate::config::AppConfig::from_path(
+            tmp_path.to_str().expect("tmp path is utf-8"),
+        )
+        .expect("test config loads cleanly");
+        let _ = std::fs::remove_file(&tmp_path);
+
+        // This is exactly the kind of careless log a future contributor
+        // might add. The redacting `Debug` impl on the inner structs makes
+        // it safe — the test pins that contract.
+        tracing::trace!(?config, "force-debug-format the whole config");
+
+        assert!(
+            !logs_contain(SENTINEL_TOKEN),
+            "api_token leaked into logs when AppConfig was Debug-formatted"
+        );
+        assert!(
+            !logs_contain(SENTINEL_PASSWORD),
+            "user_password leaked into logs when AppConfig was Debug-formatted"
+        );
+        assert!(
+            logs_contain(crate::utils::REDACTED_PLACEHOLDER),
+            "Debug redaction did not fire — test trivially passing without \
+             confirming the redaction path"
+        );
+    }
 }

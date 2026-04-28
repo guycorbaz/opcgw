@@ -8,6 +8,14 @@ permalink: /configuration/
 
 opcgw uses TOML configuration files. The main config file is typically `config/config.toml`.
 
+### Secrets
+
+`api_token` and `user_password` ship as `REPLACE_ME_WITH_*` placeholders
+that the gateway refuses to start with. Inject the real values via
+environment variables — see [`docs/security.md`](security.md) for the env
+var convention, the Docker / Kubernetes recipe, and the migration path
+for existing deployments.
+
 ### Global Structure
 
 ```toml

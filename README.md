@@ -111,9 +111,18 @@ metric_unit = "%"
 
 **For complete configuration details**, see the [Configuration Reference](https://guycorbaz.github.io/opcgw/configuration/).
 
+> 🔐 **Secrets:** the shipped `config/config.toml` ships with placeholder
+> values for `api_token` and `user_password`. The gateway refuses to
+> start with the placeholders in place — inject the real values via the
+> `OPCGW_CHIRPSTACK__API_TOKEN` and `OPCGW_OPCUA__USER_PASSWORD` env vars
+> (or via the `.env` file consumed by Docker Compose). See
+> [`docs/security.md`](./docs/security.md) for the full env-var
+> convention, Docker / Kubernetes recipes, and the migration path for
+> existing deployments.
+
 ## Planning
 
-**Current Version:** 2.0.0 — last updated 2026-04-27.
+**Current Version:** 2.0.0 — last updated 2026-04-28.
 
 The roadmap is tracked in [`_bmad-output/implementation-artifacts/sprint-status.yaml`](./_bmad-output/implementation-artifacts/sprint-status.yaml). The table below mirrors the current state of every epic; story-level detail lives in the sprint status file and the per-story documents under `_bmad-output/implementation-artifacts/`.
 
@@ -125,7 +134,7 @@ The roadmap is tracked in [`_bmad-output/implementation-artifacts/sprint-status.
 | **Epic 4 — Scalable Data Collection** | ✅ done (4-4 deferred to Phase B) | Poller refactored onto `StorageBackend`, support for all ChirpStack metric types, gRPC pagination. Story 4-4 (auto-recovery from ChirpStack outages) is deferred to a Phase B resilience epic. |
 | **Epic 5 — Operational Visibility** | ✅ done | OPC UA server refactored onto SQLite backend, stale-data detection with OPC UA `Good`/`Uncertain`/`Bad` status codes, gateway health metrics (last poll timestamp, error count, ChirpStack availability) exposed under the `Gateway` folder. |
 | **Epic 6 — Production Observability & Diagnostics** | ✅ done | **6-1 done** (structured logging, correlation IDs on every OPC UA read, staleness-transition logs, poller-cycle structured logs, storage-query timing, configurable log directory via `OPCGW_LOG_DIR` and `[logging].dir`); **6-2 done** (configurable log verbosity via `OPCGW_LOG_LEVEL` and `[logging].level`); **6-3 done** (microsecond UTC timestamps; performance-budget warnings on `opc_ua_read`/`storage_query`/`batch_write`; data-anomaly logs — NULL `last_poll_timestamp`, staleness-boundary, error-count spike; ChirpStack `chirpstack_connect` / `chirpstack_outage` / `retry_schedule` diagnostics; edge-case logs — `gateway_status_init`, `chirpstack_request` timeout, `metric_parse`; transient-failure logs — `device_poll`, SQLITE_BUSY (with `sqlite_error_code` sibling field for differentiating BUSY/LOCKED); end-to-end `request_id` correlation verified via integration test; expanded operations reference + symptom cookbook in `docs/logging.md`. Code review complete in 3 iterations: clippy-clean across the workspace, `Mutex<HashMap>` staleness cache replaced with `DashMap` for lock-free concurrent reads, 5 helpers extracted (`maybe_emit_error_spike`, `maybe_emit_chirpstack_outage`, `validate_bool_metric_value`, `classify_and_log_grpc_error`, `format_last_successful_poll`) so synthetic tests now drive production paths; 188 lib + 209 bin + 79 integration tests pass). |
-| **Epic 7 — Security Hardening** | 📋 backlog | Credential management via environment variables (no secrets in TOML), OPC UA security endpoints + authentication, connection limiting. |
+| **Epic 7 — Security Hardening** | 🔄 in-progress (7-1 done) | Credential management via environment variables (no secrets in TOML), OPC UA security endpoints + authentication, connection limiting. **7-1 done** — sanitized `config/config.toml` with `REPLACE_ME_WITH_*` placeholders + placeholder-detection in `validate()`, hand-written redacting `Debug` impls on `ChirpstackPollerConfig` / `OpcUaConfig`, `secrets_not_logged_when_full_config_debug_formatted` regression test, tonic 0.14.5 metadata-leak audit (clean — no `EnvFilter` mitigation needed today), `.env.example` + Compose recipe with `:?err` guards, `docs/security.md` with reversible-migration alternative, scrubbed `config/config.example.toml` (synthetic IDs only). |
 | **Epic 8 — Real-Time Subscriptions & Historical Data (Phase B)** | 📋 backlog | `async-opcua` subscription spike, OPC UA subscription support, historical-data access via OPC UA, threshold-based alarm conditions. |
 | **Epic 9 — Web Configuration & Hot-Reload (Phase B)** | 📋 backlog | Axum web server + basic auth, gateway status dashboard, live metric values, application/device/metric/command CRUD via web UI, configuration hot-reload, dynamic OPC UA address-space mutation. |
 

@@ -89,7 +89,7 @@ pub struct Global {
 /// Contains all parameters required to establish connection with the ChirpStack
 /// LoRaWAN Network Server and configure the polling behavior for device metrics.
 #[allow(dead_code)]
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Deserialize, Clone)]
 pub struct ChirpstackPollerConfig {
     /// ChirpStack server address including protocol and port.
     ///
@@ -144,7 +144,7 @@ pub struct ChirpstackPollerConfig {
 /// Contains all settings required to configure and run the OPC UA server
 /// that exposes ChirpStack device data to OPC UA clients. This includes
 /// security settings, network configuration, and certificate management.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Deserialize, Clone)]
 pub struct OpcUaConfig {
     /// Human-readable name for the OPC UA application.
     ///
@@ -246,6 +246,52 @@ pub struct OpcUaConfig {
     /// Default: 2x polling frequency (e.g., 20s if polling every 10s).
     /// Can be overridden via OPCGW_OPC_UA_STALE_THRESHOLD_SECONDS environment variable.
     pub stale_threshold_seconds: Option<u64>,
+}
+
+// Hand-written Debug impls (Story 7-1, AC#3) replace `derive(Debug)` so that
+// `api_token` and `user_password` are emitted as `***REDACTED***` in any
+// `format!("{:?}", ...)` site — including transitive ones reached via
+// `derive(Debug)` on enclosing structs like `AppConfig`. Non-secret fields
+// keep the default `Debug` formatting so existing log lines are unchanged.
+//
+// Field-coverage rationale lives in the story's AC#3 matrix
+// (`_bmad-output/implementation-artifacts/7-1-credential-management-via-environment-variables.md`).
+
+impl std::fmt::Debug for ChirpstackPollerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChirpstackPollerConfig")
+            .field("server_address", &self.server_address)
+            .field("api_token", &crate::utils::REDACTED_PLACEHOLDER)
+            .field("tenant_id", &self.tenant_id)
+            .field("polling_frequency", &self.polling_frequency)
+            .field("retry", &self.retry)
+            .field("delay", &self.delay)
+            .field("list_page_size", &self.list_page_size)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for OpcUaConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpcUaConfig")
+            .field("application_name", &self.application_name)
+            .field("application_uri", &self.application_uri)
+            .field("product_uri", &self.product_uri)
+            .field("diagnostics_enabled", &self.diagnostics_enabled)
+            .field("hello_timeout", &self.hello_timeout)
+            .field("host_ip_address", &self.host_ip_address)
+            .field("host_port", &self.host_port)
+            .field("create_sample_keypair", &self.create_sample_keypair)
+            .field("certificate_path", &self.certificate_path)
+            .field("private_key_path", &self.private_key_path)
+            .field("trust_client_cert", &self.trust_client_cert)
+            .field("check_cert_time", &self.check_cert_time)
+            .field("pki_dir", &self.pki_dir)
+            .field("user_name", &self.user_name)
+            .field("user_password", &crate::utils::REDACTED_PLACEHOLDER)
+            .field("stale_threshold_seconds", &self.stale_threshold_seconds)
+            .finish()
+    }
 }
 
 /// ChirpStack application configuration.
@@ -692,6 +738,17 @@ impl AppConfig {
 
         if self.chirpstack.api_token.is_empty() {
             errors.push("chirpstack.api_token: must not be empty".to_string());
+        } else if self
+            .chirpstack
+            .api_token
+            .starts_with(crate::utils::PLACEHOLDER_PREFIX)
+        {
+            errors.push(format!(
+                "chirpstack.api_token: placeholder value detected (starts with \"{}\"). \
+                 Set OPCGW_CHIRPSTACK__API_TOKEN to inject the real secret. \
+                 See docs/security.md.",
+                crate::utils::PLACEHOLDER_PREFIX
+            ));
         }
 
         if self.chirpstack.tenant_id.is_empty() {
@@ -734,6 +791,17 @@ impl AppConfig {
 
         if self.opcua.user_password.is_empty() {
             errors.push("opcua.user_password: must not be empty".to_string());
+        } else if self
+            .opcua
+            .user_password
+            .starts_with(crate::utils::PLACEHOLDER_PREFIX)
+        {
+            errors.push(format!(
+                "opcua.user_password: placeholder value detected (starts with \"{}\"). \
+                 Set OPCGW_OPCUA__USER_PASSWORD to inject the real secret. \
+                 See docs/security.md.",
+                crate::utils::PLACEHOLDER_PREFIX
+            ));
         }
 
         // Validate stale_threshold_seconds (Story 5-2)
@@ -1773,5 +1841,262 @@ mod tests {
                 "env var must override TOML value"
             );
         });
+    }
+
+    /// Story 7-1 (AC#2): a placeholder `api_token` left over from the shipped
+    /// template must trigger a validation error that names the env var the
+    /// operator should set. Uses the canonical placeholder string from
+    /// `config/config.toml`.
+    #[test]
+    fn test_validation_rejects_placeholder_api_token() {
+        let toml = r#"
+            [global]
+            debug = true
+            [chirpstack]
+            server_address = "http://localhost:8080"
+            api_token = "REPLACE_ME_WITH_OPCGW_CHIRPSTACK__API_TOKEN_ENV_VAR"
+            tenant_id = "00000000-0000-0000-0000-000000000000"
+            polling_frequency = 10
+            retry = 1
+            delay = 1
+            [opcua]
+            application_name = "A"
+            application_uri = "urn:a"
+            product_uri = "urn:p"
+            diagnostics_enabled = false
+            create_sample_keypair = false
+            certificate_path = "c"
+            private_key_path = "k"
+            trust_client_cert = true
+            check_cert_time = false
+            pki_dir = "pki"
+            user_name = "u"
+            user_password = "p"
+            [[application]]
+            application_name = "App"
+            application_id = "app1"
+            [[application.device]]
+            device_id = "dev1"
+            device_name = "Dev"
+            [[application.device.read_metric]]
+            metric_name = "m"
+            chirpstack_metric_name = "m"
+            metric_type = "Float"
+        "#;
+        let config: AppConfig = Figment::new()
+            .merge(Toml::string(toml))
+            .extract()
+            .expect("toml parses");
+        let err = config
+            .validate()
+            .expect_err("validation must fail on placeholder api_token");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("OPCGW_CHIRPSTACK__API_TOKEN"),
+            "error must name the env var to set, got: {msg}"
+        );
+        assert!(
+            msg.contains("REPLACE_ME_WITH_"),
+            "error must reference the placeholder prefix literal, got: {msg}"
+        );
+    }
+
+    /// Story 7-1 (AC#2): symmetric — placeholder `user_password` is rejected
+    /// and the error names `OPCGW_OPCUA__USER_PASSWORD`.
+    #[test]
+    fn test_validation_rejects_placeholder_user_password() {
+        let toml = r#"
+            [global]
+            debug = true
+            [chirpstack]
+            server_address = "http://localhost:8080"
+            api_token = "x"
+            tenant_id = "t"
+            polling_frequency = 10
+            retry = 1
+            delay = 1
+            [opcua]
+            application_name = "A"
+            application_uri = "urn:a"
+            product_uri = "urn:p"
+            diagnostics_enabled = false
+            create_sample_keypair = false
+            certificate_path = "c"
+            private_key_path = "k"
+            trust_client_cert = true
+            check_cert_time = false
+            pki_dir = "pki"
+            user_name = "u"
+            user_password = "REPLACE_ME_WITH_OPCGW_OPCUA__USER_PASSWORD_ENV_VAR"
+            [[application]]
+            application_name = "App"
+            application_id = "app1"
+            [[application.device]]
+            device_id = "dev1"
+            device_name = "Dev"
+            [[application.device.read_metric]]
+            metric_name = "m"
+            chirpstack_metric_name = "m"
+            metric_type = "Float"
+        "#;
+        let config: AppConfig = Figment::new()
+            .merge(Toml::string(toml))
+            .extract()
+            .expect("toml parses");
+        let err = config
+            .validate()
+            .expect_err("validation must fail on placeholder user_password");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("OPCGW_OPCUA__USER_PASSWORD"),
+            "error must name the env var to set, got: {msg}"
+        );
+        assert!(
+            msg.contains("REPLACE_ME_WITH_"),
+            "error must reference the placeholder prefix literal, got: {msg}"
+        );
+    }
+
+    /// Story 7-1 (AC#2): end-to-end — the shipped placeholder TOML refuses
+    /// to load with no env vars, but loads cleanly when the canonical env
+    /// vars are set. Pins the override-after-merge contract.
+    #[test]
+    fn test_from_path_with_and_without_placeholder_env_vars() {
+        let toml = r#"
+            [global]
+            debug = true
+            [chirpstack]
+            server_address = "http://localhost:8080"
+            api_token = "REPLACE_ME_WITH_OPCGW_CHIRPSTACK__API_TOKEN_ENV_VAR"
+            tenant_id = "00000000-0000-0000-0000-000000000000"
+            polling_frequency = 10
+            retry = 1
+            delay = 1
+            [opcua]
+            application_name = "A"
+            application_uri = "urn:a"
+            product_uri = "urn:p"
+            diagnostics_enabled = false
+            create_sample_keypair = false
+            certificate_path = "c"
+            private_key_path = "k"
+            trust_client_cert = true
+            check_cert_time = false
+            pki_dir = "pki"
+            user_name = "u"
+            user_password = "REPLACE_ME_WITH_OPCGW_OPCUA__USER_PASSWORD_ENV_VAR"
+            [[application]]
+            application_name = "App"
+            application_id = "app1"
+            [[application.device]]
+            device_id = "dev1"
+            device_name = "Dev"
+            [[application.device.read_metric]]
+            metric_name = "m"
+            chirpstack_metric_name = "m"
+            metric_type = "Float"
+        "#;
+        let path = std::env::temp_dir()
+            .join(format!("opcgw-7-1-{}.toml", uuid::Uuid::new_v4()));
+        std::fs::write(&path, toml).expect("write temp toml");
+        let path_str = path.to_str().expect("temp path is utf-8").to_string();
+
+        // Without the env vars, both placeholders fire; from_path returns Err.
+        temp_env::with_vars(
+            vec![
+                ("OPCGW_CHIRPSTACK__API_TOKEN", None::<&str>),
+                ("OPCGW_OPCUA__USER_PASSWORD", None::<&str>),
+            ],
+            || {
+                let err = AppConfig::from_path(&path_str)
+                    .expect_err("placeholder TOML with no env vars must fail to load");
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("OPCGW_CHIRPSTACK__API_TOKEN"),
+                    "error must mention chirpstack env var, got: {msg}"
+                );
+                assert!(
+                    msg.contains("OPCGW_OPCUA__USER_PASSWORD"),
+                    "error must mention opcua env var, got: {msg}"
+                );
+            },
+        );
+
+        // With the env vars set, the merged config passes validation.
+        temp_env::with_vars(
+            vec![
+                ("OPCGW_CHIRPSTACK__API_TOKEN", Some("real-token")),
+                ("OPCGW_OPCUA__USER_PASSWORD", Some("real-password")),
+            ],
+            || {
+                let config = AppConfig::from_path(&path_str)
+                    .expect("env-overridden TOML must load cleanly");
+                assert_eq!(config.chirpstack.api_token, "real-token");
+                assert_eq!(config.opcua.user_password, "real-password");
+            },
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Story 7-1 (AC#3): the hand-written `Debug` impl for
+    /// `ChirpstackPollerConfig` must redact `api_token` and emit the
+    /// canonical `***REDACTED***` placeholder. A sentinel token value must
+    /// not appear anywhere in the formatted output.
+    #[test]
+    fn test_chirpstack_poller_config_debug_redacts_api_token() {
+        const SENTINEL: &str = "SENTINEL-API-TOKEN-XYZ";
+        let cfg = ChirpstackPollerConfig {
+            server_address: "http://example:8080".to_string(),
+            api_token: SENTINEL.to_string(),
+            tenant_id: "tenant".to_string(),
+            polling_frequency: 10,
+            retry: 1,
+            delay: 1,
+            list_page_size: 100,
+        };
+        let formatted = format!("{:?}", cfg);
+        assert!(
+            !formatted.contains(SENTINEL),
+            "api_token sentinel must not appear in Debug output: {formatted}"
+        );
+        assert!(
+            formatted.contains(crate::utils::REDACTED_PLACEHOLDER),
+            "Debug output must contain the redaction placeholder: {formatted}"
+        );
+    }
+
+    /// Story 7-1 (AC#3): symmetric — `OpcUaConfig::Debug` must redact
+    /// `user_password` and emit the canonical placeholder.
+    #[test]
+    fn test_opcua_config_debug_redacts_password() {
+        const SENTINEL: &str = "SENTINEL-PASSWORD-ABC";
+        let cfg = OpcUaConfig {
+            application_name: "A".to_string(),
+            application_uri: "urn:a".to_string(),
+            product_uri: "urn:p".to_string(),
+            diagnostics_enabled: false,
+            hello_timeout: None,
+            host_ip_address: None,
+            host_port: None,
+            create_sample_keypair: false,
+            certificate_path: "c".to_string(),
+            private_key_path: "k".to_string(),
+            trust_client_cert: false,
+            check_cert_time: false,
+            pki_dir: "pki".to_string(),
+            user_name: "u".to_string(),
+            user_password: SENTINEL.to_string(),
+            stale_threshold_seconds: None,
+        };
+        let formatted = format!("{:?}", cfg);
+        assert!(
+            !formatted.contains(SENTINEL),
+            "user_password sentinel must not appear in Debug output: {formatted}"
+        );
+        assert!(
+            formatted.contains(crate::utils::REDACTED_PLACEHOLDER),
+            "Debug output must contain the redaction placeholder: {formatted}"
+        );
     }
 }

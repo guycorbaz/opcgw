@@ -171,6 +171,27 @@ pub const OPCGW_CP_AVAILABILITY_NAME: &str = "Chirpstack_available";
 /// - Zero value: No recent measurements or server unavailable
 pub const OPCGW_CP_RESPONSE_TIME_NAME: &str = "ResponseTime";
 
+// =============================================================================
+// Secret-Handling Constants (Story 7-1)
+// =============================================================================
+
+/// Prefix used in shipped configuration templates to mark fields whose value
+/// must be supplied by the operator before first run (Story 7-1, AC#1/AC#2).
+///
+/// `AppConfig::validate` rejects `chirpstack.api_token` and `opcua.user_password`
+/// when their value starts with this literal prefix, with an error message
+/// pointing at the corresponding `OPCGW_*` env var. The prefix is checked
+/// verbatim — future placeholders following the same convention generalise.
+pub const PLACEHOLDER_PREFIX: &str = "REPLACE_ME_WITH_";
+
+/// Replacement string emitted by the redacting `Debug` impls of
+/// `ChirpstackPollerConfig` and `OpcUaConfig` (Story 7-1, AC#3).
+///
+/// 14 characters total: 3 asterisks + the 8-letter word `REDACTED` + 3
+/// asterisks. Centralised here so tests can assert against the constant
+/// rather than duplicating the literal.
+pub const REDACTED_PLACEHOLDER: &str = "***REDACTED***";
+
 /// Internal device identifier for ChirpStack server monitoring.
 ///
 /// This identifier is used internally by the gateway to track and store
