@@ -458,12 +458,18 @@ to hold. Concretely:
   (the file appender) for the correlation in that case — the global
   console becomes a "username only" view.
 
-Loud check at startup: the gateway does not currently fail-fast when
-the global level is set above `info`. This is documented as a
-deliberate trade-off (operators may legitimately want quieter
-console output when running headless under systemd). The correlation
-recipe above tells operators which log file to grep when console
-output is intentionally minimal.
+Loud check at startup: as of issue #91 (Epic 7 retrospective action
+item, 2026-04-29), the gateway emits a one-shot
+`warn!(operation="nfr12_correlation_check", level=...)` immediately
+after the `Resolved global log level` info line whenever the resolved
+level is more restrictive than `info`. The warn is visible at
+`OPCGW_LOG_LEVEL=warn` (the most common volume-reduction case) but
+filtered at `error` / `off` — operators choosing to silence everything
+below ERROR are presumed to know they're trading off the audit trail.
+The startup warn does not fail-fast (operators may legitimately want
+quieter console output when running headless under systemd). The
+correlation recipe above tells operators which log file to grep when
+console output is intentionally minimal.
 
 ### Verifying OPC UA security
 

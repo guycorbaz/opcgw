@@ -178,6 +178,26 @@ fn resolve_log_level(
     (filter::LevelFilter::INFO, "default")
 }
 
+/// Returns `true` when the resolved global log level filters out
+/// async-opcua's `info!`-level "Accept new connection from {addr}"
+/// event. Story 7-2 + 7-3 audit warns (`opcua_auth_failed`,
+/// `opcua_session_count_at_limit`) carry source-IP information either
+/// by line-correlation (auth-failed) or by `tracing`-Layer parsing of
+/// the accept event (at-limit). When the global filter strips the
+/// info-level accept event, both correlations break silently — the
+/// `source_ip` field disappears or the preceding correlation line is
+/// missing. NFR12 source-IP audit is degraded.
+///
+/// `LevelFilter::ERROR` and `LevelFilter::OFF` also satisfy the
+/// condition, but the startup `warn!` itself is filtered at those
+/// levels — callers receive an honest "no audit correlation" mode
+/// only at ERROR/OFF (the operator's explicit silence-everything
+/// choice). At `WARN` the warn is visible and the operator gets one
+/// shot at noticing the silent degradation.
+fn nfr12_correlation_breaks_at_level(level: filter::LevelFilter) -> bool {
+    level < filter::LevelFilter::INFO
+}
+
 /// Ensure the log directory exists and is writable. On failure, falls back
 /// to `./log` and writes a diagnostic to stderr (tracing isn't up yet).
 /// Returns the final directory that callers should use for appenders.
@@ -372,6 +392,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         source = log_level_source,
         "Resolved global log level"
     );
+    // Epic 7 retrospective action item (issue #91): Stories 7-2 and 7-3
+    // satisfy NFR12 (source-IP in failed-auth audit logs) via two-event
+    // correlation against async-opcua's `info!`-level
+    // "Accept new connection from {addr}" event. If the resolved level
+    // filters out info, that correlation breaks silently. Emit a
+    // one-shot warn so operators see the gap at boot rather than only
+    // discovering it during incident response. At ERROR/OFF the warn
+    // itself is filtered — that's the operator's explicit choice.
+    if nfr12_correlation_breaks_at_level(log_level) {
+        warn!(
+            operation = "nfr12_correlation_check",
+            level = %log_level,
+            "OPC UA source-IP audit correlation requires log level >= info; \
+             failed-auth and at-limit warns will not be correlatable to \
+             source IP at the current level. See docs/security.md."
+        );
+    }
     info!("starting opcgw");
 
     // Phase 2: now that tracing is up, load the full config from the same
@@ -1149,5 +1186,30 @@ mod tests {
             assert_eq!(dir, "/from-config");
             assert_eq!(source, "config");
         });
+    }
+
+    // ===== Issue #91 (Epic 7 retro action): NFR12 correlation gate =====
+
+    /// Issue #91: at INFO or more verbose, async-opcua's `info!` accept
+    /// event flows; NFR12 source-IP correlation works; no startup warn
+    /// fires.
+    #[test]
+    fn nfr12_correlation_holds_at_info_or_more_verbose() {
+        assert!(!super::nfr12_correlation_breaks_at_level(LevelFilter::TRACE));
+        assert!(!super::nfr12_correlation_breaks_at_level(LevelFilter::DEBUG));
+        assert!(!super::nfr12_correlation_breaks_at_level(LevelFilter::INFO));
+    }
+
+    /// Issue #91: at WARN or stricter, the global filter strips the
+    /// info-level accept event before it reaches any layer; the
+    /// `opcua_auth_failed` line-correlation breaks and the
+    /// `AtLimitAcceptLayer` source-IP parse never fires. The startup
+    /// warn must fire (visible at WARN; filtered at ERROR/OFF, but
+    /// the boolean condition is what we pin here).
+    #[test]
+    fn nfr12_correlation_breaks_at_warn_or_more_restrictive() {
+        assert!(super::nfr12_correlation_breaks_at_level(LevelFilter::WARN));
+        assert!(super::nfr12_correlation_breaks_at_level(LevelFilter::ERROR));
+        assert!(super::nfr12_correlation_breaks_at_level(LevelFilter::OFF));
     }
 }
