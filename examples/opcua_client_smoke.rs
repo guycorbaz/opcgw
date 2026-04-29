@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 use opcua::client::{ClientBuilder, IdentityToken, Password as ClientPassword};
-use opcua::types::{EndpointDescription, MessageSecurityMode, UserTokenPolicy};
+use opcua::types::{EndpointDescription, MessageSecurityMode, UserTokenPolicy, UserTokenType};
 
 #[derive(Parser, Debug)]
 #[command(version, about = "OPC UA security smoke-test client (Story 7-2 AC#7)")]
@@ -86,6 +86,12 @@ impl EndpointKind {
 async fn main() -> std::process::ExitCode {
     let args = Args::parse();
 
+    // P19: `create_sample_keypair(true)` here generates a *client*-side
+    // self-signed keypair under `--pki-dir`, used only to authenticate the
+    // smoke client to the gateway's secure endpoints. This is unrelated
+    // to the gateway's own server keypair — production gateways still
+    // ship with `create_sample_keypair = false` and operator-supplied
+    // server keypairs (see docs/security.md). Do not confuse the two.
     let mut client = match ClientBuilder::new()
         .application_name("opcgw-client-smoke")
         .application_uri("urn:opcgw:smoke-client")
@@ -105,11 +111,18 @@ async fn main() -> std::process::ExitCode {
         }
     };
 
+    // P4: UserName policy matches the gateway's actual policy (under the
+    // `OpcgwAuthManager` introduced by Story 7-2 the gateway only
+    // advertises username/password identity tokens, never anonymous).
+    let user_token_policy = UserTokenPolicy {
+        token_type: UserTokenType::UserName,
+        ..UserTokenPolicy::anonymous()
+    };
     let endpoint: EndpointDescription = (
         args.url.as_str(),
         args.endpoint.policy(),
         args.endpoint.mode(),
-        UserTokenPolicy::anonymous(),
+        user_token_policy,
     )
         .into();
 
@@ -140,8 +153,11 @@ async fn main() -> std::process::ExitCode {
     session.disable_reconnects();
     let handle = event_loop.spawn();
 
+    // P16: wait timeout (8s) is strictly greater than session_timeout
+    // (5s) so under load we never report "did NOT activate" while the
+    // session is still mid-handshake against its own deadline.
     let connected = tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_secs(8),
         session.wait_for_connection(),
     )
     .await
@@ -149,14 +165,21 @@ async fn main() -> std::process::ExitCode {
 
     let _ = session.disconnect().await;
     handle.abort();
-    let _ = handle.await;
+    // P12: surface event-loop panics to stderr instead of silently
+    // dropping the JoinError. Cancellation (`is_cancelled()`) and normal
+    // completion (`Ok(_)`) are the expected outcomes.
+    if let Err(join_err) = handle.await {
+        if join_err.is_panic() {
+            eprintln!("smoke: event loop panicked during teardown: {join_err:?}");
+        }
+    }
 
     if connected {
         println!("Session established on endpoint={}", args.endpoint.label());
         std::process::ExitCode::from(0)
     } else {
         eprintln!(
-            "smoke: session did NOT activate within 5s — check log/opc_ua.log for `event=\"opcua_auth_failed\"`"
+            "smoke: session did NOT activate within 8s — check log/opc_ua.log for `event=\"opcua_auth_failed\"`"
         );
         std::process::ExitCode::from(1)
     }

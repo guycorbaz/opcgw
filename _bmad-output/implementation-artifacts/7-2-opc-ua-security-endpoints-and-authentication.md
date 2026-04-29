@@ -2,7 +2,7 @@
 
 **Epic:** 7 (Security Hardening)
 **Phase:** Phase A
-**Status:** review
+**Status:** done
 **Created:** 2026-04-28
 **Author:** Claude Code (Automated Story Generation)
 
@@ -719,3 +719,109 @@ deployment.
 | 2026-04-28 | Claude Opus 4.7 (Create-Story)      | Story 7-2 spec created. 10 ACs covering endpoint pinning, username/password enforcement, source-IP failed-auth logging (via two-event correlation), private-key file-permission check, PKI directory verification + auto-create, `create_sample_keypair` default flip with release-build warning, integration tests, smoke-test example, documentation, security re-check. Status: backlog → ready-for-dev. |
 | 2026-04-28 | Claude Opus 4.7 (Validation pass)   | Self-validation pass. **A1** AC#10 grep regex tightened (`event\s*=\s*"..."`). **A2** explicit `tempfile = "3"` dev-dep task. **A3** async-opcua 0.17.1 API audited from local registry source — confirmed `pub trait AuthManager` at `authenticator.rs:95` and `ServerBuilder::with_authenticator` at `builder.rs:269`. Source IP is **not** passed to AuthManager — NFR12 is satisfied via two-event correlation (accept-event + auth-failed-event). AC#3 + Task 2 + Dev Notes "Why NFR12 is satisfied via two-event correlation" rewritten to reflect the actual library capability. **B1** `host_port = Some(port)` clarified in Testing Standards. **B2** `serial_test` recommendation added for parallel-test port collision. **B3** References line range corrected to `src/config.rs:148-249`. **B4** canonical `[dependencies] features = ["server", "client"]`. **C1** Story-7-1-pattern reuse consolidated into Testing Standards. **D1** AC#2 picks 3 named sub-tests. **D2** AC#3 sanitisation canonical recipe = `escape_default().to_string().chars().take(64).collect()`. |
 | 2026-04-28 | Claude Opus 4.7 (Dev agent)         | Implementation complete — Status: `ready-for-dev → in-progress → review`. New modules: `src/opc_ua_auth.rs` (`OpcgwAuthManager`), `src/security.rs` (file-perm validation + PKI layout + release-warn helper, 11 unit tests), `tests/opc_ua_security_endpoints.rs` (4 integration tests covering endpoint shape pinning, wrong-password rejection, audit-trail logging, log-injection sanitisation), `examples/opcua_client_smoke.rs` (manual smoke-test client). Modified: `src/opc_ua.rs` (4 `"user1"` literals → `OPCUA_USER_TOKEN_ID`, `with_authenticator` wiring, `ensure_pki_directories` call), `src/config.rs` (perm-validation hooked into `AppConfig::validate`), `src/main.rs` (release-build warn wiring), `Cargo.toml` (`client` feature, `tempfile`, `tracing-test/no-env-filter`), shipped configs (`create_sample_keypair = false`), 11 test fixtures flipped to `true` so fake `private_key_path = "k"` passes the new file-existence check. Deviations from spec: AC#2 ships only the `null`-endpoint sub-test (auth path is endpoint-agnostic; rationale in Dev Agent Record); AC#3 uses a `captured_logs_contain_anywhere` helper that bypasses tracing-test's scope filter (the auth events run in async-opcua's spawned-task span). Final: 520 tests pass / 0 fail / 7 ignored, `cargo clippy --all-targets -- -D warnings` clean, all AC#10 greps clean. |
+
+---
+
+### Review Findings
+
+Adversarial code review run on 2026-04-28 against commit `28957e0`, three layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor). 21 patches, 6 decision-needed, 10 deferred, 7 dismissed as noise. **All HIGH/MEDIUM findings resolved over three review iterations** (pass-1 → patches → pass-2 → round-2 patches → pass-3 → HMAC refactor + small LOW patches). Final loop terminates with only LOW findings remaining; story flipped to `done` 2026-04-29. Final test count: 554 pass / 0 fail / 7 ignored (`+34` from baseline of 520). `cargo clippy --all-targets -- -D warnings` clean. AC#10 regression greps clean.
+
+**Decision-needed** (HIGH/MEDIUM findings requiring user judgement before patch):
+
+- [x] [Review][Decision] **D1: Non-constant-time password / username comparison (timing-side-channel)** — `src/opc_ua_auth.rs:103`. `username == self.user && password.get() == self.pass.as_str()` short-circuits per-byte; remote attacker can iterate to discover credentials by timing. Fix = add `subtle::ConstantTimeEq` or `constant_time_eq` crate. Threat model is LAN-internal so practical impact is low, but this is a security-hardening story and Story 7-1's deferral covered SecretString memory-zeroize, not constant-time compare. **Decide:** address now (~30 lines + new dep) or defer with documented rationale.
+- [x] [Review][Decision] **D2: AC#2 ships only one of three required wrong-password sub-tests** — spec mandates `_null`, `_basic256_sign`, `_basic256_sign_encrypt`. Dev Agent Record pre-discloses the deviation (auth path is endpoint-agnostic, Basic256 client-side PKI handshake adds brittleness). **Decide:** add the two missing sub-tests (likely flaky against self-signed-cert client handshake) or accept the documented deviation as user-approved.
+- [x] [Review][Decision] **D3: AC#7 manual smoke-test was not actually executed** — Task 9 marked `[x]` but Completion Notes lines 651-659 acknowledge the manual run did not happen; integration tests cover the same auth code paths against the `None` endpoint only. **Decide:** run the smoke recipe end-to-end now and paste exit codes / log lines into Dev Notes, or accept the integration-test substitute.
+- [x] [Review][Decision] **D4: Trojan-source Unicode in usernames not sanitised** — `src/opc_ua_auth.rs:76-78`. `escape_default()` only escapes ASCII control chars + backslash + quote; passes RTL overrides (`U+202E`), zero-width joiners, bidi isolates untouched. A malicious username appears differently in RTL-aware log viewers than what was authenticated. Fix = stricter sanitiser (filter to printable ASCII range, or `unicode-security` crate). **Decide:** address now or defer (the LAN threat model and operator-readable plain logs make this lower-priority, but it is a real attack class).
+- [x] [Review][Decision] **D5: NFR12 source-IP correlation degrades silently under WARN-only logging** — async-opcua emits the accept event at `info!` level, our auth-failed event at `warn!` level. Operators who set `OPCGW_LOG_LEVEL=warn` to reduce volume receive auth-failed events without source IP. **Decide:** document a hard requirement that `opcgw::*` and `opcua::server::*` log targets must both be at `info!` (docs-only patch), file an upstream feature request to extend `AuthManager` with peer-addr (deferred-work entry), or leave the silent degradation in place.
+- [x] [Review][Decision] **D6: Fresh-regen on missing keypair file with `create_sample_keypair=true` produces world-readable file** — `src/security.rs:84-90` short-circuits `Ok(())` when the file is missing and sample-keypair is `true`, so async-opcua regenerates with default umask perms (typically `0o644`). The gateway then boots once with a world-readable key before the next-restart validation catches it. **Decide:** post-create chmod / re-validate after async-opcua's keypair-write path (non-trivial), or document as acknowledged limitation in `docs/security.md` anti-patterns section.
+
+**Patches** — HIGH severity (4):
+
+- [x] [Review][Patch] **P1: `private_key_path` containing `..` or absolute path silently escapes `pki_dir`** [`src/security.rs:65`] — `Path::join` semantics mean `Path::new("/var/lib/opcgw/pki").join("/etc/shadow")` returns `/etc/shadow`. Add explicit rejection of `is_absolute()` and `Component::ParentDir` in the joined path before stat.
+- [x] [Review][Patch] **P2: Empty / relative `pki_dir` accepted, silently uses cwd** [`src/security.rs`, `src/config.rs:807-817`] — `pki_dir = ""` evaluates to `cwd`; relative `pki_dir` evaluates per process cwd which is undefined under systemd. Add `is_empty()` rejection in `AppConfig::validate`; canonicalise once at config load or warn on relative paths.
+- [x] [Review][Patch] **P3: Race window between `create_dir_all` and `set_permissions` on `<pki_dir>/private`** [`src/security.rs:144-155`] — directory is born `0o755` (default umask), only chmodded to `0o700` after. Use `std::os::unix::fs::DirBuilderExt::mode(0o700)` + `DirBuilder::create` to make it born-`0o700` (Unix only).
+- [x] [Review][Patch] **P4: Test/smoke client builds `EndpointDescription` with `UserTokenPolicy::anonymous()`** [`tests/opc_ua_security_endpoints.rs:2625`, `examples/opcua_client_smoke.rs:1249`] — gateway only advertises `UserName` policy under the new `OpcgwAuthManager`. Switch tuple to a `UserName` policy for consistency with the server's actual contract.
+
+**Patches** — MEDIUM severity (9):
+
+- [x] [Review][Patch] **P5: Sanitiser truncates mid-escape sequence** [`src/opc_ua_auth.rs:76-78`] — `escape_default().chars().take(64)` can land mid `\u{1f600}` producing `\u{1f6`. Fix: truncate raw input first (`raw.chars().take(64).collect::<String>().escape_default()`), or cap on source-char boundaries.
+- [x] [Review][Patch] **P6: Substring assertions are buffer-wide / co-location-blind** [`tests/opc_ua_security_endpoints.rs:451`] — `captured_logs_contain_anywhere(TEST_USER)` matches any line in the global tracing-test buffer, not the auth-failed event line specifically. With `cargo test` parallelism + global `'static Mutex<Vec<u8>>`, a successful-auth event from another test can satisfy the positive assertion. Fix: assert that `opcua_auth_failed` AND `user="opcua-user"` appear on the same line.
+- [x] [Review][Patch] **P7: `async-opcua-client` shipped into production binary** [`Cargo.toml:21`] — moved to `[dependencies] features = ["server", "client"]`; client crate is only needed by integration tests and the smoke example. Move under `[dev-dependencies]` (with separate `default-features = false, features = ["client"]` entry) or behind a Cargo feature flag (`integration-tests`).
+- [x] [Review][Patch] **P8: `setup_test_server` uses 200ms sleep** [`tests/opc_ua_security_endpoints.rs:2582-2583`] — direct violation of the spec's own Testing Standards "no sleeps in tests". Replace with poll-loop on `get_server_endpoints_from_url` or TCP-connect probe under `tokio::time::timeout`.
+- [x] [Review][Patch] **P9: `<pki_dir>/private` exists as regular file (not directory)** [`src/security.rs:144-155`] — `path.exists()` returns `true` for files; chmod targets the file, then async-opcua's later `pki_dir(...)` fails opaquely. Replace `path.exists()` with `path.is_dir()` and explicitly error if it exists but is a non-directory.
+- [x] [Review][Patch] **P10: Trailing whitespace in `user_name` / `user_password` accepted** [`src/config.rs:788-805`] — operator copy-paste from `.env` line includes trailing `\n`; passes `is_empty()` and `REPLACE_ME_WITH_` checks; OPC UA wire format strips it; auth always fails with no clue why. Add `if value.trim() != value` rejection in `AppConfig::validate`.
+- [x] [Review][Patch] **P11: `OpcgwAuthManager::new` with empty configured user/password authenticates anyone with empty creds** [`src/opc_ua_auth.rs:103`] — Story 7-1's `is_empty()` validation is the only barrier; defense-in-depth means hard-rejecting `username.is_empty() || self.user.is_empty()` inside `authenticate_username_identity_token` itself.
+- [x] [Review][Patch] **P12: `event_handle.abort()` followed by silently dropped `JoinError`** [`tests/opc_ua_security_endpoints.rs:2663-2664`, `examples/opcua_client_smoke.rs:1292-1293`] — a panic inside async-opcua's event loop is dropped on the floor; tests pass for the wrong reason. Assert the JoinError is `is_cancelled()`, not `is_panic()`.
+- [x] [Review][Patch] **P13: AC#3 log-injection integration test may pass for the wrong reason** [`tests/opc_ua_security_endpoints.rs:483-487`] — wire-format normalisation may strip newlines from `UserNameIdentityToken` before the server sees them, so the `\n[INJECTED]\n` substring may never reach `sanitise_user`. Add a direct unit test calling `OpcgwAuthManager::authenticate_username_identity_token` with the malicious string, bypassing the wire layer.
+
+**Patches** — LOW severity (8):
+
+- [x] [Review][Patch] **P14: `endpoint_path.clone()` dead allocation in hot auth path** [`src/opc_ua_auth.rs:1734`] — used only inside `tracing` macros where `%endpoint.path` works directly. Inline.
+- [x] [Review][Patch] **P15: Test missing `#[cfg(unix)]` guard for symmetry** [`src/security.rs::tests::test_validation_skips_permission_check_when_create_sample_keypair_true_and_file_missing`] — passes vacuously on non-Unix. Gate for symmetry with siblings.
+- [x] [Review][Patch] **P16: Off-by-one between `session_timeout(5_000)` and `wait_for_connection(5s)`** [`examples/opcua_client_smoke.rs:1238 & 1284-1289`] — wait can fire before session-establishment timeout reaches; user sees misleading "did NOT activate within 5s". Make wait strictly greater (e.g. 8s vs 5s).
+- [x] [Review][Patch] **P17: Asymmetric error types in `src/security.rs`** — `validate_private_key_permissions` returns `Result<(), String>`, `ensure_pki_directories` returns `Result<(), OpcGwError>`. Story 7-1 established the `OpcGwError::Configuration` pattern. Make both consistent.
+- [x] [Review][Patch] **P18: Shipped-config comments use Story-internal jargon "AC#6"** [`config/config.toml`, `config/config.example.toml`] — operators reading config don't need to know what "AC#6" means. Drop the "Story 7-2 (AC#6)" prefix; keep the rationale.
+- [x] [Review][Patch] **P19: Smoke client uses `create_sample_keypair(true)` against story's anti-pattern guidance** [`examples/opcua_client_smoke.rs:1234`] — semantically distinct (client keypair, not server PKI) but cognitive-dissonant for someone reading both. Add a one-line clarifying comment.
+- [x] [Review][Patch] **P20: `validate_private_key_permissions` does not also enforce `<pki_dir>/private` directory mode is `0o700`** [`src/security.rs`] — a `0o600` file under a `0o755` parent is still discoverable. Stat the parent dir alongside the file.
+- [x] [Review][Patch] **P21: Tuple → `EndpointDescription` `.into()` is undocumented** [`tests/opc_ua_security_endpoints.rs:2625`, `examples/opcua_client_smoke.rs:1249`] — relies on async-opcua's `From<(...)>` impl. Construct `EndpointDescription` with named fields for forward-compat.
+
+**Deferred** (10) — pre-existing or out-of-scope for Story 7-2:
+
+- [x] [Review][Defer] DF1: `endpoint.path` logged unsanitised — defensive coding for future-proof; today only registered endpoint names land here.
+- [x] [Review][Defer] DF2: `tracing_test::internal::global_buf()` private API — pre-disclosed deviation in Dev Agent Record; alternative requires custom subscriber-layer.
+- [x] [Review][Defer] DF3: TOCTOU between `validate_private_key_permissions` and async-opcua's runtime read — relies on `private/` `0o700` (which IS enforced in normal flow).
+- [x] [Review][Defer] DF4: NFC vs NFD username normalization — usability, not security; ASCII usernames are the norm.
+- [x] [Review][Defer] DF5: `pki_dir` symlink-followed silently — niche threat (shared-host attacker); `O_NOFOLLOW` defence is non-trivial.
+- [x] [Review][Defer] DF6: `set_mode` discards setuid/setgid/sticky — niche operator workflow; preserve high bits in a follow-up.
+- [x] [Review][Defer] DF7: Plaintext password no zeroize-on-drop — Story 7-1 + 7-2 explicit Out of Scope (`secrecy::SecretString`).
+- [x] [Review][Defer] DF8: `pick_free_port` race window — `serial_test` already recommended in spec Testing Standards; flake-driven escalation.
+- [x] [Review][Defer] DF9: `ServerUserToken` duplicates plaintext password (kept alongside `OpcgwAuthManager`) — minor; story Task 2 noted the verification path.
+- [x] [Review][Defer] DF10: `TestServer::Drop` race with `TempDir` — cosmetic stderr noise on panic; tempfile leak negligible.
+
+**Dismissed as noise** (7) — not recorded above:
+
+1. Sprint-status / story-spec "Status: review in committed file" contradiction — by-design BMad workflow (implementation commit flips status).
+2. AC#1 verification claims 5 grep hits, actual is 7 — improvement (doc-comment references), not defect.
+3. `tests/config/config.toml` `"user1"` → `"test-user"` rename — fixture-only; AC#10 grep is what was specified.
+4. README Planning row long-paragraph format — stylistic.
+5. EROFS error message generic — Configuration error is technically correct.
+6. `existed` flag cosmetic drift between `path.exists()` and `create_dir_all` — info-event reports `created=true` even if not (cosmetic).
+7. `tempfile` leak across tests after panic — cosmetic CI tmpdir noise.
+
+#### Round-2 patches (Edge Case Hunter pass-2 — all MEDIUM/LOW)
+
+- [x] [Review][Patch] **N2: test happy-path `wait_timeout == session_timeout` race** [`tests/opc_ua_security_endpoints.rs:449`] — bumped happy-path timeout to 8s mirroring P16's example fix.
+- [x] [Review][Patch] **N3: misleading comment about `constant_time_eq` length behaviour** — corrected the inline doc; explicit length-leak acknowledgement (later closed by HMAC refactor).
+- [x] [Review][Patch] **N4: parent-mode and file-mode violations now accumulate** [`src/security.rs::validate_private_key_permissions`] — both errors join into a single `Err` separated by ` | ` so operators see all NFR9 violations in one restart.
+- [x] [Review][Patch] **N5: line-coupled assertion tightened to structured-field syntax** [`tests/opc_ua_security_endpoints.rs:511-516`] — matches `event="opcua_auth_failed"` AND `user=opcua-user` (the actual unquoted Display field syntax) on the same line.
+- [x] [Review][Patch] **N7: empty-vs-whitespace-only error wording** [`src/security.rs:65-70`, `src/config.rs:835-841`] — error messages updated to "must not be empty or whitespace-only".
+- [x] [Review][Patch] **N8: generic `Err(e)` pattern in `validate` call site** [`src/config.rs:842-857`] — uses `e.to_string()` and strips the thiserror prefix so future `OpcGwError` variants don't silently disappear from the accumulated errors vec.
+- [x] [Review][Defer] N6: `test_validation_rejects_loose_parent_dir_mode` — robust now (umask-independent via explicit chmod 0o755).
+
+#### Round-3: HMAC-keyed digest refactor (resolves N1 HIGH)
+
+The user explicitly chose to close N1 (`constant_time_eq` length oracle) via patch rather than defer. Refactored `OpcgwAuthManager` to:
+
+- Generate a 32-byte HMAC-SHA-256 key per process via `getrandom::getrandom` at startup (panics intentionally if OS RNG is unavailable — better than silently using a zero key).
+- Store digests `user_digest = HMAC(key, configured_user)` and `pass_digest = HMAC(key, configured_pass)` instead of plaintext.
+- On auth, compute `HMAC(key, submitted_user)` and `HMAC(key, submitted_password)` and `constant_time_eq` over the fixed-length 32-byte digests. Both HMACs and both compares run unconditionally before bitwise `&` — fully constant-time across the whole comparison, no length leak.
+- Per-process keying means digests cannot be replayed across gateway instances and cannot be precomputed offline.
+
+Added 4 free-function HMAC tests + 5 `OpcgwAuthManager::new` tests covering: per-instance random key uniqueness, `is_configured` flag transitions for empty user / empty password / both populated, async-rejection when `is_configured = false`. New deps: `hmac = "0.12"`, `getrandom = "0.2"` (sha2 was already present from Story 5-2's stale-data integrity hash).
+
+#### Round-3 review (Edge Case Hunter pass-3 — all LOW after HMAC refactor)
+
+- [x] [Review][Patch] **E2: test for distinct random keys across `OpcgwAuthManager::new` calls** — added `new_generates_distinct_random_key_per_instance`.
+- [x] [Review][Patch] **E3: test for `is_configured` defense-in-depth** — added `authenticate_rejects_when_is_configured_false` (async test exercising the empty-credential rejection path) plus three `is_configured` flag tests.
+- [x] [Review][Patch] **E5: doc comment on `OpcgwAuthManager::new` panic** — added `# Panics` section documenting the OS-RNG hard-fail rationale.
+- [x] [Review][Patch] **E6: `hmac_sha256` `expect` rationale corrected** — comment now states "Hmac::new_from_slice never fails for variable-key HMAC" instead of incorrect "internal allocation error".
+- [x] [Review][Defer] **E1: HMAC key not zeroized on drop** — adds `zeroize` crate dep; LAN threat model and difficulty of memory-dump access make this strategically marginal. Recorded in `deferred-work.md`.
+- [x] [Review][Defer] **E4: `getrandom` not exact-pinned** — `Cargo.lock` provides reproducibility today; pin if a 0.2.x patch causes a regression.
+
+#### Final state
+
+- 554 tests pass / 0 fail / 7 ignored (+34 from baseline of 520).
+- `cargo clippy --all-targets -- -D warnings` clean.
+- `cargo build --release` clean (production binary does NOT pull in async-opcua client feature thanks to P7's `[dev-dependencies]` migration).
+- AC#10 regression greps clean: `grep -nE '"user1"' src/ tests/` empty, `event = "opcua_auth_failed"` has 3 sites in `src/opc_ua_auth.rs` (production warn calls + the test that pins the format).
+- Loop terminates: zero HIGH/MEDIUM findings open. Status flipped to `done`.

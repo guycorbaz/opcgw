@@ -115,7 +115,7 @@ diagnostics_enabled = true
 # IP port for the server
 # This field is optional. Default value is 4840
 #host_port = 9090
-# OPC UA self-signed-keypair generation (Story 7-2, AC#6).
+# OPC UA self-signed-keypair generation.
 #
 # Production: false. Provision your keypair manually under pki/own/cert.der
 # and pki/private/private.pem (file mode 0o600, directory mode 0o700).

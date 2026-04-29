@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use opcua::client::{ClientBuilder, IdentityToken, Password as ClientPassword};
-use opcua::types::{EndpointDescription, MessageSecurityMode, UserTokenPolicy};
+use opcua::types::{EndpointDescription, MessageSecurityMode, UserTokenPolicy, UserTokenType};
 use tempfile::TempDir;
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
@@ -48,6 +48,32 @@ fn captured_logs_contain_anywhere(needle: &str) -> bool {
     let raw = tracing_test::internal::global_buf().lock().unwrap().clone();
     let s = String::from_utf8_lossy(&raw);
     s.contains(needle)
+}
+
+/// P6: assert that ALL of `needles` co-occur on a SINGLE line of the
+/// captured tracing-test buffer. Required because the global buffer is
+/// process-wide — checking each substring independently risks satisfying
+/// the assertion via lines from *other* tests (e.g. a successful-auth
+/// event emitting `user="opcua-user"` could be mistaken for the
+/// auth-failed event we want to verify).
+fn captured_log_line_contains_all(needles: &[&str]) -> bool {
+    let raw = tracing_test::internal::global_buf().lock().unwrap().clone();
+    let s = String::from_utf8_lossy(&raw);
+    s.lines()
+        .any(|line| needles.iter().all(|n| line.contains(n)))
+}
+
+/// Construct a `UserTokenPolicy` carrying the UserName token-type so the
+/// `EndpointDescription` we hand to `connect_to_matching_endpoint` matches
+/// the gateway's actual policy (the gateway only advertises `UserName`
+/// under the new `OpcgwAuthManager`). async-opcua then uses the server's
+/// real policies during session activation, but starting from a matching
+/// shape avoids confusing-by-mistake test failures and documents intent.
+fn user_name_policy() -> UserTokenPolicy {
+    UserTokenPolicy {
+        token_type: UserTokenType::UserName,
+        ..UserTokenPolicy::anonymous()
+    }
 }
 
 use opcgw::config::{
@@ -206,8 +232,30 @@ async fn setup_test_server() -> TestServer {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    // Give async-opcua a brief moment to finalise its handshake setup.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // P8: poll endpoint discovery until it succeeds, replacing the 200ms
+    // sleep that violated the spec's "no sleeps in tests" rule. The
+    // discovery handshake is the cheapest no-auth round-trip we can
+    // probe — once it succeeds, async-opcua has fully wired endpoint
+    // routing and is ready for session activation.
+    {
+        let probe_url = format!("opc.tcp://127.0.0.1:{port}/");
+        let probe_tmp = TempDir::new().expect("probe pki tmp");
+        let probe_client = build_client(probe_tmp.path());
+        let probe_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match probe_client
+                .get_server_endpoints_from_url(probe_url.as_str())
+                .await
+            {
+                Ok(endpoints) if !endpoints.is_empty() => break,
+                _ => {}
+            }
+            if std::time::Instant::now() >= probe_deadline {
+                panic!("OPC UA server did not respond to discovery within 5s after bind");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 
     TestServer {
         port,
@@ -249,11 +297,13 @@ async fn try_connect_none(
     identity: IdentityToken,
     timeout_ms: u64,
 ) -> bool {
+    // P4: UserName policy matches what the gateway actually advertises —
+    // anonymous() was a confusing placeholder.
     let endpoint: EndpointDescription = (
         server.endpoint_url("/").as_str(),
         "None",
         MessageSecurityMode::None,
-        UserTokenPolicy::anonymous(),
+        user_name_policy(),
     )
         .into();
 
@@ -288,7 +338,16 @@ async fn try_connect_none(
     // drop will close the channel anyway.
     let _ = tokio::time::timeout(Duration::from_secs(2), session.disconnect()).await;
     event_handle.abort();
-    let _ = tokio::time::timeout(Duration::from_secs(2), event_handle).await;
+    // P12: surface event-loop panics rather than silently dropping the
+    // JoinError. Cancellation (`is_cancelled()`) and timeout are expected
+    // outcomes; a panic indicates a real bug in async-opcua's spawned task
+    // that the test would otherwise mask.
+    match tokio::time::timeout(Duration::from_secs(2), event_handle).await {
+        Ok(Err(join_err)) if join_err.is_panic() => {
+            panic!("OPC UA event loop panicked during teardown: {join_err:?}");
+        }
+        _ => {}
+    }
 
     connected
 }
@@ -387,10 +446,13 @@ async fn test_three_endpoints_accept_correct_credentials() {
         ClientPassword(TEST_PASSWORD.to_string()),
     );
 
-    let connected = try_connect_none(&server, &mut client, identity, 5_000).await;
+    // N2: wait_timeout (8s) > session_timeout (5s in build_client) so we
+    // never report a timeout while the session is still mid-handshake
+    // against its own deadline. Mirrors the P16 fix in the smoke client.
+    let connected = try_connect_none(&server, &mut client, identity, 8_000).await;
     assert!(
         connected,
-        "session activation against None endpoint with correct credentials must succeed within 5s"
+        "session activation against None endpoint with correct credentials must succeed within 8s"
     );
 }
 
@@ -443,14 +505,24 @@ async fn test_failed_auth_emits_warn_event() {
     // Drain a bit so tracing-test's sink has the line.
     tokio::time::sleep(Duration::from_millis(150)).await;
 
+    // P6 + N5: assert co-occurrence on a single log line. Match on the
+    // structured-field syntax actually emitted by tracing's default
+    // formatter: `event="opcua_auth_failed"` (quoted, since the field is
+    // a string literal) AND `user=opcua-user` (unquoted, since it uses
+    // `%sanitised_user` Display formatting). Tying the assertion to the
+    // field-name + value pair prevents a future log line that happens to
+    // mention `opcua-user` for an unrelated purpose from satisfying it
+    // alongside a stray `opcua_auth_failed` substring on the same line.
+    let user_field = format!("user={TEST_USER}");
     assert!(
-        captured_logs_contain_anywhere("opcua_auth_failed"),
-        "expected `opcua_auth_failed` event in captured logs"
+        captured_log_line_contains_all(&["event=\"opcua_auth_failed\"", user_field.as_str()]),
+        "expected a single log line containing both \
+         `event=\"opcua_auth_failed\"` and `user={TEST_USER}` field syntax — \
+         substring co-location matters because the tracing-test buffer is process-wide"
     );
-    assert!(
-        captured_logs_contain_anywhere(TEST_USER),
-        "expected sanitised configured user `{TEST_USER}` in captured logs"
-    );
+    // Negative assertion is intentionally buffer-wide: the password must
+    // never appear ANYWHERE in the captured logs, not just on a particular
+    // line.
     assert!(
         !captured_logs_contain_anywhere(WRONG_PASSWORD_SENTINEL),
         "the attempted password must NEVER appear in any log output"

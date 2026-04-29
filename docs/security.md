@@ -437,6 +437,34 @@ A first-class source-IP-in-the-auth-event is tracked as an upstream
 follow-up against async-opcua (see
 `_bmad-output/implementation-artifacts/deferred-work.md`).
 
+#### Required log levels for NFR12 correlation
+
+The two-event correlation only works when both events reach the log
+sink. async-opcua emits the connection-accept event at **`info!`**
+level on the `opcua_server::server` target; the gateway emits the
+auth-failed event at **`warn!`** level on the `opcgw::opc_ua_auth`
+target. **Both targets must be at `info!` level or below** for NFR12
+to hold. Concretely:
+
+- The default `OPCGW_LOG_LEVEL=info` is sufficient — do not raise it
+  to `warn` or `error` on the global console.
+- The per-module file appender for `opc_ua.log` already captures
+  async-opcua at `DEBUG` and `opcgw::opc_ua` at `TRACE` (see
+  `config/config.example.toml` "Logging configuration"), so the
+  on-disk audit trail is unaffected by the global console level.
+- If you set `OPCGW_LOG_LEVEL=warn` to reduce console volume, the
+  console will still receive the auth-failed event but **not** the
+  preceding accept event. Operators must rely on `log/opc_ua.log`
+  (the file appender) for the correlation in that case — the global
+  console becomes a "username only" view.
+
+Loud check at startup: the gateway does not currently fail-fast when
+the global level is set above `info`. This is documented as a
+deliberate trade-off (operators may legitimately want quieter
+console output when running headless under systemd). The correlation
+recipe above tells operators which log file to grep when console
+output is intentionally minimal.
+
 ### Verifying OPC UA security
 
 A small smoke-test client ships under `examples/opcua_client_smoke.rs`:
@@ -474,6 +502,19 @@ mapping, ensure the UID alignment before mounting.
 - **Do not** run with `create_sample_keypair = true` in production. The
   shipped default since Story 7-2 is `false`. Release builds emit a
   startup `warn!` if the flag is `true`.
+- **Do not** rely on `create_sample_keypair = true` to "fix" a missing
+  keypair on a running deployment. When the configured private-key file
+  is absent and `create_sample_keypair = true`, async-opcua regenerates
+  the keypair on next start with the **default umask** (typically
+  `0o644` — world-readable). The startup file-permission check
+  short-circuits on the missing-file path and does not catch it; the
+  next-restart validation does, but the gateway runs once with a
+  world-readable key in the meantime. Production deployments must
+  provision the keypair manually with `chmod 600` and ship with
+  `create_sample_keypair = false` so this regen path can never trigger.
+  This is intentional — the alternative (post-create chmod or hard
+  fail) would prevent operators from using `create_sample_keypair` for
+  development, where the world-readable window is acceptable.
 - **Do not** leave `private/*.pem` at `0o644`. The startup check is a
   hard error — fix the mode rather than relaxing the check.
 - **Do not** configure the `null` endpoint as the only available

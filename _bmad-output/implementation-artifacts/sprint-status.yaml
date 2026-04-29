@@ -1,5 +1,5 @@
 # generated: 2026-04-02
-# last_updated: 2026-04-28 (Story 7-2 review — OPC UA security hardening implementation complete)
+# last_updated: 2026-04-29 (Story 7-2 code review complete — all HIGH/MEDIUM findings resolved over 3 review iterations including HMAC-keyed credential digest refactor; flipped to done)
 # project: opcgw
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-02
-last_updated: "2026-04-28 (Story 7-2 review — implementation complete: OpcgwAuthManager + sanitised audit logging, NFR9 file-perm check, FR45 PKI auto-create, create_sample_keypair flip; 520 tests pass / 0 fail / 7 ignored, clippy clean)"
+last_updated: "2026-04-29 (Story 7-2 code review complete — three review iterations: round-1 applied 21 patches across 8 files (path-traversal guards, atomic-mode dir creation, line-scoped log assertions, dev-dep client feature, sanitiser ordering); round-2 patched 6 follow-on findings; round-3 closed N1 HIGH timing-leak via HMAC-SHA-256 keyed credential digests with constant-time fixed-length comparison. Final: 554 tests pass / 0 fail / 7 ignored, clippy clean, release build clean)"
 project: opcgw
 project_key: NOKEY
 tracking_system: file-system
@@ -115,7 +115,7 @@ development_status:
   # Epic 7: Security Hardening (Phase A)
   epic-7: in-progress
   7-1-credential-management-via-environment-variables: done
-  7-2-opc-ua-security-endpoints-and-authentication: review
+  7-2-opc-ua-security-endpoints-and-authentication: done
   7-3-connection-limiting: backlog
   epic-7-retrospective: optional
 

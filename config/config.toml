@@ -79,7 +79,7 @@ diagnostics_enabled = true
 #hello_timeout = 10
 #host_ip_address = "localhost"
 #host_port = 9090
-# OPC UA self-signed-keypair generation (Story 7-2, AC#6).
+# OPC UA self-signed-keypair generation.
 #
 # Production: false. Provision your keypair manually under pki/own/cert.der
 # and pki/private/private.pem (file mode 0o600, directory mode 0o700).

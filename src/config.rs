@@ -787,6 +787,14 @@ impl AppConfig {
 
         if self.opcua.user_name.is_empty() {
             errors.push("opcua.user_name: must not be empty".to_string());
+        } else if self.opcua.user_name.trim() != self.opcua.user_name {
+            // P10: trailing/leading whitespace in env-var values is a
+            // common copy-paste error from .env files; OPC UA wire format
+            // strips it on the client side, so auth always fails with no
+            // diagnostic. Reject explicitly at startup.
+            errors.push(
+                "opcua.user_name: must not have leading or trailing whitespace".to_string(),
+            );
         }
 
         if self.opcua.user_password.is_empty() {
@@ -802,18 +810,52 @@ impl AppConfig {
                  See docs/security.md.",
                 crate::utils::PLACEHOLDER_PREFIX
             ));
+        } else if self.opcua.user_password.trim() != self.opcua.user_password {
+            // P10: same rationale as user_name above.
+            errors.push(
+                "opcua.user_password: must not have leading or trailing whitespace".to_string(),
+            );
+        }
+
+        // P2: empty (or whitespace-only) pki_dir would silently fall back
+        // to cwd via Path::join. Reject explicitly here so the error
+        // surfaces alongside other config violations
+        // (validate_private_key_permissions and ensure_pki_directories
+        // also guard, but accumulating the message here gives a single
+        // clean error for an empty config field).
+        if self.opcua.pki_dir.trim().is_empty() {
+            errors.push(
+                "opcua.pki_dir: must not be empty or whitespace-only (relative paths resolve \
+                 against the gateway's current working directory; an empty value silently \
+                 falls back to cwd)"
+                    .to_string(),
+            );
         }
 
         // Story 7-2 (AC#4): NFR9 — the OPC UA private-key file must be at
-        // mode 0o600. The check accumulates into the same `errors` vec so a
-        // misconfigured operator sees ALL violations in one go (not one
-        // error, fix, restart, see the next error, fix, restart…).
-        if let Err(msg) = crate::security::validate_private_key_permissions(
+        // mode 0o600 and live under a 0o700 parent directory. The check
+        // accumulates into the same `errors` vec so a misconfigured
+        // operator sees the top-level violation alongside any other
+        // configuration errors. (Some private-key violations are
+        // file-mode vs parent-mode: today the helper returns on the
+        // first one, so a subsequent restart may surface the second —
+        // see N4 in the code review.)
+        //
+        // N8: use a generic `Err(e)` match so any future variant added
+        // to `OpcGwError` cannot silently disappear from the errors vec.
+        if let Err(e) = crate::security::validate_private_key_permissions(
             &self.opcua.pki_dir,
             &self.opcua.private_key_path,
             self.opcua.create_sample_keypair,
         ) {
-            errors.push(msg);
+            // Strip the `Configuration error: ` prefix that thiserror's
+            // Display injects so the operator-facing list reads cleanly.
+            let msg = e.to_string();
+            let stripped = msg
+                .strip_prefix("Configuration error: ")
+                .map(str::to_string)
+                .unwrap_or(msg);
+            errors.push(stripped);
         }
 
         // Validate stale_threshold_seconds (Story 5-2)

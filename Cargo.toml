@@ -18,7 +18,10 @@ tokio = { version = "1.50.0", features = ["full", "rt-multi-thread"] }
 thiserror = "2.0.18"
 tonic = "0.14.5"
 chirpstack_api = "4.17.0"
-async-opcua = { version = "0.17.1", features = ["server", "client"] }
+async-opcua = { version = "0.17.1", features = ["server"] }
+constant_time_eq = "0.3"
+hmac = "0.12"
+getrandom = "0.2"
 clap = { version = "4.6.0", features = ["derive"] }
 local-ip-address = "0.6.5"
 url = "2.5.7"
@@ -46,6 +49,12 @@ uuid = { version = "1.10.0", features = ["v4", "serde"] }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
 temp-env = "0.3"
 tempfile = "3"
+# Test/example-only access to async-opcua's client API. Kept out of the
+# production binary to limit attack surface (no outbound OPC UA client in a
+# release build) and shrink the release binary. Tests + examples have access
+# to dev-dependencies, so `cargo test` and `cargo build --examples`
+# transparently see both server + client features merged.
+async-opcua = { version = "0.17.1", features = ["client"] }
 
 [build-dependencies]
 tonic-build = "0.14.5"
