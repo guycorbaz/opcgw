@@ -24,7 +24,7 @@ use opcua::server::address_space::Variable;
 use opcua::server::{
     diagnostics::NamespaceMetadata,
     node_manager::memory::{simple_node_manager, SimpleNodeManager},
-    Server, ServerBuilder, ServerEndpoint, ServerUserToken,
+    Server, ServerBuilder, ServerEndpoint, ServerHandle, ServerUserToken,
 };
 use opcua::types::{DataValue, DateTime, NodeId, Variant};
 
@@ -165,7 +165,7 @@ impl OpcUa {
     ///     Err(e) => eprintln!("Failed to create server: {}", e),
     /// }
     /// ```
-    fn create_server(&mut self) -> Result<Server, OpcGwError> {
+    fn create_server(&mut self) -> Result<(Server, ServerHandle), OpcGwError> {
         let discovery_url = "opc.tcp://".to_owned()
             + &self.host_ip_address
             + ":"
@@ -198,6 +198,12 @@ impl OpcUa {
             ));
 
         let server_builder = self.configure_network(server_builder);
+        // Story 7-3 (AC#2, FR44): cap concurrent OPC UA sessions at the
+        // configured `max_connections` (or the gateway default of 10).
+        // async-opcua's `SessionManager::create_session` rejects
+        // (N+1)th attempts with `BadTooManySessions`. Existing sessions
+        // are unaffected.
+        let server_builder = self.configure_limits(server_builder);
         let server_builder = self.configure_key(server_builder);
         // Story 7-2: `configure_user_token` is still required so the
         // server-config validator (`async_opcua::config::ServerEndpoint::validate`)
@@ -234,7 +240,7 @@ impl OpcUa {
 
         self.add_nodes(ns, node_manager);
 
-        Ok(server)
+        Ok((server, handle))
     }
 
     /// Configures network settings for the OPC UA server.
@@ -292,6 +298,38 @@ impl OpcUa {
             .hello_timeout(hello_timeout)
             .host(host_ip)
             .port(host_port)
+    }
+
+    /// Configures the concurrent-session cap (Story 7-3, AC#2, FR44).
+    ///
+    /// Wires `OpcUaConfig::max_connections` (defaulting to
+    /// `OPCUA_DEFAULT_MAX_CONNECTIONS = 10`) into
+    /// `ServerBuilder::max_sessions(N)`. async-opcua's
+    /// `SessionManager::create_session` enforces the cap by rejecting the
+    /// (N+1)th `CreateSession` request with `BadTooManySessions`. Existing
+    /// sessions are not disturbed.
+    ///
+    /// The default is applied here (not in `AppConfig::validate`) so the
+    /// `Option<usize>` shape stays consistent with other `OpcUaConfig`
+    /// fields and so the value documented in `src/utils.rs` is the single
+    /// source of truth.
+    fn configure_limits(&self, server_builder: ServerBuilder) -> ServerBuilder {
+        let max = self.max_sessions();
+        debug!(max_sessions = %max, "Configure session limit");
+        server_builder.max_sessions(max)
+    }
+
+    /// Single source of truth for "what session cap will be enforced",
+    /// shared by `configure_limits` (the wire-level cap) and `run`
+    /// (the value reported by the session-count gauge / at-limit warn).
+    /// Code-review feedback 2026-04-29: avoids two independent
+    /// `unwrap_or(OPCUA_DEFAULT_MAX_CONNECTIONS)` call sites silently
+    /// diverging in a future change.
+    fn max_sessions(&self) -> usize {
+        self.config
+            .opcua
+            .max_connections
+            .unwrap_or(OPCUA_DEFAULT_MAX_CONNECTIONS)
     }
 
     /// Configures security certificates and PKI (Public Key Infrastructure) settings for the OPC UA server.
@@ -531,10 +569,10 @@ impl OpcUa {
         trace!("Running OPC UA server");
 
         // Error management for server creation
-        let server = match self.create_server() {
-            Ok(server) => {
+        let (server, handle) = match self.create_server() {
+            Ok(pair) => {
                 debug!("OPC UA server built");
-                server
+                pair
             }
             Err(e) => {
                 error!(error = %e, "OPC UA server error");
@@ -542,7 +580,29 @@ impl OpcUa {
             }
         };
 
-        let _ = match server.run().await {
+        // Story 7-3 (AC#3, FR44): wire the session-count monitor — both
+        // the at-limit-accept tracing layer (already installed by
+        // `main.rs::initialise_tracing`) and the periodic gauge task.
+        // The layer reads the same shared state we populate here, so it
+        // becomes active as soon as `set_session_monitor_state` returns.
+        //
+        // `MonitorStateGuard` ensures the static state is cleared even
+        // if `server.run()` panics (code-review feedback 2026-04-29 —
+        // panic-safety guarantee that lifts the "stale handle in static
+        // OnceLock" hazard).
+        let max_sessions = self.max_sessions();
+        crate::opc_ua_session_monitor::set_session_monitor_state(handle.clone(), max_sessions);
+        let _state_guard = crate::opc_ua_session_monitor::MonitorStateGuard;
+        let gauge_handle = tokio::spawn(
+            crate::opc_ua_session_monitor::SessionMonitor::new(
+                handle.clone(),
+                max_sessions,
+                self.cancel_token.clone(),
+            )
+            .run_gauge_loop(),
+        );
+
+        let run_result = match server.run().await {
             Ok(_) => {
                 info!("OPC UA server stopped");
                 Ok(())
@@ -553,7 +613,23 @@ impl OpcUa {
             }
         };
 
-        Ok(())
+        // Reap the gauge task before returning so it does not outlive
+        // the server task across Ctrl+C. Fire the cancel token first
+        // so the gauge has a chance to exit naturally; `abort` + the
+        // post-await JoinError check are the belt-and-braces.
+        self.cancel_token.cancel();
+        gauge_handle.abort();
+        match gauge_handle.await {
+            Ok(()) => {}
+            Err(e) if e.is_cancelled() => {}
+            Err(e) => {
+                error!(error = ?e, "Session-count gauge task ended abnormally");
+            }
+        }
+        // _state_guard's Drop clears the shared MonitorState (including
+        // on the panic-unwind path).
+
+        run_result
     }
 
     /// Adds hierarchical nodes to the OPC UA server address space based on application configuration.

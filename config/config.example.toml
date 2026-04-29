@@ -147,6 +147,13 @@ user_password = "REPLACE_ME_WITH_OPCGW_OPCUA__USER_PASSWORD_ENV_VAR"
 # Valid range: 1-86400 seconds
 # Can override with OPCGW_OPC_UA_STALE_THRESHOLD_SECONDS environment variable
 stale_threshold_seconds = 120
+# Maximum number of concurrent OPC UA client sessions (Story 7-3, FR44).
+# New connections beyond this limit are rejected with the OPC UA status code
+# BadTooManySessions. Existing sessions are unaffected.
+#
+# Default: 10. Range: 1 to 4096.
+# Override via env var: OPCGW_OPCUA__MAX_CONNECTIONS
+#max_connections = 10
 
 
 ###########################################################

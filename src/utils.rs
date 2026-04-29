@@ -94,6 +94,33 @@ pub const OPCUA_DEFAULT_IP_ADDRESS: &str = "127.0.0.1";
 /// to use an alternative port through the configuration file.
 pub const OPCUA_DEFAULT_PORT: u16 = 4840;
 
+/// Default maximum number of concurrent OPC UA client sessions (Story 7-3, FR44).
+///
+/// When `[opcua].max_connections` is unset (or `None`), the gateway caps
+/// concurrent sessions at this value. Single source of truth — `opc_ua.rs`
+/// reads this constant via `Option::unwrap_or` and `AppConfig::validate`
+/// references it implicitly through [`OPCUA_MAX_CONNECTIONS_HARD_CAP`] /
+/// the `Some(0)` lower-bound check.
+pub const OPCUA_DEFAULT_MAX_CONNECTIONS: usize = 10;
+
+/// Hard upper bound for `[opcua].max_connections` (Story 7-3, FR44).
+///
+/// Values above this cap are rejected at startup by `AppConfig::validate`.
+/// 4096 is a "you almost certainly want a deployment review before going
+/// here" guard rather than a physical limit — see
+/// `_bmad-output/implementation-artifacts/7-3-connection-limiting.md`
+/// "Why 4096" for the back-of-envelope. Operators hitting it should file
+/// the per-IP rate-limiting follow-up rather than raising the cap.
+pub const OPCUA_MAX_CONNECTIONS_HARD_CAP: usize = 4096;
+
+/// Period (seconds) between `info!(event="opcua_session_count")` gauge
+/// emissions from `SessionMonitor` (Story 7-3, AC#3). 5s strikes a
+/// balance between operator-facing utilisation visibility and log volume.
+/// Tests in `tests/opc_ua_connection_limit.rs` sleep
+/// `OPCUA_SESSION_GAUGE_INTERVAL_SECS + 1` seconds to guarantee at least
+/// one tick — keep that relationship intact when tuning.
+pub const OPCUA_SESSION_GAUGE_INTERVAL_SECS: u64 = 5;
+
 // =============================================================================
 // Configuration File Path Constants
 // =============================================================================

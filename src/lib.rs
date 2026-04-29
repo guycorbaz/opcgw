@@ -10,6 +10,7 @@ pub mod command_validation;
 pub mod config;
 pub mod opc_ua;
 pub mod opc_ua_auth;
+pub mod opc_ua_session_monitor;
 pub mod security;
 pub mod storage;
 pub mod utils;

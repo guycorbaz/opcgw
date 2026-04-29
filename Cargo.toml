@@ -49,6 +49,10 @@ uuid = { version = "1.10.0", features = ["v4", "serde"] }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
 temp-env = "0.3"
 tempfile = "3"
+# Story 7-3: serialise integration tests in tests/opc_ua_connection_limit.rs
+# so the process-wide tracing-test buffer + the at-limit-accept layer's
+# shared state never have two tests racing for the same OPC UA server.
+serial_test = "3"
 # Test/example-only access to async-opcua's client API. Kept out of the
 # production binary to limit attack surface (no outbound OPC UA client in a
 # release build) and shrink the release binary. Tests + examples have access

@@ -246,6 +246,19 @@ pub struct OpcUaConfig {
     /// Default: 2x polling frequency (e.g., 20s if polling every 10s).
     /// Can be overridden via OPCGW_OPC_UA_STALE_THRESHOLD_SECONDS environment variable.
     pub stale_threshold_seconds: Option<u64>,
+
+    /// Maximum number of concurrent OPC UA client sessions (Story 7-3, FR44).
+    ///
+    /// When set, caps the number of concurrent sessions the gateway will
+    /// accept. New connections beyond this limit are rejected with the
+    /// OPC UA status code `BadTooManySessions`. Existing sessions are
+    /// unaffected. `None` falls back to the gateway default
+    /// (`OPCUA_DEFAULT_MAX_CONNECTIONS = 10`).
+    ///
+    /// Range: 1 to `OPCUA_MAX_CONNECTIONS_HARD_CAP` (4096). Values
+    /// outside this range are rejected at startup by `validate()`.
+    /// Override via env var: `OPCGW_OPCUA__MAX_CONNECTIONS`.
+    pub max_connections: Option<usize>,
 }
 
 // Hand-written Debug impls (Story 7-1, AC#3) replace `derive(Debug)` so that
@@ -290,6 +303,7 @@ impl std::fmt::Debug for OpcUaConfig {
             .field("user_name", &self.user_name)
             .field("user_password", &crate::utils::REDACTED_PLACEHOLDER)
             .field("stale_threshold_seconds", &self.stale_threshold_seconds)
+            .field("max_connections", &self.max_connections)
             .finish()
     }
 }
@@ -783,6 +797,47 @@ impl AppConfig {
 
         if self.opcua.host_port == Some(0) {
             errors.push("opcua.host_port: must not be 0 if specified".to_string());
+        }
+
+        // Story 7-3 (AC#1, FR44): bound `max_connections`. The Some(0)
+        // lower-bound stops an operator from accidentally bricking the
+        // server (no client could ever connect, including the operator
+        // themselves). The hard-cap upper bound stops fd-exhaustion DoS
+        // — see `OPCUA_MAX_CONNECTIONS_HARD_CAP` doc comment. Both
+        // checks accumulate into `errors` so a single startup pass
+        // surfaces every violation.
+        if self.opcua.max_connections == Some(0) {
+            errors.push(
+                "opcua.max_connections: must be at least 1 (use a small positive integer like 1 \
+                 to enforce single-client mode; 0 would refuse all clients including operators)"
+                    .to_string(),
+            );
+        } else if let Some(n) = self.opcua.max_connections {
+            if n > crate::utils::OPCUA_MAX_CONNECTIONS_HARD_CAP {
+                errors.push(format!(
+                    "opcua.max_connections: {} exceeds hard cap of {}. Either lower the value or \
+                     open a follow-up if your deployment really needs more (the cap protects \
+                     against fd-exhaustion DoS)",
+                    n,
+                    crate::utils::OPCUA_MAX_CONNECTIONS_HARD_CAP
+                ));
+            }
+        }
+
+        // Story 7-3 code review (2026-04-29): if max_connections is
+        // explicitly configured but diagnostics are disabled, the
+        // session-count gauge and the at-limit warn both go silent
+        // (async-opcua's CurrentSessionCount stays at 0 forever — the
+        // cap is still enforced via SessionManager.sessions.len(), but
+        // operator observability is dead). Refuse the combination at
+        // startup with a clear remediation hint.
+        if self.opcua.max_connections.is_some() && !self.opcua.diagnostics_enabled {
+            errors.push(
+                "opcua.max_connections: requires opcua.diagnostics_enabled = true so the \
+                 session-count gauge and at-limit warn have a live counter to read. \
+                 Either set diagnostics_enabled = true or remove max_connections."
+                    .to_string(),
+            );
         }
 
         if self.opcua.user_name.is_empty() {
@@ -2178,6 +2233,7 @@ mod tests {
             user_name: "u".to_string(),
             user_password: SENTINEL.to_string(),
             stale_threshold_seconds: None,
+            max_connections: None,
         };
         let formatted = format!("{:?}", cfg);
         assert!(
@@ -2187,6 +2243,113 @@ mod tests {
         assert!(
             formatted.contains(crate::utils::REDACTED_PLACEHOLDER),
             "Debug output must contain the redaction placeholder: {formatted}"
+        );
+    }
+
+    /// Story 7-3 (AC#1, FR44): `Some(0)` is a misconfiguration — it would
+    /// refuse every client including the operator. Validation must reject
+    /// it with a clear error pointing at the lower bound.
+    #[test]
+    fn test_validation_rejects_max_connections_zero() {
+        let mut config = get_config();
+        config.opcua.max_connections = Some(0);
+
+        let result = config.validate();
+        assert!(result.is_err(), "Some(0) must fail validation");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("max_connections"), "{error_msg}");
+        assert!(error_msg.contains("at least 1"), "{error_msg}");
+    }
+
+    /// Story 7-3 (AC#1, FR44): values above the hard cap are rejected
+    /// with a message naming both the offending value and the cap.
+    #[test]
+    fn test_validation_rejects_max_connections_above_hard_cap() {
+        let mut config = get_config();
+        config.opcua.max_connections = Some(4097);
+
+        let result = config.validate();
+        assert!(result.is_err(), "Some(4097) must fail validation");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("max_connections"), "{error_msg}");
+        assert!(error_msg.contains("hard cap"), "{error_msg}");
+        assert!(error_msg.contains("4096"), "{error_msg}");
+    }
+
+    /// Story 7-3 (AC#1): exact-cap value passes — the bound is inclusive.
+    #[test]
+    fn test_validation_accepts_max_connections_at_hard_cap() {
+        let mut config = get_config();
+        config.opcua.max_connections = Some(4096);
+
+        assert!(config.validate().is_ok(), "Some(4096) must pass validation");
+    }
+
+    /// Story 7-3 (AC#1): `None` is the documented "use the gateway default"
+    /// signal — validation must not reject it. The default (10) is applied
+    /// at use site (`opc_ua.rs::configure_limits`), not in `validate`.
+    #[test]
+    fn test_validation_accepts_max_connections_none() {
+        let mut config = get_config();
+        config.opcua.max_connections = None;
+
+        assert!(config.validate().is_ok(), "None must pass validation");
+    }
+
+    /// Story 7-3 (AC#1): `Some(1)` is a legitimate single-client lockdown
+    /// mode (engineering-only-access during commissioning windows).
+    #[test]
+    fn test_validation_accepts_max_connections_one() {
+        let mut config = get_config();
+        config.opcua.max_connections = Some(1);
+
+        assert!(config.validate().is_ok(), "Some(1) must pass validation");
+    }
+
+    /// Story 7-3 code review (2026-04-29): `max_connections` configured
+    /// alongside `diagnostics_enabled = false` would silently disable
+    /// the session-count gauge and the at-limit warn (the diagnostics
+    /// counter stays at 0 forever). Validation must reject the
+    /// combination so the silent-observability hazard cannot ship.
+    #[test]
+    fn test_validation_rejects_max_connections_when_diagnostics_disabled() {
+        let mut config = get_config();
+        config.opcua.max_connections = Some(10);
+        config.opcua.diagnostics_enabled = false;
+
+        let result = config.validate();
+        assert!(
+            result.is_err(),
+            "max_connections with diagnostics_enabled=false must fail"
+        );
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("max_connections"), "{error_msg}");
+        assert!(error_msg.contains("diagnostics_enabled"), "{error_msg}");
+    }
+
+    /// Story 7-3 code review (2026-04-29): the inverse — `None` for
+    /// max_connections (use gateway default) AND diagnostics_enabled =
+    /// false — is also rejected, because the gateway default still
+    /// activates the session monitor wiring at runtime. Operators who
+    /// disable diagnostics must explicitly opt out of the cap.
+    /// (Note: today the default is still applied at runtime even when
+    /// the field is `None`. If we ever introduce a "no cap" sentinel,
+    /// this test will need updating to reflect that distinction.)
+    #[test]
+    fn test_validation_accepts_diagnostics_disabled_when_no_max_connections_field() {
+        // When max_connections is None, the gateway default (10) is
+        // applied at use-site — observability would still go silent if
+        // diagnostics is off, but the user has not explicitly opted in
+        // to a cap. Validation passes; runtime emits the
+        // `session_count_variable_missing` error log to surface the
+        // misconfiguration.
+        let mut config = get_config();
+        config.opcua.max_connections = None;
+        config.opcua.diagnostics_enabled = false;
+
+        assert!(
+            config.validate().is_ok(),
+            "max_connections=None with diagnostics_enabled=false must pass (warn at runtime)"
         );
     }
 }

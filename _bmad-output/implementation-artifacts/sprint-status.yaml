@@ -1,5 +1,5 @@
 # generated: 2026-04-02
-# last_updated: 2026-04-29 (Story 7-2 code review complete — all HIGH/MEDIUM findings resolved over 3 review iterations including HMAC-keyed credential digest refactor; flipped to done)
+# last_updated: 2026-04-29 (Story 7-3 code review complete and flipped to done. 581 tests pass / 0 fail / 7 ignored; clippy clean. Triage: 16 patch / 6 defer / 11 dismiss out of 33 raw findings (Blind Hunter / Edge Case Hunter / Acceptance Auditor). All 16 patches applied: shutdown-cleanliness integration test added (resolves AC#6 manual smoke + production shutdown coverage gap); MonitorStateGuard RAII wrapper for panic-safe cleanup; cancel_token fired before gauge abort; first-tick wrapped in select! for cancellation; mutex poison recovery + diagnostic logging across set/clear/read paths; AppConfig::validate rejects max_connections+!diagnostics_enabled; parse_source_ip rejects control chars; OpcUa::max_sessions() helper deduplicates default; HeldSession session_timeout 60s→15s; init_test_subscriber fail-soft; module-wide allow(dead_code) removed.)
 # project: opcgw
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-02
-last_updated: "2026-04-29 (Story 7-2 code review complete — three review iterations: round-1 applied 21 patches across 8 files (path-traversal guards, atomic-mode dir creation, line-scoped log assertions, dev-dep client feature, sanitiser ordering); round-2 patched 6 follow-on findings; round-3 closed N1 HIGH timing-leak via HMAC-SHA-256 keyed credential digests with constant-time fixed-length comparison. Final: 554 tests pass / 0 fail / 7 ignored, clippy clean, release build clean)"
+last_updated: "2026-04-29 (Story 7-3 code review complete and flipped to done. 581 tests pass / 0 fail / 7 ignored; clippy clean. Triage: 16 patch / 6 defer / 11 dismiss out of 33 raw findings. All 16 patches applied including shutdown-cleanliness integration test, MonitorStateGuard RAII wrapper for panic-safe cleanup, mutex poison recovery, AppConfig::validate diagnostics_enabled+max_connections combination check, parse_source_ip control-char rejection, OpcUa::max_sessions() helper, HeldSession session_timeout 60s→15s, fail-soft init_test_subscriber. Issues #87/#88/#89/#90 still open for follow-ups.)"
 project: opcgw
 project_key: NOKEY
 tracking_system: file-system
@@ -116,7 +116,7 @@ development_status:
   epic-7: in-progress
   7-1-credential-management-via-environment-variables: done
   7-2-opc-ua-security-endpoints-and-authentication: done
-  7-3-connection-limiting: backlog
+  7-3-connection-limiting: done
   epic-7-retrospective: optional
 
   # Epic 8: Real-Time Subscriptions & Historical Data (Phase B)

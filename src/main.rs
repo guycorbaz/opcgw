@@ -26,6 +26,7 @@ mod command_validation;
 mod config;
 mod opc_ua;
 mod opc_ua_auth;
+mod opc_ua_session_monitor;
 mod security;
 mod storage;
 mod utils;
@@ -351,6 +352,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .with_target("opcgw::config", tracing::Level::TRACE),
                 ),
         )
+        // Story 7-3 (AC#3, FR44): observe async-opcua's
+        // `Accept new connection from {addr}` events and emit an
+        // `event="opcua_session_count_at_limit"` warn when the live
+        // session count is at the configured cap. The layer reads
+        // shared state populated by `OpcUa::run` after the server is
+        // built; until then it no-ops.
+        .with(opc_ua_session_monitor::AtLimitAcceptLayer::new())
         .init();
 
     let init_ms = init_start.elapsed().as_millis();

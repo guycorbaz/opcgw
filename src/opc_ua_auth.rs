@@ -472,6 +472,7 @@ mod tests {
                 user_name: user.to_string(),
                 user_password: password.to_string(),
                 stale_threshold_seconds: Some(120),
+                max_connections: None,
             },
             application_list: vec![ChirpStackApplications {
                 application_name: "App".to_string(),

@@ -102,6 +102,13 @@ user_password = "REPLACE_ME_WITH_OPCGW_OPCUA__USER_PASSWORD_ENV_VAR"
 # Staleness threshold in seconds for metric status codes (Story 5-2).
 # Range: 1-86400. Default: 2x polling_frequency.
 stale_threshold_seconds = 120
+# Maximum number of concurrent OPC UA client sessions. New connections
+# beyond this limit are rejected with the OPC UA status code
+# BadTooManySessions. Existing sessions are unaffected.
+#
+# Default: 10. Range: 1 to 4096.
+# Override via env var: OPCGW_OPCUA__MAX_CONNECTIONS
+#max_connections = 10
 
 
 ###########################################################

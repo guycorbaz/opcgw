@@ -528,14 +528,142 @@ mapping, ensure the UID alignment before mounting.
 
 ---
 
+## OPC UA connection limiting
+
+Story 7-3 caps the number of concurrent OPC UA client sessions the
+gateway will host so a misbehaving SCADA client (runaway reconnect
+loop, leaked sessions, deliberate flood) cannot exhaust file
+descriptors, memory, or CPU. This closes **FR44** and the **OT
+Security / Connection rate limiting** PRD line item.
+
+### What it is
+
+A configurable cap on concurrent OPC UA **sessions** (not raw TCP
+connections — async-opcua's enforcement point is `CreateSession`,
+which is the first wire-level signal that the peer is a real OPC UA
+client). New sessions beyond the cap are rejected by async-opcua with
+the OPC UA status code `BadTooManySessions`. **Existing sessions are
+unaffected** — the cap is checked on the (N+1)th attempt only.
+
+Default: **10 concurrent sessions**. Range: 1 to 4096 (the upper
+bound is a "you almost certainly want a deployment review" guard
+against fd-exhaustion DoS — see Story 7-3 spec for the back-of-
+envelope rationale).
+
+### Configuration
+
+```toml
+# config/config.toml
+[opcua]
+max_connections = 10
+```
+
+Env-var override (figment `__`-split convention):
+
+```bash
+OPCGW_OPCUA__MAX_CONNECTIONS=20 cargo run
+```
+
+`max_connections = 0` and values above 4096 are rejected at startup
+by `AppConfig::validate` with a clear error message. Single-client
+lockdown (`max_connections = 1`) is a legitimate "engineering-only-
+access" configuration for a final commissioning window.
+
+**Worked sizing example.** 10 SCADA clients × 1 session each = 10.
+Reserve 2-3 slots for overlap during reconfiguration / failover, so
+12-13 is a typical Phase A choice. Going above 50 should prompt a
+deployment review — most LAN-internal SCADA scenarios saturate well
+before that point.
+
+### What you'll see in the logs
+
+Two events, both on the `opcgw::opc_ua_session_monitor` target:
+
+- `event="opcua_session_count" current=N limit=L` at `info!` level,
+  every 5 seconds (gauge — operators graph this for capacity
+  planning). Period controlled by
+  `OPCUA_SESSION_GAUGE_INTERVAL_SECS`.
+- `event="opcua_session_count_at_limit" source_ip=<addr> limit=L current=N`
+  at `warn!` level, fired on every TCP accept while the gateway is
+  at the cap. The `source_ip` field comes from async-opcua's
+  pre-existing `info!("Accept new connection from {addr}")` line —
+  we correlate to it from a tracing-Layer (same NFR12 two-event
+  pattern Story 7-2 used for failed-auth audit).
+
+#### Grep recipes
+
+```bash
+# See current utilisation.
+grep 'event="opcua_session_count"' log/opc_ua.log | tail -5
+
+# Find at-limit rejections.
+grep 'event="opcua_session_count_at_limit"' log/opc_ua.log
+# 2026-04-29T10:14:22.105Z  WARN opcgw::opc_ua_session_monitor: ... source_ip=192.168.1.42:54311 limit=10 current=10
+```
+
+### Anti-patterns
+
+- **Do not set `max_connections = 0`.** Refuses operators too —
+  startup will fail-fast.
+- **Do not set above 4096.** File-descriptor exhaustion risk on
+  default Linux ulimits; startup will fail-fast.
+- **Do not combine `max_connections = <any>` with
+  `diagnostics_enabled = false`.** The session-count gauge and the
+  at-limit warn both read async-opcua's `CurrentSessionCount`
+  diagnostics variable; with diagnostics disabled the counter never
+  increments, the gauge logs `current=0` forever, and the at-limit
+  warn never fires (the cap is still enforced via
+  `SessionManager.sessions.len()`, but operator observability is
+  silent). Startup will fail-fast with a remediation hint.
+- **Do not rely on the cap as a brute-force defence.** Per-IP
+  throttling is a separate, deferred concern (issue
+  [#88](https://github.com/guycorbaz/opcgw/issues/88)). The cap stops
+  a single misbehaving SCADA but does not stop a distributed flood.
+
+### Expected at-limit log noise
+
+When the gateway is at the cap, **every** TCP accept fires an
+`event="opcua_session_count_at_limit"` warn — including port scans
+and partial-handshake probes that never request a session. This is
+the correct trade-off (operators want full visibility into
+rejection-window connection attempts) but means a misconfigured
+upstream firewall, a busy nmap scan, or a confused SCADA reconnect
+loop can produce a high rate of warns. The warn event is the
+symptom; investigate the source IPs and either tighten the firewall
+or raise the cap.
+
+### Tuning checklist
+
+1. Inventory expected SCADA clients × sessions each.
+2. Add 20% headroom.
+3. Gauge over a representative day.
+4. Raise the cap if `current` is consistently within 90% of `limit`.
+
+### What's out of scope
+
+- **Per-source-IP rate limiting / token-bucket throttling.** Tracked
+  at issue [#88](https://github.com/guycorbaz/opcgw/issues/88).
+- **Per-endpoint or per-user session caps.** Differentiated quotas
+  (e.g. "5 SignAndEncrypt + 5 None") are not in scope.
+- **Hot-reload of the cap at runtime.** Currently read at startup
+  only — Phase B Epic 9 hot-reload covers runtime reconfiguration
+  (issue [#90](https://github.com/guycorbaz/opcgw/issues/90)).
+- **Subscription / monitored-item / message-size limits.** Tracked
+  at issue [#89](https://github.com/guycorbaz/opcgw/issues/89);
+  revisit when subscriptions land in Epic 8.
+
+---
+
 ## References
 
 - Story 7-1 spec: `_bmad-output/implementation-artifacts/7-1-credential-management-via-environment-variables.md`
 - Story 7-2 spec: `_bmad-output/implementation-artifacts/7-2-opc-ua-security-endpoints-and-authentication.md`
+- Story 7-3 spec: `_bmad-output/implementation-artifacts/7-3-connection-limiting.md`
 - PRD requirements: FR42 (env-var injection), NFR7 (no secrets in logs),
   NFR8 (no real credentials in default config), NFR24 (env override for
   all secrets), FR19 (multi-policy OPC UA endpoints), FR20 (OPC UA user
   auth), FR45 (PKI layout), NFR9 (private-key 0o600), NFR12 (failed-auth
-  audit trail) in `_bmad-output/planning-artifacts/prd.md`
+  audit trail), FR44 (connection limiting) in
+  `_bmad-output/planning-artifacts/prd.md`
 - Configuration reference: [`docs/configuration.md`](configuration.md)
 - Deferred follow-ups: `_bmad-output/implementation-artifacts/deferred-work.md`

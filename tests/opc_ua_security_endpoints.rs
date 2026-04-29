@@ -171,6 +171,7 @@ fn test_config(port: u16, pki_dir: &std::path::Path) -> AppConfig {
             user_name: TEST_USER.to_string(),
             user_password: TEST_PASSWORD.to_string(),
             stale_threshold_seconds: Some(120),
+            max_connections: None,
         },
         application_list: vec![ChirpStackApplications {
             application_name: "TestApp".to_string(),
