@@ -26,6 +26,7 @@ mod command_validation;
 mod config;
 mod opc_ua;
 mod opc_ua_auth;
+mod opc_ua_history;
 mod opc_ua_session_monitor;
 mod security;
 mod storage;
@@ -507,6 +508,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             error!(error = %e, "Failed to create SQLite backend for metric restore");
             e
         })?;
+
+    // Story 8-3 AC#3: write `[storage].retention_days` into the
+    // `retention_config` table so the prune loop honours operator config.
+    // Migration default is 90 days; without this UPSERT the prune loop
+    // would ignore `[storage].retention_days` after first boot.
+    if let Err(e) =
+        sqlite_backend.set_metric_history_retention_days(application_config.storage.retention_days)
+    {
+        error!(error = %e, "Failed to apply [storage].retention_days to retention_config (continuing with previous DB value)");
+    }
 
     match sqlite_backend.load_all_metrics() {
         Ok(metrics) => {

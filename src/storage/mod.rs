@@ -146,6 +146,32 @@ pub struct BatchMetricWrite {
     pub timestamp: std::time::SystemTime,
 }
 
+/// One row of historical metric data, as stored in the `metric_history` table.
+///
+/// Returned by `StorageBackend::query_metric_history` for OPC UA HistoryRead
+/// service support (Story 8-3, FR22).
+///
+/// **Note on `value`:** this is the actual sensor reading as a string —
+/// numeric for Float/Int (e.g. `"3.14"`), `"true"`/`"false"` for Bool, raw
+/// text for String. The metric_history table's `batch_write_metrics` write
+/// path stores the actual value here, not the type variant name. The
+/// legacy single-row `append_metric_history` method (only used by tests)
+/// stores the variant name; production code uses the batch path.
+#[derive(Clone, Debug)]
+pub struct HistoricalMetricRow {
+    /// Original value as stored — the actual sensor reading.
+    /// NOT the MetricType variant name. See `storage/sqlite.rs::batch_write_metrics`
+    /// for the production write path that populates this field correctly.
+    pub value: String,
+    /// MetricType variant (Float, Int, Bool, String). Stored separately from
+    /// `value` so the OPC UA layer can construct a typed Variant without
+    /// re-parsing the value string twice.
+    pub data_type: MetricType,
+    /// Timestamp when the metric was measured at the device (NOT when the
+    /// row was inserted — that's `created_at`, not exposed here).
+    pub timestamp: std::time::SystemTime,
+}
+
 pub trait StorageBackend: Send + Sync {
     // ===== Metric Operations =====
 
@@ -444,6 +470,47 @@ pub trait StorageBackend: Send + Sync {
     /// - Returns 0 if no rows meet the deletion criteria
     /// - Reads retention_days fresh from retention_config at each call (never cached)
     fn prune_metric_history(&self) -> Result<u32, OpcGwError>;
+
+    /// Query historical metric values for a `(device_id, metric_name)` window
+    /// (Story 8-3, FR22).
+    ///
+    /// # Half-open interval semantics
+    ///
+    /// Returns rows with `start <= timestamp < end`. This matches OPC UA
+    /// Part 11 §6.4 `ReadRawModifiedDetails.startTime` / `endTime` where
+    /// `endTime` is exclusive. SCADA clients paging through a long range
+    /// pass the previous call's last-row timestamp as the next call's
+    /// `start` and they get the next page without overlap or gaps.
+    ///
+    /// # Bounds
+    ///
+    /// `max_results` caps the number of returned rows (NFR15 + DoS protection
+    /// against a SCADA client requesting an unbounded range). When the cap is
+    /// reached, the caller is responsible for re-querying with the last
+    /// returned row's timestamp as the new `start` to page through the full
+    /// range. Story 8-3's HistoryRead handler does not implement OPC UA
+    /// `ByteString` continuation points; manual paging is the contract.
+    ///
+    /// # Ordering
+    ///
+    /// Rows are returned in `timestamp ASC`. An empty range returns
+    /// `Ok(Vec::new())` — NOT an `Err`. Storage errors (pool checkout, SQL
+    /// execution) return `Err(OpcGwError::Storage)`.
+    ///
+    /// # Partial-success on bad rows
+    ///
+    /// Rows whose `value` cannot be parsed (e.g., `"NaN"` for Float) or whose
+    /// `data_type` is unknown are silently skipped with a `trace!` log
+    /// emission. The remaining rows are returned. This avoids terminating a
+    /// 600k-row scan because of one bad row.
+    fn query_metric_history(
+        &self,
+        device_id: &str,
+        metric_name: &str,
+        start: std::time::SystemTime,
+        end: std::time::SystemTime,
+        max_results: usize,
+    ) -> Result<Vec<HistoricalMetricRow>, OpcGwError>;
 
     // ===== High-Level Command Queue Operations (Story 3-1) =====
 

@@ -477,6 +477,7 @@ mod tests {
                 max_monitored_items_per_sub: None,
                 max_message_size: None,
                 max_chunk_count: None,
+                max_history_data_results_per_node: None,
             },
             application_list: vec![ChirpStackApplications {
                 application_name: "App".to_string(),

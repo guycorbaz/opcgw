@@ -22,11 +22,17 @@ use dashmap::DashMap;
 use opcua::server::address_space::AccessLevel;
 use opcua::server::address_space::Variable;
 use opcua::server::{
-    diagnostics::NamespaceMetadata,
-    node_manager::memory::{simple_node_manager, SimpleNodeManager},
-    Server, ServerBuilder, ServerEndpoint, ServerHandle, ServerUserToken,
+    diagnostics::NamespaceMetadata, Server, ServerBuilder, ServerEndpoint, ServerHandle,
+    ServerUserToken,
 };
+use opcua::sync::RwLock as OpcuaRwLock;
 use opcua::types::{DataValue, DateTime, NodeId, Variant};
+
+// Story 8-3: HistoryRead support via a node-manager wrap.
+use crate::opc_ua_history::{
+    opcgw_history_node_manager, OpcgwHistoryNodeManager,
+};
+use std::collections::HashMap;
 
 // Constants for staleness detection (Story 5-2)
 const DEFAULT_STALE_THRESHOLD_SECS: u64 = 120;
@@ -65,6 +71,14 @@ pub struct OpcUa {
     cancel_token: tokio_util::sync::CancellationToken,
     /// Last seen status code per (device_id, metric_name) — for transition logging.
     last_status: StatusCache,
+    /// Story 8-3: NodeId → (device_id, metric_name) reverse-lookup map
+    /// shared with `OpcgwHistoryNodeManagerImpl`. Populated during
+    /// `add_nodes` for each metric variable that opcgw exposes; the
+    /// HistoryRead handler resolves inbound NodeIds via this map.
+    /// Wrapped in `OpcuaRwLock` (async-opcua's `parking_lot`-backed sync
+    /// primitive) so the populate-then-read pattern is lock-free for
+    /// readers and the build-time fill is a single short critical section.
+    node_to_metric: Arc<OpcuaRwLock<HashMap<NodeId, (String, String)>>>,
 }
 
 impl OpcUa {
@@ -123,6 +137,9 @@ impl OpcUa {
             host_port,
             cancel_token,
             last_status: Arc::new(DashMap::new()),
+            // Story 8-3: build empty; `add_nodes` fills it during
+            // address-space construction.
+            node_to_metric: Arc::new(OpcuaRwLock::new(HashMap::new())),
         }
     }
 
@@ -189,12 +206,24 @@ impl OpcUa {
             .default_endpoint("null".to_string())
             .diagnostics_enabled(self.config.opcua.diagnostics_enabled)
             .token(self.cancel_token.clone())
-            .with_node_manager(simple_node_manager(
+            // Story 8-3: HistoryRead-aware node manager wrapping
+            // `SimpleNodeManagerImpl`. The wrapper implements
+            // `history_read_raw_modified` (AC#2) and forwards every other
+            // method to the inner SimpleNodeManagerImpl so the existing
+            // read/subscription/write pipeline (Stories 8-2 et al.) is
+            // untouched.
+            .with_node_manager(opcgw_history_node_manager(
                 NamespaceMetadata {
                     namespace_uri: OPCUA_NAMESPACE_URI.to_owned(),
                     ..Default::default()
                 },
                 "opcgw",
+                self.storage.clone(),
+                self.node_to_metric.clone(),
+                self.config
+                    .opcua
+                    .max_history_data_results_per_node
+                    .unwrap_or(crate::utils::OPCUA_DEFAULT_MAX_HISTORY_DATA_RESULTS_PER_NODE),
             ));
 
         let server_builder = self.configure_network(server_builder);
@@ -222,12 +251,15 @@ impl OpcUa {
             .map_err(|e| OpcGwError::OpcUa(e.to_string()))?;
 
         debug!("Creating node manager");
+        // Story 8-3: pull the wrapped HistoryRead-aware node manager. The
+        // existing read/subscription pipeline still uses the inner
+        // SimpleNodeManagerImpl via `manager.inner().simple()`.
         let node_manager = handle
             .node_managers()
-            .get_of_type::<SimpleNodeManager>()
+            .get_of_type::<OpcgwHistoryNodeManager>()
             .ok_or_else(|| {
-                error!("Failed to get SimpleNodeManager from server handle");
-                OpcGwError::OpcUa("Failed to get SimpleNodeManager".to_string())
+                error!("Failed to get OpcgwHistoryNodeManager from server handle");
+                OpcGwError::OpcUa("Failed to get OpcgwHistoryNodeManager".to_string())
             })?;
 
         let ns = handle
@@ -766,7 +798,7 @@ impl OpcUa {
     ///
     /// Each metric variable is configured with a read callback that queries the data storage
     /// using device ID and ChirpStack metric name, providing real-time data access without polling.
-    pub fn add_nodes(&mut self, ns: u16, manager: Arc<SimpleNodeManager>) {
+    pub fn add_nodes(&mut self, ns: u16, manager: Arc<OpcgwHistoryNodeManager>) {
         trace!("Add nodes to OPC UA server");
         let address_space = manager.address_space();
 
@@ -800,22 +832,45 @@ impl OpcUa {
                 for read_metric in device.read_metric_list.iter() {
                     debug!(metric_name = %read_metric.metric_name, "Adding read metric to OPC UA");
                     let read_metric_node = NodeId::new(ns, read_metric.metric_name.clone());
-                    let _ = address_space.add_variables(
-                        vec![Variable::new(
-                            &read_metric_node,
-                            read_metric.metric_name.clone(),
-                            read_metric.metric_name.clone(),
-                            0_i32,
-                        )],
-                        &device_node,
+                    let mut metric_variable = Variable::new(
+                        &read_metric_node,
+                        read_metric.metric_name.clone(),
+                        read_metric.metric_name.clone(),
+                        0_i32,
                     );
+                    // Story 8-3 AC#2: enable HistoryRead access on metric
+                    // variables. async-opcua's session-layer dispatch
+                    // checks the variable's `access_level` and
+                    // `user_access_level` and rejects HistoryRead with
+                    // `BadUserAccessDenied` unless the
+                    // `AccessLevel::HISTORY_READ` bit is set.
+                    metric_variable.set_access_level(
+                        AccessLevel::CURRENT_READ | AccessLevel::HISTORY_READ,
+                    );
+                    metric_variable.set_user_access_level(
+                        AccessLevel::CURRENT_READ | AccessLevel::HISTORY_READ,
+                    );
+                    metric_variable.set_historizing(true);
+                    let _ = address_space.add_variables(vec![metric_variable], &device_node);
                     let storage_clone = self.storage.clone();
                     let last_status_clone = self.last_status.clone();
                     let device_id = device.device_id.clone();
                     let chirpstack_metric_name = read_metric.chirpstack_metric_name.clone();
                     let stale_threshold = self.config.opcua.stale_threshold_seconds.unwrap_or(DEFAULT_STALE_THRESHOLD_SECS);
+                    // Story 8-3: register the NodeId → (device_id, chirpstack_metric_name)
+                    // mapping so HistoryRead requests can resolve back to the
+                    // storage layer. This is the same pair the read callback
+                    // uses, captured once during address-space construction.
+                    {
+                        let mut map = self.node_to_metric.write();
+                        map.insert(
+                            read_metric_node.clone(),
+                            (device.device_id.clone(), read_metric.chirpstack_metric_name.clone()),
+                        );
+                    }
                     manager
                         .inner()
+                        .simple()
                         .add_read_callback(read_metric_node.clone(), move |_, _, _| {
                             Self::get_value(
                                 &storage_clone,
@@ -852,7 +907,7 @@ impl OpcUa {
                             let _ =
                                 address_space.add_variables(vec![command_variable], &device_node);
                             let command_clone = command.clone();
-                            manager.inner().add_write_callback(
+                            manager.inner().simple().add_write_callback(
                                 command_node.clone(),
                                 move |data_value, _numeric_range| {
                                     Self::set_command(
@@ -903,7 +958,7 @@ impl OpcUa {
 
         // Add callback for command status variable (Task 6)
         // No lock needed - just return a static response
-        manager.inner().add_read_callback(
+        manager.inner().simple().add_read_callback(
             status_query_node.clone(),
             move |_, _, _| {
                 let response = "Command status query endpoint - use OPC UA method calls for specific command".to_string();
@@ -965,7 +1020,7 @@ impl OpcUa {
 
         // Register read callbacks for health variables
         let storage_clone = self.storage.clone();
-        manager.inner().add_read_callback(
+        manager.inner().simple().add_read_callback(
             last_poll_node.clone(),
             move |_, _, _| {
                 Self::get_health_value(&storage_clone, "last_poll_timestamp".to_string())
@@ -973,7 +1028,7 @@ impl OpcUa {
         );
 
         let storage_clone = self.storage.clone();
-        manager.inner().add_read_callback(
+        manager.inner().simple().add_read_callback(
             error_count_node.clone(),
             move |_, _, _| {
                 Self::get_health_value(&storage_clone, "error_count".to_string())
@@ -981,7 +1036,7 @@ impl OpcUa {
         );
 
         let storage_clone = self.storage.clone();
-        manager.inner().add_read_callback(
+        manager.inner().simple().add_read_callback(
             chirpstack_available_node.clone(),
             move |_, _, _| {
                 Self::get_health_value(&storage_clone, "chirpstack_available".to_string())

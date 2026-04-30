@@ -316,6 +316,26 @@ pub struct OpcUaConfig {
     /// env var: `OPCGW_OPCUA__MAX_CHUNK_COUNT`.
     #[serde(default)]
     pub max_chunk_count: Option<usize>,
+
+    /// Per-call cap on the number of `HistoryData` rows returned by a
+    /// single OPC UA `HistoryRead` request for one NodeId
+    /// (Story 8-3, AC#3, FR22).
+    ///
+    /// `None` falls back to
+    /// `OPCUA_DEFAULT_MAX_HISTORY_DATA_RESULTS_PER_NODE` (10000), which
+    /// is ~28 hours of poll data at 10s polling — sufficient for typical
+    /// FUXA dashboard time-windows. SCADA clients that want longer
+    /// windows page via follow-up calls (Story 8-3 does not implement
+    /// OPC UA `ByteString` continuation points; manual paging via
+    /// `last_returned_row.timestamp + 1µs` is the contract — see
+    /// `docs/security.md#historical-data-access`).
+    ///
+    /// Range: 1 to `OPCUA_MAX_HISTORY_DATA_RESULTS_PER_NODE_HARD_CAP`
+    /// (1_000_000). Values outside this range are rejected at startup
+    /// by `validate()`. Override via env var:
+    /// `OPCGW_OPCUA__MAX_HISTORY_DATA_RESULTS_PER_NODE`.
+    #[serde(default)]
+    pub max_history_data_results_per_node: Option<usize>,
 }
 
 // Hand-written Debug impls (Story 7-1, AC#3) replace `derive(Debug)` so that
@@ -368,6 +388,10 @@ impl std::fmt::Debug for OpcUaConfig {
             .field("max_monitored_items_per_sub", &self.max_monitored_items_per_sub)
             .field("max_message_size", &self.max_message_size)
             .field("max_chunk_count", &self.max_chunk_count)
+            .field(
+                "max_history_data_results_per_node",
+                &self.max_history_data_results_per_node,
+            )
             .finish()
     }
 }
@@ -1024,6 +1048,45 @@ impl AppConfig {
                      327_675 / 5 — coherent.)"
                 ));
             }
+        }
+
+        // Story 8-3 AC#3: max_history_data_results_per_node validation
+        if self.opcua.max_history_data_results_per_node == Some(0) {
+            errors.push(
+                "opcua.max_history_data_results_per_node: must be at least 1 (0 would refuse \
+                 every HistoryRead, leaving SCADA dashboards without historical-trend data)"
+                    .to_string(),
+            );
+        } else if let Some(n) = self.opcua.max_history_data_results_per_node {
+            if n > crate::utils::OPCUA_MAX_HISTORY_DATA_RESULTS_PER_NODE_HARD_CAP {
+                errors.push(format!(
+                    "opcua.max_history_data_results_per_node: {} exceeds hard cap of {} (DoS \
+                     protection on per-call response size — large values would saturate the \
+                     publish pipeline and likely exceed max_message_size)",
+                    n,
+                    crate::utils::OPCUA_MAX_HISTORY_DATA_RESULTS_PER_NODE_HARD_CAP
+                ));
+            }
+        }
+
+        // Story 8-3 AC#3: storage.retention_days FR22 floor + storage-cost cap
+        if self.storage.retention_days < crate::utils::STORAGE_RETENTION_DAYS_FLOOR {
+            errors.push(format!(
+                "storage.retention_days: {} is below FR22 minimum of {} days (lower values \
+                 would defeat the historical-trend use case — SCADA operators analysing \
+                 patterns over the past week need at least one week of data on hand)",
+                self.storage.retention_days,
+                crate::utils::STORAGE_RETENTION_DAYS_FLOOR
+            ));
+        } else if self.storage.retention_days > crate::utils::STORAGE_RETENTION_DAYS_HARD_CAP {
+            errors.push(format!(
+                "storage.retention_days: {} exceeds hard cap of {} days (longer retention \
+                 strains pruning + HistoryRead query latency; open a follow-up issue if a \
+                 deployment really needs more — sharding / archival / lower polling-rate \
+                 trade-offs need review)",
+                self.storage.retention_days,
+                crate::utils::STORAGE_RETENTION_DAYS_HARD_CAP
+            ));
         }
 
         if self.opcua.user_name.is_empty() {
@@ -2424,6 +2487,7 @@ mod tests {
             max_monitored_items_per_sub: None,
             max_message_size: None,
             max_chunk_count: None,
+            max_history_data_results_per_node: None,
         };
         let formatted = format!("{:?}", cfg);
         assert!(
@@ -2849,5 +2913,113 @@ mod tests {
             !error_msg.contains("max_chunk_count × 65535"),
             "must NOT surface cross-knob duplicate when per-knob zero already fires: {error_msg}"
         );
+    }
+
+    // ===== Story 8-3 AC#3: storage.retention_days validation =====
+
+    #[test]
+    fn test_validation_rejects_retention_days_below_floor() {
+        let mut config = get_config();
+        config.storage.retention_days = 6; // FR22 floor is 7
+
+        let result = config.validate();
+        assert!(result.is_err(), "below-floor must fail validation");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("storage.retention_days") && error_msg.contains("FR22"),
+            "error must reference FR22 floor: {error_msg}"
+        );
+    }
+
+    #[test]
+    fn test_validation_rejects_retention_days_above_hard_cap() {
+        let mut config = get_config();
+        config.storage.retention_days = 366;
+
+        let result = config.validate();
+        assert!(result.is_err(), "above-cap must fail validation");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("storage.retention_days") && error_msg.contains("hard cap"),
+            "error must reference hard cap: {error_msg}"
+        );
+    }
+
+    #[test]
+    fn test_validation_accepts_retention_days_at_floor() {
+        let mut config = get_config();
+        config.storage.retention_days = 7;
+
+        assert!(config.validate().is_ok(), "exact floor must pass");
+    }
+
+    #[test]
+    fn test_validation_accepts_retention_days_at_hard_cap() {
+        let mut config = get_config();
+        config.storage.retention_days = 365;
+
+        assert!(config.validate().is_ok(), "exact cap must pass");
+    }
+
+    #[test]
+    fn test_validation_accepts_retention_days_default() {
+        // get_config() returns the default retention_days = 7 (per
+        // default_retention_days fn). Confirm baseline passes.
+        let config = get_config();
+        assert!(config.validate().is_ok(), "default retention must pass");
+    }
+
+    // ===== Story 8-3 AC#3: max_history_data_results_per_node validation =====
+
+    #[test]
+    fn test_validation_rejects_max_history_data_results_zero() {
+        let mut config = get_config();
+        config.opcua.max_history_data_results_per_node = Some(0);
+
+        let result = config.validate();
+        assert!(result.is_err(), "Some(0) must fail validation");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("max_history_data_results_per_node") && error_msg.contains("at least 1"),
+            "error must reference must-be-at-least-1: {error_msg}"
+        );
+    }
+
+    #[test]
+    fn test_validation_rejects_max_history_data_results_above_hard_cap() {
+        let mut config = get_config();
+        config.opcua.max_history_data_results_per_node = Some(1_000_001);
+
+        let result = config.validate();
+        assert!(result.is_err(), "above-cap must fail validation");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("max_history_data_results_per_node") && error_msg.contains("hard cap"),
+            "error must reference hard cap: {error_msg}"
+        );
+    }
+
+    #[test]
+    fn test_validation_accepts_max_history_data_results_at_hard_cap() {
+        let mut config = get_config();
+        config.opcua.max_history_data_results_per_node = Some(1_000_000);
+
+        assert!(config.validate().is_ok(), "exact cap must pass");
+    }
+
+    #[test]
+    fn test_validation_accepts_max_history_data_results_none() {
+        let mut config = get_config();
+        config.opcua.max_history_data_results_per_node = None;
+
+        assert!(config.validate().is_ok(), "None must pass validation");
+    }
+
+    #[test]
+    fn test_validation_accepts_max_history_data_results_one() {
+        let mut config = get_config();
+        config.opcua.max_history_data_results_per_node = Some(1);
+
+        assert!(config.validate().is_ok(), "Some(1) must pass validation");
     }
 }

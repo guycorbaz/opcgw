@@ -226,6 +226,22 @@ impl StorageBackend for InMemoryBackend {
         Ok(0)
     }
 
+    fn query_metric_history(
+        &self,
+        _device_id: &str,
+        _metric_name: &str,
+        _start: std::time::SystemTime,
+        _end: std::time::SystemTime,
+        _max_results: usize,
+    ) -> Result<Vec<crate::storage::HistoricalMetricRow>, OpcGwError> {
+        // InMemoryBackend: no historical data is persisted, so the query
+        // window always returns empty. The OPC UA HistoryRead service
+        // surfaces this to the SCADA client as an empty `HistoryData.dataValues`
+        // array with `Good` status — matching the contract in `SqliteBackend`
+        // for empty ranges.
+        Ok(Vec::new())
+    }
+
     fn enqueue_command(&self, mut command: Command) -> Result<u64, OpcGwError> {
         // Validate command parameters if validator is configured (Story 3-2)
         if let Some(validator) = &self.validator {
@@ -444,6 +460,27 @@ mod tests {
         let backend = InMemoryBackend::new();
         let result = backend.get_metric("device_123", "temperature").unwrap();
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_query_metric_history_returns_empty_vec() {
+        // Story 8-3 AC#1: InMemoryBackend has no persistent history table,
+        // so `query_metric_history` always returns `Ok(Vec::new())` for any
+        // window. This matches the OPC UA HistoryRead contract — empty
+        // ranges are returned as `Good`-status `data_values: []`, NOT errors.
+        // Production deployments must use `SqliteBackend` if HistoryRead
+        // results are required.
+        let backend = InMemoryBackend::new();
+        let t0 = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let t1 = t0 + std::time::Duration::from_secs(60 * 60 * 24);
+
+        let result = backend
+            .query_metric_history("dev1", "moisture", t0, t1, 100)
+            .expect("query_metric_history must not error on InMemoryBackend");
+        assert!(
+            result.is_empty(),
+            "InMemoryBackend has no history table; result must always be empty"
+        );
     }
 
     // Tests for trait methods are disabled until trait signature is updated in story 2-2

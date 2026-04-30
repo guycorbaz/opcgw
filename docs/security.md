@@ -819,6 +819,165 @@ startup-config event** (same shape as Story 7-2's
 
 ---
 
+## Historical data access
+
+Story 8-3 closes FR22 by exposing the `metric_history` SQLite table
+(populated by the poller's append-only write path, Story 2-3b) as OPC UA
+`HistoryRead` results. A SCADA client (FUXA, Ignition, UaExpert) issues a
+`HistoryRead` request for a metric NodeId and receives a list of
+timestamped values that fit the requested time window. This unlocks the
+"show me the past 7 days of soil moisture" use case without polling.
+
+### What it is
+
+When a SCADA client issues an OPC UA `HistoryRead` request with
+`HistoryReadDetails::ReadRawModified`, opcgw resolves the inbound NodeId
+to the `(device_id, chirpstack_metric_name)` pair that the address-space
+construction loop registered for that variable, queries
+`metric_history` via the existing `(device_id, timestamp)` composite
+index, and writes the typed values back to the wire as a `HistoryData`
+extension object. The new code surface lives in
+`src/opc_ua_history.rs` (a thin wrap around async-opcua's
+`SimpleNodeManagerImpl`) and `src/storage/sqlite.rs::query_metric_history`
+(the storage method).
+
+What you get on the wire is exactly what the poller stored, with one
+caveat: rows whose `value` column doesn't parse to the declared type
+(e.g. `"NaN"` for a Float metric, `"garbage"` for a Bool metric) are
+silently skipped with a `trace!` log. This is the partial-success
+contract — a single bad row never terminates a 600k-row scan.
+
+### Configuration
+
+Two new knobs land in `[storage]` and `[opcua]`:
+
+| Knob | TOML key | Default | Range | Env var |
+|---|---|---|---|---|
+| Retention period for `metric_history` | `[storage].retention_days` | `7` | 7-365 | `OPCGW_STORAGE__RETENTION_DAYS` |
+| Per-call HistoryRead response cap | `[opcua].max_history_data_results_per_node` | `10000` | 1-1_000_000 | `OPCGW_OPCUA__MAX_HISTORY_DATA_RESULTS_PER_NODE` |
+
+The 7-day floor on `retention_days` matches FR22 ("a minimum of 7 days
+of historical data must be retained"). Values below 7 are rejected at
+startup. The 365-day cap is a deployment review trigger — at 10s polling
+× ~400 metric pairs × 365 days the table approaches 1.3 billion rows
+and pruning + HistoryRead query latency need a separate look. Operators
+that need longer retention should open a follow-up issue.
+
+The 10000-row default for `max_history_data_results_per_node` is
+roughly 28 hours of poll data at 10s polling — sufficient for typical
+FUXA dashboard time-windows. SCADA clients that want longer windows
+**page manually** (see *Anti-patterns* below).
+
+`[storage].retention_days` is written into the SQLite `retention_config`
+table at every startup via `INSERT OR REPLACE`, overriding the migration
+default of 90 days that `v001_initial.sql` seeds at first boot. This
+keeps the prune loop and the operator-config in sync.
+
+### What you'll see in the logs
+
+On a successful HistoryRead with rows returned:
+
+```
+DEBUG history_read_raw_modified: returning rows
+    node_id=ns=2;s=Moisture
+    device_id=0000000000000001
+    metric_name=moisture
+    row_count=42
+```
+
+On a HistoryRead for an unregistered NodeId (typo, or a node that's not
+a metric variable):
+
+```
+TRACE history_read_raw_modified: NodeId not registered for HistoryRead
+    node_id=ns=2;s=DefinitelyNotARegisteredMetric
+```
+
+The wire-level surface for that case is `BadNodeIdUnknown` — the SCADA
+client sees the correct error, the gateway logs at TRACE so a noisy
+client doesn't flood the log file.
+
+On an inverted time range (`end < start`) — typically a SCADA bug:
+
+```
+(no log line — the rejection is silent on the gateway side)
+```
+
+The wire-level surface is `BadInvalidArgument` per OPC UA Part 11 §6.4.2.
+
+### Anti-patterns
+
+- **Don't use the in-memory backend for historical data.** `InMemoryBackend`
+  is intentionally a lossy non-persistent backend. Its
+  `query_metric_history` returns `Ok(Vec::new())` for every window. The
+  OPC UA client sees a `Good`-status empty response, so the client
+  thinks "no data in range" — which is technically accurate but
+  operationally misleading. Use `SqliteBackend` for any deployment
+  where HistoryRead matters.
+
+- **Don't expect continuation-point round-tripping.** Story 8-3 does
+  not implement OPC UA Part 11 §6.4.4 `ByteString` continuation points.
+  Truncated responses surface as
+  `data_values.len() == max_history_data_results_per_node` with `Good`
+  status. SCADA clients that want more rows must page manually:
+
+  ```text
+  // First call:
+  HistoryRead(start = T0, end = T1, num_values_per_node = 10000)
+  // → 10000 rows back, status Good
+
+  // Second call: bump start by 1µs past the last returned timestamp
+  let next_start = last_returned_row.timestamp + 1µs;
+  HistoryRead(start = next_start, end = T1, num_values_per_node = 10000)
+  // → next page, status Good
+
+  // Loop until data_values.len() < max_history_data_results_per_node
+  ```
+
+  The 1-microsecond bump matches the storage layer's microsecond-
+  precision timestamp format (`%Y-%m-%dT%H:%M:%S%.6fZ`). Anything
+  smaller would re-yield the last row of the previous page.
+
+- **Don't issue HistoryRead with `num_values_per_node = 0`** unless you
+  trust your time window. A zero `num_values_per_node` means "use the
+  server default" — and if the server is configured with
+  `max_history_data_results_per_node = 1_000_000`, a stray query for a
+  365-day range against a high-frequency metric could pull back over
+  a million rows and saturate the publish pipeline. The
+  `max_history_data_results_per_node` cap is the safety net; SCADA
+  clients should still set their own cap.
+
+- **Don't rely on `HistoryReadProcessed` (aggregations).** opcgw leaves
+  async-opcua's default `BadHistoryOperationUnsupported` for
+  `HistoryReadProcessed` and `HistoryReadAtTime`. SCADA clients that
+  need min/max/avg/sum over rolling buckets must compute them
+  client-side from the raw rows this story returns. Tracked at GitHub
+  issue [#98](https://github.com/guycorbaz/opcgw/issues/98).
+
+- **Don't expect `HistoryUpdate` to work.** opcgw is a read-only gateway
+  from ChirpStack's perspective; `HistoryUpdate` from the SCADA side
+  doesn't make sense and returns `BadHistoryOperationUnsupported`.
+
+### Tuning checklist
+
+For a 7-day retention deployment with FUXA dashboards:
+
+- Set `[storage].retention_days = 7` (the default).
+- Leave `[opcua].max_history_data_results_per_node = 10000` (the default)
+  unless dashboard latency profiling reveals a need.
+- Verify NFR15 by issuing a 7-day query during commissioning; the
+  `bench_history_read_7_day_full_retention` benchmark in
+  `tests/opcua_history_bench.rs` documents the contract.
+- If query latency exceeds 2 s, run `EXPLAIN QUERY PLAN` against the
+  underlying SQLite to confirm the `idx_metric_history_device_timestamp`
+  index is hit; if not, add a covering index
+  `(device_id, metric_name, timestamp)` and re-measure.
+- Per-metric retention overrides (e.g. "moisture keeps 30 days, all
+  others keep 7") are out of scope for Story 8-3 — tracked at
+  GitHub issue [#98](https://github.com/guycorbaz/opcgw/issues/98).
+
+---
+
 ## References
 
 - Story 7-1 spec: `_bmad-output/implementation-artifacts/7-1-credential-management-via-environment-variables.md`

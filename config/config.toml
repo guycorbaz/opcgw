@@ -129,6 +129,15 @@ stale_threshold_seconds = 120
 #max_message_size = 327675
 #max_chunk_count = 5
 #
+# OPC UA HistoryRead per-call response cap (Story 8-3, FR22).
+# Caps the number of HistoryData rows returned for one NodeId in a single
+# HistoryRead call. SCADA clients that want more page via follow-up
+# calls (manual paging — Story 8-3 does not implement OPC UA
+# continuation points; see docs/security.md#historical-data-access).
+# Default 10000 ≈ 28 hours of poll data at 10s polling.
+# Range: 1-1000000.
+#max_history_data_results_per_node = 10000
+#
 # Override via env var: OPCGW_OPCUA__<UPPERCASE_KEY>
 
 

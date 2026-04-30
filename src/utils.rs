@@ -197,6 +197,48 @@ pub const OPCUA_DEFAULT_MAX_CHUNK_COUNT: usize = 5;
 /// misconfiguration rather than a deliberate sizing.
 pub const OPCUA_MAX_CHUNK_COUNT_HARD_CAP: usize = 4096;
 
+/// FR22 floor for `[storage].retention_days` (Story 8-3, AC#3).
+///
+/// FR22 mandates a minimum of 7 days for historical metric data
+/// retention. Lower values would defeat the historical-trend
+/// use case (a SCADA operator analysing soil-moisture patterns
+/// over the past week needs at least one week of data on hand).
+/// Values below this floor are rejected at startup by `validate()`.
+pub const STORAGE_RETENTION_DAYS_FLOOR: u32 = 7;
+
+/// Hard upper bound for `[storage].retention_days` (Story 8-3, AC#3).
+///
+/// Values above this cap are rejected at startup by `validate()`.
+/// At 10s polling × ~400 metric pairs × 365 days the metric_history
+/// table approaches 1.3 billion rows which strains both pruning
+/// performance and per-call HistoryRead query latency. Operators
+/// that need longer retention must open a follow-up issue so the
+/// tuning trade-offs (sharding, archival to cold storage, lower
+/// polling rate) can be reviewed.
+pub const STORAGE_RETENTION_DAYS_HARD_CAP: u32 = 365;
+
+/// Default for `[opcua].max_history_data_results_per_node` (Story 8-3, AC#3).
+///
+/// Per-call cap on the number of `HistoryData` rows returned by a
+/// single OPC UA `HistoryRead` request for one NodeId. 10000 rows
+/// at 10s polling is ~28 hours of poll data — sufficient for typical
+/// FUXA dashboard time-windows. SCADA clients that want longer
+/// windows page via repeated calls (Story 8-3 does NOT implement
+/// OPC UA `ByteString` continuation points; manual paging via
+/// `last_returned_row.timestamp + 1µs` is the contract — see
+/// `docs/security.md#historical-data-access`). Override via env
+/// var `OPCGW_OPCUA__MAX_HISTORY_DATA_RESULTS_PER_NODE`.
+pub const OPCUA_DEFAULT_MAX_HISTORY_DATA_RESULTS_PER_NODE: usize = 10_000;
+
+/// Hard upper bound for `[opcua].max_history_data_results_per_node` (Story 8-3, AC#3).
+///
+/// Values above this cap are rejected at startup by `validate()`.
+/// 1_000_000 rows is the per-call response-size DoS protection
+/// ceiling; values above signal a misconfiguration. A per-call
+/// response of 1M `HistoryData` rows would saturate the publish
+/// pipeline and likely exceed `max_message_size` even at the cap.
+pub const OPCUA_MAX_HISTORY_DATA_RESULTS_PER_NODE_HARD_CAP: usize = 1_000_000;
+
 /// Maximum bytes per chunk in async-opcua 0.17.1 (Story 8-2 code review).
 ///
 /// **Note on naming:** this constant is named "min" because it is the

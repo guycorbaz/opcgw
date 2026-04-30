@@ -949,10 +949,16 @@ impl crate::storage::StorageBackend for SqliteBackend {
         };
 
         let value_str = value.to_string();
-        // Note: metric_history stores the MetricType variant name (e.g., "Float", "Int") in both value and data_type columns.
-        // This is intentional: the actual metric value (e.g., 3.14) is stored in metric_values via upsert_metric_value.
-        // metric_history is an append-only audit log of **which type was seen when**, not the actual sensor readings.
-        // Actual values are queried by joining metric_values with metric_history timestamps. See Story 7-3 (Phase B).
+        // NOTE: This single-row method is **legacy** — only the test fallback
+        // in `chirpstack.rs:1438-1468` calls it. The production poller uses
+        // `batch_write_metrics` (`:992-1109`), which stores the **actual
+        // sensor value** (numeric / boolean / text string) in
+        // `metric_history.value`. Story 8-3's HistoryRead path
+        // (`query_metric_history`, `:1357`) reads those rows directly and
+        // returns the actual values. The "type variant only" pattern below
+        // is a quirk of this legacy method's signature (which takes
+        // `value: &MetricType`, not the actual value); it does not affect
+        // production data.
         let data_type = value.to_string();
         // Use 'Z' suffix for UTC timezone to ensure consistent lexicographic ordering
         // Microsecond precision (%.6f) matches prune cutoff calculation for boundary accuracy
@@ -1352,6 +1358,140 @@ impl crate::storage::StorageBackend for SqliteBackend {
 
         __op.ok();
         Ok(deleted_count)
+    }
+
+    fn query_metric_history(
+        &self,
+        device_id: &str,
+        metric_name: &str,
+        start: std::time::SystemTime,
+        end: std::time::SystemTime,
+        max_results: usize,
+    ) -> Result<Vec<crate::storage::HistoricalMetricRow>, OpcGwError> {
+        use std::str::FromStr;
+        let mut __op = StorageOpLog::start("query_metric_history");
+
+        // Format timestamps to match the production write path
+        // (`batch_write_metrics:1048`: `chrono::DateTime::<Utc>::from(...).to_rfc3339()`).
+        // ISO8601 with timezone offset is what's stored, so lexicographic
+        // string comparison matches chronological order only if the bind
+        // values use the SAME format. NOTE: the legacy `append_metric_history`
+        // method at `:957-960` uses a different format (microsecond + `Z`)
+        // — that method is test-only and only writes the type variant name,
+        // so historical reads via this method don't see those rows in
+        // production.
+        let start_iso = chrono::DateTime::<Utc>::from(start).to_rfc3339();
+        let end_iso = chrono::DateTime::<Utc>::from(end).to_rfc3339();
+
+        let conn = self.pool.checkout(Duration::from_secs(5))?;
+
+        // Half-open interval `start <= timestamp < end`. Uses the
+        // `idx_metric_history_device_timestamp` composite index for time-range
+        // seeks; LIMIT is a hard cap on response size.
+        let query = "SELECT value, data_type, timestamp FROM metric_history \
+                     WHERE device_id = ?1 AND metric_name = ?2 \
+                     AND timestamp >= ?3 AND timestamp < ?4 \
+                     ORDER BY timestamp ASC LIMIT ?5";
+
+        let mut stmt = conn.prepare(query).map_err(|e| {
+            OpcGwError::Storage(format!("Failed to prepare query_metric_history statement: {e}"))
+        })?;
+
+        let rows = stmt
+            .query_map(
+                params![device_id, metric_name, start_iso, end_iso, max_results as i64],
+                |row| {
+                    let value: String = row.get(0)?;
+                    let data_type_str: String = row.get(1)?;
+                    let timestamp_str: String = row.get(2)?;
+                    Ok((value, data_type_str, timestamp_str))
+                },
+            )
+            .map_err(|e| {
+                OpcGwError::Storage(format!("Failed to execute query_metric_history: {e}"))
+            })?;
+
+        let mut results: Vec<crate::storage::HistoricalMetricRow> = Vec::new();
+        for row in rows {
+            let (value, data_type_str, timestamp_str) = row.map_err(|e| {
+                OpcGwError::Storage(format!("Failed to read query_metric_history row: {e}"))
+            })?;
+
+            // Partial-success: skip rows with unknown data_type rather than
+            // terminating the iterator on a single bad row.
+            let data_type = match crate::storage::MetricType::from_str(&data_type_str) {
+                Ok(t) => t,
+                Err(e) => {
+                    trace!(
+                        device_id = %device_id,
+                        metric_name = %metric_name,
+                        data_type_str = %data_type_str,
+                        error = %e,
+                        "query_metric_history: skipping row with unknown data_type"
+                    );
+                    continue;
+                }
+            };
+
+            // Partial-success: skip rows whose Float values are NaN/Infinity
+            // (OPC UA Variant::Float requires finite f32). Other types pass
+            // through unparsed — the OPC UA layer parses on demand.
+            if data_type == crate::storage::MetricType::Float {
+                match value.parse::<f64>() {
+                    Ok(f) if !f.is_finite() => {
+                        trace!(
+                            device_id = %device_id,
+                            metric_name = %metric_name,
+                            value = %value,
+                            "query_metric_history: skipping non-finite Float row"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        trace!(
+                            device_id = %device_id,
+                            metric_name = %metric_name,
+                            value = %value,
+                            error = %e,
+                            "query_metric_history: skipping unparseable Float row"
+                        );
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Parse the ISO8601 timestamp back to SystemTime.
+            let timestamp = match chrono::DateTime::parse_from_rfc3339(&timestamp_str) {
+                Ok(dt) => std::time::SystemTime::from(dt.with_timezone(&Utc)),
+                Err(e) => {
+                    trace!(
+                        device_id = %device_id,
+                        metric_name = %metric_name,
+                        timestamp_str = %timestamp_str,
+                        error = %e,
+                        "query_metric_history: skipping row with unparseable timestamp"
+                    );
+                    continue;
+                }
+            };
+
+            results.push(crate::storage::HistoricalMetricRow {
+                value,
+                data_type,
+                timestamp,
+            });
+        }
+
+        trace!(
+            device_id = %device_id,
+            metric_name = %metric_name,
+            row_count = results.len(),
+            "query_metric_history complete"
+        );
+
+        __op.ok();
+        Ok(results)
     }
 
     // ===== Story 3-1: High-level Command Queue =====
@@ -1901,6 +2041,46 @@ impl SqliteBackend {
         );
 
         Ok(deleted_count)
+    }
+
+    /// Story 8-3 AC#3: write the operator-configured `metric_history`
+    /// retention period to the `retention_config` table so the prune loop
+    /// (`prune_metric_history`) and the HistoryRead path observe the same
+    /// value.
+    ///
+    /// Uses `INSERT OR REPLACE` keyed on `(data_type)` (UNIQUE constraint
+    /// per `migrations/v001_initial.sql:118`). The migration default for the
+    /// `metric_history` row is 90 days (`v001_initial.sql:128`); this method
+    /// overrides that default with the value from `[storage].retention_days`
+    /// at startup, restoring operator intent on every boot. Validation
+    /// (`AppConfig::validate`) already enforces the FR22 floor of 7 days
+    /// and the hard cap of 365 — this method assumes a pre-validated value
+    /// and does not re-check.
+    pub fn set_metric_history_retention_days(&self, days: u32) -> Result<(), OpcGwError> {
+        let conn = self.pool.checkout(Duration::from_secs(5)).map_err(|e| {
+            error!(error = %e, "Pool checkout timeout for set_metric_history_retention_days");
+            e
+        })?;
+
+        conn.execute(
+            "INSERT OR REPLACE INTO retention_config \
+             (id, data_type, retention_days, auto_delete, updated_at) \
+             VALUES \
+             ((SELECT id FROM retention_config WHERE data_type = 'metric_history'), \
+              'metric_history', ?1, 1, datetime('now'))",
+            params![days as i64],
+        )
+        .map_err(|e| {
+            OpcGwError::Database(format!(
+                "Failed to set metric_history retention_days={days}: {e}"
+            ))
+        })?;
+
+        info!(
+            retention_days = days,
+            "metric_history retention_config row updated from operator config"
+        );
+        Ok(())
     }
 }
 
@@ -4216,5 +4396,344 @@ mod tests {
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(&path2);
+    }
+
+    // ===== Story 8-3 AC#1: query_metric_history tests =====
+
+    /// Helper: seed `count` history rows for `(device_id, metric_name)`,
+    /// values "v0", "v1", ..., spaced 1 second apart starting at `base_ts`.
+    fn seed_history_rows(
+        backend: &SqliteBackend,
+        device_id: &str,
+        metric_name: &str,
+        base_ts: std::time::SystemTime,
+        count: usize,
+        data_type: MetricType,
+    ) {
+        for i in 0..count {
+            let ts = base_ts + Duration::from_secs(i as u64);
+            let value = format!("v{i}");
+            backend
+                .batch_write_metrics(vec![crate::storage::BatchMetricWrite {
+                    device_id: device_id.to_string(),
+                    metric_name: metric_name.to_string(),
+                    value,
+                    data_type,
+                    timestamp: ts,
+                }])
+                .expect("seed batch_write_metrics");
+        }
+    }
+
+    #[test]
+    fn test_query_metric_history_empty_range() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("create backend");
+        let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let t1 = t0 + Duration::from_secs(60);
+
+        // No rows seeded.
+        let result = backend
+            .query_metric_history("dev1", "moisture", t0, t1, 100)
+            .expect("query empty");
+        assert!(result.is_empty(), "empty range must return empty Vec");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_query_metric_history_single_row() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("create backend");
+        let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        seed_history_rows(&backend, "dev1", "moisture", t0, 1, MetricType::String);
+
+        let result = backend
+            .query_metric_history(
+                "dev1",
+                "moisture",
+                t0,
+                t0 + Duration::from_secs(60),
+                100,
+            )
+            .expect("query single");
+        assert_eq!(result.len(), 1, "single seeded row must be returned");
+        assert_eq!(result[0].value, "v0");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_query_metric_history_boundary_inclusion_start() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("create backend");
+        let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        // Seed exactly at `start`.
+        seed_history_rows(&backend, "dev1", "m", t0, 1, MetricType::String);
+
+        // start == seed_ts; row should be returned (start is inclusive).
+        let result = backend
+            .query_metric_history("dev1", "m", t0, t0 + Duration::from_secs(10), 100)
+            .expect("query");
+        assert_eq!(result.len(), 1, "row at exactly `start` must be returned");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_query_metric_history_boundary_exclusion_end() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("create backend");
+        let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        // Seed exactly at `end`.
+        seed_history_rows(&backend, "dev1", "m", t0, 1, MetricType::String);
+
+        // end == seed_ts; row should NOT be returned (end is exclusive).
+        let result = backend
+            .query_metric_history(
+                "dev1",
+                "m",
+                t0 - Duration::from_secs(10),
+                t0,
+                100,
+            )
+            .expect("query");
+        assert_eq!(result.len(), 0, "row at exactly `end` must NOT be returned");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_query_metric_history_max_results_truncates() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("create backend");
+        let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        seed_history_rows(&backend, "dev1", "m", t0, 100, MetricType::String);
+
+        // max_results = 10
+        let result = backend
+            .query_metric_history(
+                "dev1",
+                "m",
+                t0,
+                t0 + Duration::from_secs(200),
+                10,
+            )
+            .expect("query");
+        assert_eq!(result.len(), 10, "max_results must truncate at 10");
+        // Earliest 10 timestamps in ASC order
+        assert_eq!(result[0].value, "v0", "first row must be earliest seed");
+        assert_eq!(result[9].value, "v9", "10th row must be 10th earliest seed");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_query_metric_history_ordering_ascending() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("create backend");
+        let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        // Seed in reverse order to defeat any insertion-order optimisation.
+        for i in (0..5).rev() {
+            let ts = t0 + Duration::from_secs(i as u64);
+            backend
+                .batch_write_metrics(vec![crate::storage::BatchMetricWrite {
+                    device_id: "dev1".to_string(),
+                    metric_name: "m".to_string(),
+                    value: format!("v{i}"),
+                    data_type: MetricType::String,
+                    timestamp: ts,
+                }])
+                .expect("seed");
+        }
+
+        let result = backend
+            .query_metric_history("dev1", "m", t0, t0 + Duration::from_secs(60), 100)
+            .expect("query");
+        assert_eq!(result.len(), 5);
+        let timestamps: Vec<std::time::SystemTime> = result.iter().map(|r| r.timestamp).collect();
+        for window in timestamps.windows(2) {
+            assert!(window[0] <= window[1], "rows must be in timestamp ASC order");
+        }
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_query_metric_history_skips_nan() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("create backend");
+        let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        // Seed a NaN Float row directly (bypassing batch_write_metrics, which
+        // would store the literal "NaN" string).
+        backend
+            .batch_write_metrics(vec![crate::storage::BatchMetricWrite {
+                device_id: "dev1".to_string(),
+                metric_name: "m".to_string(),
+                value: "NaN".to_string(),
+                data_type: MetricType::Float,
+                timestamp: t0,
+            }])
+            .expect("seed NaN");
+
+        let result = backend
+            .query_metric_history("dev1", "m", t0, t0 + Duration::from_secs(60), 100)
+            .expect("query");
+        assert_eq!(
+            result.len(),
+            0,
+            "NaN Float row must be skipped (partial-success)"
+        );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_query_metric_history_other_device_excluded() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("create backend");
+        let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        seed_history_rows(&backend, "dev1", "m", t0, 3, MetricType::String);
+        seed_history_rows(&backend, "dev2", "m", t0, 3, MetricType::String);
+
+        let result = backend
+            .query_metric_history("dev1", "m", t0, t0 + Duration::from_secs(60), 100)
+            .expect("query");
+        assert_eq!(result.len(), 3, "only dev1 rows must be returned");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_query_metric_history_other_metric_excluded() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("create backend");
+        let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        seed_history_rows(&backend, "dev1", "moisture", t0, 3, MetricType::String);
+        seed_history_rows(&backend, "dev1", "temperature", t0, 3, MetricType::String);
+
+        let result = backend
+            .query_metric_history("dev1", "moisture", t0, t0 + Duration::from_secs(60), 100)
+            .expect("query");
+        assert_eq!(result.len(), 3, "only moisture rows must be returned");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_query_metric_history_skips_unknown_data_type() {
+        // AC#1 partial-success: a row whose `data_type` column is not a
+        // recognised `MetricType` variant must be silently skipped (with a
+        // `trace!` log) rather than aborting the iterator. We bypass
+        // `batch_write_metrics` (which only accepts typed `MetricType`) and
+        // insert directly to seed an invalid row, then issue
+        // `query_metric_history` and expect zero rows.
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("create backend");
+        let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let ts_iso = chrono::DateTime::<Utc>::from(t0).to_rfc3339();
+
+        {
+            let conn = backend
+                .pool
+                .checkout(Duration::from_secs(5))
+                .expect("checkout");
+            conn.execute(
+                "INSERT INTO metric_history \
+                 (device_id, metric_name, value, data_type, timestamp, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                params!["dev1", "m", "1.0", "Frobnicator", ts_iso],
+            )
+            .expect("seed bad row");
+        }
+
+        let result = backend
+            .query_metric_history("dev1", "m", t0, t0 + Duration::from_secs(60), 100)
+            .expect("query");
+        assert_eq!(
+            result.len(),
+            0,
+            "row with unknown data_type must be skipped"
+        );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// Story 8-3 AC#3: `set_metric_history_retention_days` overrides the
+    /// `INSERT OR IGNORE` migration default (90 days) with the operator's
+    /// `[storage].retention_days` value. Verifies the table is updated
+    /// idempotently across multiple calls (matches the at-startup contract).
+    #[test]
+    fn test_set_metric_history_retention_days_writes_retention_config() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("create backend");
+
+        // Migration default for metric_history retention is 90 days
+        // (v001_initial.sql:128). Verify baseline.
+        let baseline: i64 = {
+            let conn = backend.pool.checkout(Duration::from_secs(5)).expect("checkout");
+            conn.query_row(
+                "SELECT retention_days FROM retention_config WHERE data_type = 'metric_history'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("baseline query")
+        };
+        assert_eq!(baseline, 90, "migration default must be 90 days");
+
+        // Apply operator config — 14 days.
+        backend
+            .set_metric_history_retention_days(14)
+            .expect("set retention");
+
+        let after_first: i64 = {
+            let conn = backend.pool.checkout(Duration::from_secs(5)).expect("checkout");
+            conn.query_row(
+                "SELECT retention_days FROM retention_config WHERE data_type = 'metric_history'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query after first set")
+        };
+        assert_eq!(after_first, 14, "retention_config must reflect 14 days");
+
+        // Idempotent re-apply — 30 days. Re-boot semantics: the value should
+        // always reflect the latest operator config, not accumulate.
+        backend
+            .set_metric_history_retention_days(30)
+            .expect("set retention");
+
+        let after_second: i64 = {
+            let conn = backend.pool.checkout(Duration::from_secs(5)).expect("checkout");
+            conn.query_row(
+                "SELECT retention_days FROM retention_config WHERE data_type = 'metric_history'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query after second set")
+        };
+        assert_eq!(
+            after_second, 30,
+            "retention_config must reflect last-write 30 days"
+        );
+
+        // Confirm there is still only one `metric_history` row (UPSERT, not
+        // INSERT-multiply).
+        let row_count: i64 = {
+            let conn = backend.pool.checkout(Duration::from_secs(5)).expect("checkout");
+            conn.query_row(
+                "SELECT COUNT(*) FROM retention_config WHERE data_type = 'metric_history'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("row count")
+        };
+        assert_eq!(
+            row_count, 1,
+            "UPSERT must not create duplicate metric_history rows"
+        );
+
+        let _ = fs::remove_file(&path);
     }
 }
