@@ -1397,9 +1397,14 @@ impl crate::storage::StorageBackend for SqliteBackend {
             OpcGwError::Storage(format!("Failed to prepare query_metric_history statement: {e}"))
         })?;
 
+        // Review patch P17: saturate the cast — `max_results: usize` could
+        // be > i64::MAX on a 64-bit host, and a wrapped negative LIMIT in
+        // SQLite means "no limit" (silently disabling the per-call DoS cap).
+        let max_results_i64 = i64::try_from(max_results).unwrap_or(i64::MAX);
+
         let rows = stmt
             .query_map(
-                params![device_id, metric_name, start_iso, end_iso, max_results as i64],
+                params![device_id, metric_name, start_iso, end_iso, max_results_i64],
                 |row| {
                     let value: String = row.get(0)?;
                     let data_type_str: String = row.get(1)?;
@@ -2071,7 +2076,13 @@ impl SqliteBackend {
             params![days as i64],
         )
         .map_err(|e| {
-            OpcGwError::Database(format!(
+            // Review patch P14: use OpcGwError::Storage to match
+            // `query_metric_history` and the spec's "Existing
+            // Infrastructure" guidance ("Use `Storage` for SQLite query
+            // failures"). The surrounding pre-Story-8-3 methods use
+            // `Database` for historical reasons; the two Story 8-3
+            // methods are now consistent with each other and with spec.
+            OpcGwError::Storage(format!(
                 "Failed to set metric_history retention_days={days}: {e}"
             ))
         })?;
@@ -4560,6 +4571,7 @@ mod tests {
     }
 
     #[test]
+    #[traced_test]
     fn test_query_metric_history_skips_nan() {
         let path = temp_backend_path();
         let backend = SqliteBackend::new(&path).expect("create backend");
@@ -4584,6 +4596,15 @@ mod tests {
             result.len(),
             0,
             "NaN Float row must be skipped (partial-success)"
+        );
+
+        // Review patch P15: pin the spec's partial-success contract by
+        // asserting the trace! log line was emitted. A regression that
+        // silently drops the trace! (e.g., refactor to eprintln!, or no
+        // log at all) will now fail this test.
+        assert!(
+            logs_contain("query_metric_history: skipping non-finite Float row"),
+            "expected partial-success trace! log on NaN Float skip"
         );
 
         let _ = fs::remove_file(&path);
@@ -4622,6 +4643,7 @@ mod tests {
     }
 
     #[test]
+    #[traced_test]
     fn test_query_metric_history_skips_unknown_data_type() {
         // AC#1 partial-success: a row whose `data_type` column is not a
         // recognised `MetricType` variant must be silently skipped (with a
@@ -4655,6 +4677,13 @@ mod tests {
             result.len(),
             0,
             "row with unknown data_type must be skipped"
+        );
+
+        // Review patch P15: pin the spec's partial-success contract by
+        // asserting the trace! log was emitted on the unknown-data_type path.
+        assert!(
+            logs_contain("query_metric_history: skipping row with unknown data_type"),
+            "expected partial-success trace! log on unknown data_type skip"
         );
 
         let _ = fs::remove_file(&path);

@@ -228,8 +228,8 @@ impl StorageBackend for InMemoryBackend {
 
     fn query_metric_history(
         &self,
-        _device_id: &str,
-        _metric_name: &str,
+        device_id: &str,
+        metric_name: &str,
         _start: std::time::SystemTime,
         _end: std::time::SystemTime,
         _max_results: usize,
@@ -239,6 +239,29 @@ impl StorageBackend for InMemoryBackend {
         // surfaces this to the SCADA client as an empty `HistoryData.dataValues`
         // array with `Good` status — matching the contract in `SqliteBackend`
         // for empty ranges.
+        //
+        // Review patch P13 (revised iter-2): emit a warn! once per process
+        // (gated by a static AtomicBool) so an operator running in
+        // degradation mode (or a smoke test that accidentally wires the
+        // in-memory backend into HistoryRead) sees a clear indication that
+        // the empty result is structural, not data-driven — without
+        // flooding the log under sustained dashboard polling. Subsequent
+        // calls drop to a per-call `debug!`.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static WARNED: AtomicBool = AtomicBool::new(false);
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                device_id = %device_id,
+                metric_name = %metric_name,
+                "InMemoryBackend::query_metric_history called — no historical data is persisted in this backend; returning empty (this warn fires once per process; subsequent calls log at debug)"
+            );
+        } else {
+            tracing::debug!(
+                device_id = %device_id,
+                metric_name = %metric_name,
+                "InMemoryBackend::query_metric_history: returning empty (in-memory backend has no history)"
+            );
+        }
         Ok(Vec::new())
     }
 

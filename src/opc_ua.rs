@@ -832,11 +832,30 @@ impl OpcUa {
                 for read_metric in device.read_metric_list.iter() {
                     debug!(metric_name = %read_metric.metric_name, "Adding read metric to OPC UA");
                     let read_metric_node = NodeId::new(ns, read_metric.metric_name.clone());
+                    // Story 8-3 review patch P1: the variable's initial value
+                    // determines its `DataType` attribute. Pick a value that
+                    // matches the metric_type so `HistoryData` Variants
+                    // (built by `opc_ua_history::build_data_values`) and live
+                    // reads (built by `convert_metric_to_variant`) agree
+                    // with the variable's declared DataType. Variant pairing
+                    // mirrors `convert_metric_to_variant`:
+                    //   Int    → Int32   (live path may widen to Int64)
+                    //   Float  → Float (f32)
+                    //   String → String
+                    //   Bool   → Boolean
+                    let initial_variant: Variant = match read_metric.metric_type {
+                        crate::config::OpcMetricTypeConfig::Int => Variant::Int32(0),
+                        crate::config::OpcMetricTypeConfig::Float => Variant::Float(0.0),
+                        crate::config::OpcMetricTypeConfig::String => {
+                            Variant::String(opcua::types::UAString::null())
+                        }
+                        crate::config::OpcMetricTypeConfig::Bool => Variant::Boolean(false),
+                    };
                     let mut metric_variable = Variable::new(
                         &read_metric_node,
                         read_metric.metric_name.clone(),
                         read_metric.metric_name.clone(),
-                        0_i32,
+                        initial_variant,
                     );
                     // Story 8-3 AC#2: enable HistoryRead access on metric
                     // variables. async-opcua's session-layer dispatch

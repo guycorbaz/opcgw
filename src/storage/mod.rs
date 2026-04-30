@@ -157,6 +157,18 @@ pub struct BatchMetricWrite {
 /// path stores the actual value here, not the type variant name. The
 /// legacy single-row `append_metric_history` method (only used by tests)
 /// stores the variant name; production code uses the batch path.
+///
+/// **Review patch P16 contract clarification**: legacy test-only rows
+/// produced by `append_metric_history` (which stored the literal variant
+/// names `"Float"` / `"Int"` / `"Bool"` / `"String"` in the `value`
+/// column) are tolerated by `query_metric_history` only because the
+/// per-type partial-success skips them: Float rows fail the
+/// `value.parse::<f64>()` step and are dropped with a `trace!`. Bool
+/// rows fail `bool::from_str("Float")` and are dropped at
+/// `build_data_values` time. Production deployments never hit this
+/// because production code always uses the batch path. If a future
+/// change re-enables `append_metric_history` for production data, the
+/// type-name-as-value rows must be migrated or filtered explicitly.
 #[derive(Clone, Debug)]
 pub struct HistoricalMetricRow {
     /// Original value as stored — the actual sensor reading.

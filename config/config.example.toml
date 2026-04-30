@@ -171,6 +171,15 @@ stale_threshold_seconds = 120
 #
 # Override via env var: OPCGW_OPCUA__<UPPERCASE_KEY>
 
+# OPC UA HistoryRead per-call response cap (Story 8-3, FR22).
+# Default is 10000 (~28h of 10s polling — sufficient for typical FUXA
+# dashboard time-windows). Hard cap is 1_000_000. SCADA clients that
+# want longer windows page manually — see
+# docs/security.md#historical-data-access for the recipe.
+#max_history_data_results_per_node = 10000
+#
+# Override via env var: OPCGW_OPCUA__MAX_HISTORY_DATA_RESULTS_PER_NODE
+
 
 ###########################################################
 # Applications

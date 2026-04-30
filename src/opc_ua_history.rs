@@ -185,6 +185,25 @@ impl InMemoryNodeManagerImpl for OpcgwHistoryNodeManagerImpl {
     /// `(device_id, metric_name)` pair via `node_to_metric`, query
     /// `metric_history` via `StorageBackend::query_metric_history`, and
     /// write results back to each `HistoryNode` as `HistoryData`.
+    ///
+    /// **Review patches applied (2026-04-30):**
+    /// - P4: `is_read_modified = true` → `BadHistoryOperationUnsupported`
+    ///   (we don't track per-row modification info; raw history only).
+    /// - P5: `return_bounds = true` → `BadHistoryOperationUnsupported`
+    ///   (boundary-row interpolation not implemented).
+    /// - P2/P3: explicit guard for null `start_time` / `end_time`. A null
+    ///   on either end (or both) is mapped to `BadInvalidArgument` rather
+    ///   than silently coerced to the OPC UA 1601 epoch.
+    /// - P6/P7: per-node `continuation_point` and `index_range` rejected
+    ///   with `BadContinuationPointInvalid` / `BadIndexRangeNoData`.
+    /// - P11: storage failure surfaces as `BadInternalError` (transient)
+    ///   rather than `BadHistoryOperationInvalid` (permanent NodeId
+    ///   structural failure per Part 11 §6.4 semantics).
+    /// - P18: `node_to_metric` is snapshotted into a local `Vec` while the
+    ///   `RwLock` read guard is held briefly, then the lock is dropped
+    ///   before any blocking SQLite call. This preserves the spec's
+    ///   "Build once, immutable" intent without holding a read lock
+    ///   across N storage queries.
     async fn history_read_raw_modified(
         &self,
         _context: &RequestContext,
@@ -192,10 +211,33 @@ impl InMemoryNodeManagerImpl for OpcgwHistoryNodeManagerImpl {
         nodes: &mut [&mut &mut opcua::server::node_manager::HistoryNode],
         _timestamps_to_return: TimestampsToReturn,
     ) -> Result<(), StatusCode> {
-        // Decode the requested time range. `start_time` and `end_time` are
-        // OPC UA `DateTime` values — convert to `SystemTime` for the storage
-        // method. AC#1's half-open interval semantics (start inclusive, end
-        // exclusive) match Part 11 §6.4 — so we pass through unchanged.
+        // P4: modification history is not tracked.
+        if details.is_read_modified {
+            for node in nodes.iter_mut() {
+                node.set_status(StatusCode::BadHistoryOperationUnsupported);
+            }
+            return Ok(());
+        }
+
+        // P5: bounding-value interpolation is not implemented.
+        if details.return_bounds {
+            for node in nodes.iter_mut() {
+                node.set_status(StatusCode::BadHistoryOperationUnsupported);
+            }
+            return Ok(());
+        }
+
+        // P2/P3: a null `DateTime` on either endpoint (or both) is
+        // structurally invalid; do not silently coerce to the 1601 epoch.
+        if details.start_time == DateTime::null() || details.end_time == DateTime::null() {
+            for node in nodes.iter_mut() {
+                node.set_status(StatusCode::BadInvalidArgument);
+            }
+            return Ok(());
+        }
+
+        // Decode the requested time range. AC#1's half-open interval
+        // semantics (start inclusive, end exclusive) match Part 11 §6.4.
         let start_st: std::time::SystemTime =
             std::time::SystemTime::from(details.start_time.as_chrono());
         let end_st: std::time::SystemTime =
@@ -204,10 +246,7 @@ impl InMemoryNodeManagerImpl for OpcgwHistoryNodeManagerImpl {
         // AC#2 verification: an inverted time range returns
         // `BadInvalidArgument` per OPC UA Part 11 §6.4.2 (server-side
         // validation of range monotonicity).
-        if details.end_time != DateTime::null()
-            && details.start_time != DateTime::null()
-            && end_st < start_st
-        {
+        if end_st < start_st {
             for node in nodes.iter_mut() {
                 node.set_status(StatusCode::BadInvalidArgument);
             }
@@ -215,22 +254,62 @@ impl InMemoryNodeManagerImpl for OpcgwHistoryNodeManagerImpl {
         }
 
         // AC#3: the per-NodeId cap. `num_values_per_node` of 0 in the
-        // HistoryRead request means "no client-side cap"; honour the
-        // server-side default in that case.
+        // HistoryRead request means "no client-side cap" per the OPC UA
+        // Part 11 §5.6.3 convention; honour the server-side default in
+        // that case.
+        //
+        // Review patch P20 (revised iter-2): clients that genuinely want
+        // zero rows are ill-served by the OPC UA convention here — there's
+        // no way to distinguish "no cap" from "zero rows". Emit a `debug!`
+        // (NOT `info!` — UaExpert and several SCADA dashboards default to
+        // num_values_per_node=0, which would flood the log at info level)
+        // so an operator debugging an unexpected payload size can see the
+        // convention applied without noise on the steady-state path.
         let server_cap = self.max_results_per_node;
         let client_cap = details.num_values_per_node as usize;
         let max_results = if client_cap == 0 {
+            debug!(
+                server_cap,
+                "history_read_raw_modified: client num_values_per_node=0 (OPC UA \"no cap\" convention) — using server cap"
+            );
             server_cap
         } else {
             std::cmp::min(client_cap, server_cap)
         };
 
-        let map = self.node_to_metric.read();
+        // P18: snapshot the `(device_id, metric_name)` lookups under the
+        // read guard, then drop the lock before any blocking SQLite call.
+        // The map is write-once-then-read-only (built during
+        // `OpcUa::add_nodes` before `server.run()`), so this is just a
+        // brief pointer-clone walk.
+        let lookups: Vec<Option<(String, String)>> = {
+            let map = self.node_to_metric.read();
+            nodes
+                .iter()
+                .map(|node| map.get(node.node_id()).cloned())
+                .collect()
+        };
 
-        for node in nodes.iter_mut() {
+        for (node, lookup) in nodes.iter_mut().zip(lookups) {
+            // P6: stale or foreign continuation points are explicitly
+            // rejected — Story 8-3 does not implement continuation point
+            // round-tripping (AC#5; manual-paging recipe in
+            // docs/security.md).
+            if node.continuation_point().is_some() {
+                node.set_status(StatusCode::BadContinuationPointInvalid);
+                continue;
+            }
+
+            // P7: a non-`None` `NumericRange` on a scalar history variable
+            // is structurally invalid — there is no array element to slice.
+            if !node.index_range().is_none() {
+                node.set_status(StatusCode::BadIndexRangeNoData);
+                continue;
+            }
+
             let node_id = node.node_id().clone();
 
-            let Some((device_id, metric_name)) = map.get(&node_id) else {
+            let Some((device_id, metric_name)) = lookup else {
                 trace!(
                     node_id = %node_id,
                     "history_read_raw_modified: NodeId not registered for HistoryRead"
@@ -240,13 +319,14 @@ impl InMemoryNodeManagerImpl for OpcgwHistoryNodeManagerImpl {
             };
 
             match self.backend.query_metric_history(
-                device_id,
-                metric_name,
+                &device_id,
+                &metric_name,
                 start_st,
                 end_st,
                 max_results,
             ) {
                 Ok(rows) => {
+                    let row_count = rows.len();
                     let data_values = build_data_values(&rows);
                     let history_data = HistoryData {
                         data_values: Some(data_values),
@@ -257,7 +337,7 @@ impl InMemoryNodeManagerImpl for OpcgwHistoryNodeManagerImpl {
                         node_id = %node_id,
                         device_id = %device_id,
                         metric_name = %metric_name,
-                        row_count = rows.len(),
+                        row_count = row_count,
                         "history_read_raw_modified: returning rows"
                     );
                 }
@@ -269,12 +349,12 @@ impl InMemoryNodeManagerImpl for OpcgwHistoryNodeManagerImpl {
                         error = %e,
                         "history_read_raw_modified: storage query failed"
                     );
-                    // BadHistoryOperationInvalid is the closest async-opcua
-                    // 0.17.1 surfaces for storage-side failures (the spec's
-                    // BadHistoryOperationFailed isn't in this build of the
-                    // status_code table — see async-opcua-types-0.17.1
-                    // status_code.rs:697-698).
-                    node.set_status(StatusCode::BadHistoryOperationInvalid);
+                    // P11: transient storage failure → BadInternalError per
+                    // OPC UA Part 11. `BadHistoryOperationInvalid` would
+                    // mean "permanent structural failure on this NodeId"
+                    // and SCADA clients would disable the trend rather
+                    // than retrying.
+                    node.set_status(StatusCode::BadInternalError);
                 }
             }
         }
@@ -292,8 +372,26 @@ fn build_data_values(rows: &[HistoricalMetricRow]) -> Vec<DataValue> {
     let now = DateTime::now();
     for row in rows {
         let variant = match row.data_type {
+            // Review patch P10: align with the live read path
+            // (`OpcUa::convert_metric_to_variant`) which emits
+            // `Variant::Float` (f32) for `MetricType::Float`. The variable's
+            // declared DataType (set in `OpcUa::add_nodes` from
+            // `OpcMetricTypeConfig::Float`) is also Float (f32) — using
+            // Variant::Double here would mean the historized DataType
+            // diverges from the variable's DataType (Part 11 §6.4.2 violation).
+            // Parse as f64 first to detect non-finite values, then narrow to
+            // f32 with a finite-after-narrowing check (an f64 in (f32::MAX,
+            // f64::MAX) overflows to f32::INFINITY, which we skip).
             MetricType::Float => match row.value.parse::<f64>() {
-                Ok(f) if f.is_finite() => Variant::Double(f),
+                Ok(f) if f.is_finite() => {
+                    let narrowed = f as f32;
+                    if narrowed.is_finite() {
+                        Variant::Float(narrowed)
+                    } else {
+                        trace!(value = %row.value, "history: skipping Float row that overflows f32");
+                        continue;
+                    }
+                }
                 _ => {
                     trace!(value = %row.value, "history: skipping unparseable Float row");
                     continue;
@@ -395,7 +493,9 @@ mod tests {
     use crate::storage::MetricType;
 
     /// Story 8-3 AC#1: `build_data_values` round-trips Float rows from
-    /// `HistoricalMetricRow` to `DataValue` with `Variant::Double`.
+    /// `HistoricalMetricRow` to `DataValue` with `Variant::Float` (f32) —
+    /// matching the live read path (`convert_metric_to_variant`) and the
+    /// metric variable's declared DataType (review patch P10).
     #[test]
     fn test_build_data_values_float_round_trip() {
         let rows = vec![HistoricalMetricRow {
@@ -407,8 +507,8 @@ mod tests {
         let dvs = build_data_values(&rows);
         assert_eq!(dvs.len(), 1);
         match dvs[0].value.as_ref().expect("variant") {
-            Variant::Double(f) => assert!((f - 20.5).abs() < 1e-9),
-            other => panic!("expected Double, got {:?}", other),
+            Variant::Float(f) => assert!((f - 20.5_f32).abs() < 1e-6),
+            other => panic!("expected Float, got {:?}", other),
         }
     }
 

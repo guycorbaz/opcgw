@@ -513,11 +513,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `retention_config` table so the prune loop honours operator config.
     // Migration default is 90 days; without this UPSERT the prune loop
     // would ignore `[storage].retention_days` after first boot.
-    if let Err(e) =
-        sqlite_backend.set_metric_history_retention_days(application_config.storage.retention_days)
-    {
-        error!(error = %e, "Failed to apply [storage].retention_days to retention_config (continuing with previous DB value)");
-    }
+    //
+    // Review patch P8: fail-closed at startup. A silent fallback to the
+    // 90-day migration default when the operator has explicitly configured
+    // a 7-day FR22-compliant retention is a compliance footgun (Story 7-2
+    // established the fail-closed pattern for security-relevant
+    // configuration). Propagate the error so the gateway refuses to start
+    // with a misconfigured retention rather than silently honouring the
+    // wrong retention.
+    sqlite_backend
+        .set_metric_history_retention_days(application_config.storage.retention_days)
+        .map_err(|e| {
+            error!(error = %e, "Failed to apply [storage].retention_days to retention_config — failing closed");
+            e
+        })?;
 
     match sqlite_backend.load_all_metrics() {
         Ok(metrics) => {

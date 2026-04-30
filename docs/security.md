@@ -847,6 +847,33 @@ caveat: rows whose `value` column doesn't parse to the declared type
 silently skipped with a `trace!` log. This is the partial-success
 contract — a single bad row never terminates a 600k-row scan.
 
+#### Known limitations of the historized record
+
+- **All historical rows are reported `StatusCode::Good`** — the
+  `metric_history` SQLite table has no `status` column, so the
+  `OpcgwHistoryNodeManagerImpl` cannot reconstruct the per-row status
+  that the live read path computes via the Story 5-2 stale-detection
+  logic. A SCADA client reviewing a flaky sensor's history will see "all
+  green" even if the live reads for that period were `Uncertain`. Use
+  the live `Read` service alongside `HistoryRead` if status
+  interpretation matters for your workflow.
+- **Timestamps are microsecond-precise on the wire.** The storage layer
+  uses `SecondsFormat::AutoSi` RFC3339 (which caps at microsecond
+  resolution), then `OpcDateTime` re-encodes as 100-nanosecond ticks
+  since 1601. Sub-microsecond detail from `SystemTime` is lost; this is
+  not a regression — it's the same precision the poller writes.
+
+#### `[storage].retention_days` and HistoryRead
+
+The `[storage].retention_days` knob (and its env-var override
+`OPCGW_STORAGE__RETENTION_DAYS`) governs **both** the prune loop's
+deletion horizon **and** the effective HistoryRead window. Story 8-3
+extended this single field rather than adding a separate
+`history_retention_days` — one source of truth, validated against the
+FR22 floor of 7 days and the storage-cost hard cap of 365 days. The
+field is written to the SQLite `retention_config` table at every
+startup, overriding the migration default of 90 days.
+
 ### Configuration
 
 Two new knobs land in `[storage]` and `[opcua]`:

@@ -35,11 +35,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use opcua::client::{ClientBuilder, IdentityToken, Password as ClientPassword, Session};
+use opcua::client::{
+    ClientBuilder, DataChangeCallback, IdentityToken, Password as ClientPassword, Session,
+};
 use opcua::types::{
     DateTime as OpcDateTime, EndpointDescription, ExtensionObject, HistoryData,
-    HistoryReadValueId, MessageSecurityMode, NodeId, ReadRawModifiedDetails, StatusCode,
-    TimestampsToReturn, UserTokenPolicy, UserTokenType,
+    HistoryReadValueId, MessageSecurityMode, MonitoredItemCreateRequest, MonitoringMode, NodeId,
+    ReadRawModifiedDetails, ReadValueId, StatusCode, TimestampsToReturn, UserTokenPolicy,
+    UserTokenType,
 };
 use tempfile::TempDir;
 use tokio::net::TcpStream;
@@ -570,6 +573,191 @@ async fn test_history_read_max_results_truncates_at_limit() {
     let dvs = decode_history_data(&results[0].history_data);
     assert_eq!(dvs.len(), 100, "response must truncate at the cap");
 
+    let _ = session.disconnect().await;
+    event_handle.abort();
+}
+
+/// Story 8-3 review patch P12: cover the **client cap < server cap**
+/// branch of the per-call cap. With `max_history_data_results_per_node`
+/// set to 100 (server cap) but the client requesting `num_values_per_node
+/// = 50`, the response must contain 50 rows (the smaller of the two), not
+/// 100. The previous truncation test only exercised the
+/// `num_values_per_node = 0` path (client says "no cap, use server
+/// default"); this test covers `min(client_cap, server_cap)`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn test_history_read_client_cap_below_server_cap_uses_client_cap() {
+    let server = setup_test_server(Some(100)).await;
+
+    // Seed 200 rows; both caps will truncate, but the client cap (50) wins.
+    let base = std::time::SystemTime::now() - Duration::from_secs(3600);
+    seed_rows(&server.backend, base, 200);
+
+    let (session, _ctmp, _client, event_handle) = open_session(&server).await;
+
+    let node_id = NodeId::new(OPCGW_NAMESPACE_INDEX, TEST_METRIC_OPCUA_NAME);
+    // num_values_per_node = 50 — strictly below the server cap of 100.
+    let details_eo = read_raw_details(base, base + Duration::from_secs(3600), 50);
+    let details = opcua::client::HistoryReadAction::ReadRawModifiedDetails(
+        details_eo
+            .inner_as::<ReadRawModifiedDetails>()
+            .expect("decode")
+            .clone(),
+    );
+    let nodes = vec![HistoryReadValueId {
+        node_id: node_id.clone(),
+        index_range: opcua::types::NumericRange::None,
+        data_encoding: opcua::types::QualifiedName::null(),
+        continuation_point: opcua::types::ByteString::null(),
+    }];
+    let results = session
+        .history_read(details, TimestampsToReturn::Both, false, &nodes)
+        .await
+        .expect("HistoryRead must succeed");
+    assert_eq!(results.len(), 1);
+    assert!(
+        results[0].status_code.is_good(),
+        "per-node status must be Good"
+    );
+    let dvs = decode_history_data(&results[0].history_data);
+    assert_eq!(
+        dvs.len(),
+        50,
+        "client cap must win when smaller than the server cap"
+    );
+
+    let _ = session.disconnect().await;
+    event_handle.abort();
+}
+
+/// Story 8-3 review patch P-D1 / AC#2.6: HistoryRead and a Subscription's
+/// MonitoredItem can run concurrently in the **same session** without
+/// interference. The two services dispatch through different paths in
+/// async-opcua's session-layer, but they share the underlying
+/// `OpcgwHistoryNodeManagerImpl`'s reverse-lookup map (Story 8-3) and
+/// `SimpleNodeManagerImpl`'s read-callback registry. This test pins:
+///   - CreateSubscription + CreateMonitoredItems on the metric NodeId
+///     succeeds (live read path)
+///   - HistoryRead for the same NodeId in the same session succeeds and
+///     returns the seeded historical rows (history path)
+///   - The subscription's first DataChangeNotification arrives (publish
+///     path was not blocked while HistoryRead was iterating storage —
+///     validates review patch P18, which moved the lookup-map snapshot
+///     out of the lock-held loop).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn test_history_read_concurrent_with_subscription_same_session() {
+    use tokio::sync::mpsc;
+
+    let server = setup_test_server(None).await;
+
+    // Seed 5 historical rows so HistoryRead has something to return.
+    let base = std::time::SystemTime::now() - Duration::from_secs(300);
+    seed_rows(&server.backend, base, 5);
+
+    let (session, _ctmp, _client, event_handle) = open_session(&server).await;
+
+    let node_id = NodeId::new(OPCGW_NAMESPACE_INDEX, TEST_METRIC_OPCUA_NAME);
+
+    // Step 1: create the subscription. Channel collects each
+    // DataChangeNotification so the test can assert the publish path
+    // is alive after HistoryRead completes.
+    let (tx, mut rx) = mpsc::unbounded_channel::<opcua::types::DataValue>();
+    let subscription_id = session
+        .create_subscription(
+            Duration::from_millis(1000),
+            30,
+            10,
+            0,
+            0,
+            true,
+            DataChangeCallback::new(move |dv, _item| {
+                let _ = tx.send(dv);
+            }),
+        )
+        .await
+        .expect("CreateSubscription must succeed");
+    assert!(
+        subscription_id != 0,
+        "server-assigned subscription_id must be non-zero"
+    );
+
+    // Step 2: register a monitored item on the metric NodeId.
+    let create = MonitoredItemCreateRequest {
+        item_to_monitor: ReadValueId::from(node_id.clone()),
+        monitoring_mode: MonitoringMode::Reporting,
+        requested_parameters: opcua::types::MonitoringParameters {
+            client_handle: 1,
+            sampling_interval: 1000.0,
+            filter: ExtensionObject::null(),
+            queue_size: 10,
+            discard_oldest: true,
+        },
+    };
+    let create_results = session
+        .create_monitored_items(subscription_id, TimestampsToReturn::Both, vec![create])
+        .await
+        .expect("CreateMonitoredItems must succeed");
+    assert_eq!(create_results.len(), 1);
+    assert!(
+        create_results[0].result.status_code.is_good(),
+        "CreateMonitoredItems must be Good"
+    );
+
+    // Step 3: issue HistoryRead **while the subscription is active** in
+    // the same session. The historical query must not block on (or be
+    // blocked by) the publish loop.
+    let start = base;
+    let end = base + Duration::from_secs(60);
+    let details_eo = read_raw_details(start, end, 100);
+    let details = opcua::client::HistoryReadAction::ReadRawModifiedDetails(
+        details_eo
+            .inner_as::<ReadRawModifiedDetails>()
+            .expect("decode")
+            .clone(),
+    );
+    let nodes = vec![HistoryReadValueId {
+        node_id: node_id.clone(),
+        index_range: opcua::types::NumericRange::None,
+        data_encoding: opcua::types::QualifiedName::null(),
+        continuation_point: opcua::types::ByteString::null(),
+    }];
+    let history_results = session
+        .history_read(details, TimestampsToReturn::Both, false, &nodes)
+        .await
+        .expect("HistoryRead must succeed concurrently with active subscription");
+    assert_eq!(history_results.len(), 1);
+    assert!(
+        history_results[0].status_code.is_good(),
+        "HistoryRead status must be Good — subscription must not interfere"
+    );
+    let dvs = decode_history_data(&history_results[0].history_data);
+    assert_eq!(
+        dvs.len(),
+        5,
+        "HistoryRead must return all 5 seeded rows even with active subscription"
+    );
+
+    // Step 4: confirm the subscription's publish path is still alive
+    // after HistoryRead returned. The first notification should arrive
+    // within ~1 publishing-interval of subscription creation; a
+    // generous 10s timeout absorbs CI variance.
+    let first_notification = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect(
+            "subscription DataChangeNotification must arrive within 10s — \
+             HistoryRead must not block the publish path (review patch P18 regression)",
+        )
+        .expect("notification channel closed unexpectedly");
+    assert!(
+        first_notification.value.is_some()
+            || first_notification.status.is_some()
+            || first_notification.source_timestamp.is_some(),
+        "DataChangeNotification must carry at least one populated field"
+    );
+
+    // Tear down the subscription cleanly.
+    let _ = session.delete_subscription(subscription_id).await;
     let _ = session.disconnect().await;
     event_handle.abort();
 }

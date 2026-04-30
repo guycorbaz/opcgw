@@ -1069,13 +1069,26 @@ impl AppConfig {
             }
         }
 
-        // Story 8-3 AC#3: storage.retention_days FR22 floor + storage-cost cap
+        // Story 8-3 AC#3: storage.retention_days FR22 floor + storage-cost cap.
+        //
+        // Review patch P21: this validation tightens the existing field
+        // (it was previously an unbounded `u32`). Pre-Story-8-3 deployments
+        // with `retention_days < 7` will fail to start after upgrade. The
+        // error message now explicitly names the upgrade scenario so the
+        // operator can either bump the value to 7 (recommended — matches
+        // FR22) or, for a smoke-test environment, open an issue to revisit
+        // the floor.
         if self.storage.retention_days < crate::utils::STORAGE_RETENTION_DAYS_FLOOR {
             errors.push(format!(
                 "storage.retention_days: {} is below FR22 minimum of {} days (lower values \
                  would defeat the historical-trend use case — SCADA operators analysing \
-                 patterns over the past week need at least one week of data on hand)",
+                 patterns over the past week need at least one week of data on hand). \
+                 If you are upgrading from a pre-Story-8-3 deployment that previously \
+                 accepted values below 7, raise this knob to {} or above; smoke-test \
+                 environments that cannot honour the floor should open a tracking issue \
+                 rather than disabling validation.",
                 self.storage.retention_days,
+                crate::utils::STORAGE_RETENTION_DAYS_FLOOR,
                 crate::utils::STORAGE_RETENTION_DAYS_FLOOR
             ));
         } else if self.storage.retention_days > crate::utils::STORAGE_RETENTION_DAYS_HARD_CAP {

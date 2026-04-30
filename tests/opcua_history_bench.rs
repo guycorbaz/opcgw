@@ -132,11 +132,17 @@ fn bench_history_read_7_day_full_retention() {
             LATENCY_BUDGET_MS
         );
     } else {
-        eprintln!(
-            "WARNING: bench_history_read_7_day_full_retention ran in DEBUG \
-             build — latency assertion skipped (debug SQLite is ~10× slower). \
-             Re-run with `cargo test --release --test opcua_history_bench -- \
-             --ignored bench_history_read_7_day_full_retention`."
+        // Review patch P28: a debug-build run silently green-tested the
+        // benchmark without verifying NFR15. CI lanes that don't pass
+        // `--release` would have shown a green test that did not
+        // exercise the latency contract. Hard-panic instead so debug
+        // runs are an unambiguous skip rather than a false success.
+        panic!(
+            "bench_history_read_7_day_full_retention must be invoked with \
+             --release. Re-run with `cargo test --release --test opcua_history_bench \
+             -- --ignored bench_history_read_7_day_full_retention`. (Debug SQLite \
+             runs ~10× slower; the latency budget would either be a false alarm or \
+             a meaningless pass.)"
         );
     }
 }
