@@ -314,9 +314,42 @@ impl OpcUa {
     /// fields and so the value documented in `src/utils.rs` is the single
     /// source of truth.
     fn configure_limits(&self, server_builder: ServerBuilder) -> ServerBuilder {
-        let max = self.max_sessions();
-        debug!(max_sessions = %max, "Configure session limit");
-        server_builder.max_sessions(max)
+        let max_sessions = self.max_sessions();
+        let max_subs_per_session = self.max_subscriptions_per_session();
+        let max_items_per_sub = self.max_monitored_items_per_sub();
+        let max_message_size = self.max_message_size();
+        let max_chunk_count = self.max_chunk_count();
+        debug!(
+            max_sessions,
+            max_subs_per_session,
+            max_items_per_sub,
+            max_message_size,
+            max_chunk_count,
+            "Configure session and subscription limits"
+        );
+        // Ordering invariant: direct setters (`.max_sessions`,
+        // `.max_message_size`, `.max_chunk_count`) MUST run before the
+        // `limits_mut()` block. ServerBuilder's setters take `self` by
+        // value and could in principle reset the entire `Limits` struct
+        // on a future async-opcua refactor; performing the
+        // subscription-field mutations afterwards guarantees they win.
+        // Reordering this chain (e.g. moving `limits_mut()` before
+        // direct setters) risks silent loss of the subscription caps.
+        let mut server_builder = server_builder
+            .max_sessions(max_sessions)
+            .max_message_size(max_message_size)
+            .max_chunk_count(max_chunk_count);
+        // Subscription-related fields have no direct setter on
+        // ServerBuilder — the only path is `limits_mut().subscriptions`.
+        // Story 8-1 spike § 11 item 2: do NOT call `.limits(Limits)` —
+        // that resets every default and risks silent regressions on
+        // fields this story doesn't touch.
+        {
+            let limits = server_builder.limits_mut();
+            limits.subscriptions.max_subscriptions_per_session = max_subs_per_session;
+            limits.subscriptions.max_monitored_items_per_sub = max_items_per_sub;
+        }
+        server_builder
     }
 
     /// Single source of truth for "what session cap will be enforced",
@@ -330,6 +363,46 @@ impl OpcUa {
             .opcua
             .max_connections
             .unwrap_or(OPCUA_DEFAULT_MAX_CONNECTIONS)
+    }
+
+    /// Single source of truth for the resolved
+    /// `max_subscriptions_per_session` cap (Story 8-2, AC#2). Falls back
+    /// to `OPCUA_DEFAULT_MAX_SUBSCRIPTIONS_PER_SESSION` when unset.
+    fn max_subscriptions_per_session(&self) -> usize {
+        self.config
+            .opcua
+            .max_subscriptions_per_session
+            .unwrap_or(OPCUA_DEFAULT_MAX_SUBSCRIPTIONS_PER_SESSION)
+    }
+
+    /// Single source of truth for the resolved
+    /// `max_monitored_items_per_sub` cap (Story 8-2, AC#2). Falls back
+    /// to `OPCUA_DEFAULT_MAX_MONITORED_ITEMS_PER_SUB` when unset.
+    fn max_monitored_items_per_sub(&self) -> usize {
+        self.config
+            .opcua
+            .max_monitored_items_per_sub
+            .unwrap_or(OPCUA_DEFAULT_MAX_MONITORED_ITEMS_PER_SUB)
+    }
+
+    /// Single source of truth for the resolved `max_message_size` cap in
+    /// bytes (Story 8-2, AC#2). Falls back to
+    /// `OPCUA_DEFAULT_MAX_MESSAGE_SIZE` when unset.
+    fn max_message_size(&self) -> usize {
+        self.config
+            .opcua
+            .max_message_size
+            .unwrap_or(OPCUA_DEFAULT_MAX_MESSAGE_SIZE)
+    }
+
+    /// Single source of truth for the resolved `max_chunk_count` cap
+    /// (Story 8-2, AC#2). Falls back to `OPCUA_DEFAULT_MAX_CHUNK_COUNT`
+    /// when unset.
+    fn max_chunk_count(&self) -> usize {
+        self.config
+            .opcua
+            .max_chunk_count
+            .unwrap_or(OPCUA_DEFAULT_MAX_CHUNK_COUNT)
     }
 
     /// Configures security certificates and PKI (Public Key Infrastructure) settings for the OPC UA server.
@@ -593,6 +666,29 @@ impl OpcUa {
         let max_sessions = self.max_sessions();
         crate::opc_ua_session_monitor::set_session_monitor_state(handle.clone(), max_sessions);
         let _state_guard = crate::opc_ua_session_monitor::MonitorStateGuard;
+
+        // Story 8-2 (AC#2, FR21): one-shot diagnostic emit of the
+        // resolved limits so operators can verify the configuration on
+        // every restart with `grep 'event="opcua_limits_configured"'`.
+        // Diagnostic event (NOT audit) — same shape as Story 7-2's
+        // `pki_dir_initialised`. The NFR12 carry-forward acknowledgment
+        // forbids new audit events; this one is whitelisted because it
+        // is a startup-config emit, not a security-relevant state
+        // change.
+        let max_subscriptions_per_session = self.max_subscriptions_per_session();
+        let max_monitored_items_per_sub = self.max_monitored_items_per_sub();
+        let max_message_size = self.max_message_size();
+        let max_chunk_count = self.max_chunk_count();
+        info!(
+            event = "opcua_limits_configured",
+            max_sessions,
+            max_subscriptions_per_session,
+            max_monitored_items_per_sub,
+            max_message_size,
+            max_chunk_count,
+            "OPC UA limits configured"
+        );
+
         let gauge_handle = tokio::spawn(
             crate::opc_ua_session_monitor::SessionMonitor::new(
                 handle.clone(),

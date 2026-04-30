@@ -110,6 +110,27 @@ stale_threshold_seconds = 120
 # Override via env var: OPCGW_OPCUA__MAX_CONNECTIONS
 #max_connections = 10
 
+# OPC UA subscription / message-size limits (Story 8-2). Surface async-opcua's
+# ServerBuilder limits as config knobs so operators can shape subscription /
+# message-size load. All four values default to the async-opcua library
+# defaults; uncomment only if a specific deployment scenario requires tuning.
+#
+# max_subscriptions_per_session — per-session cap on simultaneous
+#   subscriptions. Library default 10. Range: 1-1000.
+# max_monitored_items_per_sub — per-subscription cap on monitored items.
+#   Library default 1000. Range: 1-100000.
+# max_message_size — per-message byte ceiling (inbound + outbound).
+#   Library default 327675 (= 65535 * 5). Range: 1-268435456 (256 MiB).
+# max_chunk_count — per-message chunk count ceiling. Library default 5.
+#   Range: 1-4096.
+#
+#max_subscriptions_per_session = 10
+#max_monitored_items_per_sub = 1000
+#max_message_size = 327675
+#max_chunk_count = 5
+#
+# Override via env var: OPCGW_OPCUA__<UPPERCASE_KEY>
+
 
 ###########################################################
 # Applications

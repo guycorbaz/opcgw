@@ -194,6 +194,10 @@ fn test_config(port: u16, pki_dir: &std::path::Path, max_connections: usize) -> 
             user_password: TEST_PASSWORD.to_string(),
             stale_threshold_seconds: Some(120),
             max_connections: Some(max_connections),
+            max_subscriptions_per_session: None,
+            max_monitored_items_per_sub: None,
+            max_message_size: None,
+            max_chunk_count: None,
         },
         application_list: vec![ChirpStackApplications {
             application_name: "TestApp".to_string(),

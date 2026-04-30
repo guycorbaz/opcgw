@@ -473,6 +473,10 @@ mod tests {
                 user_password: password.to_string(),
                 stale_threshold_seconds: Some(120),
                 max_connections: None,
+                max_subscriptions_per_session: None,
+                max_monitored_items_per_sub: None,
+                max_message_size: None,
+                max_chunk_count: None,
             },
             application_list: vec![ChirpStackApplications {
                 application_name: "App".to_string(),

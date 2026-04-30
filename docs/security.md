@@ -654,9 +654,168 @@ or raise the cap.
 - **Hot-reload of the cap at runtime.** Currently read at startup
   only — Phase B Epic 9 hot-reload covers runtime reconfiguration
   (issue [#90](https://github.com/guycorbaz/opcgw/issues/90)).
-- **Subscription / monitored-item / message-size limits.** Tracked
-  at issue [#89](https://github.com/guycorbaz/opcgw/issues/89);
-  revisit when subscriptions land in Epic 8.
+
+### Subscription and message-size limits
+
+Story 8-2 (Phase B) extends the connection-limiting surface with four
+configurable `Limits` knobs that shape subscription / message-size
+load. They share the validation pattern, env-var convention, and
+hard-cap shape established by `max_connections`.
+
+#### What they are
+
+| Knob | Purpose | Default | Range |
+|------|---------|---------|-------|
+| `max_subscriptions_per_session` | Per-session cap on simultaneous subscriptions. The (cap+1)th `CreateSubscription` from a session is rejected with `BadTooManySubscriptions`. | 10 | 1–1000 |
+| `max_monitored_items_per_sub` | Per-subscription cap on monitored items. Past the cap, async-opcua returns `BadTooManyMonitoredItems` (service-level error in 0.17.1, observed empirically). | 1000 | 1–100 000 |
+| `max_message_size` | Per-message byte ceiling (inbound + outbound, including `DataChangeNotification` payloads). | 327 675 (= 65 535 × 5) | 1–268 431 360 (≈ 256 MiB; = 4096 × 65535) |
+| `max_chunk_count` | Per-message chunk count ceiling. Together with `max_message_size`, bounds per-message resource cost. | 5 | 1–4096 |
+
+The two subscription-related defaults match async-opcua 0.17.1's
+library defaults (`MAX_SUBSCRIPTIONS_PER_SESSION = 10`,
+`DEFAULT_MAX_MONITORED_ITEMS_PER_SUB = 1000`); the two message-size
+defaults match `opcua_types::constants::MAX_MESSAGE_SIZE` /
+`MAX_CHUNK_COUNT`. Unsetting in TOML is a true no-op against the
+library.
+
+#### Configuration
+
+```toml
+[opcua]
+# Subscription / message-size limits — uncomment only if a deployment
+# scenario requires tuning. All four default to the async-opcua
+# library defaults.
+#max_subscriptions_per_session = 10                  # Range: 1-1000
+#max_monitored_items_per_sub   = 1000                # Range: 1-100000
+#max_message_size              = 327675              # Range: 1-268431360 (≈ 256 MiB)
+#max_chunk_count               = 5                   # Range: 1-4096
+```
+
+Env-var overrides (figment `__`-split convention):
+
+```bash
+OPCGW_OPCUA__MAX_SUBSCRIPTIONS_PER_SESSION=20
+OPCGW_OPCUA__MAX_MONITORED_ITEMS_PER_SUB=500
+OPCGW_OPCUA__MAX_MESSAGE_SIZE=131072
+OPCGW_OPCUA__MAX_CHUNK_COUNT=10
+```
+
+Validation (`AppConfig::validate`) rejects each knob with `Some(0)`
+(misconfiguration — would refuse all subscriptions / items / messages
+including operators' clients) and `Some(n) > HARD_CAP` (structural
+ceiling — values above signal a misconfiguration rather than a
+deliberate sizing). Errors accumulate so a single startup pass
+surfaces every violation.
+
+#### What you'll see in the logs
+
+At startup, the gateway emits a one-shot diagnostic event with the
+resolved values for all five session / subscription / message-size
+limits:
+
+```bash
+grep 'event="opcua_limits_configured"' log/opcgw.log | tail -1
+# 2026-04-30T08:14:22Z  INFO opcgw::opc_ua: event="opcua_limits_configured"
+#   max_sessions=10 max_subscriptions_per_session=10
+#   max_monitored_items_per_sub=1000 max_message_size=327675
+#   max_chunk_count=5 "OPC UA limits configured"
+```
+
+Operators grep this line on every restart to verify the resolved
+configuration matches expectations.
+
+**Subscription-flood / monitored-item-flood rejections are silent**
+in async-opcua 0.17.1 — `SubscriptionService::create_subscription`
+returns `BadTooManySubscriptions` and `MonitoredItemService` returns
+`BadTooManyMonitoredItems` *without* log emission. The contract is
+the OPC UA status code on the wire, not a log line. Tracked as a
+candidate for an upstream feature request (analogous to issue #94's
+session-rejected-callback gap).
+
+#### Stale-status notifications and the `DataChangeFilter` contract
+
+Story 5-2's stale-status logic propagates through subscription
+notifications **only when the client supplies a `DataChangeFilter`
+with `trigger: StatusValue` or `StatusValueTimestamp`** (OPC UA
+Part 4 §7.22.2 `DataChangeFilter`). The library default for
+`DataChangeTrigger` is `Status` (annotated `#[opcua(default)]` on
+`DataChangeTrigger::Status` in `async-opcua-types`) — that default
+would fire only on status changes and miss value-only changes, so
+compliant SCADA clients like FUXA, Ignition, and UaExpert override
+the trigger to `StatusValue` or `StatusValueTimestamp` to fire on
+either. With the filter present, async-opcua's `is_changed()` in
+`async-opcua-types::data_change` detects status-only transitions
+even when the numeric value is unchanged, so a Good→Uncertain
+transition during a ChirpStack outage fires a notification and
+SCADA dashboards show the stale state.
+
+If a client supplies **no filter** (`ExtensionObject::null()`),
+async-opcua falls into the unfiltered path in
+`MonitoredItem::notify_data_value`
+(`async-opcua-server::subscriptions::monitored_item`) which dedupes
+on `value.value` only — status-only transitions are silently
+suppressed and dashboards would freeze on the last-good value. This
+Plan-A fallback is pinned by
+`tests/opcua_subscription_spike.rs::test_subscription_unfiltered_dedupes_status_only_transitions`
+as a regression baseline against issue #94.
+
+#### Anti-patterns
+
+- Setting any knob to `0` — refuses all subscriptions / items /
+  messages, including operators'. Validation rejects it.
+- Setting `max_message_size` above `max_chunk_count × 65535` without
+  understanding the chunk geometry — see async-opcua docs.
+- Relying on `max_subscriptions_per_session` for distributed-flood
+  defence. It is a per-session cap, not a per-IP cap. Per-IP
+  throttling is deferred (issue
+  [#88](https://github.com/guycorbaz/opcgw/issues/88)).
+
+#### Tuning checklist
+
+- Inventory expected SCADA clients × subscriptions per client
+  (typically 1–3); add 30% headroom.
+- Inventory monitored items per subscription (typically 10–100 for
+  FUXA dashboards); leave the 1000 default unless headroom demands
+  more.
+- `max_message_size` / `max_chunk_count` only matter if `Read`
+  operations return very large arrays; default opcgw deployments
+  expose scalar metrics and the defaults are oversized.
+- Pair with `max_connections`: subscription clients consume one
+  session each, so `max_connections × max_subscriptions_per_session
+  × max_monitored_items_per_sub` is the upper bound on the publish
+  pipeline's work.
+
+### Subscription clients and the audit trail
+
+Subscription-creating clients pass through the existing
+`OpcgwAuthManager` (Story 7-2) and `AtLimitAcceptLayer` (Story 7-3)
+identically to read-only clients. The `event="opcua_auth_failed"`
+and `event="opcua_session_count_at_limit"` audit events from those
+stories cover them. **No new audit infrastructure was introduced by
+Story 8-2** (NFR12 carry-forward acknowledgment). The regression
+baseline is two existing tests in
+`tests/opcua_subscription_spike.rs`:
+`test_subscription_client_rejected_by_auth_manager` and
+`test_subscription_client_rejected_by_at_limit_layer`.
+
+The new `event="opcua_limits_configured"` is a **diagnostic
+startup-config event** (same shape as Story 7-2's
+`pki_dir_initialised`), not an audit event.
+
+### What's out of scope (subscription / message-size knobs)
+
+- **Per-source-IP subscription throttling.** Tracked at issue
+  [#88](https://github.com/guycorbaz/opcgw/issues/88).
+- **Upstream FR for rejection-time audit events** in async-opcua
+  (`BadTooManySubscriptions` / `BadTooManyMonitoredItems` are silent
+  in 0.17.1) — operator-pending follow-up.
+- **The five "advanced" subscription knobs** surfaced by the spike
+  report (`max_pending_publish_requests`,
+  `max_publish_requests_per_subscription`, `min_sampling_interval_ms`,
+  `max_keep_alive_count`, `max_queued_notifications`) — deferred
+  unless an operator's `--load-probe` numbers (issue
+  [#95](https://github.com/guycorbaz/opcgw/issues/95)) reveal a
+  back-pressure scenario the four mandatory knobs can't shape.
 
 ---
 

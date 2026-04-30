@@ -259,6 +259,63 @@ pub struct OpcUaConfig {
     /// outside this range are rejected at startup by `validate()`.
     /// Override via env var: `OPCGW_OPCUA__MAX_CONNECTIONS`.
     pub max_connections: Option<usize>,
+
+    /// Maximum number of subscriptions a single OPC UA session may create
+    /// simultaneously (Story 8-2, AC#1, FR21).
+    ///
+    /// When set, async-opcua rejects the `(N+1)`th `CreateSubscription`
+    /// call from a session with `BadTooManySubscriptions`. `None` falls
+    /// back to `OPCUA_DEFAULT_MAX_SUBSCRIPTIONS_PER_SESSION` (10), which
+    /// mirrors the async-opcua library default.
+    ///
+    /// Range: 1 to `OPCUA_MAX_SUBSCRIPTIONS_PER_SESSION_HARD_CAP` (1000).
+    /// Override via env var: `OPCGW_OPCUA__MAX_SUBSCRIPTIONS_PER_SESSION`.
+    #[serde(default)]
+    pub max_subscriptions_per_session: Option<usize>,
+
+    /// Maximum number of monitored items a single subscription may carry
+    /// (Story 8-2, AC#1, FR21).
+    ///
+    /// When set, async-opcua rejects further `CreateMonitoredItems`
+    /// requests on a subscription that already holds this many items
+    /// with `BadTooManyMonitoredItems`. `None` falls back to
+    /// `OPCUA_DEFAULT_MAX_MONITORED_ITEMS_PER_SUB` (1000), which mirrors
+    /// the async-opcua library default. Note the library field name is
+    /// `max_monitored_items_per_sub` (not `_per_subscription`); the
+    /// gateway uses the same name throughout.
+    ///
+    /// Range: 1 to `OPCUA_MAX_MONITORED_ITEMS_PER_SUB_HARD_CAP` (100_000).
+    /// Override via env var: `OPCGW_OPCUA__MAX_MONITORED_ITEMS_PER_SUB`.
+    #[serde(default)]
+    pub max_monitored_items_per_sub: Option<usize>,
+
+    /// Maximum size in bytes of a single OPC UA message (Story 8-2, AC#1, FR21).
+    ///
+    /// Caps both inbound and outbound messages, including
+    /// `DataChangeNotification` payloads. `None` falls back to
+    /// `OPCUA_DEFAULT_MAX_MESSAGE_SIZE` (327_675 bytes), which mirrors
+    /// `async-opcua-types::constants::MAX_MESSAGE_SIZE = 65_535 * 5`.
+    ///
+    /// Range: 1 to `OPCUA_MAX_MESSAGE_SIZE_HARD_CAP` (= 4096 × 65535 =
+    /// 268_431_360 bytes ≈ 256 MiB). Values outside this range are
+    /// rejected at startup by `validate()`. The cap is aligned with
+    /// `max_chunk_count`'s hard cap so the two knobs are coherent.
+    /// Override via env var: `OPCGW_OPCUA__MAX_MESSAGE_SIZE`.
+    #[serde(default)]
+    pub max_message_size: Option<usize>,
+
+    /// Maximum number of message chunks per OPC UA message
+    /// (Story 8-2, AC#1, FR21).
+    ///
+    /// Together with `max_message_size`, bounds the resource cost of a
+    /// single request/response. `None` falls back to
+    /// `OPCUA_DEFAULT_MAX_CHUNK_COUNT` (5), which mirrors
+    /// `async-opcua-types::constants::MAX_CHUNK_COUNT`.
+    ///
+    /// Range: 1 to `OPCUA_MAX_CHUNK_COUNT_HARD_CAP` (4096). Override via
+    /// env var: `OPCGW_OPCUA__MAX_CHUNK_COUNT`.
+    #[serde(default)]
+    pub max_chunk_count: Option<usize>,
 }
 
 // Hand-written Debug impls (Story 7-1, AC#3) replace `derive(Debug)` so that
@@ -304,6 +361,13 @@ impl std::fmt::Debug for OpcUaConfig {
             .field("user_password", &crate::utils::REDACTED_PLACEHOLDER)
             .field("stale_threshold_seconds", &self.stale_threshold_seconds)
             .field("max_connections", &self.max_connections)
+            .field(
+                "max_subscriptions_per_session",
+                &self.max_subscriptions_per_session,
+            )
+            .field("max_monitored_items_per_sub", &self.max_monitored_items_per_sub)
+            .field("max_message_size", &self.max_message_size)
+            .field("max_chunk_count", &self.max_chunk_count)
             .finish()
     }
 }
@@ -838,6 +902,128 @@ impl AppConfig {
                  Either set diagnostics_enabled = true or remove max_connections."
                     .to_string(),
             );
+        }
+
+        // Story 8-2 (AC#1, FR21): bound the four `Limits` knobs that
+        // shape subscription / message-size load. Same accumulator
+        // pattern as `max_connections` above — `Some(0)` is treated as
+        // the operator's mistake (refuses all subscriptions/items even
+        // for legitimate clients), and `Some(n) > HARD_CAP` is a
+        // structural ceiling. Hard caps live in `src/utils.rs`.
+        if self.opcua.max_subscriptions_per_session == Some(0) {
+            errors.push(
+                "opcua.max_subscriptions_per_session: must be at least 1 (use a small positive \
+                 integer like 1 to enforce single-subscription mode; 0 would refuse all \
+                 subscriptions including operators)"
+                    .to_string(),
+            );
+        } else if let Some(n) = self.opcua.max_subscriptions_per_session {
+            if n > crate::utils::OPCUA_MAX_SUBSCRIPTIONS_PER_SESSION_HARD_CAP {
+                errors.push(format!(
+                    "opcua.max_subscriptions_per_session: {} exceeds hard cap of {}. Either \
+                     lower the value or open a follow-up issue if your deployment really needs \
+                     more (the cap protects against subscription-flood DoS)",
+                    n,
+                    crate::utils::OPCUA_MAX_SUBSCRIPTIONS_PER_SESSION_HARD_CAP
+                ));
+            }
+        }
+
+        if self.opcua.max_monitored_items_per_sub == Some(0) {
+            errors.push(
+                "opcua.max_monitored_items_per_sub: must be at least 1 (0 would refuse all \
+                 monitored items, leaving subscriptions unable to track any value)"
+                    .to_string(),
+            );
+        } else if let Some(n) = self.opcua.max_monitored_items_per_sub {
+            if n > crate::utils::OPCUA_MAX_MONITORED_ITEMS_PER_SUB_HARD_CAP {
+                errors.push(format!(
+                    "opcua.max_monitored_items_per_sub: {} exceeds hard cap of {}. Either lower \
+                     the value or open a follow-up issue if your deployment really needs more \
+                     (typical opcgw address spaces hold 10–1000 nodes total)",
+                    n,
+                    crate::utils::OPCUA_MAX_MONITORED_ITEMS_PER_SUB_HARD_CAP
+                ));
+            }
+        }
+
+        if self.opcua.max_message_size == Some(0) {
+            errors.push(
+                "opcua.max_message_size: must be at least 1 byte (0 would refuse every OPC UA \
+                 message, leaving the server unable to communicate)"
+                    .to_string(),
+            );
+        } else if let Some(n) = self.opcua.max_message_size {
+            if n > crate::utils::OPCUA_MAX_MESSAGE_SIZE_HARD_CAP {
+                errors.push(format!(
+                    "opcua.max_message_size: {} exceeds hard cap of {} bytes (~256 MiB; \
+                     exactly 4096 × 65535 to stay coherent with max_chunk_count's hard cap). \
+                     Either lower the value or open a follow-up issue (the cap protects \
+                     against memory-exhaustion DoS via large arrays)",
+                    n,
+                    crate::utils::OPCUA_MAX_MESSAGE_SIZE_HARD_CAP
+                ));
+            }
+        }
+
+        if self.opcua.max_chunk_count == Some(0) {
+            errors.push(
+                "opcua.max_chunk_count: must be at least 1 (0 would refuse every chunked OPC UA \
+                 message)"
+                    .to_string(),
+            );
+        } else if let Some(n) = self.opcua.max_chunk_count {
+            if n > crate::utils::OPCUA_MAX_CHUNK_COUNT_HARD_CAP {
+                errors.push(format!(
+                    "opcua.max_chunk_count: {} exceeds hard cap of {}. Either lower the value \
+                     or open a follow-up issue (the cap together with max_message_size bounds \
+                     per-message resource cost)",
+                    n,
+                    crate::utils::OPCUA_MAX_CHUNK_COUNT_HARD_CAP
+                ));
+            }
+        }
+
+        // Cross-knob coherence: a single chunk in async-opcua holds at
+        // most 65535 bytes (per `async-opcua-types-0.17.1::lib.rs:43`,
+        // `MAX_MESSAGE_SIZE = 65535 * MAX_CHUNK_COUNT`), so
+        // max_chunk_count × 65535 is the absolute message-size ceiling.
+        // If max_message_size exceeds that ceiling, every message
+        // larger than the chunk-derived limit will fail at runtime
+        // with BadResponseTooLarge — fail-fast at startup instead.
+        //
+        // Resolve unset knobs via library defaults so a misconfig
+        // like `max_message_size = 256 MiB` with `max_chunk_count = None`
+        // (default 5 → 327_675-byte ceiling) is caught even when only
+        // one side is explicit. Library defaults (327_675 / 5) are
+        // exactly coherent so this never triggers a false positive on
+        // the all-defaults path.
+        //
+        // Skip if either knob was explicitly set to 0 — the per-knob
+        // `Some(0)` rejections accumulated above already; firing the
+        // cross-knob check too would surface a duplicate error.
+        let chunks_explicit_zero = self.opcua.max_chunk_count == Some(0);
+        let msg_explicit_zero = self.opcua.max_message_size == Some(0);
+        if !chunks_explicit_zero && !msg_explicit_zero {
+            let msg = self
+                .opcua
+                .max_message_size
+                .unwrap_or(crate::utils::OPCUA_DEFAULT_MAX_MESSAGE_SIZE);
+            let chunks = self
+                .opcua
+                .max_chunk_count
+                .unwrap_or(crate::utils::OPCUA_DEFAULT_MAX_CHUNK_COUNT);
+            let chunk_ceiling = chunks.saturating_mul(crate::utils::OPCUA_MIN_CHUNK_SIZE_BYTES);
+            if msg > chunk_ceiling {
+                errors.push(format!(
+                    "opcua.max_message_size ({msg}) exceeds max_chunk_count × 65535 \
+                     ({chunks} × 65535 = {chunk_ceiling}). One async-opcua chunk holds \
+                     at most 65535 bytes, so any message larger than this ceiling would \
+                     fail with BadResponseTooLarge at runtime. Either raise \
+                     max_chunk_count or lower max_message_size. (Library defaults: \
+                     327_675 / 5 — coherent.)"
+                ));
+            }
         }
 
         if self.opcua.user_name.is_empty() {
@@ -2234,6 +2420,10 @@ mod tests {
             user_password: SENTINEL.to_string(),
             stale_threshold_seconds: None,
             max_connections: None,
+            max_subscriptions_per_session: None,
+            max_monitored_items_per_sub: None,
+            max_message_size: None,
+            max_chunk_count: None,
         };
         let formatted = format!("{:?}", cfg);
         assert!(
@@ -2350,6 +2540,314 @@ mod tests {
         assert!(
             config.validate().is_ok(),
             "max_connections=None with diagnostics_enabled=false must pass (warn at runtime)"
+        );
+    }
+
+    // ============================================================
+    // Story 8-2 (AC#1, FR21): subscription / message-size knobs.
+    // The pattern mirrors max_connections: 5 tests per knob —
+    // zero, above-hard-cap, at-hard-cap, none, one.
+    // ============================================================
+
+    #[test]
+    fn test_validation_rejects_max_subscriptions_per_session_zero() {
+        let mut config = get_config();
+        config.opcua.max_subscriptions_per_session = Some(0);
+
+        let result = config.validate();
+        assert!(result.is_err(), "Some(0) must fail validation");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("max_subscriptions_per_session"), "{error_msg}");
+        assert!(error_msg.contains("at least 1"), "{error_msg}");
+    }
+
+    #[test]
+    fn test_validation_rejects_max_subscriptions_per_session_above_hard_cap() {
+        let mut config = get_config();
+        config.opcua.max_subscriptions_per_session = Some(1001);
+
+        let result = config.validate();
+        assert!(result.is_err(), "Some(1001) must fail validation");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("max_subscriptions_per_session"), "{error_msg}");
+        assert!(error_msg.contains("hard cap"), "{error_msg}");
+        assert!(error_msg.contains("1000"), "{error_msg}");
+    }
+
+    #[test]
+    fn test_validation_accepts_max_subscriptions_per_session_at_hard_cap() {
+        let mut config = get_config();
+        config.opcua.max_subscriptions_per_session = Some(1000);
+
+        assert!(
+            config.validate().is_ok(),
+            "Some(1000) must pass validation"
+        );
+    }
+
+    #[test]
+    fn test_validation_accepts_max_subscriptions_per_session_none() {
+        let mut config = get_config();
+        config.opcua.max_subscriptions_per_session = None;
+
+        assert!(config.validate().is_ok(), "None must pass validation");
+    }
+
+    #[test]
+    fn test_validation_accepts_max_subscriptions_per_session_one() {
+        let mut config = get_config();
+        config.opcua.max_subscriptions_per_session = Some(1);
+
+        assert!(config.validate().is_ok(), "Some(1) must pass validation");
+    }
+
+    #[test]
+    fn test_validation_rejects_max_monitored_items_per_sub_zero() {
+        let mut config = get_config();
+        config.opcua.max_monitored_items_per_sub = Some(0);
+
+        let result = config.validate();
+        assert!(result.is_err(), "Some(0) must fail validation");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("max_monitored_items_per_sub"), "{error_msg}");
+        assert!(error_msg.contains("at least 1"), "{error_msg}");
+    }
+
+    #[test]
+    fn test_validation_rejects_max_monitored_items_per_sub_above_hard_cap() {
+        let mut config = get_config();
+        config.opcua.max_monitored_items_per_sub = Some(100_001);
+
+        let result = config.validate();
+        assert!(result.is_err(), "Some(100_001) must fail validation");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("max_monitored_items_per_sub"), "{error_msg}");
+        assert!(error_msg.contains("hard cap"), "{error_msg}");
+        assert!(error_msg.contains("100000"), "{error_msg}");
+    }
+
+    #[test]
+    fn test_validation_accepts_max_monitored_items_per_sub_at_hard_cap() {
+        let mut config = get_config();
+        config.opcua.max_monitored_items_per_sub = Some(100_000);
+
+        assert!(
+            config.validate().is_ok(),
+            "Some(100_000) must pass validation"
+        );
+    }
+
+    #[test]
+    fn test_validation_accepts_max_monitored_items_per_sub_none() {
+        let mut config = get_config();
+        config.opcua.max_monitored_items_per_sub = None;
+
+        assert!(config.validate().is_ok(), "None must pass validation");
+    }
+
+    #[test]
+    fn test_validation_accepts_max_monitored_items_per_sub_one() {
+        let mut config = get_config();
+        config.opcua.max_monitored_items_per_sub = Some(1);
+
+        assert!(config.validate().is_ok(), "Some(1) must pass validation");
+    }
+
+    #[test]
+    fn test_validation_rejects_max_message_size_zero() {
+        let mut config = get_config();
+        config.opcua.max_message_size = Some(0);
+
+        let result = config.validate();
+        assert!(result.is_err(), "Some(0) must fail validation");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("max_message_size"), "{error_msg}");
+        assert!(error_msg.contains("at least 1"), "{error_msg}");
+    }
+
+    #[test]
+    fn test_validation_rejects_max_message_size_above_hard_cap() {
+        let mut config = get_config();
+        config.opcua.max_message_size = Some(crate::utils::OPCUA_MAX_MESSAGE_SIZE_HARD_CAP + 1);
+
+        let result = config.validate();
+        assert!(result.is_err(), "above hard cap must fail validation");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("max_message_size"), "{error_msg}");
+        assert!(error_msg.contains("hard cap"), "{error_msg}");
+    }
+
+    #[test]
+    fn test_validation_accepts_max_message_size_at_hard_cap() {
+        let mut config = get_config();
+        config.opcua.max_message_size = Some(crate::utils::OPCUA_MAX_MESSAGE_SIZE_HARD_CAP);
+        // Cross-knob coherence (iter-2): max_message_size at HARD_CAP
+        // requires max_chunk_count at HARD_CAP too — otherwise the
+        // default 5 chunks → 327_675-byte ceiling rejects the combo.
+        config.opcua.max_chunk_count = Some(crate::utils::OPCUA_MAX_CHUNK_COUNT_HARD_CAP);
+
+        assert!(
+            config.validate().is_ok(),
+            "exact-cap value must pass validation"
+        );
+    }
+
+    #[test]
+    fn test_validation_accepts_max_message_size_none() {
+        let mut config = get_config();
+        config.opcua.max_message_size = None;
+
+        assert!(config.validate().is_ok(), "None must pass validation");
+    }
+
+    #[test]
+    fn test_validation_accepts_max_message_size_one() {
+        let mut config = get_config();
+        config.opcua.max_message_size = Some(1);
+
+        assert!(config.validate().is_ok(), "Some(1) must pass validation");
+    }
+
+    #[test]
+    fn test_validation_rejects_max_chunk_count_zero() {
+        let mut config = get_config();
+        config.opcua.max_chunk_count = Some(0);
+
+        let result = config.validate();
+        assert!(result.is_err(), "Some(0) must fail validation");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("max_chunk_count"), "{error_msg}");
+        assert!(error_msg.contains("at least 1"), "{error_msg}");
+    }
+
+    #[test]
+    fn test_validation_rejects_max_chunk_count_above_hard_cap() {
+        let mut config = get_config();
+        config.opcua.max_chunk_count = Some(4097);
+
+        let result = config.validate();
+        assert!(result.is_err(), "Some(4097) must fail validation");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("max_chunk_count"), "{error_msg}");
+        assert!(error_msg.contains("hard cap"), "{error_msg}");
+        assert!(error_msg.contains("4096"), "{error_msg}");
+    }
+
+    #[test]
+    fn test_validation_accepts_max_chunk_count_at_hard_cap() {
+        let mut config = get_config();
+        config.opcua.max_chunk_count = Some(4096);
+
+        assert!(
+            config.validate().is_ok(),
+            "Some(4096) must pass validation"
+        );
+    }
+
+    #[test]
+    fn test_validation_accepts_max_chunk_count_none() {
+        let mut config = get_config();
+        config.opcua.max_chunk_count = None;
+
+        assert!(config.validate().is_ok(), "None must pass validation");
+    }
+
+    #[test]
+    fn test_validation_accepts_max_chunk_count_one() {
+        let mut config = get_config();
+        config.opcua.max_chunk_count = Some(1);
+        // Cross-knob coherence (iter-2): max_chunk_count = 1 requires
+        // max_message_size <= 1 × 65535 = 65535 — otherwise the default
+        // 327_675-byte msg exceeds the single-chunk ceiling.
+        config.opcua.max_message_size = Some(65_535);
+
+        assert!(config.validate().is_ok(), "Some(1) must pass validation");
+    }
+
+    /// Cross-knob coherence (Story 8-2 code review): a 256 MiB
+    /// max_message_size with max_chunk_count = 1 is geometrically
+    /// impossible — a single chunk holds at most 65535 bytes on the
+    /// OPC UA TransportProfile minimum, so any message > 65535 bytes
+    /// would fail at runtime with BadResponseTooLarge. Reject at
+    /// startup.
+    #[test]
+    fn test_validation_rejects_max_message_size_above_chunk_ceiling() {
+        let mut config = get_config();
+        config.opcua.max_chunk_count = Some(1);
+        // 1 chunk × 65535 bytes = 65535-byte ceiling; 65536 exceeds it.
+        config.opcua.max_message_size = Some(65_536);
+
+        let result = config.validate();
+        assert!(result.is_err(), "must reject incoherent chunk geometry");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("max_chunk_count × 65535"),
+            "error must explain chunk-derived ceiling: {error_msg}"
+        );
+    }
+
+    /// Cross-knob coherence: when both knobs satisfy
+    /// `max_message_size <= max_chunk_count × 65535`, validation must
+    /// pass. Library defaults (327_675 bytes, 5 chunks) are coherent
+    /// (5 × 65535 = 327_675).
+    #[test]
+    fn test_validation_accepts_coherent_chunk_geometry() {
+        let mut config = get_config();
+        config.opcua.max_chunk_count = Some(5);
+        config.opcua.max_message_size = Some(crate::utils::OPCUA_DEFAULT_MAX_MESSAGE_SIZE);
+
+        assert!(
+            config.validate().is_ok(),
+            "library-default geometry must pass validation"
+        );
+    }
+
+    /// Cross-knob coherence (iteration-2 patch): if only
+    /// `max_message_size` is set and `max_chunk_count` is unset, the
+    /// validation resolves the chunk count to the library default (5)
+    /// before checking. A misconfig like `max_message_size = 256 MiB`
+    /// with `max_chunk_count = None` would otherwise surface as runtime
+    /// `BadResponseTooLarge`.
+    #[test]
+    fn test_validation_rejects_oversized_msg_with_default_chunks() {
+        let mut config = get_config();
+        config.opcua.max_chunk_count = None;
+        // Default chunks (5) × 65535 = 327_675 ceiling; 65 MiB exceeds it.
+        config.opcua.max_message_size = Some(65 * 1024 * 1024);
+
+        let result = config.validate();
+        assert!(
+            result.is_err(),
+            "must reject when max_message_size exceeds default-chunk ceiling"
+        );
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("max_chunk_count × 65535"),
+            "error must explain chunk-derived ceiling: {error_msg}"
+        );
+    }
+
+    /// Cross-knob coherence (iteration-2 patch): if either knob is
+    /// explicitly `Some(0)`, the per-knob `Some(0)` rejection already
+    /// fires; the cross-knob check must skip to avoid surfacing a
+    /// duplicate confusing error. Operator should fix the zero first.
+    #[test]
+    fn test_validation_skips_cross_knob_when_message_size_zero() {
+        let mut config = get_config();
+        config.opcua.max_message_size = Some(0);
+        config.opcua.max_chunk_count = Some(1);
+
+        let result = config.validate();
+        assert!(result.is_err(), "Some(0) must be rejected");
+        let error_msg = result.unwrap_err().to_string();
+        // Per-knob error fires; cross-knob does not.
+        assert!(
+            error_msg.contains("max_message_size") && error_msg.contains("at least 1 byte"),
+            "must surface per-knob zero rejection: {error_msg}"
+        );
+        assert!(
+            !error_msg.contains("max_chunk_count × 65535"),
+            "must NOT surface cross-knob duplicate when per-knob zero already fires: {error_msg}"
         );
     }
 }

@@ -155,6 +155,22 @@ stale_threshold_seconds = 120
 # Override via env var: OPCGW_OPCUA__MAX_CONNECTIONS
 #max_connections = 10
 
+# OPC UA subscription / message-size limits (Story 8-2). All four values
+# default to the async-opcua library defaults; uncomment only if a specific
+# deployment scenario requires tuning.
+#
+# max_subscriptions_per_session: per-session cap (default 10, range 1-1000)
+# max_monitored_items_per_sub:    per-subscription cap (default 1000, range 1-100000)
+# max_message_size:               per-message bytes (default 327675, range 1-268435456)
+# max_chunk_count:                per-message chunks (default 5, range 1-4096)
+#
+#max_subscriptions_per_session = 10
+#max_monitored_items_per_sub = 1000
+#max_message_size = 327675
+#max_chunk_count = 5
+#
+# Override via env var: OPCGW_OPCUA__<UPPERCASE_KEY>
+
 
 ###########################################################
 # Applications

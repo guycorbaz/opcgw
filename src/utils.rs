@@ -121,6 +121,102 @@ pub const OPCUA_MAX_CONNECTIONS_HARD_CAP: usize = 4096;
 /// one tick — keep that relationship intact when tuning.
 pub const OPCUA_SESSION_GAUGE_INTERVAL_SECS: u64 = 5;
 
+/// Default maximum subscriptions per OPC UA session (Story 8-2, AC#1, FR21).
+///
+/// Mirrors `async-opcua-server-0.17.1::lib.rs:131`'s
+/// `MAX_SUBSCRIPTIONS_PER_SESSION = 10`. When `[opcua].max_subscriptions_per_session`
+/// is unset (or `None`), the gateway falls back to this value so the
+/// configured behaviour matches the async-opcua library default. Override
+/// via env var `OPCGW_OPCUA__MAX_SUBSCRIPTIONS_PER_SESSION`.
+pub const OPCUA_DEFAULT_MAX_SUBSCRIPTIONS_PER_SESSION: usize = 10;
+
+/// Hard upper bound for `[opcua].max_subscriptions_per_session` (Story 8-2, AC#1).
+///
+/// Values above this cap are rejected at startup by `AppConfig::validate`.
+/// 1000 is a "deployment review needed" guard against subscription-flood
+/// DoS — a single misbehaving SCADA client creating 1000+ subscriptions
+/// would saturate the publish pipeline. Operators hitting it should
+/// inventory their client topology before raising.
+pub const OPCUA_MAX_SUBSCRIPTIONS_PER_SESSION_HARD_CAP: usize = 1000;
+
+/// Default maximum monitored items per subscription (Story 8-2, AC#1, FR21).
+///
+/// Mirrors `async-opcua-server-0.17.1::lib.rs:64`'s
+/// `DEFAULT_MAX_MONITORED_ITEMS_PER_SUB = 1000`. Note the library field
+/// name is `max_monitored_items_per_sub` (not `_per_subscription`); the
+/// gateway field, TOML key, and env var all use the library name. Override
+/// via env var `OPCGW_OPCUA__MAX_MONITORED_ITEMS_PER_SUB`.
+pub const OPCUA_DEFAULT_MAX_MONITORED_ITEMS_PER_SUB: usize = 1000;
+
+/// Hard upper bound for `[opcua].max_monitored_items_per_sub` (Story 8-2, AC#1).
+///
+/// Values above this cap are rejected at startup by `AppConfig::validate`.
+/// 100_000 is structurally absurd for the address spaces typical opcgw
+/// deployments expose (10–1000 nodes total) — the cap exists to surface
+/// configuration mistakes (typo, unit confusion) rather than restrict
+/// legitimate sizing.
+pub const OPCUA_MAX_MONITORED_ITEMS_PER_SUB_HARD_CAP: usize = 100_000;
+
+/// Default maximum OPC UA message size in bytes (Story 8-2, AC#1, FR21).
+///
+/// Mirrors `async-opcua-types-0.17.1::lib.rs:43`'s `MAX_MESSAGE_SIZE =
+/// 65535 * MAX_CHUNK_COUNT = 65535 * 5 = 327_675`. When
+/// `[opcua].max_message_size` is unset (or `None`), the gateway falls
+/// back to this value so behaviour matches the library default. Override
+/// via env var `OPCGW_OPCUA__MAX_MESSAGE_SIZE`.
+pub const OPCUA_DEFAULT_MAX_MESSAGE_SIZE: usize = 65_535 * 5;
+
+/// Hard upper bound for `[opcua].max_message_size` in bytes (Story 8-2, AC#1).
+///
+/// Values above this cap are rejected at startup by `AppConfig::validate`.
+/// The value is exactly `OPCUA_MAX_CHUNK_COUNT_HARD_CAP × 65535 =
+/// 4096 × 65535 = 268_431_360 ≈ 255.996 MiB` so that the two hard caps
+/// are mathematically coherent — any message at this ceiling can fit
+/// inside the maximum allowable chunk count, avoiding a configuration
+/// where both knobs are at their per-knob caps but the cross-knob
+/// coherence check would still reject the combination. Protects against
+/// memory-exhaustion DoS via forged "large array" reads — default opcgw
+/// deployments expose scalar metrics and never approach this ceiling.
+pub const OPCUA_MAX_MESSAGE_SIZE_HARD_CAP: usize = 4096 * 65_535;
+
+/// Default maximum number of message chunks per OPC UA message (Story 8-2, AC#1, FR21).
+///
+/// Mirrors `async-opcua-types-0.17.1::lib.rs:48`'s `MAX_CHUNK_COUNT = 5`.
+/// When `[opcua].max_chunk_count` is unset (or `None`), the gateway falls
+/// back to this value so behaviour matches the library default. Override
+/// via env var `OPCGW_OPCUA__MAX_CHUNK_COUNT`.
+pub const OPCUA_DEFAULT_MAX_CHUNK_COUNT: usize = 5;
+
+/// Hard upper bound for `[opcua].max_chunk_count` (Story 8-2, AC#1).
+///
+/// Values above this cap are rejected at startup by `AppConfig::validate`.
+/// 4096 chunks × 65535 bytes/chunk = 268_431_360 bytes (≈ 256 MiB),
+/// exactly equal to `OPCUA_MAX_MESSAGE_SIZE_HARD_CAP` so the two knobs
+/// can both reach their per-knob maxima simultaneously without
+/// tripping the cross-knob coherence check. Values above signal a
+/// misconfiguration rather than a deliberate sizing.
+pub const OPCUA_MAX_CHUNK_COUNT_HARD_CAP: usize = 4096;
+
+/// Maximum bytes per chunk in async-opcua 0.17.1 (Story 8-2 code review).
+///
+/// **Note on naming:** this constant is named "min" because it is the
+/// smaller-than-or-equal bound used by the cross-knob coherence check —
+/// the actual per-chunk byte limit in async-opcua is **at most** 65535
+/// bytes per `async-opcua-types-0.17.1::lib.rs:43` (`MAX_MESSAGE_SIZE =
+/// 65535 * MAX_CHUNK_COUNT`). This is **not** the OPC UA Part 6
+/// TransportProfile minimum (which is 8192 bytes for
+/// `ReceiveBufferSize` / `SendBufferSize` per Part 6 §6.7.2); the
+/// gateway uses the library's per-chunk ceiling because that is the
+/// effective constraint at runtime.
+///
+/// Used by the cross-knob coherence check in `AppConfig::validate`:
+/// `max_message_size > max_chunk_count × OPCUA_MIN_CHUNK_SIZE_BYTES` is
+/// geometrically impossible — any message larger than the chunk-derived
+/// ceiling will fail at runtime with `BadResponseTooLarge`. Reject this
+/// combination at startup instead of letting it surface as an opaque
+/// per-message rejection in production.
+pub const OPCUA_MIN_CHUNK_SIZE_BYTES: usize = 65_535;
+
 // =============================================================================
 // Configuration File Path Constants
 // =============================================================================
