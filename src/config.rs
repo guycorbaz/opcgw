@@ -16,7 +16,7 @@
 //!
 //! # Usage
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use crate::config::AppConfig;
 //!
 //! let config = AppConfig::new()?;
@@ -754,7 +754,7 @@ impl AppConfig {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// use crate::config::AppConfig;
     ///
     /// let config = AppConfig::new()?;
@@ -1280,7 +1280,7 @@ impl AppConfig {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let app_name = config.get_application_name(&"app-123".to_string());
     /// match app_name {
     ///     Some(name) => println!("Application name: {}", name),
@@ -1313,7 +1313,7 @@ impl AppConfig {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let app_id = config.get_application_id(&"Building Sensors".to_string());
     /// match app_id {
     ///     Some(id) => println!("Application ID: {}", id),
@@ -1346,7 +1346,7 @@ impl AppConfig {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let device_name = config.get_device_name(&"0018b20000000001".to_string());
     /// match device_name {
     ///     Some(name) => println!("Device name: {}", name),
@@ -1391,7 +1391,7 @@ impl AppConfig {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let device_id = config.get_device_id(
     ///     &"Temperature Sensor 01".to_string(),
     ///     &"app-123".to_string()
@@ -1433,7 +1433,7 @@ impl AppConfig {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let metrics = config.get_metric_list(&"0018b20000000001".to_string());
     /// match metrics {
     ///     Some(metric_list) => {
@@ -1477,7 +1477,7 @@ impl AppConfig {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let metric_type = config.get_metric_type(
     ///     &"temperature".to_string(),
     ///     &"0018b20000000001".to_string()

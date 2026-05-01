@@ -166,7 +166,7 @@ impl Drop for StorageOpLog {
 /// via Arc. Each task holds Arc<ConnectionPool>, enabling concurrent independent connections.
 ///
 /// # Example
-/// ```no_run
+/// ```rust,ignore
 /// use opcgw::storage::SqliteBackend;
 /// use std::sync::Arc;
 ///

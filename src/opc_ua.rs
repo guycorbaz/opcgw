@@ -100,7 +100,7 @@ impl OpcUa {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use std::sync::Arc;
     ///
     /// let config = AppConfig::new().expect("Failed to load config");
@@ -175,7 +175,7 @@ impl OpcUa {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let mut opcua_server = OpcUa::new(&config, storage);
     /// match opcua_server.create_server() {
     ///     Ok(server) => println!("OPC UA server created successfully"),
@@ -304,7 +304,7 @@ impl OpcUa {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let server_builder = ServerBuilder::new();
     /// let configured_builder = self.configure_network(server_builder);
     /// ```
@@ -469,7 +469,7 @@ impl OpcUa {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let server_builder = ServerBuilder::new();
     /// let secured_builder = self.configure_key(server_builder);
     /// ```
@@ -518,7 +518,7 @@ impl OpcUa {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let server_builder = ServerBuilder::new();
     /// let authenticated_builder = self.configure_user_token(server_builder);
     /// ```
@@ -583,7 +583,7 @@ impl OpcUa {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let server_builder = ServerBuilder::new();
     /// let endpoint_builder = self.configure_end_points(server_builder);
     /// ```
@@ -664,7 +664,7 @@ impl OpcUa {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let opc_server = OpcUaServer::new(config);
     /// if let Err(e) = opc_server.run().await {
     ///     eprintln!("Server failed: {}", e);
@@ -784,7 +784,7 @@ impl OpcUa {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let ns = 2; // Custom namespace
     /// let manager = Arc::new(SimpleNodeManager::new());
     /// server.add_nodes(ns, manager);

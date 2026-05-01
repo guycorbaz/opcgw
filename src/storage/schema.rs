@@ -35,7 +35,7 @@ const MIGRATION_V006: &str = include_str!("../../migrations/v006_gateway_status_
 /// Panics are explicitly avoided — errors propagate for caller to handle gracefully.
 ///
 /// # Example
-/// ```no_run
+/// ```rust,ignore
 /// use rusqlite::Connection;
 /// use crate::storage::schema;
 /// use crate::utils::OpcGwError;

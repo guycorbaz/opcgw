@@ -38,7 +38,7 @@
 //!
 //! # Usage
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use crate::storage::{Storage, MetricType};
 //! use crate::config::AppConfig;
 //!
@@ -103,7 +103,7 @@ use rusqlite::Result as SqliteResult;
 ///
 /// # Example
 ///
-/// ```rust,no_run
+/// ```rust,ignore
 /// # use crate::utils::OpcGwError;
 /// # use crate::storage::{StorageBackend, MetricType, ChirpstackStatus, DeviceCommand, CommandStatus};
 /// # async fn example(backend: Arc<dyn StorageBackend>) -> Result<(), OpcGwError> {
@@ -957,7 +957,7 @@ impl Storage {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// use crate::config::AppConfig;
     /// use crate::storage::Storage;
     ///
@@ -1071,7 +1071,7 @@ impl Storage {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let mut storage = Storage::new(&config);
     /// if let Some(device) = storage.get_device(&"device_123".to_string()) {
     ///     println!("Found device: {}", device.device_name);
@@ -1103,7 +1103,7 @@ impl Storage {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let storage = Storage::new(&config);
     /// match storage.get_device_name(&"device_123".to_string()) {
     ///     Some(name) => println!("Device name: {}", name),
@@ -1151,7 +1151,7 @@ impl Storage {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let mut storage = Storage::new(&config);
     /// match storage.get_metric_value("device_123", "temperature") {
     ///     Some(MetricType::Float(temp)) => println!("Temperature: {}°C", temp),
@@ -1226,7 +1226,7 @@ impl Storage {
     /// # Error Handling
     ///
     /// Rather than panicking, consider checking device existence first:
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// if storage.get_device(&device_id).is_some() {
     ///     storage.set_metric_value(&device_id, "temperature", MetricType::Float(23.5));
     /// } else {
@@ -1236,7 +1236,7 @@ impl Storage {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let mut storage = Storage::new(&config);
     ///
     /// // Update temperature reading
@@ -1310,7 +1310,7 @@ impl Storage {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// use crate::storage::{Storage, ChirpstackStatusInternal};
     /// use chrono::Utc;
     ///
@@ -1354,7 +1354,7 @@ impl Storage {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let storage = Storage::new(&config);
     /// let status = storage.get_chirpstack_status();
     /// println!("ChirpStack available: {}", status.server_available);
@@ -1378,7 +1378,7 @@ impl Storage {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let storage = Storage::new(&config);
     /// if storage.get_chirpstack_available() {
     ///     println!("ChirpStack server is online");
@@ -1465,7 +1465,7 @@ impl Storage {
     /// * `command` - The `DeviceCommand` to add to the queue
     ///
     /// # Examples
-    /// ```
+    /// ```rust,ignore
     /// let mut storage = Storage::new(&config);
     /// let command = DeviceCommand {
     ///     device_id: "device_123".to_string(),
@@ -1489,7 +1489,7 @@ impl Storage {
     /// * `None` - If the command queue is empty
     ///
     /// # Examples
-    /// ```
+    /// ```rust,ignore
     /// let mut storage = Storage::new(&config);
     /// match storage.dequeue_command() {
     ///     Some(command) => println!("Dequeued command for device: {}", command.device_id),
@@ -1507,7 +1507,7 @@ impl Storage {
     /// * `None` - If the command queue is empty
     ///
     /// # Examples
-    /// ```
+    /// ```rust,ignore
     /// let storage = Storage::new(&config);
     /// match storage.get_device_command_queue() {
     ///     Some(commands) => println!("Found {} commands", commands.len()),

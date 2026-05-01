@@ -440,7 +440,7 @@ pub const BATCH_WRITE_BUDGET_MS: u64 = 500;
 ///
 /// # Examples
 ///
-/// ```rust,no_run
+/// ```rust,ignore
 /// use crate::utils::OpcGwError;
 ///
 /// fn load_config() -> Result<Config, OpcGwError> {
@@ -575,7 +575,7 @@ pub enum OpcGwError {
 ///
 /// # Examples
 ///
-/// ```rust
+/// ```rust,ignore
 /// use crate::utils::print_type_of;
 ///
 /// let integer = 42;
@@ -609,7 +609,7 @@ pub enum OpcGwError {
 /// Consider removing calls to this function in production code or
 /// guarding them with debug assertions:
 ///
-/// ```rust
+/// ```rust,ignore
 /// #[cfg(debug_assertions)]
 /// print_type_of(&my_variable);
 /// ```

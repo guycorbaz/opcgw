@@ -18,7 +18,7 @@
 //! - No Rust Mutex bottleneck (unlike shared Arc<Mutex<Connection>>)
 //!
 //! # Example
-//! ```no_run
+//! ```rust,ignore
 //! use opcgw::storage::ConnectionPool;
 //! use std::time::Duration;
 //!

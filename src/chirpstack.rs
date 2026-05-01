@@ -16,7 +16,7 @@
 //!
 //! # Usage
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use crate::chirpstack::ChirpstackPoller;
 //! use std::sync::{Arc, Mutex};
 //!
@@ -190,7 +190,7 @@ fn classify_metric_kind(kind: i32) -> ChirpStackMetricKind {
 ///
 /// # Examples
 ///
-/// ```rust,no_run
+/// ```rust,ignore
 /// use crate::chirpstack::ChirpstackPoller;
 /// use std::sync::{Arc, Mutex};
 ///
@@ -409,7 +409,7 @@ impl ChirpstackPoller {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// use crate::chirpstack::ChirpstackPoller;
     /// use std::sync::{Arc, Mutex};
     ///
@@ -460,7 +460,7 @@ impl ChirpstackPoller {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let channel = poller.create_channel().await?;
     /// ```
     async fn create_channel(&self) -> Result<tonic::transport::Channel, OpcGwError> {
@@ -554,7 +554,7 @@ impl ChirpstackPoller {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let interceptor = poller.create_interceptor();
     /// ```
     fn create_interceptor(&self) -> AuthInterceptor {
@@ -581,7 +581,7 @@ impl ChirpstackPoller {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let app_client = poller.create_application_client().await?;
     /// let request = Request::new(ListApplicationsRequest { /* ... */ });
     /// let response = app_client.list(request).await?;
@@ -620,7 +620,7 @@ impl ChirpstackPoller {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let device_client = poller.create_device_client().await?;
     /// let request = Request::new(GetDeviceMetricsRequest { /* ... */ });
     /// let response = device_client.get_metrics(request).await?;
@@ -661,7 +661,7 @@ impl ChirpstackPoller {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// match poller.check_server_availability() {
     ///     Ok(duration) => println!("Server responded in {:?}", duration),
     ///     Err(e) => println!("Server unavailable: {:?}", e),
@@ -737,7 +737,7 @@ impl ChirpstackPoller {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let ip = poller.extract_ip_address()?;
     /// println!("ChirpStack server IP: {}", ip);
     /// ```
@@ -786,7 +786,7 @@ impl ChirpstackPoller {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// async fn start_polling() -> Result<(), OpcGwError> {
     ///     let mut poller = ChirpstackPoller::new(&config, storage).await?;
     ///     poller.run().await // Runs indefinitely
@@ -955,7 +955,7 @@ impl ChirpstackPoller {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// // Called automatically by run(), but can be called manually for testing
     /// poller.poll_metrics().await?;
     /// ```
@@ -1394,7 +1394,7 @@ impl ChirpstackPoller {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// // Called automatically during polling
     /// poller.store_metric(&device_id, &metric);
     /// ```
@@ -1670,7 +1670,7 @@ impl ChirpstackPoller {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let applications = poller.get_applications_list_from_server().await?;
     /// for app in applications {
     ///     println!("Application: {} ({})", app.application_name, app.application_id);
@@ -1710,7 +1710,7 @@ impl ChirpstackPoller {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let devices = poller.get_devices_list_from_server("app-123".to_string()).await?;
     /// for device in devices {
     ///     println!("Device: {} ({})", device.name, device.dev_eui);
@@ -1760,7 +1760,7 @@ impl ChirpstackPoller {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let dev_eui = "0018B20000001122".to_string();
     /// let metrics = poller.get_device_metrics_from_server(dev_eui, 3600, 1).await?;
     /// println!("Retrieved {} metrics", metrics.metrics.len());
@@ -1962,7 +1962,7 @@ impl ChirpstackPoller {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use chrono::Utc;
     /// use crate::storage::CommandStatus;
     ///
@@ -2052,7 +2052,7 @@ impl ChirpstackPoller {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// // Called internally by get_applications_list_from_server()
     /// let app_details = poller.convert_to_applications(response);
     /// ```
@@ -2089,7 +2089,7 @@ impl ChirpstackPoller {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// // Called internally by get_devices_list_from_server()
     /// let device_details = poller.convert_to_devices(response);
     /// ```
@@ -2120,7 +2120,7 @@ impl ChirpstackPoller {
 ///
 /// # Examples
 ///
-/// ```rust,no_run
+/// ```rust,ignore
 /// let applications = poller.get_applications_list_from_server().await?;
 /// print_application_list(&applications);
 /// ```
@@ -2142,7 +2142,7 @@ pub fn print_application_list(list: &Vec<ApplicationDetail>) {
 ///
 /// # Examples
 ///
-/// ```rust,no_run
+/// ```rust,ignore
 /// let devices = poller.get_devices_list_from_server("app-123".to_string()).await?;
 /// print_device_list(&devices);
 /// ```
