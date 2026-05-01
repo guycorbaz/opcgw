@@ -2658,7 +2658,20 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    // Epic 8 retrospective action item #3 (2026-05-01): this test asserts that
+    // a concurrent reader sees at least one of 50 written metrics. The original
+    // shape spawned writer + reader simultaneously and the reader could finish
+    // all 50 attempts before the writer committed *any* row — `found == 0`
+    // tripped the assertion non-deterministically. `#[serial_test::serial]`
+    // alone doesn't help (the race is in-test, not cross-test).
+    //
+    // Fix: write `metric_0` synchronously before spawning the reader, so the
+    // reader is guaranteed to see at least one committed row regardless of
+    // thread-scheduling order. The writer thread continues writing 1..50 in
+    // parallel with the reader to preserve the original concurrent-access
+    // intent.
     #[test]
+    #[serial_test::serial]
     fn test_concurrent_write_read_isolation() {
         use std::sync::Arc;
         use std::thread;
@@ -2667,10 +2680,16 @@ mod tests {
         let backend = Arc::new(SqliteBackend::new(&path).expect("Should create backend"));
         let now = std::time::SystemTime::now();
 
-        // Writer thread
+        // Pre-write metric_0 so the reader has at least one row to find,
+        // independent of writer/reader thread scheduling.
+        backend
+            .upsert_metric_value("device_w", "metric_0", &MetricType::Float, now)
+            .expect("Pre-write: should upsert metric_0");
+
+        // Writer thread — concurrent writes for indices 1..50
         let backend_w = Arc::clone(&backend);
         let writer = thread::spawn(move || {
-            for i in 0..50 {
+            for i in 1..50 {
                 let metric_name = format!("metric_{}", i);
                 let value = if i % 2 == 0 { MetricType::Float } else { MetricType::Int };
                 backend_w.upsert_metric_value("device_w", &metric_name, &value, now)
@@ -2678,7 +2697,8 @@ mod tests {
             }
         });
 
-        // Reader thread
+        // Reader thread — reads 0..50; metric_0 is guaranteed by the pre-write,
+        // metrics 1..50 are racy (any subset is acceptable).
         let backend_r = Arc::clone(&backend);
         let reader = thread::spawn(move || {
             let mut found_count = 0;
@@ -2694,7 +2714,7 @@ mod tests {
         writer.join().expect("Writer should complete");
         let found = reader.join().expect("Reader should complete");
 
-        assert!(found > 0, "Reader should see some written metrics");
+        assert!(found > 0, "Reader should see some written metrics (at least metric_0 from the pre-write)");
 
         let _ = fs::remove_file(&path);
     }
