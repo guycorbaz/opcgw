@@ -27,10 +27,19 @@
 //   - Asserting on async-opcua's own `info!("Accept new connection from
 //     {addr} ...")` event — that is library-emitted and outside our trait.
 
+// Issue #102 (Epic 8 retro 2026-05-02): truly identical helpers
+// (pick_free_port, build_client) now live in tests/common/mod.rs.
+// This file's `captured_logs_contain_anywhere` + per-test inline
+// IdentityToken construction stay below — they intentionally diverge
+// from the project's standard test-client shape (each test uses
+// different auth credentials to exercise different rejection paths).
+
+mod common;
+
 use std::sync::Arc;
 use std::time::Duration;
 
-use opcua::client::{ClientBuilder, IdentityToken, Password as ClientPassword};
+use opcua::client::{IdentityToken, Password as ClientPassword};
 use opcua::types::{EndpointDescription, MessageSecurityMode, UserTokenPolicy, UserTokenType};
 use tempfile::TempDir;
 use tokio::net::TcpStream;
@@ -120,16 +129,8 @@ impl Drop for TestServer {
     }
 }
 
-/// Discover a free port. Bind a listener on `127.0.0.1:0`, read the
-/// allocated port, then drop the listener so the OPC UA server can grab
-/// the same port. There is a small race window between drop and the
-/// server's `listen` call but it is benign in practice.
-async fn pick_free_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral port for discovery");
-    listener.local_addr().expect("local_addr").port()
-}
+// Issue #102: pick_free_port now lives in tests/common/mod.rs.
+use common::pick_free_port;
 
 /// Build a minimal `AppConfig` pointing at a sandboxed PKI dir + SQLite
 /// db. The configured user/password matches `TEST_USER` / `TEST_PASSWORD`.
@@ -273,19 +274,15 @@ async fn setup_test_server() -> TestServer {
 
 /// Build a fresh client with its own sandboxed PKI dir, ready to talk to
 /// the test server.
+// Issue #102: build_client moved to tests/common/mod.rs.
 fn build_client(client_pki: &std::path::Path) -> opcua::client::Client {
-    ClientBuilder::new()
-        .application_name("opcgw-test-client")
-        .application_uri("urn:opcgw:test:client")
-        .product_uri("urn:opcgw:test:client")
-        .create_sample_keypair(true)
-        .trust_server_certs(true)
-        .verify_server_certs(false)
-        .session_retry_limit(0)
-        .session_timeout(5_000)
-        .pki_dir(client_pki)
-        .client()
-        .expect("client build")
+    common::build_client(common::ClientBuildSpec {
+        application_name: "opcgw-test-client",
+        application_uri: "urn:opcgw:test:client",
+        product_uri: "urn:opcgw:test:client",
+        session_timeout_ms: 5_000,
+        client_pki,
+    })
 }
 
 /// Try to connect to the `None` endpoint with the supplied identity and

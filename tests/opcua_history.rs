@@ -24,19 +24,19 @@
 // async-opcua property pinned by the existing subscription-basic /
 // two-clients-share-node tests. No new contract surface here.
 //
-// Test-harness shape mirrors `tests/opcua_subscription_spike.rs` — per
-// CLAUDE.md scope-discipline rule "the fourth integration-test file
-// crosses the threshold for `tests/common/` extraction", but the spec
-// (Story 8-3 Dev Notes → Test-harness strategy) allows deferring the
-// extraction if invasive. The four files now diverge slightly (history
-// vs. subscription / connection-limit / security) and the extraction
-// would touch all four — deferred to a separate cleanup story.
+// Issue #102 (Epic 8 retro 2026-05-02): truly identical helpers
+// (pick_free_port, build_client, user_name_identity) now live in
+// tests/common/mod.rs. Per-file divergent helpers (init_test_subscriber
+// — N/A here, no event capture; setup_test_server — diverging max
+// parameter; history_test_config — file-specific fixture) stay below.
+
+mod common;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use opcua::client::{
-    ClientBuilder, DataChangeCallback, IdentityToken, Password as ClientPassword, Session,
+    DataChangeCallback, IdentityToken, Session,
 };
 use opcua::types::{
     DateTime as OpcDateTime, EndpointDescription, ExtensionObject, HistoryData,
@@ -74,12 +74,8 @@ fn user_name_policy() -> UserTokenPolicy {
     }
 }
 
-async fn pick_free_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral port");
-    listener.local_addr().expect("local_addr").port()
-}
+// Issue #102: pick_free_port now lives in tests/common/mod.rs.
+use common::pick_free_port;
 
 fn history_test_config(
     port: u16,
@@ -234,26 +230,21 @@ async fn setup_test_server(max_results_per_node: Option<usize>) -> TestServer {
     }
 }
 
+// Issue #102: build_client moved to tests/common/mod.rs as a
+// parametrised helper. Thin wrapper preserves call shape.
 fn build_client(client_pki: &std::path::Path) -> opcua::client::Client {
-    ClientBuilder::new()
-        .application_name("opcgw-history-8-3-client")
-        .application_uri("urn:opcgw:history:8-3:client")
-        .product_uri("urn:opcgw:history:8-3:client")
-        .create_sample_keypair(true)
-        .trust_server_certs(true)
-        .verify_server_certs(false)
-        .session_retry_limit(0)
-        .session_timeout(15_000)
-        .pki_dir(client_pki)
-        .client()
-        .expect("client build")
+    common::build_client(common::ClientBuildSpec {
+        application_name: "opcgw-history-8-3-client",
+        application_uri: "urn:opcgw:history:8-3:client",
+        product_uri: "urn:opcgw:history:8-3:client",
+        session_timeout_ms: 15_000,
+        client_pki,
+    })
 }
 
+// Issue #102: identity construction lives in tests/common/mod.rs.
 fn user_password_identity() -> IdentityToken {
-    IdentityToken::UserName(
-        TEST_USER.to_string(),
-        ClientPassword(TEST_PASSWORD.to_string()),
-    )
+    common::user_name_identity(TEST_USER, TEST_PASSWORD)
 }
 
 /// Open and activate a session against the server. Returns the session +

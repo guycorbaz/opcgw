@@ -22,14 +22,20 @@
 //           identically to read-only clients — no new auth or audit
 //           infrastructure introduced by Epic 8.
 //
-// Mirror of tests/opc_ua_connection_limit.rs harness — keep in sync;
-// refactor into tests/common/ when the fourth test file appears.
+// Issue #102 (Epic 8 retro 2026-05-02): truly identical helpers
+// (pick_free_port, build_client, user_name_identity) are now in
+// tests/common/mod.rs. Per-file divergent helpers (init_test_subscriber,
+// setup_test_server_with_max, HeldSession, spike_test_config) stay
+// in this file with documented divergence rationale — see
+// tests/common/mod.rs top-of-file docstring.
+
+mod common;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use opcua::client::{
-    ClientBuilder, DataChangeCallback, IdentityToken, Password as ClientPassword, Session,
+    DataChangeCallback, IdentityToken, Session,
 };
 use opcua::types::{
     DataChangeFilter, DataChangeTrigger, EndpointDescription, ExtensionObject,
@@ -185,12 +191,9 @@ impl Drop for TestServer {
     }
 }
 
-async fn pick_free_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral port");
-    listener.local_addr().expect("local_addr").port()
-}
+// Issue #102: pick_free_port moved to tests/common/mod.rs.
+// Local re-export keeps existing call sites unchanged.
+use common::pick_free_port;
 
 fn spike_test_config(port: u16, pki_dir: &std::path::Path, max_connections: usize) -> AppConfig {
     AppConfig {
@@ -318,33 +321,27 @@ async fn setup_test_server_with_max(max: usize) -> TestServer {
     }
 }
 
+// Issue #102: build_client moved to tests/common/mod.rs as a
+// parametrised helper. This thin wrapper keeps the existing
+// `build_client(client_pki)` call shape stable across the file.
 fn build_client(client_pki: &std::path::Path) -> opcua::client::Client {
-    ClientBuilder::new()
-        .application_name("opcgw-spike-8-1-client")
-        .application_uri("urn:opcgw:spike:8-1:client")
-        .product_uri("urn:opcgw:spike:8-1:client")
-        .create_sample_keypair(true)
-        .trust_server_certs(true)
-        .verify_server_certs(false)
-        .session_retry_limit(0)
-        .session_timeout(15_000)
-        .pki_dir(client_pki)
-        .client()
-        .expect("client build")
+    common::build_client(common::ClientBuildSpec {
+        application_name: "opcgw-spike-8-1-client",
+        application_uri: "urn:opcgw:spike:8-1:client",
+        product_uri: "urn:opcgw:spike:8-1:client",
+        session_timeout_ms: 15_000,
+        client_pki,
+    })
 }
 
+// Issue #102: user_name_identity moved to tests/common/mod.rs.
+// Per-file thin wrappers preserve the call shape.
 fn user_password_identity() -> IdentityToken {
-    IdentityToken::UserName(
-        TEST_USER.to_string(),
-        ClientPassword(TEST_PASSWORD.to_string()),
-    )
+    common::user_name_identity(TEST_USER, TEST_PASSWORD)
 }
 
 fn wrong_password_identity() -> IdentityToken {
-    IdentityToken::UserName(
-        TEST_USER.to_string(),
-        ClientPassword("definitely-not-the-password".to_string()),
-    )
+    common::user_name_identity(TEST_USER, "definitely-not-the-password")
 }
 
 struct HeldSession {

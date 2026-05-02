@@ -15,13 +15,17 @@
 //           ~5s. Disconnects decrement the count visible via
 //           `read_current_session_count`.
 //
-// Mirror of tests/opc_ua_security_endpoints.rs harness — keep in sync;
-// refactor into tests/common/ when the third user appears.
+// Issue #102 (Epic 8 retro 2026-05-02): truly identical helpers
+// (pick_free_port, build_client, user_name_identity) now live in
+// tests/common/mod.rs. The custom subscriber composition + connection-
+// limit-specific harness stays here.
+
+mod common;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use opcua::client::{ClientBuilder, IdentityToken, Password as ClientPassword, Session};
+use opcua::client::{IdentityToken, Session};
 use opcua::types::{
     EndpointDescription, MessageSecurityMode, NodeId, ReadValueId, TimestampsToReturn,
     UserTokenPolicy, UserTokenType,
@@ -149,12 +153,8 @@ impl Drop for TestServer {
     }
 }
 
-async fn pick_free_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral port");
-    listener.local_addr().expect("local_addr").port()
-}
+// Issue #102: pick_free_port now lives in tests/common/mod.rs.
+use common::pick_free_port;
 
 fn test_config(port: u16, pki_dir: &std::path::Path, max_connections: usize) -> AppConfig {
     AppConfig {
@@ -286,34 +286,29 @@ async fn setup_test_server_with_max(max: usize) -> TestServer {
     }
 }
 
+// Issue #102: build_client moved to tests/common/mod.rs.
+//
+// session_timeout=15_000ms keeps held sessions alive for the full
+// wall-clock of `test_max_sessions_enforced` (~10s) plus the
+// gauge-decrement test (~12s) while bounding leakage if a test
+// panics before disconnecting (HeldSession::Drop only aborts the
+// local task — server-side sessions linger until session_timeout).
+// 15s is the minimum that keeps the gauge-decrement test stable
+// and the leak window short. Code-review feedback 2026-04-29
+// (lowered from 60_000ms).
 fn build_client(client_pki: &std::path::Path) -> opcua::client::Client {
-    // session_timeout=15_000ms keeps held sessions alive for the full
-    // wall-clock of `test_max_sessions_enforced` (~10s) plus the
-    // gauge-decrement test (~12s) while bounding leakage if a test
-    // panics before disconnecting (HeldSession::Drop only aborts the
-    // local task — server-side sessions linger until session_timeout).
-    // 15s is the minimum that keeps the gauge-decrement test stable
-    // and the leak window short. Code-review feedback 2026-04-29
-    // (lowered from 60_000ms).
-    ClientBuilder::new()
-        .application_name("opcgw-test-client")
-        .application_uri("urn:opcgw:test:client")
-        .product_uri("urn:opcgw:test:client")
-        .create_sample_keypair(true)
-        .trust_server_certs(true)
-        .verify_server_certs(false)
-        .session_retry_limit(0)
-        .session_timeout(15_000)
-        .pki_dir(client_pki)
-        .client()
-        .expect("client build")
+    common::build_client(common::ClientBuildSpec {
+        application_name: "opcgw-test-client",
+        application_uri: "urn:opcgw:test:client",
+        product_uri: "urn:opcgw:test:client",
+        session_timeout_ms: 15_000,
+        client_pki,
+    })
 }
 
+// Issue #102: identity construction lives in tests/common/mod.rs.
 fn user_password_identity() -> IdentityToken {
-    IdentityToken::UserName(
-        TEST_USER.to_string(),
-        ClientPassword(TEST_PASSWORD.to_string()),
-    )
+    common::user_name_identity(TEST_USER, TEST_PASSWORD)
 }
 
 /// Owned, held-open OPC UA session for the duration of a test.
