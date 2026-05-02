@@ -128,15 +128,20 @@ development_status:
   epic-8-retrospective: done
 
   # Epic 9: Web Configuration & Hot-Reload (Phase B)
+  # Sequencing per Epic 8 retro action item #5 (2026-05-02): 9-0 spike runs
+  # after 9-1/9-2/9-3 (those don't touch OPC UA address space) and before
+  # 9-7 (hot-reload depends on the spike's findings about address-space
+  # mutation under live subscriptions).
   epic-9: backlog
+  9-0-async-opcua-runtime-address-space-mutation-spike: backlog
   9-1-axum-web-server-and-basic-authentication: backlog
   9-2-gateway-status-dashboard: backlog
   9-3-live-metric-values-display: backlog
   9-4-application-crud-via-web-ui: backlog
-  9-5-device-and-metric-mapping-crud-via-web-ui: backlog
+  9-5-device-and-metric-mapping-crud-via-web-ui: backlog  # blocked by issue #99 (NodeId collision); fixed in commit 9f823cc
   9-6-command-crud-via-web-ui: backlog
-  9-7-configuration-hot-reload: backlog
-  9-8-dynamic-opc-ua-address-space-mutation: backlog
+  9-7-configuration-hot-reload: backlog  # depends on 9-0 spike findings
+  9-8-dynamic-opc-ua-address-space-mutation: backlog  # depends on 9-0 spike findings
   epic-9-retrospective: optional
 
 ---
