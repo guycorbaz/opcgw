@@ -21,6 +21,10 @@ chirpstack_api = "4.17.0"
 async-opcua = { version = "0.17.1", features = ["server"] }
 constant_time_eq = "0.3"
 hmac = "0.12"
+# Story 7-2 + 9-1: per-process HMAC keying via OS RNG. Pinned to 0.2
+# explicitly because `getrandom` 0.3 renamed the entry point from
+# `getrandom(&mut [u8])` to `fill(&mut [u8])`; a transitive bump
+# would silently break compilation. Story 9-1 review iter-1 patch.
 getrandom = "0.2"
 clap = { version = "4.6.0", features = ["derive"] }
 local-ip-address = "0.6.5"

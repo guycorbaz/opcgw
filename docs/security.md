@@ -1070,6 +1070,46 @@ fixed-length digests closes that oracle.
 operator with LAN access; one credential rotation step covers both
 surfaces; one less credential pair for operators to forget to rotate).
 
+### Required reading before enabling
+
+The web UI binds an HTTP listener that any client on the configured
+network can probe. Before flipping `[web].enabled = true`, confirm:
+
+1. **You're on a trusted LAN.** Story 9-1 ships HTTP-only — credentials
+   transit in cleartext. If your gateway is reachable from the public
+   internet, deploy a reverse proxy (nginx, Caddy, Traefik) with TLS
+   termination + a deny-all firewall on the gateway port. The default
+   `bind_address = "0.0.0.0"` listens on every interface; if a reverse
+   proxy on the same host fronts the gateway, override to
+   `bind_address = "127.0.0.1"` so the listener is loopback-only.
+2. **You've rotated the placeholder password.** The shipped
+   `config/config.toml` has a placeholder `[opcua].user_password` value
+   the gateway refuses to start with. The same protection extends to
+   the web surface (since credentials are shared). Verify your
+   `OPCGW_OPCUA__USER_PASSWORD` env var injection before flipping
+   `[web].enabled = true`.
+
+### Deployment requirements
+
+The web server's `static/` directory **must** be reachable from the
+gateway's working directory at runtime. Story 9-1 resolves
+`std::path::PathBuf::from("static")` relative to the gateway's CWD,
+so `static/` must live next to the binary or under
+`WorkingDirectory` (systemd) / `WORKDIR` (Docker):
+
+- **Local development (`cargo run` from project root):** the shipped
+  `static/index.html` etc. are picked up automatically.
+- **Docker:** the shipped `Dockerfile` copies `static/` into
+  `/usr/local/bin/static` next to the binary. If you customise the
+  `Dockerfile`, preserve this `COPY`.
+- **systemd:** set `WorkingDirectory=/var/lib/opcgw` (or wherever
+  `static/` lives) in the service unit; otherwise `GET /index.html`
+  returns 404 even after auth succeeds.
+
+Tracked as a Story 9-X follow-up: a `[web].static_dir` config knob
+that lets operators specify the path explicitly. For now the
+project root / binary location is the convention.
+
 ### Configuration
 
 ```toml
@@ -1077,7 +1117,8 @@ surfaces; one less credential pair for operators to forget to rotate).
 enabled = true              # default false — opt-in to expose
 port = 8080                 # default 8080; range 1024-65535
 bind_address = "0.0.0.0"    # default "0.0.0.0"; must parse as IpAddr
-auth_realm = "opcgw"        # default "opcgw"; max 64 chars, no `"`
+auth_realm = "opcgw"        # default "opcgw"; max 64 chars, ASCII-only,
+                            # no `"`, no `\`, no leading/trailing whitespace
 ```
 
 Env-var overrides via figment's nested-key convention:
@@ -1156,16 +1197,20 @@ at `error`/`off` lose the audit trail entirely (their explicit choice).
 
 ### Anti-patterns
 
-- **Don't expose the gateway's web port to the internet.** The threat model
-  is LAN-internal: Basic auth over HTTP transmits credentials in cleartext,
-  which is acceptable on a trusted LAN with reverse-proxy TLS termination
-  but not over the public internet. If you need internet exposure, deploy
-  a reverse proxy (nginx, Caddy, Traefik) with TLS + a deny-all firewall on
-  the gateway port.
 - **Don't roll your own credential comparison.** The HMAC-keyed digest +
   `constant_time_eq` shape exists to close two specific weaknesses (the
   length oracle of a direct compare; replay across instances). Phase-B
   carry-forward rule (`epics.md:782`).
+- **Don't put symlinks in `static/`.** `tower-http = "0.6"`'s `ServeDir`
+  doesn't expose a symlink-disable knob (verified against upstream
+  source during Story 9-1 review iter-1). On Linux,
+  `tokio::fs::File::open` follows symlinks by default. A symlink in
+  `static/` pointing outside the directory (e.g. to `/etc/passwd`)
+  would let an authenticated user read it. Restrict `static/` to plain
+  files. Tracked as a follow-up: a custom `tower::Service` wrapper
+  that canonicalises every request path against the canonical
+  `static/` root before dispatch would close this gap, but Story 9-1's
+  scope didn't include it.
 - **Don't introduce a separate `[web]` user/password pair without
   symmetric rotation procedures.** Story 9-1's single-source-of-truth
   shape (credentials live under `[opcua]`) means one rotation step

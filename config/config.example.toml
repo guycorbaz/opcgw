@@ -187,11 +187,22 @@ stale_threshold_seconds = 120
 # for both auth surfaces). HTTP-only — deploy a reverse proxy if your
 # environment requires TLS.
 #
-# port — listening port. Default 8080. Range 1024–65535.
-# bind_address — IP to bind. Default "0.0.0.0".
+# port — listening port. Default 8080. Range 1024-65535.
+# bind_address — IP to bind. Default "0.0.0.0". Use "127.0.0.1" if a
+#   reverse proxy on the same host fronts the gateway.
 # auth_realm — Basic-auth realm string. Default "opcgw". Max 64 chars,
-#   no `"` allowed.
+#   ASCII-only, no `"`, no `\`, no leading/trailing whitespace.
 # enabled — master switch. Default false.
+#
+# WARNING: this example overrides the default `enabled = false` to
+# `enabled = true` for illustration. The shipped `config/config.toml`
+# (the canonical starting point for new deployments) ships the entire
+# `[web]` block commented-out so the safe default applies. If you
+# copy this example as your starting point, REVIEW the `[web]` block
+# before deploying — verify your reverse-proxy / firewall posture
+# matches your threat model. See
+# `docs/security.md § Web UI authentication § Required reading
+# before enabling`.
 [web]
 enabled = true
 port = 8080

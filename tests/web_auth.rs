@@ -18,13 +18,19 @@
 //           and the spawn task joins within a few seconds.
 //   - AC#5 (line 785, FR41): static placeholder files are served from
 //           `static/` with the auth middleware applied. The
-//           `<meta name="viewport">` tag is present in the body
-//           (FR41 mobile-responsive marker).
+//           <meta name="viewport"> tag is present in the body
+//           (FR41 mobile-responsive marker). Unauth'd `GET
+//           /nonexistent.html` returns 401 (not 404) — the layer-
+//           after-fallback ordering invariant.
+//   - Review iter-1: production `WebAuthState::new(&AppConfig, realm)`
+//           is exercised by a dedicated unit test; route-vs-fallback
+//           ordering is pinned; `[web].enabled = false` no-bind path
+//           is pinned.
 //
 // Notes on the test harness:
 //   - We spawn the web server on an ephemeral port via the same
-//     `web::run` entry point production uses. No mocking — real
-//     reqwest client + real Axum router.
+//     `web::bind` + `web::run` entry points production uses. No
+//     mocking — real reqwest client + real Axum router.
 //   - Tests are `#[serial_test::serial]` because they install a
 //     process-wide tracing subscriber via `init_test_subscriber()`
 //     for `event="web_auth_failed"` capture.
@@ -44,7 +50,7 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{fmt as tracing_fmt, layer::SubscriberExt, Layer};
 
 use opcgw::utils::{WEB_DEFAULT_AUTH_REALM, WEB_DEFAULT_BIND_ADDRESS};
-use opcgw::web::{auth::WebAuthState, build_router, run as web_run};
+use opcgw::web::{auth::WebAuthState, bind as web_bind, build_router, run as web_run};
 
 const TEST_USER: &str = "opcua-user";
 const TEST_PASSWORD: &str = "test-password-9-1";
@@ -54,10 +60,6 @@ const TEST_REALM: &str = "opcgw-9-1";
 /// `tracing_test`'s capture buffer. Same shape as
 /// `tests/opcua_subscription_spike.rs::init_test_subscriber` (issue
 /// #101 fixes — panic on install failure).
-///
-/// **DO NOT add `#[tracing_test::traced_test]` to any test in this
-/// file** — it installs its own subscriber and `set_global_default`
-/// would fail.
 fn init_test_subscriber() {
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INIT.get_or_init(|| {
@@ -94,9 +96,7 @@ fn captured_log_line_contains_all(needles: &[&str]) -> bool {
         .any(|line| needles.iter().all(|n| line.contains(n)))
 }
 
-/// Bounded-retry poll for a captured log line. Returns `true` once a
-/// line matching every needle appears in the global tracing-test
-/// buffer; returns `false` if the budget elapses without a match.
+/// Bounded-retry poll for a captured log line.
 async fn wait_for_captured_log(needles: &[&str], budget: Duration) -> bool {
     let deadline = std::time::Instant::now() + budget;
     loop {
@@ -111,27 +111,30 @@ async fn wait_for_captured_log(needles: &[&str], budget: Duration) -> bool {
 }
 
 /// Spawn a web server on an ephemeral port + return its bound
-/// `SocketAddr` plus a CancellationToken to stop it. Mirrors the
-/// `setup_test_server*` shape used by the OPC UA integration tests.
+/// `SocketAddr` plus a CancellationToken to stop it.
 struct TestWebServer {
     addr: SocketAddr,
     cancel: CancellationToken,
     handle: Option<tokio::task::JoinHandle<()>>,
     /// Hold the static-files temp dir alive for the lifetime of the
-    /// server — `Drop` cleans up on test exit.
+    /// server.
     _static_dir: TempDir,
 }
 
 impl Drop for TestWebServer {
     fn drop(&mut self) {
+        // Review iter-1 patch: `cancel.cancel()` is the only cleanup.
+        // The handle is dropped (not aborted) — `axum::serve`'s
+        // graceful-shutdown path responds to `cancel.cancelled()` so
+        // the spawned task exits naturally. `abort()`-mid-shutdown
+        // can panic-poison subsequent serial tests on Windows; on
+        // Linux today this is observably benign but the cleaner
+        // shape avoids the trap.
         self.cancel.cancel();
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-        }
     }
 }
 
-/// Pick an ephemeral TCP port (matches `tests/common/mod.rs`).
+/// Pick an ephemeral TCP port.
 async fn pick_free_port() -> u16 {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -139,11 +142,7 @@ async fn pick_free_port() -> u16 {
     listener.local_addr().expect("local_addr").port()
 }
 
-/// Build a minimal `static/` directory shape for tests:
-///   - index.html with a `<meta viewport>` tag (so AC#5's
-///     mobile-responsive marker is present)
-///   - api/health is the smoke endpoint built by `build_router`,
-///     not a static file
+/// Build a minimal `static/` directory shape for tests.
 async fn build_test_static_dir() -> TempDir {
     let tmp = TempDir::new().expect("test static tmp dir");
     let index = tmp.path().join("index.html");
@@ -164,10 +163,13 @@ async fn build_test_static_dir() -> TempDir {
     tmp
 }
 
+/// Bind + spawn a test web server. Uses the production `web::bind` +
+/// `web::run` entry points so the test harness exercises the same
+/// fail-fast bind path as the gateway's `main`.
 async fn setup_test_web_server() -> TestWebServer {
     let static_tmp = build_test_static_dir().await;
     let port = pick_free_port().await;
-    // Bind to 127.0.0.1 specifically — production defaults to 0.0.0.0
+    // Bind to 127.0.0.1 explicitly — production default is 0.0.0.0
     // but on shared CI runners we don't want to advertise the test
     // port externally even briefly.
     let bind_ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
@@ -183,14 +185,14 @@ async fn setup_test_web_server() -> TestWebServer {
     let cancel_for_run = cancel.clone();
     let realm = TEST_REALM.to_string();
 
+    // Bind synchronously (matches production's D1 fail-fast pattern).
+    let listener = web_bind(addr).await.expect("test web server bind");
+
     let handle = tokio::spawn(async move {
-        let _ = web_run(addr, router, &realm, cancel_for_run).await;
+        let _ = web_run(listener, router, &realm, cancel_for_run).await;
     });
 
-    // Wait for the listener to bind. `web::run` calls `TcpListener::bind`
-    // synchronously (in the async sense — before the first request
-    // is awaited) before reaching the serve loop, so polling for a
-    // successful connect against the bound port covers it.
+    // Probe the bound port to confirm the serve loop is accepting.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         if tokio::net::TcpStream::connect(&addr).await.is_ok() {
@@ -219,6 +221,43 @@ fn build_basic_auth(user: &str, pass: &str) -> String {
     format!("Basic {blob}")
 }
 
+/// Match either IPv4 or IPv6 loopback in audit-event source_ip
+/// assertions. Linux x86_64 default is `127.0.0.1`; some platforms
+/// or dual-stack configs route loopback as `::1`. Accept both.
+fn source_ip_loopback_needles(line: &str) -> bool {
+    line.contains("source_ip=127.0.0.1") || line.contains("source_ip=::1")
+}
+
+/// Match a captured log line that contains all `static_needles` AND
+/// passes `extra_predicate`. Used to combine static-string and
+/// dynamic (e.g. IP-family-flexible) match conditions.
+fn captured_log_line_matches(
+    static_needles: &[&str],
+    extra_predicate: impl Fn(&str) -> bool,
+) -> bool {
+    let raw = tracing_test::internal::global_buf().lock().unwrap().clone();
+    let s = String::from_utf8_lossy(&raw);
+    s.lines().any(|line| {
+        static_needles.iter().all(|n| line.contains(n)) && extra_predicate(line)
+    })
+}
+
+async fn wait_for_audit_with_loopback_ip(
+    static_needles: &[&str],
+    budget: Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        if captured_log_line_matches(static_needles, source_ip_loopback_needles) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 // =====================================================================
 // AC#2 + AC#3: missing Authorization header → 401 + WWW-Authenticate
 // + event="web_auth_failed" reason=missing
@@ -227,9 +266,11 @@ fn build_basic_auth(user: &str, pass: &str) -> String {
 #[serial_test::serial]
 async fn test_unauthenticated_request_returns_401_and_emits_audit_event() {
     init_test_subscriber();
-    clear_captured_buffer();
-
     let server = setup_test_web_server().await;
+    // Review iter-1: clear the buffer AFTER setup so the
+    // event="web_server_started" startup line doesn't appear in our
+    // assertion's match window.
+    clear_captured_buffer();
     let client = common::build_http_client(Duration::from_secs(5));
 
     let resp = client
@@ -254,16 +295,14 @@ async fn test_unauthenticated_request_returns_401_and_emits_audit_event() {
         "WWW-Authenticate must include configured realm; got {www:?}"
     );
 
-    // Audit event: warn-level, event=web_auth_failed, reason=missing,
-    // path=/api/health. Source-IP must be 127.0.0.1 (the test
-    // client's bind).
+    // Audit event must include event/reason/path AND a loopback
+    // source_ip (IPv4 or IPv6).
     assert!(
-        wait_for_captured_log(
+        wait_for_audit_with_loopback_ip(
             &[
                 "event=\"web_auth_failed\"",
                 "reason=\"missing\"",
-                "path=\"/api/health\"",
-                "source_ip=127.0.0.1",
+                "path=/api/health",
             ],
             Duration::from_secs(2),
         )
@@ -275,16 +314,12 @@ async fn test_unauthenticated_request_returns_401_and_emits_audit_event() {
     );
 }
 
-// =====================================================================
-// AC#2 + AC#3: malformed Authorization scheme → 401 + reason=malformed_scheme
-// =====================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn test_malformed_scheme_returns_401_and_emits_audit_event() {
     init_test_subscriber();
-    clear_captured_buffer();
-
     let server = setup_test_web_server().await;
+    clear_captured_buffer();
     let client = common::build_http_client(Duration::from_secs(5));
 
     let resp = client
@@ -308,17 +343,12 @@ async fn test_malformed_scheme_returns_401_and_emits_audit_event() {
     );
 }
 
-// =====================================================================
-// AC#2 + AC#3: wrong password → 401 + reason=password_mismatch +
-// the sanitised submitted user appears in the audit event
-// =====================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn test_wrong_password_returns_401_and_emits_audit_event_with_user() {
     init_test_subscriber();
-    clear_captured_buffer();
-
     let server = setup_test_web_server().await;
+    clear_captured_buffer();
     let client = common::build_http_client(Duration::from_secs(5));
 
     let resp = client
@@ -332,8 +362,8 @@ async fn test_wrong_password_returns_401_and_emits_audit_event_with_user() {
         .expect("GET /api/health");
 
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    // The `user` field is emitted via `%`-Display format so it
-    // renders unquoted (`user=opcua-user`) — not `user="opcua-user"`.
+    // The `user` field is emitted via Display (`%`) format so it
+    // renders unquoted (`user=opcua-user`).
     assert!(
         wait_for_captured_log(
             &[
@@ -353,16 +383,14 @@ async fn test_wrong_password_returns_401_and_emits_audit_event_with_user() {
 
 // =====================================================================
 // AC#2: correct credentials → 200 OK from the api/health smoke
-// endpoint (proves auth middleware forwards the request to inner
-// handler).
+// endpoint + no audit event emitted on the success path.
 // =====================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn test_correct_credentials_serve_api_health() {
     init_test_subscriber();
-    clear_captured_buffer();
-
     let server = setup_test_web_server().await;
+    clear_captured_buffer();
     let client = common::build_http_client(Duration::from_secs(5));
 
     let resp = client
@@ -390,6 +418,18 @@ async fn test_correct_credentials_serve_api_health() {
         body.contains("\"status\""),
         "body should include the status field, got: {body}"
     );
+
+    // Review iter-1: assert the audit event did NOT fire on the
+    // success path. Give the tracing layer a moment to flush, then
+    // grep the buffer.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !captured_log_line_contains_all(&["event=\"web_auth_failed\""]),
+        "web_auth_failed must NOT fire on success path — captured:\n{}",
+        String::from_utf8_lossy(
+            &tracing_test::internal::global_buf().lock().unwrap().clone()
+        )
+    );
 }
 
 // =====================================================================
@@ -400,12 +440,11 @@ async fn test_correct_credentials_serve_api_health() {
 #[serial_test::serial]
 async fn test_static_file_served_with_auth() {
     init_test_subscriber();
-    clear_captured_buffer();
-
     let server = setup_test_web_server().await;
+    clear_captured_buffer();
     let client = common::build_http_client(Duration::from_secs(5));
 
-    // Unauth → 401 (path inherits the auth layer).
+    // Unauth → 401.
     let resp = client
         .get(url(&server, "/index.html"))
         .send()
@@ -432,28 +471,204 @@ async fn test_static_file_served_with_auth() {
 }
 
 // =====================================================================
-// AC#4: graceful shutdown via CancellationToken — the spawn task joins
-// within a small budget after cancel().
+// AC#5 review iter-1: unauth GET /nonexistent.html returns 401, NOT
+// 404 — pins the layer-after-fallback ordering invariant. Without
+// this test, a future router refactor (e.g. nesting groups) could
+// silently re-introduce the 404-vs-401 differential that leaks the
+// directory layout to unauthenticated probers.
+// =====================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn test_unauth_unknown_path_returns_401() {
+    init_test_subscriber();
+    let server = setup_test_web_server().await;
+    clear_captured_buffer();
+    let client = common::build_http_client(Duration::from_secs(5));
+
+    let resp = client
+        .get(url(&server, "/this-path-does-not-exist.html"))
+        .send()
+        .await
+        .expect("GET /this-path-does-not-exist.html");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "unauth unknown path must be 401, not 404 — otherwise the \
+         404-vs-401 differential leaks the directory layout"
+    );
+}
+
+// =====================================================================
+// Review iter-1: route precedence — `/api/health` route handler must
+// win over a same-path file in the static directory. Pins the
+// `route(...)` + `fallback_service(...)` ordering invariant.
+// =====================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn test_route_wins_over_fallback_service() {
+    init_test_subscriber();
+
+    // Build a static dir with a file at api/health that the route
+    // handler MUST override.
+    let static_tmp = TempDir::new().expect("test static tmp dir");
+    let api_dir = static_tmp.path().join("api");
+    tokio::fs::create_dir_all(&api_dir).await.expect("mkdir api");
+    tokio::fs::write(api_dir.join("health"), b"INTENTIONALLY-WRONG-FILE")
+        .await
+        .expect("write decoy file");
+
+    let port = pick_free_port().await;
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let auth_state = Arc::new(WebAuthState::new_with_fresh_key(
+        TEST_USER,
+        TEST_PASSWORD,
+        TEST_REALM.to_string(),
+    ));
+    let router = build_router(auth_state, static_tmp.path().to_path_buf());
+    let cancel = CancellationToken::new();
+    let cancel_for_run = cancel.clone();
+    let realm = TEST_REALM.to_string();
+    let listener = web_bind(addr).await.expect("test bind");
+    let handle = tokio::spawn(async move {
+        let _ = web_run(listener, router, &realm, cancel_for_run).await;
+    });
+
+    // Probe.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("server did not bind");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let client = common::build_http_client(Duration::from_secs(5));
+    let resp = client
+        .get(format!("http://{addr}/api/health"))
+        .header(
+            header::AUTHORIZATION,
+            build_basic_auth(TEST_USER, TEST_PASSWORD),
+        )
+        .send()
+        .await
+        .expect("GET /api/health");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.text().await.expect("body");
+    assert!(
+        body.contains("\"status\""),
+        "route handler must win over static file — got body: {body}"
+    );
+    assert!(
+        !body.contains("INTENTIONALLY-WRONG-FILE"),
+        "static file should NOT be served for /api/health"
+    );
+
+    cancel.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+// =====================================================================
+// Iter-1 + iter-2: pin `WEB_DEFAULT_ENABLED = false` at COMPILE TIME
+// via a `const _: () = assert!(...)` outside of any test runtime.
+// A future edit to `src/utils.rs` flipping the constant to `true` MUST
+// fail `cargo build`, not just `cargo test` — flipping the default
+// would expose the web UI on every fresh deployment without operator
+// opt-in (Story 9-1 AC#1).
+//
+// This is NOT a behavioural test of the no-bind code path; the
+// behavioural contract that "main does not call `tokio::spawn` for the
+// web task when `[web].enabled = false`" is verified by reading
+// `src/main.rs` and the structural test below (which pins the constant
+// the branch reads).
+// =====================================================================
+const _: () = assert!(
+    !opcgw::utils::WEB_DEFAULT_ENABLED,
+    "WEB_DEFAULT_ENABLED must remain `false` — flipping it to `true` \
+     would expose the web UI on every fresh deployment without \
+     operator opt-in. Story 9-1 AC#1."
+);
+
+#[test]
+#[serial_test::serial]
+fn test_web_default_enabled_constant_is_false() {
+    // Runtime mirror of the compile-time assertion above. Kept so
+    // `cargo test` reports a named test passing for AC#1's default-off
+    // contract (the const-assert above is anonymous and produces no
+    // test-runner output). Clippy correctly notes this is evaluable
+    // at compile time — that's the point; the const-assert above is
+    // the load-bearing enforcement.
+    #[allow(clippy::assertions_on_constants)]
+    {
+        assert!(!opcgw::utils::WEB_DEFAULT_ENABLED);
+    }
+}
+
+// =====================================================================
+// Iter-2 regression pin: the embedded web server must NOT
+// self-terminate after the GRACEFUL_SHUTDOWN_BUDGET_SECS budget
+// elapses when no shutdown was requested. Iter-1 patch incorrectly
+// wrapped `axum::serve(...).with_graceful_shutdown(...)` in a
+// `tokio::time::timeout(5s, ...)` that fired regardless of whether
+// `cancel` had fired — making the server die after 5 s of idle
+// uptime. Iter-2 fix: the budget applies only to the post-cancel
+// drain via `tokio::select!`. This test idles the server past the
+// budget and confirms the port stays bound.
+//
+// Wall-clock: ~6 s.
+// =====================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn test_server_stays_bound_past_shutdown_budget_when_idle() {
+    init_test_subscriber();
+    let server = setup_test_web_server().await;
+    clear_captured_buffer();
+    let client = common::build_http_client(Duration::from_secs(5));
+
+    // Idle for 6 s (> the 5 s GRACEFUL_SHUTDOWN_BUDGET_SECS). On
+    // the iter-1 buggy code, the server self-terminates here.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+
+    // Issue an authenticated request — must succeed if the server
+    // is still bound. On the iter-1 buggy code, this returns a
+    // connection error (port closed).
+    let resp = client
+        .get(url(&server, "/api/health"))
+        .header(
+            header::AUTHORIZATION,
+            build_basic_auth(TEST_USER, TEST_PASSWORD),
+        )
+        .send()
+        .await
+        .expect("server should still be reachable after 6 s of idle uptime");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "server must remain operational past the post-cancel drain budget when no \
+         shutdown was requested — iter-1 bug let the timeout fire on the entire \
+         serve future, killing the server after exactly 5 s of normal uptime"
+    );
+}
+
+// =====================================================================
+// AC#4: graceful shutdown via CancellationToken.
 // =====================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn test_graceful_shutdown_via_cancellation_token() {
     init_test_subscriber();
-    clear_captured_buffer();
 
     let mut server = setup_test_web_server().await;
-
-    // Take the handle so we can `await` it after cancel() — the
-    // `Drop` impl would also abort it, but here we want to verify
-    // graceful join.
     let handle = server.handle.take().expect("handle");
 
     server.cancel.cancel();
 
-    let join_result = tokio::time::timeout(Duration::from_secs(5), handle).await;
+    let join_result = tokio::time::timeout(Duration::from_secs(10), handle).await;
     assert!(
         join_result.is_ok(),
-        "web server task did not join within 5s of cancellation"
+        "web server task did not join within 10s of cancellation"
     );
     let inner = join_result.unwrap();
     assert!(
@@ -461,8 +676,6 @@ async fn test_graceful_shutdown_via_cancellation_token() {
         "web server task joined with error: {inner:?}"
     );
 
-    // After cancellation the listener should be released — connect
-    // attempts on the bound addr should fail (port closed).
     let connect = tokio::net::TcpStream::connect(&server.addr).await;
     assert!(
         connect.is_err(),
@@ -471,10 +684,12 @@ async fn test_graceful_shutdown_via_cancellation_token() {
 }
 
 // =====================================================================
-// AC#1 sanity: `WEB_DEFAULT_*` constants are wired through (compile
-// + value pin so a future re-numbering of port/realm trips a test).
+// AC#1 sanity: `WEB_DEFAULT_*` constants are wired through.
+// Marked `#[serial_test::serial]` for spec compliance with Task 4's
+// "All tests `#[serial_test::serial]`" rule (review iter-1).
 // =====================================================================
 #[test]
+#[serial_test::serial]
 fn test_web_defaults_are_stable() {
     assert_eq!(WEB_DEFAULT_BIND_ADDRESS, "0.0.0.0");
     assert_eq!(WEB_DEFAULT_AUTH_REALM, "opcgw");

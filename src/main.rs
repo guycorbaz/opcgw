@@ -699,51 +699,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Story 9-1: spawn the embedded Axum web server when [web].enabled.
+    // Story 9-1: start the embedded Axum web server when [web].enabled.
     // Defaults to `false` so existing operators upgrading from Phase A
     // don't get a surprise new listening port. The server shares the
     // same Tokio runtime as the OPC UA / poller / timeout-handler
     // tasks and joins the same CancellationToken-driven shutdown
     // sequence below.
+    //
+    // **D1 resolution (review iter-1, 2026-05-02):** `bind` happens
+    // synchronously HERE — before `tokio::spawn` — so a bind failure
+    // (port in use, EACCES, etc.) aborts the gateway's startup with a
+    // non-zero exit. Previously the bind lived inside the spawned
+    // task; failures only surfaced as a single `error!` line which
+    // operators could miss while the rest of the gateway kept
+    // running. This is the same fail-closed pattern Story 7-2 used
+    // for `[storage].retention_days` startup failures.
     let web_enabled = application_config
         .web
         .enabled
         .unwrap_or(crate::utils::WEB_DEFAULT_ENABLED);
     let web_handle: Option<tokio::task::JoinHandle<()>> = if web_enabled {
+        let port = application_config
+            .web
+            .port
+            .unwrap_or(crate::utils::WEB_DEFAULT_PORT);
+        let bind_address_str = application_config
+            .web
+            .bind_address
+            .clone()
+            .unwrap_or_else(|| crate::utils::WEB_DEFAULT_BIND_ADDRESS.to_string());
+        // `validate()` already enforces bind_address parses as IpAddr;
+        // a failure here is a programming-invariant violation, not a
+        // configuration error — panic loudly instead of silently
+        // logging and continuing.
+        let bind_ip: std::net::IpAddr = bind_address_str.parse().unwrap_or_else(|e| {
+            panic!(
+                "invariant violation: web.bind_address={bind_address_str:?} \
+                 failed to parse as IpAddr at runtime ({e}); should have been \
+                 caught by AppConfig::validate"
+            )
+        });
+        let addr = std::net::SocketAddr::new(bind_ip, port);
+        let realm = application_config
+            .web
+            .auth_realm
+            .clone()
+            .unwrap_or_else(|| crate::utils::WEB_DEFAULT_AUTH_REALM.to_string());
+
+        // Construct the auth state synchronously here too — if
+        // `getrandom(2)` is unavailable (chroot without /dev/urandom,
+        // seccomp, etc.), the panic surfaces at startup rather than
+        // at shutdown via JoinError on the spawned task.
+        let auth_state = std::sync::Arc::new(web::auth::WebAuthState::new(
+            &application_config,
+            realm.clone(),
+        )?);
+
+        // Bind synchronously; fail-fast on bind failure.
+        let listener = match web::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                error!(error = %e, "Failed to bind embedded web server — aborting startup");
+                return Err(e.into());
+            }
+        };
+
+        // Build the router and spawn the serve task on the bound listener.
+        let static_dir = std::path::PathBuf::from("static");
+        let router = web::build_router(auth_state, static_dir);
         let cancel_web = cancel_token.clone();
-        let config_web = application_config.clone();
         Some(tokio::spawn(async move {
-            let port = config_web.web.port.unwrap_or(crate::utils::WEB_DEFAULT_PORT);
-            let bind_address_str = config_web
-                .web
-                .bind_address
-                .clone()
-                .unwrap_or_else(|| crate::utils::WEB_DEFAULT_BIND_ADDRESS.to_string());
-            let bind_ip: std::net::IpAddr = match bind_address_str.parse() {
-                Ok(ip) => ip,
-                Err(e) => {
-                    error!(
-                        error = %e,
-                        bind_address = %bind_address_str,
-                        "web.bind_address failed to parse at runtime — should have been caught by AppConfig::validate"
-                    );
-                    return;
-                }
-            };
-            let addr = std::net::SocketAddr::new(bind_ip, port);
-            let realm = config_web
-                .web
-                .auth_realm
-                .clone()
-                .unwrap_or_else(|| crate::utils::WEB_DEFAULT_AUTH_REALM.to_string());
-            let auth_state = std::sync::Arc::new(web::auth::WebAuthState::new(
-                &config_web,
-                realm.clone(),
-            ));
-            let static_dir = std::path::PathBuf::from("static");
-            let router = web::build_router(auth_state, static_dir);
-            if let Err(e) = web::run(addr, router, &realm, cancel_web).await {
-                error!(error = %e, "Embedded web server error");
+            if let Err(e) = web::run(listener, router, &realm, cancel_web).await {
+                error!(error = %e, "Embedded web server runtime error");
             }
         }))
     } else {
@@ -774,6 +801,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // handle is `Option<JoinHandle>` because the server may not
     // have been started; await it conditionally so the regular
     // join path is unchanged when [web].enabled = false.
+    //
+    // **D4 resolution (review iter-1, 2026-05-02):** the shutdown
+    // shape here is INTENTIONALLY asymmetric. `try_join!` covers the
+    // four core tasks that are always running; the web handle joins
+    // separately afterward because it's `Option<JoinHandle>`
+    // (`None` when `[web].enabled = false`). If `try_join!`
+    // short-circuits on a task error, sibling join futures inside
+    // it are abandoned — the outer 10 s `tokio::time::timeout` is
+    // the safety net that bounds total shutdown latency. The web
+    // server's own per-surface 5 s graceful-shutdown budget (in
+    // `web::run`) caps the slow-loris vector independently.
+    // Cancellation still fans out to all five surfaces via the
+    // shared `CancellationToken` — only the join sequencing is
+    // asymmetric.
     match tokio::time::timeout(
         std::time::Duration::from_secs(10),
         async {

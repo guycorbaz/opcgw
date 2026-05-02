@@ -117,15 +117,16 @@ impl OpcgwAuthManager {
 
     /// Borrow the per-process random HMAC key (Story 9-1).
     ///
-    /// The web auth surface ([`crate::web::auth::WebAuthState`]) reuses
-    /// this key so both auth surfaces share one per-process secret —
-    /// cleaner than each generating its own. Exposed as `pub` rather
-    /// than `pub(crate)` so the `web` module can build a
-    /// `WebAuthState` from a borrowed [`OpcgwAuthManager`] without the
-    /// two living in the same crate-private submodule.
+    /// Reserved for a future story that refactors `OpcUa::run` to
+    /// surface `OpcgwAuthManager` from `main.rs` so the web auth
+    /// surface (`crate::web::auth::WebAuthState`) can share the same
+    /// per-process secret (Shape 2 from Story 9-1 AC#2). Story 9-1
+    /// itself uses Shape 1 (independent per-process key on the web
+    /// side) because AC#6 forbids modifying `src/opc_ua.rs`.
     ///
     /// The key is **never** logged, displayed, or persisted by the
     /// auth manager itself. Callers must hold the same contract.
+    #[allow(dead_code)]
     pub fn hmac_key(&self) -> &[u8; 32] {
         &self.hmac_key
     }

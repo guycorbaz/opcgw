@@ -2,7 +2,7 @@
 
 **Epic:** 9 (Web Configuration & Hot-Reload — Phase B)
 **Phase:** Phase B
-**Status:** review
+**Status:** done
 **Created:** 2026-05-02
 **Author:** Claude Code (Automated Story Generation)
 
@@ -152,8 +152,8 @@ Read these before writing code. The story's job is to **plumb a new transport on
   - **Shape A** wins on long-term cleanliness (the function isn't OPC-UA-specific); **Shape B** wins on minimum-diff. Either is fine; document the choice in completion notes.
 - New `src/web/auth.rs` module (~120 LOC):
   - `WebAuthState { user_digest: [u8; 32], pass_digest: [u8; 32], hmac_key: [u8; 32], realm: String }` struct.
-  - `WebAuthState::new(config: &AppConfig) -> Self` — reads `config.opcua.user_name` / `user_password` (NOT `config.web.*`; credentials are shared per AC#1), generates a fresh per-process `hmac_key` via `getrandom`, computes the two digests, drops the plaintext.
-  - **OR (cleaner):** share the same `hmac_key` already living in `OpcgwAuthManager` so both auth surfaces use one per-process secret. Refactor: `OpcgwAuthManager` exposes `pub fn hmac_key(&self) -> &[u8; 32]`; `WebAuthState::from_opcua_auth(opcua: &OpcgwAuthManager, realm: String) -> Self`. **This shape is preferred** — one `hmac_key` per process is cleaner; revisit only if the dev agent finds a pinch point.
+  - `WebAuthState::new(config: &AppConfig, realm: String) -> Result<Self, OpcGwError>` — reads `config.opcua.user_name` / `user_password` (NOT `config.web.*`; credentials are shared per AC#1), generates a fresh per-process `hmac_key` via `getrandom`, computes the two digests, drops the plaintext. **Iter-2 fix:** the constructor now returns `Result` and rejects empty or whitespace-only credentials at construction time (defence-in-depth — `AppConfig::validate` rejects them upstream).
+  - ~~**OR (cleaner):** share the same `hmac_key` already living in `OpcgwAuthManager` so both auth surfaces use one per-process secret. Refactor: `OpcgwAuthManager` exposes `pub fn hmac_key(&self) -> &[u8; 32]`; `WebAuthState::from_opcua_auth(opcua: &OpcgwAuthManager, realm: String) -> Self`. **This shape is preferred** — one `hmac_key` per process is cleaner; revisit only if the dev agent finds a pinch point.~~ **(Iter-1 review 2026-05-02 deleted Shape 2: AC#6 forbids modifying `src/opc_ua.rs` to surface `OpcgwAuthManager` from `main.rs`, which was the prerequisite for sharing the key. Only Shape 1 ships. The `OpcgwAuthManager::hmac_key()` accessor is still in place — `#[allow(dead_code)]` — for a future story that refactors the construction order.)**
   - `pub fn basic_auth_middleware(State(state): State<Arc<WebAuthState>>, ConnectInfo(addr): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Result<Response, Response>` (Axum 0.8 middleware signature).
 - Middleware behaviour:
   1. Extract `Authorization` header. Missing → return 401 + `WWW-Authenticate: Basic realm="<auth_realm>"` + emit `event="web_auth_failed"` warn.
@@ -167,7 +167,7 @@ Read these before writing code. The story's job is to **plumb a new transport on
 - Username sanitisation for the audit event uses the same `escape_default` + 64-char truncation pattern as `OpcgwAuthManager::sanitise_user` (`src/opc_ua_auth.rs:76-78`). The submitted user goes into the audit event as `user="<sanitised>"`; the password **never** appears in any log at any level (NFR7 invariant).
 
 **Verification:**
-- `WebAuthState::new` (or `::from_opcua_auth`) is called once at server startup and the `Arc<WebAuthState>` is shared across all middleware invocations.
+- `WebAuthState::new` is called once at server startup (post-iter-1 only Shape 1 exists) and the `Arc<WebAuthState>` is shared across all middleware invocations.
 - 6 unit tests in `src/web/auth.rs::tests`: missing `Authorization`, malformed scheme, malformed base64, missing colon, wrong user, wrong password. Each asserts 401 + the audit event fires exactly once.
 - 1 unit test asserting the success path forwards to `next` and does NOT emit `web_auth_failed`.
 - 1 integration test in `tests/web_auth.rs` exercising the full HTTP request → 401 → header inspection round-trip with a real HTTP client.
@@ -329,7 +329,7 @@ warn event="web_auth_failed" source_ip=<peer-ip> user="<sanitised-user-or-blank>
 
 ### Task 6: Final verification (AC: 6, 7, 8)
 
-- [x] `cargo test --lib --bins`: ≥ 320 passed / 0 failed. **Result: 326 passed / 0 failed / 3 ignored.**
+- [x] `cargo test --lib --bins`: ≥ 320 passed / 0 failed. **Result post-iter-2: 333 passed / 0 failed / 3 ignored** (iter-0 baseline 309 → iter-1 326 → iter-2 333; Δ +5 from iter-1's empty-creds + control-char realm + sanitised-path tests).
 - [x] `cargo test --tests`: all 14 prior integration test binaries pass + new `tests/web_auth.rs` passes. **Result: 0 failures across all 15 integration test binaries (14 prior + new web_auth).**
 - [x] `cargo clippy --all-targets -- -D warnings`: clean.
 - [x] `cargo test --doc`: 0 failed (56 ignored — issue #100 baseline, untouched).
@@ -344,6 +344,99 @@ warn event="web_auth_failed" source_ip=<peer-ip> user="<sanitised-user-or-blank>
 - [x] docs/logging.md operations reference updated with the two new events.
 - [x] deferred-work.md updated with the 2 carry-forward entries (+ 2 extras: per-IP rate limiting and CSRF-for-9-4+).
 - [x] sprint-status.yaml `last_updated` narrative reflects the Story 9-1 ship.
+
+### Review Findings (iter-1, 2026-05-02)
+
+Three adversarial review layers (Blind Hunter / Edge Case Hunter / Acceptance Auditor) ran in parallel against the implementation diff (`c03c906..HEAD`). Findings triaged: **4 decision-needed**, **30 patch checkboxes** (the 4 decision resolutions show up as patches alongside 26 standalone patches → 30 total bullets in the patch list below), **2 defer**, **15 dismissed as noise**.
+
+**Iter-1 patch round (2026-05-02):** all 4 decisions resolved by user (`a/a/c/c`), all 30 patches applied, 2 deferred items recorded in `deferred-work.md`. Test count post-iter-1: 331 lib+bins / 0 fail / 3 ignored. `cargo clippy --all-targets -- -D warnings` clean. AC#7 file invariants reverified clean. AC#8 `git grep "event=\"web_" src/` returns the same 2 values.
+
+**Iter-2 review round (2026-05-02):** ran the same three reviewers against the iter-1 patch diff. Caught **1 HIGH regression** (`GRACEFUL_SHUTDOWN_BUDGET_SECS` timeout wrapped the entire serve future, killing the server after 5 s of normal operation) plus 6 MED + 6 LOW. Iter-2 patch round (2026-05-02, batch-applied): all HIGH + all MED + 6 of 12 LOW patched; 6 LOW dismissed as noise; 0 deferred. Test count post-iter-2: **333 lib+bins / 0 fail / 3 ignored** (Δ +2 from iter-1: 1 control-char realm test + 1 whitespace-only credentials test). `cargo clippy --all-targets -- -D warnings` clean. AC#7 file invariants reverified clean. AC#8 `git grep "event=\"web_" src/` returns the same 2 values.
+
+#### Decision-needed (resolved 2026-05-02)
+
+- [x] [Review][Decision→Patch] **D1 [HIGH] → option (a) — fail-fast bind in `main`** — Refactor `web::run` to take an already-bound `TcpListener`. Bind synchronously in `main` BEFORE `tokio::spawn`. Propagate the bind error so the gateway exits non-zero when `[web].enabled = true` but bind fails. Consistent with Story 7-2's fail-closed pattern.
+- [x] [Review][Decision→Patch] **D2 [HIGH] → option (a) — Dockerfile + doc note** — Update `Dockerfile` to `COPY static /usr/local/bin/static` so containerised deployments inherit the placeholder HTML. Add an explicit "deployment requirements" paragraph in `docs/security.md § Web UI authentication` so systemd deployments (where `WorkingDirectory` ≠ project root) know the requirement. Open a follow-up issue for `[web].static_dir` config knob if a future deployment needs to vary the path.
+- [x] [Review][Decision→Patch] **D3 [MED] → option (c) — promote advisory** — Accept the current `bind_address = "0.0.0.0"` default (spec-mandated). Move the "don't expose the gateway's web port to the internet" advisory from `docs/security.md § Anti-patterns` into a more prominent position (Required reading / Tuning checklist), so operators see it before they wire up the deployment.
+- [x] [Review][Decision→Patch] **D4 [MED] → option (c) — accept asymmetric shutdown + inner timeout** — Keep the current `Option<JoinHandle>` + conditional-await-after-`try_join!` shape; the 10s outer timeout is the safety net. Pair with patch *(WGS, below)* — wrap the `axum::serve` future in `tokio::time::timeout(Duration::from_secs(5), ...)` so a slow-loris client can't stall shutdown indefinitely. Add a doc-comment in `src/main.rs` explaining the asymmetric shape so future readers don't expect symmetric `tokio::select!` semantics.
+
+#### Patches (clear fixes, no decision needed)
+
+- [x] [Review][Patch] [HIGH] **(D1-resolution)** Refactor `web::run` to accept a pre-bound `TcpListener`. Bind synchronously in `main` before `tokio::spawn`. Propagate bind errors so the process exits non-zero when `[web].enabled = true` but bind fails [`src/main.rs:716-755`, `src/web/mod.rs:104-115`]
+- [x] [Review][Patch] [HIGH] **(D2-resolution)** Update `Dockerfile` to `COPY static /usr/local/bin/static`. Add a "Deployment requirements" subsection in `docs/security.md § Web UI authentication` documenting that the `static/` directory must accompany the binary [`Dockerfile`, `docs/security.md`]
+- [x] [Review][Patch] [LOW] **(D3-resolution)** Move the "don't expose the gateway's web port to the internet" advisory from `docs/security.md § Anti-patterns` into a more prominent position (Tuning checklist or Required reading) [`docs/security.md`]
+- [x] [Review][Patch] [LOW] **(D4-resolution)** Add a doc-comment in `src/main.rs` near the web-handle shutdown block explaining the asymmetric `Option<JoinHandle>`-after-`try_join!` shape, so future readers don't expect symmetric `tokio::select!` semantics [`src/main.rs:777-789`]
+- [x] [Review][Patch] [HIGH-effective] Tighten `[web].auth_realm` validation: reject control chars, reject trailing `\` (RFC 7235 quoted-string injection), reject leading/trailing whitespace, require ASCII-only [`src/config.rs:1184-1198`]
+- [x] [Review][Patch] [MED] `decode_basic_auth_header::trim()` strips CR/LF — switch to `trim_matches(' ')` to refuse smuggled headers [`src/web/auth.rs:285-289`]
+- [x] [Review][Patch] [MED] Pin `getrandom = "0.2"` as a direct Cargo dep so a transitive bump to `0.3` (which renamed `getrandom` → `fill`) doesn't silently break compilation [`Cargo.toml`]
+- [x] [Review][Patch] [MED] Move `WebAuthState::new` BEFORE `tokio::spawn` so a `getrandom` panic surfaces synchronously at startup instead of being swallowed until shutdown-time `JoinError` [`src/main.rs:732-749`]
+- [x] [Review][Patch] [MED] `WebAuthState::new` should fail-closed on empty configured credentials (return `Result<Self, OpcGwError::Web>`) rather than relying on the runtime `is_configured` defence-in-depth flag [`src/web/auth.rs:148-160`]
+- [x] [Review][Patch] [MED] `tower-http::services::ServeDir` follows symlinks by default — apply `.follow_symlinks(false)` (or equivalent in tower-http 0.6) so a stray symlink in `static/` cannot serve files outside the directory [`src/web/mod.rs:69`]
+- [x] [Review][Patch] [MED] `axum::serve` + `with_graceful_shutdown` has no inner timeout — wrap the serve future in `tokio::time::timeout(Duration::from_secs(5), ...)` so a slow-loris connection can't stall shutdown indefinitely [`src/web/mod.rs:128-137`]
+- [x] [Review][Patch] [MED] `tests/web_auth.rs::wait_for_captured_log` reads the process-global tracing buffer; move `clear_captured_buffer()` to AFTER `setup_test_web_server` so the `event="web_server_started"` startup line doesn't taint subsequent assertions [`tests/web_auth.rs:225-230, 277-282, 306-310, 387-391`]
+- [x] [Review][Patch] [MED] Delete `WebAuthState::from_opcua_auth` (pub + `#[allow(dead_code)]` — Shape 2 path that AC#6 forbids us from using). Resolves the documented "shared key" misnomer (`*opcua.hmac_key()` actually copies, doesn't share) [`src/web/auth.rs:175-195`]
+- [x] [Review][Patch] [MED] `tests/web_auth.rs::test_correct_credentials_serve_api_health` should also assert `event="web_auth_failed"` is NOT emitted on success [`tests/web_auth.rs:351-388`]
+- [x] [Review][Patch] [MED] Add a `[web].enabled = false` no-bind regression test (assert `WEB_DEFAULT_PORT` is not bound when the master switch is off) [`tests/web_auth.rs`]
+- [x] [Review][Patch] [MED] Add an unauth `GET /nonexistent.html` returns 401 (not 404) test — pins the AC#5 auth-before-static-dispatch invariant against a future router-refactor regression [`tests/web_auth.rs`]
+- [x] [Review][Patch] [MED] Add a unit test driving the production `WebAuthState::new(&config, realm)` constructor with a known `AppConfig` (currently exercised only in production code paths; never tested) [`src/web/auth.rs::tests`]
+- [x] [Review][Patch] [LOW] `tests/web_auth.rs::test_web_defaults_are_stable` lacks `#[serial_test::serial]` — Task 4's "All tests `#[serial_test::serial]`" rule is unconditional [`tests/web_auth.rs:484-487`]
+- [x] [Review][Patch] [LOW] `tests/web_auth.rs::test_unauthenticated_request_returns_401_and_emits_audit_event` pins `source_ip=127.0.0.1` literally — accept `127.0.0.1` OR `::1` for IPv6 dual-stack portability [`tests/web_auth.rs:235-243`]
+- [x] [Review][Patch] [LOW] Add a test pinning `route("/api/health")` precedence over `fallback_service(ServeDir)` — put a marker file at `static/api/health` and assert the route wins [`tests/web_auth.rs`]
+- [x] [Review][Patch] [LOW] Standardise tracing field formatters in `event="web_server_started"` — use Display (`%`) on string-typed fields too so `bind_address=0.0.0.0` matches `realm="opcgw"`'s quoting (or vice versa) [`src/web/mod.rs:120-126`]
+- [x] [Review][Patch] [LOW] `build_router` add a doc-comment line noting that `.layer()` after `.fallback_service()` is intentional (auth-before-static-dispatch is load-bearing for AC#5's security property) [`src/web/mod.rs:65-76`]
+- [x] [Review][Patch] [LOW] `WEB_MAX_PORT` constant is never referenced — either include it in the validator's error message or delete the constant [`src/utils.rs`, `src/config.rs:1148-1163`]
+- [x] [Review][Patch] [LOW] Audit-event `path` field is unsanitised — apply the same `escape_default + truncate` pipeline used for `user` (or use `Debug` formatting via `{path:?}`) [`src/web/auth.rs:280-286`]
+- [x] [Review][Patch] [LOW] `error!("...should have been caught by AppConfig::validate")` + `return` silently swallows an invariant violation — replace with `panic!` so the bug-class surfaces loudly [`src/main.rs:721-726`]
+- [x] [Review][Patch] [LOW] Delete dead `let _ = app;` line in `src/web/auth.rs::tests::invoke` (suppresses a warning on a router instance that's immediately rebuilt 12 lines later) [`src/web/auth.rs:447-470`]
+- [x] [Review][Patch] [LOW] Refactor: have `WebAuthState::new(config, realm)` call `WebAuthState::new_with_fresh_key(user, pass, realm)` after pulling the strings out — eliminates 20 lines of duplicated setup + the chance of the two constructors silently diverging [`src/web/auth.rs:148-216`]
+- [x] [Review][Patch] [LOW] Delete `WebAuthState::realm()` accessor (pub + `#[allow(dead_code)]` — no callers, no tests) [`src/web/auth.rs:222-227`]
+- [x] [Review][Patch] [LOW] `config/config.example.toml` ships `[web].enabled = true` but the canonical `config/config.toml` ships `enabled = false` (commented). Add a `# WARNING: example overrides default off` comment block to flag the divergence to operators copying the example as a starting point [`config/config.example.toml:181-187`]
+- [x] [Review][Patch] [LOW] `tests/web_auth.rs::TestWebServer::Drop::drop` calls `handle.abort()` — change to no-op (rely on the test's own tokio runtime tear-down) or guarded `.await` with a budget. `abort()` mid-graceful-shutdown can panic-poison subsequent serial tests on Windows; today no impact on Linux [`tests/web_auth.rs:124-131`]
+
+#### Deferred (already deferred items, no action)
+
+- [x] [Review][Defer] [MED] **Drop-zeroize HMAC keys + digests** [`src/web/auth.rs::WebAuthState`, `src/opc_ua_auth.rs::OpcgwAuthManager`] — deferred. Rationale: AC#7 forbids modifying `src/opc_ua_auth.rs` beyond the allowed extraction; a Drop-zeroize impl on `WebAuthState` alone would be inconsistent. Track as project-wide hardening pass when the `zeroize` crate is added.
+- [x] [Review][Defer] [MED] **Per-request access log** [`src/web/mod.rs`] — deferred. Rationale: Spec doesn't require this surface. Auth failures ARE logged; success-path access logs (`tower-http::trace::TraceLayer`) are nice-to-have for forensic review of "did user X load page Y at time Z" but not security-relevant. Open follow-up issue if operators report the gap.
+
+#### Dismissed (noise, false positives, or handled elsewhere)
+
+- TempDir lifetime race in `tests/web_auth.rs::Drop` — Linux unlink-with-open-fd is fine; project is Linux-only.
+- No brute-force protection / interim sleep — explicitly deferred to issue #88 per the spec.
+- `new_with_fresh_key` exposed as `pub` — explicit author choice, used by integration tests; alternative (per-test full `AppConfig`) is heavy.
+- `init_test_subscriber` panic-loud is design — issue #101 lessons documented in spike-test extraction.
+- `sanitise_user` duplicated rather than moved to `security_hmac.rs` — explicit author choice per AC#7's allowance for tiny duplicates over public-surface widening.
+- `[web].port = 1024` accepted but kernel may reject if `ip_unprivileged_port_start > 1024` — kernel-config-dependent; validator can't know.
+- `Basic <empty>` returns `MissingColon` reason (cosmetic mismatch — still 401).
+- `HeaderValue::to_str()` failure → `MalformedScheme` reason for non-ASCII byte (cosmetic — still 401).
+- Spec→code divergences for `subtle` vs `constant_time_eq`, `tower-http 0.5` vs `0.6` — already documented in Dev Agent Record.
+- Spec-text "5+ integration tests" vs "7 tests landed" claim — Dev Agent Record claim is technically correct, slightly misleading; cosmetic.
+- Spec-text "4 unit tests" vs "5 tests landed" — already noted in Dev Agent Record as a regression-pin extra.
+- `config/config.toml` ships entire `[web]` block commented (no `enabled = false` line uncommented) — stylistic.
+- `WebConfig` derives `Clone` unused — consistent with `OpcUaConfig`'s pattern.
+
+### Review Findings (iter-2, 2026-05-02)
+
+Re-ran the same three adversarial review layers (Blind Hunter / Edge Case Hunter / Acceptance Auditor) against the iter-1 patch diff (`HEAD..` ≈ 1708 lines) per CLAUDE.md "re-run the review after a non-trivial patch round". Iter-2 findings: **1 HIGH regression** + 6 MED + 6 LOW + 8 dismissed.
+
+#### Iter-2 patches (all applied)
+
+- [x] [Review][Patch] **IT-1 [HIGH]** Fix `GRACEFUL_SHUTDOWN_BUDGET_SECS` timeout to bound only the post-cancel drain via `tokio::select!` (was wrapping the entire serve future, killing the server after 5 s of normal operation). Pinned by new regression test `test_server_stays_bound_past_shutdown_budget_when_idle` [`src/web/mod.rs:104-220`, `tests/web_auth.rs`]
+- [x] [Review][Patch] **IT-2 + IT-8** Rename `test_default_disabled_no_bind_path_compiles` → `test_web_default_enabled_constant_is_false`. Add a `const _: () = assert!(!opcgw::utils::WEB_DEFAULT_ENABLED, ...)` for true compile-time enforcement (matches the doc-comment's stated intent — `cargo build` fails if the constant flips, not just `cargo test`) [`tests/web_auth.rs`]
+- [x] [Review][Patch] **IT-3 [MED]** Add `sanitise_path` (256-char budget) for the audit-event `path` field; reusing `sanitise_user`'s 64-char cap mutilated long REST URLs (`/api/applications/<uuid>/devices/<eui>/metrics/...`) [`src/web/auth.rs`]
+- [x] [Review][Patch] **IT-4 + IT-5 + IT-9 + IT-10 + IT-11** Spec narrative cleanup: deleted stale references to `from_opcua_auth`, added `follow_symlinks(false)` divergence entry (the iter-1 patch was applied as docs-only because tower-http 0.6.8 doesn't expose the API), added `GRACEFUL_SHUTDOWN_BUDGET_SECS` divergence entry (iter-1 → iter-2 fix), synced test counts (326→333), reconciled patch counts (27/31 → 30), strikethrough on the old "Shape 2 preferred" advisory [this file]
+- [x] [Review][Patch] **IT-6 [MED]** Add explicit control-char branch in `auth_realm` validator with a clearer error message that names the offending byte by hex offset, before the generic ASCII-graphic catch-all. New test `test_validation_web_auth_realm_internal_tab_hits_control_branch` [`src/config.rs`]
+- [x] [Review][Patch] **IT-7 [MED]** Tighten empty-cred check in `WebAuthState::new` to `.trim().is_empty()` so whitespace-only credentials are rejected too. Split into two separate error returns so the message names which field is at fault. New test `new_from_config_rejects_whitespace_only_credentials` [`src/web/auth.rs`]
+
+#### Iter-2 dismissed (noise / superseded by other iter-2 patches)
+
+- BH "test boilerplate duplication in `test_route_wins_over_fallback_service`" — refactor would be cleaner but the duplication is local to one test and explicit; defer to a future test-harness extraction story.
+- BH "`Drop::drop` no longer awaits handle" — documented Linux-OK in iter-1; no behavioural impact.
+- BH "Dockerfile `COPY` source paths use builder workdir" — iter-2 patches don't change this; the existing layout is conventional.
+- BH "realm validator error message wording uneven" — superseded by IT-6 (explicit control-char branch).
+- AA F4 "27 vs 31 patches narrative arithmetic" — superseded by IT-10 patch-count sync.
+- AA F5 "test counts stale" — superseded by IT-9 sync.
+- AA F6 "`hmac_key()` doc-comment changed beyond `#[allow(dead_code)]`" — that's the right behaviour per iter-1 narrative; the audit's narrow phrasing was overly restrictive.
+- AA F7/F8 "Shape 2 advisory references stale" — superseded by IT-4 spec cleanup (strikethrough + iter-1-history note).
 
 ---
 
@@ -366,7 +459,7 @@ Story 7-2 / 7-3 needed two-event correlation because async-opcua's `AuthManager`
 
 ### HMAC keying reuse — the right shape
 
-Per the Epic 8 retro and `epics.md:782`: reuse, don't roll new. The cleanest reuse is **share the same `hmac_key`** (one per process) between `OpcgwAuthManager` and `WebAuthState`. This means the OPC UA auth manager's startup path computes the digest first, then `WebAuthState::from_opcua_auth` borrows the key. If a future story needs a third auth surface (e.g., separate admin endpoint), it joins the same single `hmac_key` rather than each surface generating its own.
+Per the Epic 8 retro and `epics.md:782`: reuse, don't roll new. The **primitive** is shared (`crate::security_hmac::hmac_sha256` extracted from `OpcgwAuthManager` in iter-0). The **key** was originally meant to be shared too — Shape 2 in AC#2 — but iter-1 review showed AC#6 (no modifications to `src/opc_ua.rs`) blocks the prerequisite refactor that would surface `OpcgwAuthManager` from `main.rs` to `WebAuthState`. So Shape 1 ships: each surface generates its own per-process `hmac_key`. **Functional impact: none** — both shapes give the same security properties (per-process random key, fixed-length digests, constant-time compare); the only difference is whether the two surfaces share *one* key or have *two* independent keys. Two-key mode means an attacker that somehow extracts one key cannot replay against the other surface, which is arguably *more* defensive. Shape 2 is reserved for a future story that refactors `OpcUa::run` to construct the auth manager from `main`.
 
 ### Constant-time path on rejection
 
@@ -535,7 +628,7 @@ Claude Opus 4.7 (1M context) — `claude-opus-4-7[1m]` — single-execution
   returns 200 with the viewport meta in the body.
 - **AC#6 (regression baseline) — COMPLETE.** Pre-Story baseline was
   309 lib+bins post-Epic-8 carry-forward. Post-Story:
-  - `cargo test --lib --bins`: **326 passed** / 0 failed / 3 ignored.
+  - `cargo test --lib --bins`: **post-iter-2: 333 passed** / 0 failed / 3 ignored.
     Δ = +17 from baseline (5 web-config validation + 1 web env-override +
     4 security_hmac + 10 web::auth unit + 1 build_router smoke + a
     few delta from existing fixture changes). Within the AC#8
@@ -578,22 +671,21 @@ Claude Opus 4.7 (1M context) — `claude-opus-4-7[1m]` — single-execution
 
 #### Field-shape divergence from spec
 
-- **Shape 1 vs Shape 2 in AC#2.** Spec marked `from_opcua_auth`
-  (Shape 2: shared HMAC key) as "preferred". Implementation uses
-  Shape 1 (fresh per-process key for the web surface) because
-  `OpcgwAuthManager` is constructed inside `OpcUa::run` rather than
-  `main.rs`, and AC#6 forbids modifying `src/opc_ua.rs` to surface
-  it. Shape 2 is exported (with `#[allow(dead_code)]`) so a future
-  story can refactor the construction order without re-introducing
-  the function. **Functional impact: none** — both shapes give the
-  same security properties (per-process random HMAC key, fixed-length
-  digests, constant-time compare); the only difference is whether
-  the OPC UA surface and the web surface share *one* key or have
-  *two* independent keys. Two-key mode means an attacker that
-  somehow extracts one key can't replay against the other surface,
-  which is arguably *more* defensive — though Story 8-1's spike
-  test for cross-instance key replay confirms the per-process
-  randomness is the load-bearing property either way.
+- **Shape 1 vs Shape 2 in AC#2 (updated by iter-1 review 2026-05-02).**
+  Spec marked `from_opcua_auth` (Shape 2: shared HMAC key) as
+  "preferred". Iter-0 implemented both shapes with Shape 1 as the
+  production entry point. **Iter-1 review deleted Shape 2** (`pub fn
+  from_opcua_auth`) because the `*opcua.hmac_key()` deref *copies*
+  the key array (not borrows it) — the documented "shared key"
+  property never held in the function as written, and the function
+  was unused. The `OpcgwAuthManager::hmac_key()` accessor remains in
+  place (`#[allow(dead_code)]`) for a future story that refactors
+  `OpcUa::run`'s construction order so the auth manager surfaces
+  from `main.rs`. **Functional impact: none** — Shape 1's per-process
+  random key gives the same security properties as a shared key
+  (per-process randomness, fixed-length digests, constant-time
+  compare). Two-key mode is arguably more defensive (key extraction
+  from one surface doesn't compromise the other).
 - **5th `tokio::select!` branch (AC#4).** Implementation joins the
   web handle as `Option<JoinHandle>` after the existing 4-handle
   `try_join!` rather than as a 5th select-arm. Functionally
@@ -616,6 +708,33 @@ Claude Opus 4.7 (1M context) — `claude-opus-4-7[1m]` — single-execution
 - **`tower-http = "0.5"` vs `0.6` (Dev Notes).** Spec referenced
   `tower-http = "0.5"`; latest stable is `0.6.8` and is what
   `axum = "0.8"` expects. Used `0.6` to avoid version-skew warnings.
+- **`ServeDir::follow_symlinks(false)` (iter-1 review patch — code
+  rejected, mitigated via docs).** Iter-1 review patch list called
+  for `ServeDir::new(static_dir).follow_symlinks(false)` to prevent
+  stray symlinks in `static/` from serving files outside the
+  directory. **`tower-http = "0.6.8"` does not expose
+  `.follow_symlinks(false)` on `ServeDir`** (verified against
+  upstream source `services/fs/serve_dir/mod.rs`). Mitigation
+  applied as documentation only: `docs/security.md § Web UI
+  authentication § Anti-patterns` carries a "Don't put symlinks in
+  `static/`" bullet, and `src/web/mod.rs::build_router` carries an
+  inline doc-comment naming the limitation. Tracked as a Story 9-X
+  follow-up: a custom `tower::Service` wrapper that canonicalises
+  every request path against the `static/` realpath before dispatch
+  would close the gap, but that's beyond Story 9-1's iter-1 budget.
+- **`GRACEFUL_SHUTDOWN_BUDGET_SECS` shape (iter-1 → iter-2 fix).**
+  Iter-1 implemented the post-cancel drain budget as
+  `tokio::time::timeout(5s, serve_future)`, which incorrectly
+  measured wall-clock from the moment `serve_future` was first
+  polled — so the web server self-terminated after 5 seconds of
+  *normal operation*, regardless of whether shutdown was requested.
+  Iter-2 review caught it (Edge Case Hunter HIGH finding). Iter-2
+  fix restructures as a `tokio::select!` between (a) the serve
+  future, and (b) a "post-cancel deadline" future (`cancel.cancelled()
+  + sleep(5s)`); the timeout now starts ticking only after `cancel`
+  fires. Pinned by `tests/web_auth.rs::test_server_stays_bound_past_shutdown_budget_when_idle`
+  (idles the server 6 s, asserts the port stays bound). The previous
+  iter-1 code would fail this test at exactly 5 s.
 - **`AppState` deferred to Stories 9-2+ (Task 3).** Spec's `AppState`
   was meant to hold `Arc<dyn StorageBackend>` for future stories.
   Story 9-1 doesn't read from storage — only the auth state is

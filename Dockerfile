@@ -38,6 +38,16 @@ ARG UID=10001
 # Copy the executable from the build stage
 COPY --from=builder /usr/local/cargo/bin/opcgw /usr/local/bin/opcgw
 
+# Story 9-1: copy the embedded web server's static placeholder HTML
+# next to the binary. Without this, a Docker deployment with
+# `[web].enabled = true` would 404 every static file (auth still
+# fires correctly; the file dispatch fails behind it). `ServeDir`
+# resolves `static/` relative to the gateway's WORKDIR
+# (`/usr/local/bin`), so the directory must live there.
+# See `docs/security.md § Web UI authentication § Deployment
+# requirements` for the systemd / non-container equivalent.
+COPY --from=builder /usr/src/opcgw/static /usr/local/bin/static
+
 EXPOSE 4855
 
 ENTRYPOINT ["/usr/local/bin/opcgw"]

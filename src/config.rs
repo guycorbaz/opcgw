@@ -1142,25 +1142,29 @@ impl AppConfig {
         // `WEB_DEFAULT_*` apply when `None`.
         if let Some(port) = self.web.port {
             if port == 0 {
-                errors.push(
+                errors.push(format!(
                     "web.port: must not be 0 (use a value in the unprivileged \
-                     range 1024-65535)"
-                        .to_string(),
-                );
+                     range {}-{})",
+                    crate::utils::WEB_MIN_PORT,
+                    crate::utils::WEB_MAX_PORT,
+                ));
             } else if port < crate::utils::WEB_MIN_PORT {
                 errors.push(format!(
                     "web.port: {} is below {} (the privileged-port floor — \
-                     binding below 1024 requires CAP_NET_BIND_SERVICE or root, \
+                     binding below {} requires CAP_NET_BIND_SERVICE or root, \
                      which the gateway does not need). Pick a port in the \
-                     unprivileged range.",
+                     unprivileged range {}-{}.",
                     port,
-                    crate::utils::WEB_MIN_PORT
+                    crate::utils::WEB_MIN_PORT,
+                    crate::utils::WEB_MIN_PORT,
+                    crate::utils::WEB_MIN_PORT,
+                    crate::utils::WEB_MAX_PORT,
                 ));
             }
-            // Note: u16 already caps at 65535, so the `> WEB_MAX_PORT`
-            // branch is unreachable — keeping the constant for symmetry
-            // with WEB_MIN_PORT and for the validation error message
-            // wording above.
+            // Note: u16 already caps at 65535 (= WEB_MAX_PORT), so a
+            // dedicated `> WEB_MAX_PORT` branch is unreachable. The
+            // constant is referenced in the error messages above so
+            // operators see the supported range.
         }
 
         if let Some(addr) = self.web.bind_address.as_ref() {
@@ -1175,6 +1179,18 @@ impl AppConfig {
         }
 
         if let Some(realm) = self.web.auth_realm.as_ref() {
+            // Review iter-1 patch (combined): tighten realm validation
+            // to ASCII-graphic + space only, reject leading/trailing
+            // whitespace, reject any byte that would break the
+            // `WWW-Authenticate: Basic realm="..."` header. Without
+            // these checks, control chars / trailing backslashes /
+            // emoji / leading-trailing whitespace silently produce
+            // either a malformed RFC 7235 header (browser behaviour
+            // unpredictable) or `HeaderValue::from_str` rejection at
+            // runtime (which silently falls back to the default
+            // realm — operators see a different realm than configured
+            // with no log line). Rejecting at validate() keeps the
+            // contract honest.
             if realm.is_empty() {
                 errors.push(
                     "web.auth_realm: must not be empty (the realm is the \
@@ -1186,6 +1202,50 @@ impl AppConfig {
                 errors.push(
                     "web.auth_realm: must not contain '\"' (would break the \
                      WWW-Authenticate: Basic realm=\"...\" header)"
+                        .to_string(),
+                );
+            } else if realm.contains('\\') {
+                errors.push(
+                    "web.auth_realm: must not contain '\\' (RFC 7235 \
+                     quoted-string escape character — a trailing '\\' would \
+                     escape the closing quote of the WWW-Authenticate header)"
+                        .to_string(),
+                );
+            } else if realm.trim() != realm {
+                errors.push(
+                    "web.auth_realm: must not have leading or trailing \
+                     whitespace (browsers render the realm in the credential \
+                     prompt; whitespace produces a confusing UI)"
+                        .to_string(),
+                );
+            } else if let Some((offset, c)) = realm
+                .chars()
+                .enumerate()
+                .find(|(_, c)| c.is_ascii_control())
+            {
+                // Review iter-2 fix: dedicated control-char branch with
+                // a discriminating error message. The generic
+                // ASCII-graphic check below also catches control chars,
+                // but the message there says "graphic characters and
+                // spaces" — operators tracing a `\t` or `\n` would not
+                // realise they're holding a control byte.
+                errors.push(format!(
+                    "web.auth_realm: contains an ASCII control character \
+                     (0x{:02x}) at char offset {}. Control bytes (NUL, BEL, \
+                     TAB, LF, CR, etc.) would log-inject the \
+                     event=\"web_server_started\" diagnostic line and break \
+                     the WWW-Authenticate header. Strip non-printable bytes.",
+                    c as u32, offset
+                ));
+            } else if !realm
+                .chars()
+                .all(|c| c.is_ascii_graphic() || c == ' ')
+            {
+                errors.push(
+                    "web.auth_realm: must contain only ASCII graphic \
+                     characters and spaces (RFC 7235's `quoted-string` \
+                     production accepts a narrower charset; non-ASCII bytes \
+                     would be rejected by HeaderValue::from_str at runtime)"
                         .to_string(),
                 );
             } else if realm.chars().count() > crate::utils::WEB_AUTH_REALM_MAX_LEN {
@@ -2072,6 +2132,70 @@ mod tests {
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("web.auth_realm"), "got: {err}");
         assert!(err.contains("\""), "got: {err}");
+    }
+
+    /// Review iter-1: reject `\\` in `[web].auth_realm` (RFC 7235
+    /// quoted-string escape character; a trailing `\\` would escape
+    /// the closing quote in the WWW-Authenticate header).
+    #[test]
+    fn test_validation_web_auth_realm_rejects_backslash() {
+        let mut config = get_config();
+        config.web.auth_realm = Some("opcgw\\".to_string());
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("web.auth_realm"), "got: {err}");
+        assert!(err.contains("\\\\") || err.contains("'\\'"), "got: {err}");
+    }
+
+    /// Review iter-1: reject leading/trailing whitespace in
+    /// `[web].auth_realm` (browsers render the realm in the
+    /// credential prompt; whitespace produces a confusing UI).
+    #[test]
+    fn test_validation_web_auth_realm_rejects_whitespace() {
+        let mut config = get_config();
+        config.web.auth_realm = Some("  opcgw".to_string());
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("web.auth_realm"), "got: {err}");
+        assert!(err.contains("whitespace"), "got: {err}");
+
+        config.web.auth_realm = Some("opcgw\t".to_string());
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("web.auth_realm"), "got: {err}");
+    }
+
+    /// Review iter-1 + iter-2: reject control chars + non-ASCII in
+    /// `[web].auth_realm`. Control chars get the dedicated
+    /// "control character (0x..)" message (iter-2); non-ASCII gets
+    /// the generic "ASCII graphic characters and spaces" message.
+    #[test]
+    fn test_validation_web_auth_realm_rejects_non_ascii_and_control() {
+        let mut config = get_config();
+
+        // Control char: dedicated message names the offending byte.
+        config.web.auth_realm = Some("opcgw\nfake".to_string());
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("web.auth_realm"), "got: {err}");
+        assert!(err.contains("control character"), "got: {err}");
+        assert!(err.contains("0x0a"), "got: {err}");
+
+        // Non-ASCII (emoji): generic charset message.
+        config.web.auth_realm = Some("\u{1f525}opcgw".to_string());
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("web.auth_realm"), "got: {err}");
+        assert!(err.contains("ASCII graphic"), "got: {err}");
+    }
+
+    /// Review iter-2: explicit pin on the control-char branch — a
+    /// realm with a TAB in the middle (no leading/trailing whitespace
+    /// triggering the trim rule) should hit the control-char message,
+    /// not the generic ASCII-graphic message.
+    #[test]
+    fn test_validation_web_auth_realm_internal_tab_hits_control_branch() {
+        let mut config = get_config();
+        config.web.auth_realm = Some("op\tgw".to_string());
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("web.auth_realm"), "got: {err}");
+        assert!(err.contains("control character"), "got: {err}");
+        assert!(err.contains("0x09"), "got: {err}");
     }
 
     /// Reject `[web].auth_realm` longer than `WEB_AUTH_REALM_MAX_LEN` (64).
