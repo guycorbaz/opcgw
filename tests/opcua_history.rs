@@ -365,7 +365,7 @@ async fn test_history_read_returns_seeded_rows() {
 
     let (session, _ctmp, _client, event_handle) = open_session(&server).await;
 
-    let node_id = NodeId::new(OPCGW_NAMESPACE_INDEX, TEST_METRIC_OPCUA_NAME);
+    let node_id = NodeId::new(OPCGW_NAMESPACE_INDEX, format!("{}/{}", TEST_DEVICE_ID, TEST_METRIC_OPCUA_NAME));
     let start = base;
     let end = base + Duration::from_secs(60);
     let details_eo = read_raw_details(start, end, 100);
@@ -414,7 +414,7 @@ async fn test_history_read_empty_range_returns_empty_data_values() {
 
     let (session, _ctmp, _client, event_handle) = open_session(&server).await;
 
-    let node_id = NodeId::new(OPCGW_NAMESPACE_INDEX, TEST_METRIC_OPCUA_NAME);
+    let node_id = NodeId::new(OPCGW_NAMESPACE_INDEX, format!("{}/{}", TEST_DEVICE_ID, TEST_METRIC_OPCUA_NAME));
     let query_start = std::time::SystemTime::now() - Duration::from_secs(60);
     let query_end = std::time::SystemTime::now();
     let details_eo = read_raw_details(query_start, query_end, 100);
@@ -456,7 +456,7 @@ async fn test_history_read_invalid_time_range_returns_bad_invalid_argument() {
 
     let (session, _ctmp, _client, event_handle) = open_session(&server).await;
 
-    let node_id = NodeId::new(OPCGW_NAMESPACE_INDEX, TEST_METRIC_OPCUA_NAME);
+    let node_id = NodeId::new(OPCGW_NAMESPACE_INDEX, format!("{}/{}", TEST_DEVICE_ID, TEST_METRIC_OPCUA_NAME));
     let now = std::time::SystemTime::now();
     let start = now;
     let end = now - Duration::from_secs(3600);
@@ -546,7 +546,7 @@ async fn test_history_read_max_results_truncates_at_limit() {
 
     let (session, _ctmp, _client, event_handle) = open_session(&server).await;
 
-    let node_id = NodeId::new(OPCGW_NAMESPACE_INDEX, TEST_METRIC_OPCUA_NAME);
+    let node_id = NodeId::new(OPCGW_NAMESPACE_INDEX, format!("{}/{}", TEST_DEVICE_ID, TEST_METRIC_OPCUA_NAME));
     // num_values_per_node = 0 means "no client cap, use server default".
     let details_eo = read_raw_details(base, base + Duration::from_secs(3600), 0);
     let details = opcua::client::HistoryReadAction::ReadRawModifiedDetails(
@@ -595,7 +595,7 @@ async fn test_history_read_client_cap_below_server_cap_uses_client_cap() {
 
     let (session, _ctmp, _client, event_handle) = open_session(&server).await;
 
-    let node_id = NodeId::new(OPCGW_NAMESPACE_INDEX, TEST_METRIC_OPCUA_NAME);
+    let node_id = NodeId::new(OPCGW_NAMESPACE_INDEX, format!("{}/{}", TEST_DEVICE_ID, TEST_METRIC_OPCUA_NAME));
     // num_values_per_node = 50 — strictly below the server cap of 100.
     let details_eo = read_raw_details(base, base + Duration::from_secs(3600), 50);
     let details = opcua::client::HistoryReadAction::ReadRawModifiedDetails(
@@ -657,7 +657,7 @@ async fn test_history_read_concurrent_with_subscription_same_session() {
 
     let (session, _ctmp, _client, event_handle) = open_session(&server).await;
 
-    let node_id = NodeId::new(OPCGW_NAMESPACE_INDEX, TEST_METRIC_OPCUA_NAME);
+    let node_id = NodeId::new(OPCGW_NAMESPACE_INDEX, format!("{}/{}", TEST_DEVICE_ID, TEST_METRIC_OPCUA_NAME));
 
     // Step 1: create the subscription. Channel collects each
     // DataChangeNotification so the test can assert the publish path
@@ -758,6 +758,298 @@ async fn test_history_read_concurrent_with_subscription_same_session() {
 
     // Tear down the subscription cleanly.
     let _ = session.delete_subscription(subscription_id).await;
+    let _ = session.disconnect().await;
+    event_handle.abort();
+}
+
+// -----------------------------------------------------------------------
+// Issue #99 regression test — multi-device NodeId collision
+// -----------------------------------------------------------------------
+
+/// Issue #99: two devices that share a metric name (e.g. both have a
+/// "Moisture" metric) must resolve to two distinct NodeIds —
+/// `"device_a/Moisture"` and `"device_b/Moisture"` — and HistoryRead on
+/// each NodeId must return only that device's rows.
+///
+/// Pre-fix (commit `efc0383` and earlier): metric NodeIds were keyed by
+/// `metric_name` only. Both devices' "Moisture" metrics shared the
+/// single NodeId `"Moisture"`; the second device's `node_to_metric`
+/// insertion silently overwrote the first; HistoryRead resolved to
+/// whichever device was registered last and returned that device's
+/// rows under both browse-paths.
+///
+/// Post-fix: metric NodeId is `format!("{}/{}", device_id, metric_name)`;
+/// `node_to_metric` keeps a distinct entry per (device, metric) pair;
+/// HistoryRead returns each device's own rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn test_history_read_multi_device_no_node_id_collision_issue_99() {
+    // Build a config with two devices that intentionally share the
+    // same `metric_name` ("Moisture"). Distinct `device_id` values
+    // ensure the post-fix NodeId format produces distinct identifiers.
+    const DEVICE_A_ID: &str = "device_a_issue_99";
+    const DEVICE_B_ID: &str = "device_b_issue_99";
+    const SHARED_METRIC_OPCUA_NAME: &str = "Moisture";
+    const DEVICE_A_METRIC_NAME: &str = "moisture_a";
+    const DEVICE_B_METRIC_NAME: &str = "moisture_b";
+
+    let tmp = TempDir::new().expect("create temp dir");
+    let port = pick_free_port().await;
+    let pki_dir = tmp.path().join("pki");
+    let db_path = tmp.path().join("opcgw.db");
+
+    let config = Arc::new(AppConfig {
+        global: Global {
+            debug: true,
+            prune_interval_minutes: 60,
+            command_delivery_poll_interval_secs: 5,
+            command_delivery_timeout_secs: 60,
+            command_timeout_check_interval_secs: 10,
+            history_retention_days: 7,
+        },
+        logging: None,
+        chirpstack: ChirpstackPollerConfig {
+            server_address: "http://127.0.0.1:18080".to_string(),
+            api_token: "test-token".to_string(),
+            tenant_id: "00000000-0000-0000-0000-000000000000".to_string(),
+            polling_frequency: 10,
+            retry: 1,
+            delay: 1,
+            list_page_size: 100,
+        },
+        opcua: OpcUaConfig {
+            application_name: "opcgw-issue-99".to_string(),
+            application_uri: "urn:opcgw:issue-99".to_string(),
+            product_uri: "urn:opcgw:issue-99:product".to_string(),
+            diagnostics_enabled: true,
+            hello_timeout: Some(5),
+            host_ip_address: Some("127.0.0.1".to_string()),
+            host_port: Some(port),
+            create_sample_keypair: true,
+            certificate_path: "own/cert.der".to_string(),
+            private_key_path: "private/private.pem".to_string(),
+            trust_client_cert: true,
+            check_cert_time: false,
+            pki_dir: pki_dir.to_string_lossy().into_owned(),
+            user_name: TEST_USER.to_string(),
+            user_password: TEST_PASSWORD.to_string(),
+            stale_threshold_seconds: Some(120),
+            max_connections: Some(2),
+            max_subscriptions_per_session: None,
+            max_monitored_items_per_sub: None,
+            max_message_size: None,
+            max_chunk_count: None,
+            max_history_data_results_per_node: None,
+        },
+        application_list: vec![ChirpStackApplications {
+            application_name: "Issue99App".to_string(),
+            application_id: "00000000-0000-0000-0000-000000000099".to_string(),
+            device_list: vec![
+                ChirpstackDevice {
+                    device_name: "DeviceA".to_string(),
+                    device_id: DEVICE_A_ID.to_string(),
+                    read_metric_list: vec![ReadMetric {
+                        metric_name: SHARED_METRIC_OPCUA_NAME.to_string(),
+                        chirpstack_metric_name: DEVICE_A_METRIC_NAME.to_string(),
+                        metric_type: OpcMetricTypeConfig::Float,
+                        metric_unit: Some("pct".to_string()),
+                    }],
+                    device_command_list: None,
+                },
+                ChirpstackDevice {
+                    device_name: "DeviceB".to_string(),
+                    device_id: DEVICE_B_ID.to_string(),
+                    read_metric_list: vec![ReadMetric {
+                        metric_name: SHARED_METRIC_OPCUA_NAME.to_string(),
+                        chirpstack_metric_name: DEVICE_B_METRIC_NAME.to_string(),
+                        metric_type: OpcMetricTypeConfig::Float,
+                        metric_unit: Some("pct".to_string()),
+                    }],
+                    device_command_list: None,
+                },
+            ],
+        }],
+        storage: StorageConfig::default(),
+        command_validation: CommandValidationConfig::default(),
+    });
+
+    let pool = Arc::new(
+        ConnectionPool::new(db_path.to_str().expect("utf-8 db path"), 1)
+            .expect("create connection pool"),
+    );
+    let backend: Arc<dyn StorageBackend> =
+        Arc::new(SqliteBackend::with_pool(pool).expect("create backend"));
+
+    // Seed device-distinct historical rows. Device A: 10.0..15.0;
+    // Device B: 20.0..25.0. The chirpstack_metric_name is what the
+    // storage layer indexes by, so the seed must use those (NOT the
+    // shared OPC UA browse name "Moisture").
+    let base_ts = std::time::SystemTime::now() - Duration::from_secs(3600);
+    for i in 0..5 {
+        let ts = base_ts + Duration::from_secs(i as u64);
+        backend
+            .batch_write_metrics(vec![BatchMetricWrite {
+                device_id: DEVICE_A_ID.to_string(),
+                metric_name: DEVICE_A_METRIC_NAME.to_string(),
+                value: format!("{}.0", 10 + i),
+                data_type: MetricType::Float,
+                timestamp: ts,
+            }])
+            .expect("seed device A");
+        backend
+            .batch_write_metrics(vec![BatchMetricWrite {
+                device_id: DEVICE_B_ID.to_string(),
+                metric_name: DEVICE_B_METRIC_NAME.to_string(),
+                value: format!("{}.0", 20 + i),
+                data_type: MetricType::Float,
+                timestamp: ts,
+            }])
+            .expect("seed device B");
+    }
+
+    let cancel = CancellationToken::new();
+    let backend_for_server = backend.clone();
+    let opc_ua = OpcUa::new(&config, backend_for_server, cancel.clone());
+    let handle = tokio::spawn(async move {
+        let _ = opc_ua.run().await;
+    });
+
+    // Wait for server bind + discovery.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("OPC UA server did not bind to port {port} within 10s");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    {
+        let probe_url = format!("opc.tcp://127.0.0.1:{port}/");
+        let probe_tmp = TempDir::new().expect("probe pki tmp");
+        let probe_client = build_client(probe_tmp.path());
+        let probe_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match probe_client
+                .get_server_endpoints_from_url(probe_url.as_str())
+                .await
+            {
+                Ok(endpoints) if !endpoints.is_empty() => break,
+                _ => {}
+            }
+            if std::time::Instant::now() >= probe_deadline {
+                panic!("OPC UA server did not respond to discovery within 5s after bind");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    let server = TestServer {
+        port,
+        cancel,
+        handle: Some(handle),
+        backend,
+        _tmp: tmp,
+    };
+
+    let (session, _ctmp, _client, event_handle) = open_session(&server).await;
+
+    // HistoryRead device A's NodeId — must return rows 10.0..15.0
+    // (NOT 20.0..25.0 from device B).
+    let node_a = NodeId::new(
+        OPCGW_NAMESPACE_INDEX,
+        format!("{}/{}", DEVICE_A_ID, SHARED_METRIC_OPCUA_NAME),
+    );
+    let node_b = NodeId::new(
+        OPCGW_NAMESPACE_INDEX,
+        format!("{}/{}", DEVICE_B_ID, SHARED_METRIC_OPCUA_NAME),
+    );
+
+    let details_eo = read_raw_details(
+        base_ts - Duration::from_secs(1),
+        base_ts + Duration::from_secs(60),
+        100,
+    );
+    let details_a = opcua::client::HistoryReadAction::ReadRawModifiedDetails(
+        details_eo
+            .inner_as::<ReadRawModifiedDetails>()
+            .expect("decode details A")
+            .clone(),
+    );
+    let details_b = opcua::client::HistoryReadAction::ReadRawModifiedDetails(
+        details_eo
+            .inner_as::<ReadRawModifiedDetails>()
+            .expect("decode details B")
+            .clone(),
+    );
+
+    // Read node A.
+    let nodes_a = vec![HistoryReadValueId {
+        node_id: node_a.clone(),
+        index_range: opcua::types::NumericRange::None,
+        data_encoding: opcua::types::QualifiedName::null(),
+        continuation_point: opcua::types::ByteString::null(),
+    }];
+    let results_a = session
+        .history_read(details_a, TimestampsToReturn::Both, false, &nodes_a)
+        .await
+        .expect("history_read A");
+    assert_eq!(results_a.len(), 1);
+    assert_eq!(results_a[0].status_code, StatusCode::Good);
+    let dvs_a = decode_history_data(&results_a[0].history_data);
+    let values_a: Vec<f32> = dvs_a
+        .iter()
+        .filter_map(|dv| match dv.value.as_ref() {
+            Some(opcua::types::Variant::Float(f)) => Some(*f),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        values_a,
+        vec![10.0_f32, 11.0, 12.0, 13.0, 14.0],
+        "device A's HistoryRead must return device A's seeded rows, NOT device B's"
+    );
+
+    // Read node B.
+    let nodes_b = vec![HistoryReadValueId {
+        node_id: node_b.clone(),
+        index_range: opcua::types::NumericRange::None,
+        data_encoding: opcua::types::QualifiedName::null(),
+        continuation_point: opcua::types::ByteString::null(),
+    }];
+    let results_b = session
+        .history_read(details_b, TimestampsToReturn::Both, false, &nodes_b)
+        .await
+        .expect("history_read B");
+    assert_eq!(results_b.len(), 1);
+    assert_eq!(results_b[0].status_code, StatusCode::Good);
+    let dvs_b = decode_history_data(&results_b[0].history_data);
+    let values_b: Vec<f32> = dvs_b
+        .iter()
+        .filter_map(|dv| match dv.value.as_ref() {
+            Some(opcua::types::Variant::Float(f)) => Some(*f),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        values_b,
+        vec![20.0_f32, 21.0, 22.0, 23.0, 24.0],
+        "device B's HistoryRead must return device B's seeded rows, NOT device A's"
+    );
+
+    // Sanity: NodeId strings are distinct (catches a refactor that
+    // accidentally reverts the format).
+    let id_str = |n: &NodeId| match &n.identifier {
+        opcua::types::Identifier::String(s) => s.to_string(),
+        _ => panic!("expected String identifier"),
+    };
+    assert_ne!(
+        id_str(&node_a),
+        id_str(&node_b),
+        "Issue #99: shared metric_name across devices must produce distinct NodeId identifiers"
+    );
+
     let _ = session.disconnect().await;
     event_handle.abort();
 }

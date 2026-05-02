@@ -811,7 +811,17 @@ impl OpcUa {
                 app_name = %application.application_name,
                 "Adding application to OPC UA"
             );
-            let application_node = NodeId::new(ns, application.application_name.clone());
+            // Issue #99: NodeId identifiers use stable IDs (application_id /
+            // device_id / device_id+metric_name) instead of human-readable
+            // names. The browse-name and display-name keep using the
+            // human-readable names so SCADA browse trees are unchanged for
+            // operators. Same-name-different-id devices/metrics no longer
+            // collide on a single NodeId — e.g. two devices both having a
+            // "Moisture" metric now resolve to two distinct NodeIds
+            // ("device_1/Moisture" vs "device_2/Moisture") instead of
+            // sharing a single "Moisture" NodeId where the second
+            // registration silently overwrites the first.
+            let application_node = NodeId::new(ns, application.application_id.clone());
             address_space.add_folder(
                 &application_node,
                 &application.application_name,
@@ -821,7 +831,7 @@ impl OpcUa {
             // Add devices into folders
             for device in application.device_list.iter() {
                 debug!(device_name = %device.device_name, "Adding device to OPC UA");
-                let device_node = NodeId::new(ns, device.device_name.clone());
+                let device_node = NodeId::new(ns, device.device_id.clone());
                 address_space.add_folder(
                     &device_node,
                     &device.device_name,
@@ -831,7 +841,10 @@ impl OpcUa {
                 // Add metrics into devices node
                 for read_metric in device.read_metric_list.iter() {
                     debug!(metric_name = %read_metric.metric_name, "Adding read metric to OPC UA");
-                    let read_metric_node = NodeId::new(ns, read_metric.metric_name.clone());
+                    let read_metric_node = NodeId::new(
+                        ns,
+                        format!("{}/{}", device.device_id, read_metric.metric_name),
+                    );
                     // Story 8-3 review patch P1: the variable's initial value
                     // determines its `DataType` attribute. Pick a value that
                     // matches the metric_type so `HistoryData` Variants

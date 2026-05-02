@@ -457,7 +457,7 @@ async fn test_subscription_basic_data_change_notification() {
     // matches `src/opc_ua.rs::add_nodes` line 706 —
     // `NodeId::new(ns, metric_name)` where the metric name is the
     // OPC UA-side name (not the chirpstack-side name).
-    let node_id = NodeId::new(OPCGW_NAMESPACE_INDEX, SPIKE_METRIC_OPCUA_NAME);
+    let node_id = NodeId::new(OPCGW_NAMESPACE_INDEX, format!("{}/{}", SPIKE_DEVICE_ID, SPIKE_METRIC_OPCUA_NAME));
     let create = MonitoredItemCreateRequest {
         item_to_monitor: ReadValueId::from(node_id.clone()),
         monitoring_mode: MonitoringMode::Reporting,
@@ -703,7 +703,7 @@ async fn test_subscription_two_clients_share_node() {
     let item = MonitoredItemCreateRequest {
         item_to_monitor: ReadValueId::from(NodeId::new(
             OPCGW_NAMESPACE_INDEX,
-            SPIKE_METRIC_OPCUA_NAME,
+            format!("{}/{}", SPIKE_DEVICE_ID, SPIKE_METRIC_OPCUA_NAME),
         )),
         monitoring_mode: MonitoringMode::Reporting,
         requested_parameters: opcua::types::MonitoringParameters {
@@ -779,7 +779,7 @@ async fn test_subscription_ten_monitored_items_per_subscription() {
         .map(|h| MonitoredItemCreateRequest {
             item_to_monitor: ReadValueId::from(NodeId::new(
                 OPCGW_NAMESPACE_INDEX,
-                SPIKE_METRIC_OPCUA_NAME,
+                format!("{}/{}", SPIKE_DEVICE_ID, SPIKE_METRIC_OPCUA_NAME),
             )),
             monitoring_mode: MonitoringMode::Reporting,
             requested_parameters: opcua::types::MonitoringParameters {
@@ -867,7 +867,7 @@ async fn test_subscription_sampling_interval_revised_to_minimum() {
     let req = MonitoredItemCreateRequest {
         item_to_monitor: ReadValueId::from(NodeId::new(
             OPCGW_NAMESPACE_INDEX,
-            SPIKE_METRIC_OPCUA_NAME,
+            format!("{}/{}", SPIKE_DEVICE_ID, SPIKE_METRIC_OPCUA_NAME),
         )),
         monitoring_mode: MonitoringMode::Reporting,
         requested_parameters: opcua::types::MonitoringParameters {
@@ -956,7 +956,7 @@ async fn test_subscription_datavalue_payload_carries_seeded_value() {
             vec![MonitoredItemCreateRequest {
                 item_to_monitor: ReadValueId::from(NodeId::new(
                     OPCGW_NAMESPACE_INDEX,
-                    SPIKE_METRIC_OPCUA_NAME,
+                    format!("{}/{}", SPIKE_DEVICE_ID, SPIKE_METRIC_OPCUA_NAME),
                 )),
                 monitoring_mode: MonitoringMode::Reporting,
                 requested_parameters: opcua::types::MonitoringParameters {
@@ -1135,7 +1135,7 @@ async fn test_subscription_survives_sibling_session_disconnect() {
     let item = MonitoredItemCreateRequest {
         item_to_monitor: ReadValueId::from(NodeId::new(
             OPCGW_NAMESPACE_INDEX,
-            SPIKE_METRIC_OPCUA_NAME,
+            format!("{}/{}", SPIKE_DEVICE_ID, SPIKE_METRIC_OPCUA_NAME),
         )),
         monitoring_mode: MonitoringMode::Reporting,
         requested_parameters: opcua::types::MonitoringParameters {
@@ -1475,7 +1475,7 @@ async fn test_monitored_item_flood_capped_by_max_monitored_items_per_sub() {
     let make_request = |client_handle: u32| MonitoredItemCreateRequest {
         item_to_monitor: ReadValueId::from(NodeId::new(
             OPCGW_NAMESPACE_INDEX,
-            SPIKE_METRIC_OPCUA_NAME,
+            format!("{}/{}", SPIKE_DEVICE_ID, SPIKE_METRIC_OPCUA_NAME),
         )),
         monitoring_mode: MonitoringMode::Reporting,
         requested_parameters: opcua::types::MonitoringParameters {
@@ -1644,7 +1644,7 @@ async fn test_subscription_survives_chirpstack_outage_with_stale_status() {
             vec![MonitoredItemCreateRequest {
                 item_to_monitor: ReadValueId::from(NodeId::new(
                     OPCGW_NAMESPACE_INDEX,
-                    SPIKE_METRIC_OPCUA_NAME,
+                    format!("{}/{}", SPIKE_DEVICE_ID, SPIKE_METRIC_OPCUA_NAME),
                 )),
                 monitoring_mode: MonitoringMode::Reporting,
                 requested_parameters: opcua::types::MonitoringParameters {
@@ -1890,7 +1890,7 @@ async fn test_subscription_unfiltered_dedupes_status_only_transitions() {
             vec![MonitoredItemCreateRequest {
                 item_to_monitor: ReadValueId::from(NodeId::new(
                     OPCGW_NAMESPACE_INDEX,
-                    SPIKE_METRIC_OPCUA_NAME,
+                    format!("{}/{}", SPIKE_DEVICE_ID, SPIKE_METRIC_OPCUA_NAME),
                 )),
                 monitoring_mode: MonitoringMode::Reporting,
                 requested_parameters: opcua::types::MonitoringParameters {

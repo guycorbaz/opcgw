@@ -819,6 +819,40 @@ startup-config event** (same shape as Story 7-2's
 
 ---
 
+## OPC UA NodeId format (Issue #99 fix, 2026-05-02)
+
+opcgw constructs OPC UA NodeIds in namespace `ns=2` using **stable
+identifiers** rather than human-readable display names:
+
+| Node | NodeId identifier (string form) | Browse name + display name |
+|---|---|---|
+| Application folder | `application_id` (UUID from `[[application]].application_id`) | `application_name` |
+| Device folder | `device_id` (DevEUI / chirpstack ID) | `device_name` |
+| Metric variable | `format!("{}/{}", device_id, metric_name)` (e.g., `"0000000000000001/Moisture"`) | `metric_name` |
+| Gateway folder + members | hard-coded strings (e.g., `"Gateway"`, `"LastPollTimestamp"`) | same as NodeId |
+
+The metric NodeId embeds `device_id` so two devices that share a
+`metric_name` (e.g., both have a "Moisture" metric) resolve to two
+distinct NodeIds — `"device_a/Moisture"` vs `"device_b/Moisture"` —
+instead of colliding on a single `"Moisture"` node where the second
+registration would silently overwrite the first.
+
+**Anti-pattern:** hard-coding NodeId strings in SCADA configurations
+that bypass the browse step. A FUXA / Ignition project that hard-codes
+`"ns=2;s=Moisture"` (the pre-fix shape) breaks after the fix; even
+post-fix, hard-coded strings break when the operator changes
+`device_id` in `config.toml`. **Always use the browse path** to
+resolve NodeIds at SCADA project setup time, and re-resolve on
+configuration changes.
+
+**Migration impact:** existing SCADA configurations that browsed the
+address space and stored the resulting NodeIds will need to re-resolve
+after upgrading. The browse-name and display-name are unchanged, so
+the browse tree looks identical to operators — only the underlying
+NodeId identifier string is new.
+
+---
+
 ## Historical data access
 
 Story 8-3 closes FR22 by exposing the `metric_history` SQLite table
