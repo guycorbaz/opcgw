@@ -29,8 +29,10 @@ mod opc_ua_auth;
 mod opc_ua_history;
 mod opc_ua_session_monitor;
 mod security;
+mod security_hmac;
 mod storage;
 mod utils;
+mod web;
 
 /// ChirpStack API protobuf definitions
 ///
@@ -697,6 +699,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Story 9-1: spawn the embedded Axum web server when [web].enabled.
+    // Defaults to `false` so existing operators upgrading from Phase A
+    // don't get a surprise new listening port. The server shares the
+    // same Tokio runtime as the OPC UA / poller / timeout-handler
+    // tasks and joins the same CancellationToken-driven shutdown
+    // sequence below.
+    let web_enabled = application_config
+        .web
+        .enabled
+        .unwrap_or(crate::utils::WEB_DEFAULT_ENABLED);
+    let web_handle: Option<tokio::task::JoinHandle<()>> = if web_enabled {
+        let cancel_web = cancel_token.clone();
+        let config_web = application_config.clone();
+        Some(tokio::spawn(async move {
+            let port = config_web.web.port.unwrap_or(crate::utils::WEB_DEFAULT_PORT);
+            let bind_address_str = config_web
+                .web
+                .bind_address
+                .clone()
+                .unwrap_or_else(|| crate::utils::WEB_DEFAULT_BIND_ADDRESS.to_string());
+            let bind_ip: std::net::IpAddr = match bind_address_str.parse() {
+                Ok(ip) => ip,
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        bind_address = %bind_address_str,
+                        "web.bind_address failed to parse at runtime — should have been caught by AppConfig::validate"
+                    );
+                    return;
+                }
+            };
+            let addr = std::net::SocketAddr::new(bind_ip, port);
+            let realm = config_web
+                .web
+                .auth_realm
+                .clone()
+                .unwrap_or_else(|| crate::utils::WEB_DEFAULT_AUTH_REALM.to_string());
+            let auth_state = std::sync::Arc::new(web::auth::WebAuthState::new(
+                &config_web,
+                realm.clone(),
+            ));
+            let static_dir = std::path::PathBuf::from("static");
+            let router = web::build_router(auth_state, static_dir);
+            if let Err(e) = web::run(addr, router, &realm, cancel_web).await {
+                error!(error = %e, "Embedded web server error");
+            }
+        }))
+    } else {
+        // Plain info line, no `event=` field — AC#8 caps Story 9-1's
+        // structured events at exactly two (`web_auth_failed`,
+        // `web_server_started`).
+        info!("[web].enabled = false; embedded web server not started (set OPCGW_WEB__ENABLED=true to enable)");
+        None
+    };
+
     // Wait for shutdown signal (SIGINT or SIGTERM)
     let mut sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -713,10 +770,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Cancel the token to signal all tasks to stop
     cancel_token.cancel();
 
-    // Wait for tasks to finish gracefully (with timeout)
+    // Wait for tasks to finish gracefully (with timeout). The web
+    // handle is `Option<JoinHandle>` because the server may not
+    // have been started; await it conditionally so the regular
+    // join path is unchanged when [web].enabled = false.
     match tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        async { tokio::try_join!(chirpstack_handle, opcua_handle, poller_handle, timeout_handle) },
+        async {
+            let core =
+                tokio::try_join!(chirpstack_handle, opcua_handle, poller_handle, timeout_handle);
+            if let Some(web_h) = web_handle {
+                if let Err(e) = web_h.await {
+                    error!(error = %e, "Web server task error during shutdown");
+                }
+            }
+            core
+        },
     )
     .await
     {

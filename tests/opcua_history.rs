@@ -51,6 +51,7 @@ use tokio_util::sync::CancellationToken;
 use opcgw::config::{
     AppConfig, ChirpStackApplications, ChirpstackDevice, ChirpstackPollerConfig,
     CommandValidationConfig, Global, OpcMetricTypeConfig, OpcUaConfig, ReadMetric, StorageConfig,
+    WebConfig,
 };
 use opcgw::opc_ua::OpcUa;
 use opcgw::storage::{
@@ -142,6 +143,7 @@ fn history_test_config(
         }],
         storage: StorageConfig::default(),
         command_validation: CommandValidationConfig::default(),
+        web: WebConfig::default(),
     }
 }
 
@@ -862,6 +864,7 @@ async fn test_history_read_multi_device_no_node_id_collision_issue_99() {
         }],
         storage: StorageConfig::default(),
         command_validation: CommandValidationConfig::default(),
+        web: WebConfig::default(),
     });
 
     let pool = Arc::new(

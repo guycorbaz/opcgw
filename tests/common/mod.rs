@@ -140,6 +140,27 @@ pub fn user_name_identity(user: &str, password: &str) -> IdentityToken {
     IdentityToken::UserName(user.to_string(), ClientPassword(password.to_string()))
 }
 
+/// Build a `reqwest::Client` configured for the embedded-web-server
+/// integration tests (Story 9-1).
+///
+/// HTTP-only (Story 9-1 doesn't ship TLS), generous timeouts so the
+/// request budget covers slow CI hardware without masking the
+/// unit-test-equivalent assertions, and `redirect::none()` so 302/301
+/// responses surface to the test rather than being silently followed.
+///
+/// Caller passes a `request_timeout` so per-test budgets don't share
+/// state. Typical values: `Duration::from_secs(5)` for the auth-fail
+/// tests, `Duration::from_secs(15)` for the lifecycle tests that
+/// cover server bind + first request + cancellation.
+pub fn build_http_client(request_timeout: std::time::Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(request_timeout)
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("build_http_client: reqwest::Client::builder failed")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

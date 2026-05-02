@@ -39,6 +39,11 @@ tokio-util = "0.7.18"
 rusqlite = { version = "0.38.0", features = ["bundled"] }
 uuid = { version = "1.10.0", features = ["v4", "serde"] }
 
+# Story 9-1: embedded Axum web server for FR50 / NFR11 / NFR12 / FR41.
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs"] }
+base64 = "0.22"
+
 [dev-dependencies]
 # `no-env-filter` so tests in this crate's integration suite can capture
 # log events from any crate (including the gateway's own `opcgw::*`
@@ -59,6 +64,12 @@ serial_test = "3"
 # to dev-dependencies, so `cargo test` and `cargo build --examples`
 # transparently see both server + client features merged.
 async-opcua = { version = "0.17.1", features = ["client"] }
+# Story 9-1 integration tests: HTTP client for the embedded web server.
+# Dev-only — no inbound HTTP client in a release build.
+reqwest = { version = "0.12", default-features = false, features = ["http2"] }
+# Story 9-1 unit tests: tower::ServiceExt::oneshot for in-process Axum
+# middleware testing without binding a TCP listener.
+tower = { version = "0.5", features = ["util"] }
 
 [build-dependencies]
 tonic-build = "0.14.5"

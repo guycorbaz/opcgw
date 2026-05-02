@@ -239,6 +239,75 @@ pub const OPCUA_DEFAULT_MAX_HISTORY_DATA_RESULTS_PER_NODE: usize = 10_000;
 /// pipeline and likely exceed `max_message_size` even at the cap.
 pub const OPCUA_MAX_HISTORY_DATA_RESULTS_PER_NODE_HARD_CAP: usize = 1_000_000;
 
+// =============================================================================
+// Web UI Constants (Story 9-1)
+// =============================================================================
+//
+// The four `WEB_DEFAULT_*` / `WEB_MIN_PORT` / `WEB_MAX_PORT` /
+// `WEB_AUTH_REALM_MAX_LEN` constants are the single source of truth for the
+// `[web]` configuration block. `src/config.rs` references them in
+// `AppConfig::validate`; `src/web/mod.rs` reads them via `unwrap_or` when
+// the operator leaves a knob unset; tests assert against the constants
+// rather than duplicating the literals.
+
+/// Default port for the embedded Axum web server (Story 9-1, AC#1).
+///
+/// 8080 is the conventional non-root HTTP listening port. The web server
+/// is opt-in (default `WEB_DEFAULT_ENABLED = false`), so this port is
+/// only bound when the operator explicitly enables `[web].enabled = true`.
+/// Override via env var: `OPCGW_WEB__PORT`.
+pub const WEB_DEFAULT_PORT: u16 = 8080;
+
+/// Lower bound for `[web].port` (Story 9-1, AC#1).
+///
+/// Below 1024 lives the privileged-port range, which on Linux requires
+/// `CAP_NET_BIND_SERVICE` or root. The gateway should not need elevated
+/// privileges; values below this floor are rejected at startup by
+/// `AppConfig::validate`.
+pub const WEB_MIN_PORT: u16 = 1024;
+
+/// Upper bound for `[web].port` (Story 9-1, AC#1).
+///
+/// 65535 is the largest representable TCP port. Values above are rejected
+/// at startup. Note: `u16` already caps at 65535 — the constant exists so
+/// the validator's error message is symmetric with [`WEB_MIN_PORT`] and
+/// callers don't need to repeat the literal.
+pub const WEB_MAX_PORT: u16 = 65_535;
+
+/// Default bind address for the embedded Axum web server (Story 9-1, AC#1).
+///
+/// `"0.0.0.0"` listens on every interface — appropriate for the typical
+/// LAN-internal deployment. Operators can restrict to `"127.0.0.1"` if a
+/// reverse proxy on the same host fronts the gateway. Override via env
+/// var: `OPCGW_WEB__BIND_ADDRESS`.
+pub const WEB_DEFAULT_BIND_ADDRESS: &str = "0.0.0.0";
+
+/// Default Basic-auth realm string sent in `WWW-Authenticate` headers
+/// (Story 9-1, AC#1).
+///
+/// The realm is the human-readable label browsers display in their
+/// credential prompt. `"opcgw"` is short and unambiguous; operators
+/// running multiple gateways may override per-deployment to make the
+/// prompt distinguishable. Override via env var:
+/// `OPCGW_WEB__AUTH_REALM`.
+pub const WEB_DEFAULT_AUTH_REALM: &str = "opcgw";
+
+/// Maximum length (chars) of `[web].auth_realm` (Story 9-1, AC#1).
+///
+/// Strings longer than this are rejected at startup by
+/// `AppConfig::validate`. 64 is comfortably above the conventional
+/// "Application Realm" string lengths and below the point where the
+/// `WWW-Authenticate` header line becomes operationally awkward.
+pub const WEB_AUTH_REALM_MAX_LEN: usize = 64;
+
+/// Default for `[web].enabled` (Story 9-1, AC#1).
+///
+/// **`false` by design** — existing operators upgrading from Phase A
+/// must not get a surprise new listening port without opt-in. The
+/// shipped `config/config.toml` ships the `[web]` block commented-out
+/// with the opt-in step documented inline.
+pub const WEB_DEFAULT_ENABLED: bool = false;
+
 /// Maximum bytes per chunk in async-opcua 0.17.1 (Story 8-2 code review).
 ///
 /// **Note on naming:** this constant is named "min" because it is the
@@ -545,6 +614,16 @@ pub enum OpcGwError {
         command_name: String,
         reason: String,
     },
+
+    /// Embedded Axum web server runtime errors (Story 9-1).
+    ///
+    /// Used for runtime failures in the web server: bind failure, listener
+    /// I/O errors, request-handling panics propagated as errors. Startup
+    /// configuration mistakes (port out of range, unparseable bind address,
+    /// invalid auth realm) flow through [`OpcGwError::Configuration`]
+    /// instead — those are caught by `AppConfig::validate`.
+    #[error("Web server error: {0}")]
+    Web(String),
 }
 
 // =============================================================================

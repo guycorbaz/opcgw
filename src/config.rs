@@ -338,6 +338,66 @@ pub struct OpcUaConfig {
     pub max_history_data_results_per_node: Option<usize>,
 }
 
+/// Embedded Axum web server configuration parameters (Story 9-1).
+///
+/// Holds the four operator-tunable knobs for the embedded web server:
+/// listening `port`, `bind_address`, Basic-auth `auth_realm`, and an
+/// `enabled` master switch (default `false` — opt-in to avoid surprise
+/// new listening ports on upgrade).
+///
+/// Credentials are NOT in this block — the web server reuses
+/// `[opcua].user_name` / `[opcua].user_password` (single source of truth
+/// for both auth surfaces). Rationale: same threat model — operator with
+/// LAN access; one credential rotation step covers both surfaces; one
+/// less credential pair for operators to forget to rotate.
+///
+/// All fields are `Option<...>` so absent TOML entries deserialise to
+/// `None`; consumers fall back to the `WEB_DEFAULT_*` constants in
+/// `src/utils.rs` via `Option::unwrap_or`. Validation lives in
+/// `AppConfig::validate` and runs at startup.
+#[derive(Deserialize, Clone, Default)]
+pub struct WebConfig {
+    /// Port the web server listens on. Range: `WEB_MIN_PORT` (1024) to
+    /// `WEB_MAX_PORT` (65535). Default: `WEB_DEFAULT_PORT` (8080).
+    /// Override via env var: `OPCGW_WEB__PORT`.
+    #[serde(default)]
+    pub port: Option<u16>,
+
+    /// IP address the web server binds to. Must parse as `IpAddr`
+    /// (e.g. `"0.0.0.0"`, `"127.0.0.1"`, or a specific interface).
+    /// Default: `WEB_DEFAULT_BIND_ADDRESS` (`"0.0.0.0"`). Override via
+    /// env var: `OPCGW_WEB__BIND_ADDRESS`.
+    #[serde(default)]
+    pub bind_address: Option<String>,
+
+    /// Basic-auth realm string sent in `WWW-Authenticate: Basic
+    /// realm="..."` headers. Reject empty strings or strings containing
+    /// `"` (would break the header). Truncated to
+    /// `WEB_AUTH_REALM_MAX_LEN` (64) chars at validation. Default:
+    /// `WEB_DEFAULT_AUTH_REALM` (`"opcgw"`). Override via env var:
+    /// `OPCGW_WEB__AUTH_REALM`.
+    #[serde(default)]
+    pub auth_realm: Option<String>,
+
+    /// Master enable switch. When `false` (default) the web server is
+    /// not started and no port is bound — existing operators upgrading
+    /// from Phase A see no behavioural change. Override via env var:
+    /// `OPCGW_WEB__ENABLED`.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+impl std::fmt::Debug for WebConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebConfig")
+            .field("port", &self.port)
+            .field("bind_address", &self.bind_address)
+            .field("auth_realm", &self.auth_realm)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
 // Hand-written Debug impls (Story 7-1, AC#3) replace `derive(Debug)` so that
 // `api_token` and `user_password` are emitted as `***REDACTED***` in any
 // `format!("{:?}", ...)` site — including transitive ones reached via
@@ -711,6 +771,13 @@ pub struct AppConfig {
     #[serde(default)]
     pub logging: Option<LoggingConfig>,
 
+    /// Embedded Axum web server configuration (Story 9-1). The web
+    /// server is opt-in — when `[web].enabled` is `false` (default)
+    /// or absent, no port is bound and the web subsystem is not
+    /// started.
+    #[serde(default)]
+    pub web: WebConfig,
+
     /// List of ChirpStack applications and devices to monitor.
     #[serde(rename = "application")]
     pub application_list: Vec<ChirpStackApplications>,
@@ -1065,6 +1132,68 @@ impl AppConfig {
                      publish pipeline and likely exceed max_message_size)",
                     n,
                     crate::utils::OPCUA_MAX_HISTORY_DATA_RESULTS_PER_NODE_HARD_CAP
+                ));
+            }
+        }
+
+        // Story 9-1 (AC#1): bound the four `[web]` knobs. Same accumulator
+        // pattern as the OPC UA limits above. Each knob is `Option<...>`
+        // for forward compatibility; library defaults from
+        // `WEB_DEFAULT_*` apply when `None`.
+        if let Some(port) = self.web.port {
+            if port == 0 {
+                errors.push(
+                    "web.port: must not be 0 (use a value in the unprivileged \
+                     range 1024-65535)"
+                        .to_string(),
+                );
+            } else if port < crate::utils::WEB_MIN_PORT {
+                errors.push(format!(
+                    "web.port: {} is below {} (the privileged-port floor — \
+                     binding below 1024 requires CAP_NET_BIND_SERVICE or root, \
+                     which the gateway does not need). Pick a port in the \
+                     unprivileged range.",
+                    port,
+                    crate::utils::WEB_MIN_PORT
+                ));
+            }
+            // Note: u16 already caps at 65535, so the `> WEB_MAX_PORT`
+            // branch is unreachable — keeping the constant for symmetry
+            // with WEB_MIN_PORT and for the validation error message
+            // wording above.
+        }
+
+        if let Some(addr) = self.web.bind_address.as_ref() {
+            if addr.parse::<std::net::IpAddr>().is_err() {
+                errors.push(format!(
+                    "web.bind_address: '{}' does not parse as an IpAddr. Use a \
+                     literal IPv4/IPv6 address such as \"0.0.0.0\" or \
+                     \"127.0.0.1\".",
+                    addr
+                ));
+            }
+        }
+
+        if let Some(realm) = self.web.auth_realm.as_ref() {
+            if realm.is_empty() {
+                errors.push(
+                    "web.auth_realm: must not be empty (the realm is the \
+                     human-readable label browsers display in their \
+                     credential prompt — empty would render an unhelpful UI)"
+                        .to_string(),
+                );
+            } else if realm.contains('"') {
+                errors.push(
+                    "web.auth_realm: must not contain '\"' (would break the \
+                     WWW-Authenticate: Basic realm=\"...\" header)"
+                        .to_string(),
+                );
+            } else if realm.chars().count() > crate::utils::WEB_AUTH_REALM_MAX_LEN {
+                errors.push(format!(
+                    "web.auth_realm: length {} exceeds maximum {} chars (the cap \
+                     keeps the WWW-Authenticate header line at a sane length)",
+                    realm.chars().count(),
+                    crate::utils::WEB_AUTH_REALM_MAX_LEN
                 ));
             }
         }
@@ -1889,6 +2018,143 @@ mod tests {
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("server_address"));
         assert!(error_msg.contains("http://") || error_msg.contains("https://"));
+    }
+
+    // -------------------------------------------------------------------
+    // Story 9-1 (AC#1): `[web]` configuration block validation.
+    //
+    // Each test mutates a single knob into an invalid shape and asserts
+    // the validator surfaces a per-knob error message. Same accumulator
+    // pattern as the OPC UA limits — one combined error message per
+    // startup pass, every violation listed.
+    // -------------------------------------------------------------------
+
+    /// Reject `[web].port = 0` and any value below `WEB_MIN_PORT` (1024).
+    /// Privileged-port range needs CAP_NET_BIND_SERVICE; the gateway should
+    /// not need elevated privileges.
+    #[test]
+    fn test_validation_web_port_below_floor() {
+        let mut config = get_config();
+
+        config.web.port = Some(0);
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("web.port"), "got: {err}");
+        assert!(err.contains("0"), "got: {err}");
+
+        config.web.port = Some(80);
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("web.port"), "got: {err}");
+        assert!(err.contains("1024"), "error must mention the floor: {err}");
+    }
+
+    /// Reject unparseable `[web].bind_address` strings.
+    #[test]
+    fn test_validation_web_bind_address_unparseable() {
+        let mut config = get_config();
+        config.web.bind_address = Some("not-an-ip".to_string());
+
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("web.bind_address"), "got: {err}");
+        assert!(err.contains("not-an-ip"), "got: {err}");
+    }
+
+    /// Reject empty `[web].auth_realm` and any value containing `"`.
+    #[test]
+    fn test_validation_web_auth_realm_empty_or_quote() {
+        let mut config = get_config();
+
+        config.web.auth_realm = Some(String::new());
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("web.auth_realm"), "got: {err}");
+        assert!(err.contains("empty"), "got: {err}");
+
+        config.web.auth_realm = Some("evil\"realm".to_string());
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("web.auth_realm"), "got: {err}");
+        assert!(err.contains("\""), "got: {err}");
+    }
+
+    /// Reject `[web].auth_realm` longer than `WEB_AUTH_REALM_MAX_LEN` (64).
+    #[test]
+    fn test_validation_web_auth_realm_too_long() {
+        let mut config = get_config();
+        let too_long: String = "a".repeat(crate::utils::WEB_AUTH_REALM_MAX_LEN + 1);
+        config.web.auth_realm = Some(too_long);
+
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("web.auth_realm"), "got: {err}");
+        assert!(
+            err.contains(&crate::utils::WEB_AUTH_REALM_MAX_LEN.to_string()),
+            "error must mention the cap: {err}"
+        );
+    }
+
+    /// All-defaults `[web]` (every field `None`) passes validation. Pinned
+    /// because the `enabled = false` default means the web subsystem is
+    /// not started — the validator must not reject the absent block.
+    #[test]
+    fn test_validation_web_all_none_passes() {
+        let config = get_config();
+        // `get_config` returns a config with WebConfig::default(), which has
+        // all `Option::None` fields. Validation must succeed.
+        assert!(
+            config.validate().is_ok(),
+            "all-default WebConfig should validate cleanly"
+        );
+    }
+
+    /// `OPCGW_WEB__PORT=9090` env-var override reaches `[web].port`.
+    /// Pins the figment + nested-env-split pipeline for the new block.
+    #[test]
+    fn test_web_port_nested_env_override() {
+        let toml = r#"
+            [global]
+            debug = true
+            [chirpstack]
+            server_address = "http://localhost:8080"
+            api_token = "x"
+            tenant_id = "t"
+            polling_frequency = 10
+            retry = 1
+            delay = 1
+            [opcua]
+            application_name = "A"
+            application_uri = "urn:a"
+            product_uri = "urn:p"
+            diagnostics_enabled = false
+            create_sample_keypair = true
+            certificate_path = "c"
+            private_key_path = "k"
+            trust_client_cert = true
+            check_cert_time = false
+            pki_dir = "pki"
+            user_name = "u"
+            user_password = "p"
+            [web]
+            port = 8080
+            [[application]]
+            application_name = "App"
+            application_id = "app1"
+            [[application.device]]
+            device_id = "dev1"
+            device_name = "Dev"
+            [[application.device.read_metric]]
+            metric_name = "m"
+            chirpstack_metric_name = "m"
+            metric_type = "Float"
+        "#;
+        temp_env::with_var("OPCGW_WEB__PORT", Some("9090"), || {
+            let config: AppConfig = Figment::new()
+                .merge(Toml::string(toml))
+                .merge(Env::prefixed("OPCGW_").split("__").global())
+                .extract()
+                .expect("env override parses");
+            assert_eq!(
+                config.web.port,
+                Some(9090),
+                "OPCGW_WEB__PORT env var must override TOML"
+            );
+        });
     }
 
     /// Story 6-1: figment must merge `[logging]` from TOML when present.

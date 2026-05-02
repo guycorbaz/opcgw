@@ -2,7 +2,7 @@
 
 **Epic:** 9 (Web Configuration & Hot-Reload — Phase B)
 **Phase:** Phase B
-**Status:** ready-for-dev
+**Status:** review
 **Created:** 2026-05-02
 **Author:** Claude Code (Automated Story Generation)
 
@@ -280,70 +280,70 @@ warn event="web_auth_failed" source_ip=<peer-ip> user="<sanitised-user-or-blank>
 
 ### Task 0: Open tracking GitHub issues (CLAUDE.md compliance) (AC: All)
 
-- [ ] Open main tracker issue: "Story 9-1: Axum Web Server and Basic Authentication" — reference this story file, link to the Phase-B carry-forward bullets.
-- [ ] Open follow-up issue (or note in deferred-work.md): "Story 9-1 follow-up: web TLS / HTTPS hardening" — captures the explicit out-of-scope decision.
-- [ ] Note in deferred-work.md: "Story 9-1: User-manual chapter for web auth" — Documentation Sync deferral.
+- [x] Open main tracker issue: "Story 9-1: Axum Web Server and Basic Authentication" — reference this story file, link to the Phase-B carry-forward bullets. **Issue #103.**
+- [x] Open follow-up issue (or note in deferred-work.md): "Story 9-1 follow-up: web TLS / HTTPS hardening" — captures the explicit out-of-scope decision. **Issue #104.**
+- [x] Note in deferred-work.md: "Story 9-1: User-manual chapter for web auth" — Documentation Sync deferral.
 
 ### Task 1: Add `WebConfig` struct + validation (AC: 1)
 
-- [ ] Add `WebConfig { port: Option<u16>, bind_address: Option<String>, auth_realm: Option<String>, enabled: Option<bool> }` to `src/config.rs` with `#[derive(Deserialize, Default)]` + hand-written `Debug` impl.
-- [ ] Add `web: WebConfig` field to `AppConfig` with `#[serde(default)]`.
-- [ ] Add `WEB_DEFAULT_*` + `WEB_MIN_PORT` + `WEB_MAX_PORT` + `WEB_AUTH_REALM_MAX_LEN` constants to `src/utils.rs`.
-- [ ] Add validation entries to `AppConfig::validate` for port range, bind address parseability, auth_realm content/length.
-- [ ] 4 new unit tests in `src/config.rs::tests` for each invalid input.
-- [ ] 1 integration test verifying `OPCGW_WEB__PORT=9090` env-var override.
+- [x] Add `WebConfig { port: Option<u16>, bind_address: Option<String>, auth_realm: Option<String>, enabled: Option<bool> }` to `src/config.rs` with `#[derive(Deserialize, Default)]` + hand-written `Debug` impl.
+- [x] Add `web: WebConfig` field to `AppConfig` with `#[serde(default)]`.
+- [x] Add `WEB_DEFAULT_*` + `WEB_MIN_PORT` + `WEB_MAX_PORT` + `WEB_AUTH_REALM_MAX_LEN` constants to `src/utils.rs`.
+- [x] Add validation entries to `AppConfig::validate` for port range, bind address parseability, auth_realm content/length.
+- [x] 4 new unit tests in `src/config.rs::tests` for each invalid input. **5 tests landed** (port-below-floor, bind-address-unparseable, auth-realm-empty-or-quote, auth-realm-too-long, all-none-passes — the 5th is the regression pin that the absent block validates cleanly).
+- [x] 1 integration test verifying `OPCGW_WEB__PORT=9090` env-var override. **`test_web_port_nested_env_override` in `src/config.rs::tests`.**
 
 ### Task 2: Extract HMAC primitive + add `WebAuthState` (AC: 2)
 
-- [ ] Decide shape A vs B (cf. AC#2). Default to A (move to `src/security_hmac.rs`).
-- [ ] Apply the chosen extraction; verify `OpcgwAuthManager` continues to compile + tests pass.
-- [ ] Add `OpcgwAuthManager::hmac_key()` accessor (returns `&[u8; 32]`) so `WebAuthState` shares the same per-process secret.
-- [ ] Implement `src/web/auth.rs::WebAuthState::from_opcua_auth(opcua, realm)` + `basic_auth_middleware` per AC#2's middleware behaviour.
-- [ ] 8 unit tests covering the 6 failure modes + the 1 success path + the 1 sanitisation path.
+- [x] Decide shape A vs B (cf. AC#2). Default to A (move to `src/security_hmac.rs`). **Shape A chosen** (extracted `hmac_sha256` + the 4 hmac_sha256 unit tests into new `src/security_hmac.rs`).
+- [x] Apply the chosen extraction; verify `OpcgwAuthManager` continues to compile + tests pass. **All 10 `opc_ua_auth::tests` pass post-extraction.**
+- [x] Add `OpcgwAuthManager::hmac_key()` accessor (returns `&[u8; 32]`) so `WebAuthState` shares the same per-process secret. **Accessor added; `WebAuthState::from_opcua_auth` exposed for symmetry but not used in production because AC#6 forbids modifying `src/opc_ua.rs` to surface the auth manager from `main.rs`. Production uses `WebAuthState::new(config, realm)` (Shape 1 from AC#2) with its own per-process key.**
+- [x] Implement `src/web/auth.rs::WebAuthState::from_opcua_auth(opcua, realm)` + `basic_auth_middleware` per AC#2's middleware behaviour. **Both shapes implemented; `new` is the production entry point.**
+- [x] 8 unit tests covering the 6 failure modes + the 1 success path + the 1 sanitisation path. **10 tests landed** (6 failure modes + 1 success + 1 is_configured-false defence + sanitiser + AuthFailureReason::as_str stable).
 
 ### Task 3: Wire web server in `main.rs` (AC: 4, 5)
 
-- [ ] Add `src/web/mod.rs` with `build_router`, `run`, `AppState`.
-- [ ] Add `OpcGwError::Web(String)` variant in `src/utils.rs`.
-- [ ] Spawn `web_handle` in `src/main.rs` after the OPC UA spawn (only when `[web].enabled`).
-- [ ] Add 5th `tokio::select!` branch for graceful shutdown.
-- [ ] Mount `tower_http::services::ServeDir` at `/` with the auth layer applied.
-- [ ] Mount `/api/health` returning `{"status":"ok"}` (smoke endpoint for tests).
-- [ ] Create `static/index.html`, `static/applications.html`, `static/devices.html`, `static/commands.html` placeholders with `<meta viewport>` + Story 9-X stub.
-- [ ] Add `event="web_server_started"` info event at startup (resolved port + bind + realm).
+- [x] Add `src/web/mod.rs` with `build_router`, `run`, `AppState`. **`AppState` deferred — not needed by Story 9-1's surface (only the auth state is shared); Stories 9-2+ can introduce it when they add data routes.**
+- [x] Add `OpcGwError::Web(String)` variant in `src/utils.rs`.
+- [x] Spawn `web_handle` in `src/main.rs` after the OPC UA spawn (only when `[web].enabled`).
+- [x] Add 5th `tokio::select!` branch for graceful shutdown. **Implemented as a conditional `await` after the existing 4-handle `try_join!` rather than a 5th select-arm — the web handle is `Option<JoinHandle>` because it may not exist when `[web].enabled = false`. Operationally equivalent: the `CancellationToken` cancel still fans out to all five tasks; the difference is the join shape.**
+- [x] Mount `tower_http::services::ServeDir` at `/` with the auth layer applied. **Mounted via `Router::fallback_service` so the auth middleware layer at the router level applies before the static-file dispatch.**
+- [x] Mount `/api/health` returning `{"status":"ok"}` (smoke endpoint for tests).
+- [x] Create `static/index.html`, `static/applications.html`, `static/devices.html`, `static/commands.html` placeholders with `<meta viewport>` + Story 9-X stub.
+- [x] Add `event="web_server_started"` info event at startup (resolved port + bind + realm).
 
 ### Task 4: Integration tests (AC: 4, 5, 8)
 
-- [ ] Add `tests/web_auth.rs` — modeled on `tests/opcua_subscription_spike.rs` shape (`mod common;`, `init_test_subscriber`, `serial_test::serial`, `tracing-test` capture).
-- [ ] Add `build_http_client()` helper to `tests/common/mod.rs` returning a `reqwest::Client` configured for the test deployment shape.
-- [ ] 5+ integration tests: missing-auth-401, malformed-scheme-401, success-200, static-file-served, graceful-shutdown.
-- [ ] All tests `#[serial_test::serial]` (shared global tracing subscriber).
+- [x] Add `tests/web_auth.rs` — modeled on `tests/opcua_subscription_spike.rs` shape (`mod common;`, `init_test_subscriber`, `serial_test::serial`, `tracing-test` capture).
+- [x] Add `build_http_client()` helper to `tests/common/mod.rs` returning a `reqwest::Client` configured for the test deployment shape.
+- [x] 5+ integration tests: missing-auth-401, malformed-scheme-401, success-200, static-file-served, graceful-shutdown. **7 tests landed** (the 5 listed + wrong-password + web-defaults-stable).
+- [x] All tests `#[serial_test::serial]` (shared global tracing subscriber).
 
 ### Task 5: Documentation (AC: 5, 8)
 
-- [ ] Add `## Web UI authentication` section to `docs/security.md` with: What it is / Configuration / What you'll see in the logs / Anti-patterns / Tuning checklist. Include the shared-credentials note + the TLS-deferred-to-reverse-proxy stance.
-- [ ] Register `event="web_auth_failed"` and `event="web_server_started"` in `docs/logging.md` operations reference.
-- [ ] Update `README.md` Configuration section with the new `[web]` block.
-- [ ] Sync `README.md` Planning table — Epic 9 row updated to `🔄 in-progress (9-1 ready-for-dev)`.
-- [ ] Add entry to `_bmad-output/implementation-artifacts/deferred-work.md`: "Story 9-1: User-manual chapter for web auth" + "Story 9-1: TLS / HTTPS hardening".
+- [x] Add `## Web UI authentication` section to `docs/security.md` with: What it is / Configuration / What you'll see in the logs / Anti-patterns / Tuning checklist. Include the shared-credentials note + the TLS-deferred-to-reverse-proxy stance.
+- [x] Register `event="web_auth_failed"` and `event="web_server_started"` in `docs/logging.md` operations reference. **Added a new "Audit and diagnostic events (`event=`)" subsection that catalogues all `event=` names introduced by Stories 7-2 onward, including the two new ones.**
+- [x] Update `README.md` Configuration section with the new `[web]` block.
+- [x] Sync `README.md` Planning table — Epic 9 row updated to `🔄 in-progress (9-1 review)`.
+- [x] Add entry to `_bmad-output/implementation-artifacts/deferred-work.md`: "Story 9-1: User-manual chapter for web auth" + "Story 9-1: TLS / HTTPS hardening". **Plus per-IP rate limiting (#88) carry-forward note + CSRF-for-9-4+ note.**
 
 ### Task 6: Final verification (AC: 6, 7, 8)
 
-- [ ] `cargo test --lib --bins`: ≥ 320 passed / 0 failed.
-- [ ] `cargo test --tests`: all 14 prior integration test binaries pass + new `tests/web_auth.rs` passes.
-- [ ] `cargo clippy --all-targets -- -D warnings`: clean.
-- [ ] `cargo test --doc`: 0 failed.
-- [ ] `git diff --stat src/opc_ua_session_monitor.rs`: 0 changes.
-- [ ] `git diff src/opc_ua_auth.rs`: only the visibility / extraction changes (no logic changes).
-- [ ] `git grep "event=\"web_" src/`: exactly 2 distinct values.
+- [x] `cargo test --lib --bins`: ≥ 320 passed / 0 failed. **Result: 326 passed / 0 failed / 3 ignored.**
+- [x] `cargo test --tests`: all 14 prior integration test binaries pass + new `tests/web_auth.rs` passes. **Result: 0 failures across all 15 integration test binaries (14 prior + new web_auth).**
+- [x] `cargo clippy --all-targets -- -D warnings`: clean.
+- [x] `cargo test --doc`: 0 failed (56 ignored — issue #100 baseline, untouched).
+- [x] `git diff --stat src/opc_ua_session_monitor.rs`: 0 changes.
+- [x] `git diff src/opc_ua_auth.rs`: only the visibility / extraction changes (no logic changes). **Confirmed: removed local `hmac_sha256` (extracted to `src/security_hmac.rs`); added `pub fn hmac_key()`; removed 4 hmac_sha256 unit tests (moved to `src/security_hmac.rs::tests`); added `web: WebConfig::default()` to the test fixture.**
+- [x] `git grep "event=\"web_" src/`: exactly 2 distinct values. **Confirmed: `web_auth_failed` (1 emit site, in `web::auth::emit_auth_failure_event`) and `web_server_started` (1 emit site, in `web::run`). The graceful-shutdown line and the disabled line are plain `info!` lines without an `event=` field.**
 
 ### Task 7: Documentation sync verification (CLAUDE.md compliance)
 
-- [ ] README.md updated with the new `[web]` config block + Planning row update.
-- [ ] docs/security.md `## Web UI authentication` section landed.
-- [ ] docs/logging.md operations reference updated with the two new events.
-- [ ] deferred-work.md updated with the 2 carry-forward entries.
-- [ ] sprint-status.yaml `last_updated` narrative reflects the Story 9-1 ship.
+- [x] README.md updated with the new `[web]` config block + Planning row update.
+- [x] docs/security.md `## Web UI authentication` section landed.
+- [x] docs/logging.md operations reference updated with the two new events.
+- [x] deferred-work.md updated with the 2 carry-forward entries (+ 2 extras: per-IP rate limiting and CSRF-for-9-4+).
+- [x] sprint-status.yaml `last_updated` narrative reflects the Story 9-1 ship.
 
 ---
 
@@ -448,16 +448,210 @@ Once the web auth surface lands, a brute-force attacker can probe basic-auth cre
 
 ### Agent Model Used
 
-(filled in by dev agent at implementation start)
+Claude Opus 4.7 (1M context) — `claude-opus-4-7[1m]` — single-execution
+`bmad-dev-story` run on 2026-05-02 from a fresh `/clear` state.
 
 ### Debug Log References
 
-(filled in by dev agent during implementation)
+- Test runs documented inline in Task 6 above; no debug-log capture
+  required outside the standard `cargo test` output.
+- One mid-implementation regression iteration: the `password_mismatch`
+  audit-event assertion in `test_wrong_password_returns_401_and_emits_audit_event_with_user`
+  initially compared against `user="opcua-user"` (quoted), but the
+  tracing layer renders `%`-formatted (Display) string fields without
+  quotes — `user=opcua-user`. Fixed the assertion to match the actual
+  format. Documented inline in the test file.
 
 ### Completion Notes List
 
-(filled in by dev agent on completion)
+- **AC#1 (config block) — COMPLETE.** `WebConfig` added to
+  `src/config.rs` with hand-written `Debug` impl. All four knobs
+  (`port`, `bind_address`, `auth_realm`, `enabled`) are
+  `Option<...>` with `#[serde(default)]`. `WEB_DEFAULT_*` /
+  `WEB_MIN_PORT` / `WEB_MAX_PORT` / `WEB_AUTH_REALM_MAX_LEN` /
+  `WEB_DEFAULT_ENABLED` constants in `src/utils.rs` are the single
+  source of truth. `AppConfig::validate` rejects every invalid input
+  with a discriminating error message. Five validation unit tests +
+  one env-var override integration-style test in `src/config.rs::tests`.
+- **AC#2 (HMAC reuse + Basic auth middleware) — COMPLETE.** Shape A
+  chosen: `hmac_sha256` extracted from `src/opc_ua_auth.rs` into a
+  new `src/security_hmac.rs` module + the four primitive unit tests
+  moved with it. `OpcgwAuthManager` adopts the shared primitive via
+  `use crate::security_hmac::hmac_sha256` (no behavioural change).
+  `OpcgwAuthManager::hmac_key()` accessor added per AC#7's allowance.
+  `WebAuthState` exposes both `new(config, realm)` (Shape 1: fresh
+  per-process key) and `from_opcua_auth(opcua, user, password, realm)`
+  (Shape 2: shared key). **Production uses Shape 1** because
+  `OpcgwAuthManager` is constructed inside `OpcUa::run` rather than
+  `main.rs`, and AC#6 forbids modifying `src/opc_ua.rs` to surface it.
+  `Shape 2` is kept as `pub` (with `#[allow(dead_code)]`) for symmetry
+  with the spec and so a future story can refactor the construction
+  order without re-introducing it. The middleware
+  (`basic_auth_middleware`) uses `axum::middleware::from_fn_with_state`
+  + `ConnectInfo<SocketAddr>` so peer IP is available natively (no
+  two-event correlation pattern needed). Constant-time path verified:
+  both digests are computed and `constant_time_eq`-compared
+  unconditionally before the `&` combine; the 401 response is
+  identical across all six failure modes (the `reason` field
+  discriminates only in the audit log). Ten unit tests in
+  `src/web/auth.rs::tests` cover all six failure modes + success +
+  is_configured-false defence + sanitiser + `AuthFailureReason::as_str`
+  stability.
+- **AC#3 (NFR12 source-IP) — COMPLETE.** Audit event shape:
+  `event="web_auth_failed" source_ip=<ip> user=<sanitised> path=<req-path> reason=<discriminator>`.
+  `source_ip` is the peer IP (not the IP+port) extracted directly
+  from `ConnectInfo<SocketAddr>`. The `user` field uses the
+  `sanitise_user` helper duplicated in `src/web/auth.rs` (3 lines —
+  per CLAUDE.md scope-discipline a tiny duplicate is preferable to
+  widening `OpcgwAuthManager`'s public surface beyond AC#7's
+  allowance). The `reason` discriminator has six stable values
+  (`missing` / `malformed_scheme` / `malformed_base64` /
+  `missing_colon` / `user_mismatch` / `password_mismatch`) pinned by
+  `AuthFailureReason::as_str` and a dedicated unit test. Three
+  integration tests in `tests/web_auth.rs` exercise the full audit
+  pipeline (`source_ip=127.0.0.1` from a real reqwest client).
+- **AC#4 (CancellationToken + Tokio runtime) — COMPLETE.** The web
+  handle is spawned as the 5th `tokio::spawn` in `src/main.rs`
+  conditionally on `[web].enabled = true`. Implementation note: a
+  literal "5th `tokio::select!` branch" wasn't added — instead the
+  web handle is `Option<JoinHandle>` joined after the existing 4-handle
+  `tokio::try_join!` (cancellation still fans out to all five tasks
+  via the shared `CancellationToken`; the difference is in the
+  shutdown-join shape, not the cancellation semantics). The
+  `test_graceful_shutdown_via_cancellation_token` integration test
+  asserts the handle joins within 5s of `cancel()` and the bound
+  port is released. `event="web_server_started"` info event fires
+  exactly once at startup with resolved bind address + port + realm.
+- **AC#5 (static files + FR41) — COMPLETE.** `tower_http::services::ServeDir`
+  mounted via `Router::fallback_service("/", ServeDir::new(static_dir))`
+  so the global auth layer applies before static-file dispatch (the
+  standard nesting pattern for tower-http v0.6 — `nest_service` at the
+  empty path conflicts with the layer state binding in axum 0.8).
+  Four placeholder HTML files in `static/`
+  (`index.html` / `applications.html` / `devices.html` / `commands.html`)
+  each carry the `<meta name="viewport" content="width=device-width, initial-scale=1">`
+  tag for FR41. Two integration tests pin the auth+static behaviour:
+  unauth `GET /index.html` returns 401, auth'd `GET /index.html`
+  returns 200 with the viewport meta in the body.
+- **AC#6 (regression baseline) — COMPLETE.** Pre-Story baseline was
+  309 lib+bins post-Epic-8 carry-forward. Post-Story:
+  - `cargo test --lib --bins`: **326 passed** / 0 failed / 3 ignored.
+    Δ = +17 from baseline (5 web-config validation + 1 web env-override +
+    4 security_hmac + 10 web::auth unit + 1 build_router smoke + a
+    few delta from existing fixture changes). Within the AC#8
+    "≈14 ± minor variance" budget.
+  - `cargo test --tests`: all 14 prior integration test binaries
+    pass + new `tests/web_auth.rs` (7 web-specific + 3 reused from
+    `tests/common/`) = **15 binaries / 0 failures**.
+  - `cargo clippy --all-targets -- -D warnings`: **clean**.
+  - `cargo test --doc`: **0 failed** (56 ignored — issue #100
+    baseline, untouched).
+- **AC#7 (NFR12 + auth + connection-cap carry-forward intact) — COMPLETE.**
+  - `git diff --stat src/opc_ua_session_monitor.rs`: zero changes.
+  - `git diff --stat src/opc_ua.rs`: zero changes.
+  - `git diff --stat src/opc_ua_history.rs`: zero changes.
+  - `git diff src/opc_ua_auth.rs`: only the allowed extraction +
+    `pub fn hmac_key()` accessor + the `WebConfig::default()` test
+    fixture import. **No logic changes.**
+  - The Story 8-1/8-2/8-3 spike+history+subscription tests
+    (`tests/opcua_subscription_spike.rs` 17 tests,
+    `tests/opcua_history.rs` 11 tests) all pass unchanged.
+- **AC#8 (sanity check) — COMPLETE.**
+  - Default test count grew by **+17** lib+bins (within the spec's
+    "≈14 ± minor variance" budget).
+  - Exactly **two** new tracing-event names introduced:
+    `web_auth_failed` (audit warn) and `web_server_started`
+    (diagnostic info). `git grep 'event = "web_\|event="web_' src/`
+    produces exactly those two values, both with a single emit
+    site. The graceful-shutdown log line and the disabled log
+    line are plain `info!` lines without an `event=` field — the
+    spec's strict "exactly two" rule was honoured by trimming what
+    would have been `web_server_stopped` and `web_server_disabled`
+    down to plain log lines.
+  - Both events registered in `docs/security.md` § "Web UI
+    authentication" + `docs/logging.md` § "Audit and diagnostic
+    events (`event=`)".
+  - **Zero new audit events on the OPC UA path** (AC#7 invariant):
+    `git diff src/opc_ua_auth.rs` shows no new `warn!` / `event=`
+    sites; the existing `event="opcua_auth_failed"` and
+    `event="opcua_auth_succeeded"` are unchanged.
+
+#### Field-shape divergence from spec
+
+- **Shape 1 vs Shape 2 in AC#2.** Spec marked `from_opcua_auth`
+  (Shape 2: shared HMAC key) as "preferred". Implementation uses
+  Shape 1 (fresh per-process key for the web surface) because
+  `OpcgwAuthManager` is constructed inside `OpcUa::run` rather than
+  `main.rs`, and AC#6 forbids modifying `src/opc_ua.rs` to surface
+  it. Shape 2 is exported (with `#[allow(dead_code)]`) so a future
+  story can refactor the construction order without re-introducing
+  the function. **Functional impact: none** — both shapes give the
+  same security properties (per-process random HMAC key, fixed-length
+  digests, constant-time compare); the only difference is whether
+  the OPC UA surface and the web surface share *one* key or have
+  *two* independent keys. Two-key mode means an attacker that
+  somehow extracts one key can't replay against the other surface,
+  which is arguably *more* defensive — though Story 8-1's spike
+  test for cross-instance key replay confirms the per-process
+  randomness is the load-bearing property either way.
+- **5th `tokio::select!` branch (AC#4).** Implementation joins the
+  web handle as `Option<JoinHandle>` after the existing 4-handle
+  `try_join!` rather than as a 5th select-arm. Functionally
+  equivalent (same `CancellationToken` fan-out, same
+  graceful-shutdown semantics); the `Option` shape correctly
+  models "this handle may not exist when `[web].enabled = false`".
+- **Spec's "exactly 2 events" vs initial 4-event implementation.**
+  First implementation pass added `web_server_stopped` and
+  `web_server_disabled` as additional `event=` names for
+  symmetric lifecycle visibility. AC#8's grep contract called this
+  out as a violation; trimmed to plain `info!` lines for those two
+  cases. Net result: exactly 2 structured event names, with the
+  lifecycle visibility preserved as plain log lines.
+- **`subtle = "2"` direct dep (AC#2).** Spec wording prescribed
+  `subtle::ConstantTimeEq::ct_eq`. Implementation uses
+  `constant_time_eq::constant_time_eq` (the existing direct dep
+  Story 7-2 added) for consistency with the OPC UA auth path. Both
+  crates are vetted constant-time-comparison primitives;
+  functionally identical.
+- **`tower-http = "0.5"` vs `0.6` (Dev Notes).** Spec referenced
+  `tower-http = "0.5"`; latest stable is `0.6.8` and is what
+  `axum = "0.8"` expects. Used `0.6` to avoid version-skew warnings.
+- **`AppState` deferred to Stories 9-2+ (Task 3).** Spec's `AppState`
+  was meant to hold `Arc<dyn StorageBackend>` for future stories.
+  Story 9-1 doesn't read from storage — only the auth state is
+  needed — so `AppState` was not introduced. Stories 9-2+ can add it
+  cleanly when they introduce data routes; the change is local to
+  `src/web/mod.rs::build_router`.
 
 ### File List
 
-(filled in by dev agent on completion — verify against the expected list above)
+**New files:**
+- `src/security_hmac.rs` — extracted `hmac_sha256` primitive + 4 unit tests.
+- `src/web/mod.rs` — `build_router`, `run`, `api_health` smoke endpoint, `build_router_smoke` test.
+- `src/web/auth.rs` — `WebAuthState`, `basic_auth_middleware`, `AuthFailureReason`, helpers, 10 unit tests.
+- `static/index.html`, `static/applications.html`, `static/devices.html`, `static/commands.html` — placeholder HTML with `<meta viewport>` for FR41.
+- `tests/web_auth.rs` — 7 integration tests + helpers.
+
+**Modified files:**
+- `Cargo.toml` — added `axum = "0.8"`, `tower-http = "0.6"` (with `fs` feature), `base64 = "0.22"` as direct deps; added `reqwest = "0.12"` and `tower = "0.5"` as dev-deps.
+- `src/utils.rs` — added `WEB_DEFAULT_PORT` / `WEB_MIN_PORT` / `WEB_MAX_PORT` / `WEB_DEFAULT_BIND_ADDRESS` / `WEB_DEFAULT_AUTH_REALM` / `WEB_AUTH_REALM_MAX_LEN` / `WEB_DEFAULT_ENABLED` constants; added `OpcGwError::Web(String)` variant.
+- `src/config.rs` — added `WebConfig` struct (with hand-written `Debug` impl); added `web: WebConfig` field to `AppConfig`; added validation entries for the four `[web]` knobs in `AppConfig::validate`; added 6 unit tests.
+- `src/opc_ua_auth.rs` — removed local `hmac_sha256` + 4 unit tests (moved to `src/security_hmac.rs`); added `pub fn hmac_key(&self) -> &[u8; 32]` accessor; updated test fixture to include `web: WebConfig::default()`.
+- `src/lib.rs` — added `pub mod security_hmac;` and `pub mod web;`.
+- `src/main.rs` — added `mod security_hmac;` and `mod web;`; spawned the conditional 5th task for the embedded web server; added `Option<JoinHandle>`-based shutdown join.
+- `tests/common/mod.rs` — added `build_http_client(timeout)` helper for the web integration tests.
+- `tests/opcua_subscription_spike.rs`, `tests/opc_ua_connection_limit.rs`, `tests/opc_ua_security_endpoints.rs`, `tests/opcua_history.rs` — added `WebConfig` to the `opcgw::config::*` import + `web: WebConfig::default()` to the test fixtures (test-fixture-only changes, no production code modified per AC#6).
+- `config/config.toml` — added commented-out `[web]` block with documentation.
+- `config/config.example.toml` — added enabled `[web]` block with documentation (representative non-default deployment shape).
+- `docs/security.md` — appended `## Web UI authentication` section + reference list update.
+- `docs/logging.md` — added `### Audit and diagnostic events (event=)` subsection cataloguing all `event=` names from Stories 7-2 onward, including the two new ones.
+- `README.md` — added Web UI subsection in Configuration; updated Planning row for Epic 9; bumped `last_updated` to 2026-05-02.
+- `_bmad-output/implementation-artifacts/deferred-work.md` — added 4 entries (user-manual chapter, TLS hardening, per-IP rate limiting, CSRF for 9-4+).
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — flipped `9-1-axum-web-server-and-basic-authentication: ready-for-dev → in-progress → review`; refreshed `last_updated` narrative.
+- `_bmad-output/implementation-artifacts/9-1-axum-web-server-and-basic-authentication.md` — this file: status flipped to `review`, all task checkboxes filled, Dev Agent Record + completion notes + file list populated.
+
+### Change Log
+
+| Date | Change | Detail |
+|------|--------|--------|
+| 2026-05-02 | Status flipped `ready-for-dev → in-progress → review` | Single-execution `bmad-dev-story` run from `/clear` state. All 8 ACs satisfied; loop terminates on first pass. |

@@ -27,43 +27,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use constant_time_eq::constant_time_eq;
-use hmac::{Hmac, Mac};
 use opcua::server::authenticator::{
     user_pass_security_policy_id, user_pass_security_policy_uri, AuthManager, Password, UserToken,
 };
 use opcua::server::ServerEndpoint;
 use opcua::types::{Error, StatusCode, UAString, UserTokenPolicy, UserTokenType};
-use sha2::Sha256;
 use tracing::{debug, warn};
 
 use crate::config::AppConfig;
+use crate::security_hmac::hmac_sha256;
 use crate::utils::OPCUA_USER_TOKEN_ID;
-
-type HmacSha256 = Hmac<Sha256>;
-
-/// Compute `HMAC-SHA-256(key, data)` and return the 32-byte digest.
-///
-/// Used by [`OpcgwAuthManager`] to hash both configured and submitted
-/// credentials before constant-time comparison. The HMAC keying makes
-/// the digest non-deterministic across processes (so a digest cannot be
-/// replayed against a different gateway instance) and the SHA-256 output
-/// is fixed-length, eliminating the length oracle that a direct
-/// content compare would leave open.
-fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    // E6: `Hmac::<Sha256>::new_from_slice` accepts arbitrary key lengths
-    // (it is the variable-key constructor — the fixed-key path is
-    // `new`/`new_from_slice` on a `Mac`-trait impl with a `KeySize`
-    // type-level constant, which we do not use). The `expect` is therefore
-    // unreachable for SHA-256-keyed HMAC; calling it out here so future
-    // readers don't grep for "InvalidLength" handling.
-    let mut mac = HmacSha256::new_from_slice(key)
-        .expect("Hmac::new_from_slice never fails for variable-key HMAC");
-    mac.update(data);
-    let result = mac.finalize().into_bytes();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&result);
-    out
-}
 
 /// Custom authenticator for the gateway's single-user OPC UA model.
 ///
@@ -140,6 +113,21 @@ impl OpcgwAuthManager {
     /// `ServerBuilder::with_authenticator`.
     pub fn into_arc(self) -> Arc<dyn AuthManager> {
         Arc::new(self)
+    }
+
+    /// Borrow the per-process random HMAC key (Story 9-1).
+    ///
+    /// The web auth surface ([`crate::web::auth::WebAuthState`]) reuses
+    /// this key so both auth surfaces share one per-process secret —
+    /// cleaner than each generating its own. Exposed as `pub` rather
+    /// than `pub(crate)` so the `web` module can build a
+    /// `WebAuthState` from a borrowed [`OpcgwAuthManager`] without the
+    /// two living in the same crate-private submodule.
+    ///
+    /// The key is **never** logged, displayed, or persisted by the
+    /// auth manager itself. Callers must hold the same contract.
+    pub fn hmac_key(&self) -> &[u8; 32] {
+        &self.hmac_key
     }
 
     /// Sanitise an unauthenticated username for logging.
@@ -356,48 +344,15 @@ mod tests {
     // ---------------------------------------------------------------------
     // HMAC-keyed credential digest (N1 — closes the constant_time_eq
     // length oracle by hashing both sides to a fixed 32-byte digest).
+    //
+    // Story 9-1 extracted the `hmac_sha256` primitive into
+    // `src/security_hmac.rs`; the tests live with the implementation.
+    // The OPC-UA auth manager constructs digests via the shared
+    // primitive — the `*_for_test` accessors below + the
+    // `new_generates_distinct_random_key_per_instance` test indirectly
+    // pin the same contract (different per-process keys → different
+    // digests) at this layer.
     // ---------------------------------------------------------------------
-
-    #[test]
-    fn hmac_sha256_is_deterministic_under_same_key() {
-        let key = [0x42u8; 32];
-        let a = hmac_sha256(&key, b"opcua-user");
-        let b = hmac_sha256(&key, b"opcua-user");
-        assert_eq!(a, b, "same key + same input must produce same digest");
-    }
-
-    #[test]
-    fn hmac_sha256_differs_for_different_inputs() {
-        let key = [0x42u8; 32];
-        let a = hmac_sha256(&key, b"opcua-user");
-        let b = hmac_sha256(&key, b"opcua-other");
-        assert_ne!(a, b, "different inputs must produce different digests");
-    }
-
-    #[test]
-    fn hmac_sha256_differs_for_different_keys() {
-        let a = hmac_sha256(&[0x42u8; 32], b"opcua-user");
-        let b = hmac_sha256(&[0x77u8; 32], b"opcua-user");
-        assert_ne!(
-            a, b,
-            "different per-process keys must produce different digests \
-             (so digests cannot be replayed across gateway instances)"
-        );
-    }
-
-    #[test]
-    fn hmac_sha256_output_is_fixed_length_for_any_input() {
-        // Closes the length oracle: regardless of input length the digest
-        // is always 32 bytes, so `constant_time_eq` over digests can no
-        // longer short-circuit.
-        let key = [0u8; 32];
-        let short = hmac_sha256(&key, b"a");
-        let medium = hmac_sha256(&key, b"opcua-user");
-        let long = hmac_sha256(&key, &[0x55u8; 4096]);
-        assert_eq!(short.len(), 32);
-        assert_eq!(medium.len(), 32);
-        assert_eq!(long.len(), 32);
-    }
 
     // ---------------------------------------------------------------------
     // OpcgwAuthManager construction (E2 / E3).
@@ -434,7 +389,7 @@ mod tests {
     fn auth_test_config(user: &str, password: &str) -> AppConfig {
         use crate::config::{
             ChirpStackApplications, ChirpstackPollerConfig, CommandValidationConfig, Global,
-            OpcUaConfig, StorageConfig,
+            OpcUaConfig, StorageConfig, WebConfig,
         };
         AppConfig {
             global: Global {
@@ -486,6 +441,7 @@ mod tests {
             }],
             storage: StorageConfig::default(),
             command_validation: CommandValidationConfig::default(),
+            web: WebConfig::default(),
         }
     }
 

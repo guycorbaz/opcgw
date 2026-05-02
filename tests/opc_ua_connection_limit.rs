@@ -38,6 +38,7 @@ use tracing_subscriber::{fmt as tracing_fmt, layer::SubscriberExt, Layer};
 use opcgw::config::{
     AppConfig, ChirpStackApplications, ChirpstackDevice, ChirpstackPollerConfig,
     CommandValidationConfig, Global, OpcMetricTypeConfig, OpcUaConfig, ReadMetric, StorageConfig,
+    WebConfig,
 };
 use opcgw::opc_ua::OpcUa;
 use opcgw::storage::{ConnectionPool, SqliteBackend, StorageBackend};
@@ -217,6 +218,7 @@ fn test_config(port: u16, pki_dir: &std::path::Path, max_connections: usize) -> 
         }],
         storage: StorageConfig::default(),
         command_validation: CommandValidationConfig::default(),
+        web: WebConfig::default(),
     }
 }
 

@@ -181,6 +181,24 @@ stale_threshold_seconds = 120
 # Override via env var: OPCGW_OPCUA__MAX_HISTORY_DATA_RESULTS_PER_NODE
 
 
+# Embedded Axum web server (Story 9-1). Off by default — set
+# `enabled = true` (or `OPCGW_WEB__ENABLED=true`) to expose the gateway's
+# HTTP UI. Credentials are shared with `[opcua]` (single source of truth
+# for both auth surfaces). HTTP-only — deploy a reverse proxy if your
+# environment requires TLS.
+#
+# port — listening port. Default 8080. Range 1024–65535.
+# bind_address — IP to bind. Default "0.0.0.0".
+# auth_realm — Basic-auth realm string. Default "opcgw". Max 64 chars,
+#   no `"` allowed.
+# enabled — master switch. Default false.
+[web]
+enabled = true
+port = 8080
+bind_address = "0.0.0.0"
+auth_realm = "opcgw-example"
+
+
 ###########################################################
 # Applications
 # application are listed below. There are no limits on the

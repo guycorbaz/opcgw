@@ -1039,16 +1039,181 @@ For a 7-day retention deployment with FUXA dashboards:
 
 ---
 
+## Web UI authentication
+
+**Story 9-1** ships an embedded Axum web server gated by HTTP Basic auth.
+The server is **opt-in** (`[web].enabled = false` by default) so existing
+operators upgrading from Phase A see no behavioural change unless they
+explicitly enable it.
+
+### What it is
+
+A single `Router` mounted at the namespace root with one `Layer` enforcing
+Basic auth on every request. Routes:
+
+- `GET /api/health` — minimal smoke endpoint, returns `{"status":"ok"}`.
+  Used by integration tests; not operator-facing.
+- `GET /` (and any path under it) — static files served from `static/`.
+  Story 9-1 ships placeholder HTML; Stories 9-2 / 9-3 / 9-4 / 9-5 / 9-6
+  fill them in.
+
+The auth path **reuses** Story 7-2's HMAC-SHA-256 keyed credential digest
+(extracted into `src/security_hmac.rs`). Submitted credentials are hashed
+under a per-process random key, then constant-time compared against the
+digests of the configured credentials. A direct content compare would
+leak the credential length via the timing of the comparison; HMAC into
+fixed-length digests closes that oracle.
+
+**Credentials are shared with `[opcua]`.** The web server reads
+`[opcua].user_name` / `[opcua].user_password` directly — no separate
+`[web]` user/password pair. Rationale: the threat model is symmetric (an
+operator with LAN access; one credential rotation step covers both
+surfaces; one less credential pair for operators to forget to rotate).
+
+### Configuration
+
+```toml
+[web]
+enabled = true              # default false — opt-in to expose
+port = 8080                 # default 8080; range 1024-65535
+bind_address = "0.0.0.0"    # default "0.0.0.0"; must parse as IpAddr
+auth_realm = "opcgw"        # default "opcgw"; max 64 chars, no `"`
+```
+
+Env-var overrides via figment's nested-key convention:
+
+| Knob | Env var |
+|---|---|
+| `[web].enabled` | `OPCGW_WEB__ENABLED=true` |
+| `[web].port` | `OPCGW_WEB__PORT=8080` |
+| `[web].bind_address` | `OPCGW_WEB__BIND_ADDRESS=127.0.0.1` |
+| `[web].auth_realm` | `OPCGW_WEB__AUTH_REALM=my-gateway` |
+
+`AppConfig::validate` rejects port=0 / port<1024, unparseable
+`bind_address`, empty `auth_realm`, `auth_realm` containing `"`, and
+`auth_realm` longer than 64 chars. All checks accumulate so a single
+startup pass surfaces every violation.
+
+### What you'll see in the logs
+
+**Successful startup** (info-level diagnostic):
+
+```
+INFO event="web_server_started" bind_address=0.0.0.0 port=8080 realm="opcgw"
+```
+
+**Disabled** (plain info line — no `event=` field; the spec caps Story 9-1
+at exactly two structured event names):
+
+```
+INFO [web].enabled = false; embedded web server not started (set OPCGW_WEB__ENABLED=true to enable)
+```
+
+**Graceful shutdown** (plain info line — same rationale):
+
+```
+INFO bind_address=0.0.0.0 port=8080 Embedded web server stopped (graceful shutdown)
+```
+
+**Failed authentication** (warn-level audit event — NFR12):
+
+```
+WARN event="web_auth_failed" source_ip=192.168.1.42 user=evil-user path="/index.html" reason="user_mismatch" "Web UI authentication failed"
+```
+
+The `reason` field discriminates the failure mode for triage:
+
+| Reason | Meaning |
+|---|---|
+| `missing` | No `Authorization` header. |
+| `malformed_scheme` | Header doesn't start with `Basic `. |
+| `malformed_base64` | Base64 decode failed (or non-UTF8 bytes). |
+| `missing_colon` | Decoded blob has no `:` between user and pass. |
+| `user_mismatch` | Submitted username doesn't match the configured one. |
+| `password_mismatch` | Username matched but password didn't. |
+
+**The wire response is identical across all reasons** (constant-time
+401 + `WWW-Authenticate: Basic realm="..."`); the discrimination exists
+only in the audit log for forensic purposes.
+
+### NFR12 source-IP — direct vs. correlated
+
+Story 7-2's OPC UA path needs **two-event correlation** because async-opcua's
+`AuthManager` doesn't receive peer `SocketAddr` — operators correlate the
+`event="opcua_auth_failed"` audit event against async-opcua's own
+`info!`-level "Accept new connection from {addr} (...)" line by timestamp.
+
+Story 9-1's web path **gets the source IP directly** via Axum's
+`ConnectInfo<SocketAddr>` extractor — the audit event carries
+`source_ip=...` natively. No correlation step needed; the asymmetry is a
+strict improvement over the OPC UA path.
+
+The same NFR12 startup warn from Story 7-2 (`event="nfr12_correlation_check"`)
+applies to the web path: at log levels stricter than `info` async-opcua's
+accept event is filtered out, but the web's `source_ip` field survives at
+`warn` (the minimum level the audit event itself uses). Operators running
+at `error`/`off` lose the audit trail entirely (their explicit choice).
+
+### Anti-patterns
+
+- **Don't expose the gateway's web port to the internet.** The threat model
+  is LAN-internal: Basic auth over HTTP transmits credentials in cleartext,
+  which is acceptable on a trusted LAN with reverse-proxy TLS termination
+  but not over the public internet. If you need internet exposure, deploy
+  a reverse proxy (nginx, Caddy, Traefik) with TLS + a deny-all firewall on
+  the gateway port.
+- **Don't roll your own credential comparison.** The HMAC-keyed digest +
+  `constant_time_eq` shape exists to close two specific weaknesses (the
+  length oracle of a direct compare; replay across instances). Phase-B
+  carry-forward rule (`epics.md:782`).
+- **Don't introduce a separate `[web]` user/password pair without
+  symmetric rotation procedures.** Story 9-1's single-source-of-truth
+  shape (credentials live under `[opcua]`) means one rotation step
+  covers both surfaces; splitting them creates a footgun where one
+  surface gets rotated and the other is forgotten.
+- **Don't add `POST` / `PUT` / `DELETE` routes without CSRF protection.**
+  Story 9-1 ships only `GET` routes — no CSRF surface. Stories 9-4 / 9-5 /
+  9-6 will add mutating routes for application / device / command CRUD;
+  those need either strict same-origin policy enforcement (CORS rejecting
+  cross-origin requests) or a double-submit cookie / synchronizer-token
+  pattern. Audit each before merging.
+- **Don't enable the web server without rotating the placeholder
+  password.** The shipped `config/config.toml` has a placeholder
+  `[opcua].user_password` value the gateway refuses to start with — the
+  same protection extends to the web surface (since credentials are
+  shared). Verify your `OPCGW_OPCUA__USER_PASSWORD` env var injection
+  before flipping `[web].enabled = true`.
+
+### Tuning checklist
+
+- Set `[web].enabled = true` (or `OPCGW_WEB__ENABLED=true`) only after
+  verifying the operator's LAN threat model.
+- Pick `[web].bind_address = "127.0.0.1"` if a reverse proxy on the same
+  host fronts the gateway — no need to listen on every interface.
+- Pick `[web].auth_realm` per-deployment (e.g. `"opcgw-prod-east"`) so
+  browser credential prompts are distinguishable across environments.
+- TLS / HTTPS hardening is **out of scope** for Story 9-1 — tracked at
+  GitHub issue [#104](https://github.com/guycorbaz/opcgw/issues/104).
+  Until that lands, deploy an upstream reverse proxy if your environment
+  requires TLS.
+- Per-IP rate limiting (`#88`) becomes structurally relevant once the
+  web auth surface is exposed — consider opening a follow-up issue if
+  brute-force probing becomes a near-term operator concern.
+
+---
+
 ## References
 
 - Story 7-1 spec: `_bmad-output/implementation-artifacts/7-1-credential-management-via-environment-variables.md`
 - Story 7-2 spec: `_bmad-output/implementation-artifacts/7-2-opc-ua-security-endpoints-and-authentication.md`
 - Story 7-3 spec: `_bmad-output/implementation-artifacts/7-3-connection-limiting.md`
+- Story 9-1 spec: `_bmad-output/implementation-artifacts/9-1-axum-web-server-and-basic-authentication.md`
 - PRD requirements: FR42 (env-var injection), NFR7 (no secrets in logs),
   NFR8 (no real credentials in default config), NFR24 (env override for
   all secrets), FR19 (multi-policy OPC UA endpoints), FR20 (OPC UA user
   auth), FR45 (PKI layout), NFR9 (private-key 0o600), NFR12 (failed-auth
-  audit trail), FR44 (connection limiting) in
+  audit trail), FR44 (connection limiting), FR50 (web Basic auth),
+  NFR11 (web auth before any change), FR41 (mobile-responsive web UI) in
   `_bmad-output/planning-artifacts/prd.md`
 - Configuration reference: [`docs/configuration.md`](configuration.md)
 - Deferred follow-ups: `_bmad-output/implementation-artifacts/deferred-work.md`

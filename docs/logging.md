@@ -159,6 +159,41 @@ Every event log line carries a structured `operation=` field. The table below is
 | `batch_write` | `debug` (normal) / `warn` (slow) | End-of-cycle batch persistence. Carries `metrics_count`, `latency_ms`. The warn variant fires when `latency_ms > 500`. | A slow batch_write blocks the next poll cycle — investigate disk health. |
 | `txn_begin` / `txn_commit` / `txn_rollback` | `trace` | SQLite transaction boundaries inside `batch_write_metrics`. | Diagnostics only — captured in `storage.log`. |
 
+### Audit and diagnostic events (`event=`)
+
+Stories from 7-2 onward use a separate `event=` field instead of
+`operation=` for security-relevant audit events and one-shot
+diagnostic events (the `event=` prefix makes them easy to filter via
+`grep 'event="..."' log/*.log`). The full audit-trail catalogue lives
+in [`docs/security.md`](security.md); this is a quick-reference
+index of the event names introduced so far.
+
+| `event=` | Level | Story | Where documented |
+|---|---|---|---|
+| `opcua_auth_failed` | `warn` (audit) | 7-2 | `security.md` § OPC UA security endpoints and authentication |
+| `opcua_session_count` | `info` (diag) | 7-3 | `security.md` § OPC UA connection limiting |
+| `opcua_session_count_at_limit` | `warn` (audit) | 7-3 | `security.md` § OPC UA connection limiting |
+| `opcua_limits_configured` | `info` (diag) | 8-2 | `security.md` § OPC UA subscription limits |
+| `nfr12_correlation_check` | `warn` (one-shot) | 7-2 retro | `security.md` § OPC UA security endpoints and authentication |
+| `web_auth_failed` | `warn` (audit) | 9-1 | `security.md` § Web UI authentication |
+| `web_server_started` | `info` (diag) | 9-1 | `security.md` § Web UI authentication |
+
+Pinning rules (apply to every entry above):
+
+- The wire response to a client never depends on whether the audit
+  event fired — failure modes that surface as `event="..._failed"`
+  always return the same status code + headers regardless of which
+  internal `reason` they recorded. The discrimination exists only
+  in the audit log.
+- `warn` is the audit-event minimum. Operators running at
+  `error`/`off` lose the audit trail entirely (their explicit
+  choice — Story 7-2 emits a one-shot `event="nfr12_correlation_check"`
+  warn at startup if the resolved level filters out `info`, since
+  source-IP correlation breaks at that level).
+- `info` is the diagnostic-event minimum. They are not security
+  signals; they exist so operators can confirm a startup landed
+  cleanly without grepping multiple lines.
+
 ## Diagnosing common symptoms
 
 A symptom-first cookbook for the most common production incidents:

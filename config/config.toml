@@ -141,6 +141,33 @@ stale_threshold_seconds = 120
 # Override via env var: OPCGW_OPCUA__<UPPERCASE_KEY>
 
 
+# Embedded Axum web server (Story 9-1). Off by default — uncomment and
+# set `enabled = true` to enable, or override via env var
+# `OPCGW_WEB__ENABLED=true`. The server binds an HTTP port and serves
+# placeholder static files behind HTTP Basic auth (credentials shared
+# with `[opcua]` — `user_name` / `user_password`).
+#
+# Story 9-1 ships HTTP-only; deploy a reverse proxy (nginx, Caddy,
+# Traefik) for TLS termination if your environment requires it.
+# See docs/security.md "Web UI authentication" for the full recipe.
+#
+# port — listening port. Default 8080. Range 1024–65535 (privileged
+#   ports rejected). Override via OPCGW_WEB__PORT.
+# bind_address — IP to bind. Default "0.0.0.0" (all interfaces).
+#   Override via OPCGW_WEB__BIND_ADDRESS.
+# auth_realm — Basic-auth realm string. Default "opcgw". Reject empty
+#   strings, strings containing `"`, or strings longer than 64 chars.
+#   Override via OPCGW_WEB__AUTH_REALM.
+# enabled — master switch. Default false. Override via
+#   OPCGW_WEB__ENABLED=true.
+#
+#[web]
+#enabled = false
+#port = 8080
+#bind_address = "0.0.0.0"
+#auth_realm = "opcgw"
+
+
 ###########################################################
 # Applications
 #
