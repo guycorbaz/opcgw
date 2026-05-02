@@ -46,7 +46,7 @@ uuid = { version = "1.10.0", features = ["v4", "serde"] }
 # binary itself, which masks audit-trail events emitted by spawned
 # server tasks. Story 7-2's `tests/opc_ua_security_endpoints.rs`
 # depends on this.
-tracing-test = { version = "0.2", features = ["no-env-filter"] }
+tracing-test = { version = "=0.2.6", features = ["no-env-filter"] }  # Issue #101: exact-pin while spike-tests use tracing_test::internal::global_buf() (private API). Bump only after the test-harness extraction (issue #102) replaces internal:: with a public layer.
 temp-env = "0.3"
 tempfile = "3"
 # Story 7-3: serialise integration tests in tests/opc_ua_connection_limit.rs
