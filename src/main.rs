@@ -791,10 +791,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // through to the handler (or re-walk the OpcUaConfig per
         // request). Defaults to 120 s when [opcua].stale_threshold_seconds
         // is unset — matches the OPC UA path's DEFAULT_STALE_THRESHOLD_SECS.
-        let stale_threshold_secs = application_config
+        //
+        // Story 9-3 review iter-1 H2 fix + iter-2 L3/L5/L6 refinements:
+        // clamp `stale_threshold_secs` to keep the dashboard's
+        // "uncertain" band meaningful. Two invariants:
+        //   - `0` would make every metric immediately stale on the
+        //     dashboard (the OPC UA path tolerates 0 because the
+        //     SCADA-side staleness overlay can be disabled there;
+        //     the web UI has no equivalent).
+        //   - Anything strictly greater than `BAD_THRESHOLD_SECS`
+        //     would compress the "uncertain" band to nothing — every
+        //     metric flips Good → Bad with no Uncertain warning.
+        //
+        // **Iter-2 L5:** boundary is exclusive on the upper side
+        // (uses `>` not `>=`) — `Some(86400)` exactly is allowed
+        // because `src/config.rs::AppConfig::validate` accepts
+        // `(0, 86400]`; clamping the boundary value would emit a
+        // confusing warn for operators following the documented
+        // bounds.
+        //
+        // **Iter-2 L3:** when clamping, fall back to
+        // `DEFAULT_STALE_THRESHOLD_SECS` (120) rather than
+        // `BAD_THRESHOLD_SECS - 1` (which would have produced a
+        // 1-second-wide uncertain band — operator-visible-bad
+        // semantics that defeat the warn message's stated intent).
+        // The 120-default produces a generous ~24h uncertain window.
+        //
+        // **Iter-2 L6:** `BAD_THRESHOLD_SECS` is referenced from
+        // `crate::web::api::BAD_THRESHOLD_SECS` (single source of
+        // truth) rather than re-declared locally.
+        let configured = application_config
             .opcua
             .stale_threshold_seconds
             .unwrap_or(crate::web::api::DEFAULT_STALE_THRESHOLD_SECS);
+        let stale_threshold_secs = if configured == 0 {
+            warn!(
+                configured = configured,
+                clamped_to = crate::web::api::DEFAULT_STALE_THRESHOLD_SECS,
+                "Configured [opcua].stale_threshold_seconds = 0 makes every metric \
+                 immediately stale on the web dashboard; clamping to default"
+            );
+            crate::web::api::DEFAULT_STALE_THRESHOLD_SECS
+        } else if configured > crate::web::api::BAD_THRESHOLD_SECS {
+            warn!(
+                configured = configured,
+                bad_threshold_secs = crate::web::api::BAD_THRESHOLD_SECS,
+                clamped_to = crate::web::api::DEFAULT_STALE_THRESHOLD_SECS,
+                "Configured [opcua].stale_threshold_seconds > bad threshold (86400 s); \
+                 clamping to default so the web dashboard's 'uncertain' band stays meaningful"
+            );
+            crate::web::api::DEFAULT_STALE_THRESHOLD_SECS
+        } else {
+            configured
+        };
         let app_state = std::sync::Arc::new(web::AppState {
             auth: auth_state,
             backend: web_backend,

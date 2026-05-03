@@ -598,14 +598,15 @@ async fn api_devices_returns_json_with_expected_shape_when_authed() {
                 opcgw::web::DeviceSummary {
                     device_id: "d1".to_string(),
                     device_name: "Device One".to_string(),
-                    metric_names: vec!["temperature".to_string()],
-                    metric_types: vec![opcgw::config::OpcMetricTypeConfig::Float],
+                    metrics: vec![opcgw::web::MetricSpec {
+                        metric_name: "temperature".to_string(),
+                        metric_type: opcgw::config::OpcMetricTypeConfig::Float,
+                    }],
                 },
                 opcgw::web::DeviceSummary {
                     device_id: "d2".to_string(),
                     device_name: "Device Two".to_string(),
-                    metric_names: vec![],
-                    metric_types: vec![],
+                    metrics: vec![],
                 },
             ],
         }],
@@ -634,9 +635,26 @@ async fn api_devices_returns_json_with_expected_shape_when_authed() {
             "missing field {field} in /api/devices response: {json}"
         );
     }
-    // as_of must parse as RFC 3339.
+    // as_of must parse as RFC 3339 AND be recent (within 30 s of test
+    // start). Review iter-1 L6: the previous version only checked
+    // RFC-3339 parseability, so a future bug that swapped Utc::now()
+    // for a fixed timestamp (e.g. EPOCH) would slip through. Iter-2
+    // L4: 30 s window (was 5 s) buys CI-runner tolerance — slow
+    // valgrind / cold-start / contended runners can blow past 5 s
+    // between server-entry as_of capture and post-response Utc::now().
+    // Any window << 1970→now (~57 years) catches the EPOCH-regression
+    // that motivated this assertion in the first place.
     let as_of = json["as_of"].as_str().expect("as_of string");
-    chrono::DateTime::parse_from_rfc3339(as_of).expect("RFC 3339 parseable");
+    let as_of_dt =
+        chrono::DateTime::parse_from_rfc3339(as_of).expect("RFC 3339 parseable");
+    let now = chrono::Utc::now();
+    let drift = (now - as_of_dt.with_timezone(&chrono::Utc))
+        .num_seconds()
+        .abs();
+    assert!(
+        drift < 30,
+        "as_of must be within 30 s of test wall-clock; got drift={drift} s (as_of={as_of})"
+    );
     // Threshold defaults from Story 5-2.
     assert_eq!(json["stale_threshold_secs"].as_u64(), Some(120));
     assert_eq!(json["bad_threshold_secs"].as_u64(), Some(86_400));
@@ -758,12 +776,21 @@ async fn metrics_js_is_served_and_references_api_devices() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    // ServeDir's Content-Type sniff should yield application/javascript
-    // or text/javascript for .js files. Accept either + tolerate
-    // charset suffixes.
+    // ServeDir's Content-Type sniff yields one of two values for .js
+    // files depending on the system MIME database: `text/javascript`
+    // (RFC 9239 / ECMA-recommended, what tower-http 0.6 returns on
+    // Linux) or `application/javascript` (the legacy MIME type some
+    // older Alpine / minimal-CI images still ship). Both are
+    // browser-executable from a `<script src>`. **Story 9-3 review
+    // iter-1 M6:** the previous `ct.contains("javascript")` assertion
+    // was too loose — `text/plain; charset=javascript-utf8` would
+    // satisfy it. Tighten to require the canonical MIME-type prefix.
+    let ct_lower = ct.to_lowercase();
+    let ct_main = ct_lower.split(';').next().unwrap_or("").trim();
     assert!(
-        ct.contains("javascript"),
-        "metrics.js must be served with a JS Content-Type, got {ct:?}"
+        ct_main == "text/javascript" || ct_main == "application/javascript",
+        "metrics.js must be served with a canonical JS Content-Type \
+         (text/javascript or application/javascript); got {ct:?}"
     );
 
     let body = resp.text().await.expect("js body");

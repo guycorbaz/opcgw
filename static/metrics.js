@@ -221,8 +221,15 @@
   function render(data) {
     var asOfParsed = parseTimestamp(data.as_of);
     var asOfMs = asOfParsed.ok ? asOfParsed.ms : Date.now();
-    var staleThresholdSecs = data.stale_threshold_secs || 120;
-    var badThresholdSecs = data.bad_threshold_secs || 86400;
+    // Review iter-1 L1: explicit null-check (was `|| 120`, which
+    // swallowed an operator-configured `0`). Server-side validation
+    // already clamps `0` to the default, but keep the JS guard so a
+    // future server-side change can't silently flip the dashboard
+    // semantics.
+    var staleThresholdSecs =
+      data.stale_threshold_secs != null ? data.stale_threshold_secs : 120;
+    var badThresholdSecs =
+      data.bad_threshold_secs != null ? data.bad_threshold_secs : 86400;
 
     // Replace the grid contents atomically.
     while (els.grid.firstChild) {

@@ -2,7 +2,7 @@
 
 **Epic:** 9 (Web Configuration & Hot-Reload — Phase B)
 **Phase:** Phase B
-**Status:** review
+**Status:** done
 **Created:** 2026-05-03
 **Author:** Claude Code (Automated Story Generation)
 
@@ -714,9 +714,84 @@ for the user to authorize at commit time.
   checkboxes filled, Dev Agent Record + Completion Notes +
   Field-shape divergence + File List populated.
 
+### Review Findings (iter-1, 2026-05-03)
+
+`bmad-code-review` launched 3 parallel adversarial reviewers (Blind Hunter, Edge Case Hunter, Acceptance Auditor) against the implementation commit `0187dc8`.
+
+**Auditor verdict (iter-1):** PASS across all 7 ACs.
+**Adversarial layers (iter-1):** 17 (Blind) + 9 (Edge) = 26 raw findings → ~24 after dedup.
+
+#### Patches applied (6)
+
+- **H1 — Type-enforce `metric_names`/`metric_types` 1-to-1 invariant.** Both Blind Hunter and Edge Case Hunter independently flagged that the parallel `Vec<String>` + `Vec<OpcMetricTypeConfig>` shape on `DeviceSummary` had no compile-time guarantee of equal length; the handler's `.zip()` would silently truncate to the shorter Vec on any future drift. **Fix:** replaced both fields with a single `metrics: Vec<MetricSpec>` where `MetricSpec { metric_name: String, metric_type: OpcMetricTypeConfig }` enforces the pairing in the type system. Handler walks `dev.metrics.iter()` directly; no zip. ~30 LOC across `src/web/mod.rs`, `src/web/api.rs`, plus the 3 test fixtures.
+- **H2 — Server-side clamp + warn on misordered staleness threshold.** Blind Hunter flagged that an operator misconfiguring `[opcua].stale_threshold_seconds = 999_999` would make every dashboard metric show "Bad" (the JS `if (ageSecs >= bad_threshold_secs)` branch fires before the "uncertain" branch can apply). **Fix:** added a clamp + warn in `src/main.rs::main` at AppState construction — rejects `0` (clamps to default 120) and rejects values strictly greater than `BAD_THRESHOLD_SECS = 86400` (clamps to default 120). Two warn paths emit a clear operator-visible diagnostic at startup. ~30 LOC.
+- **M3 — Rename `FailingBackend` → `FailingBackendForApiTests` + extended doc-comment.** Blind Hunter flagged that flipping `load_all_metrics` from `panic!()` to `Err(...)` could surprise future test authors copying the fixture. **Fix:** renamed the mock to scope-explicit name + extended comment naming the two methods that intentionally `Err` vs the others that intentionally `panic!()`. Future handlers needing a different failure pattern should add their own fake (e.g. `FailingBackendForCommandTests`).
+- **M6 — Tighter MIME assertion in `metrics_js_is_served_and_references_api_devices`.** Edge Case Hunter flagged that `ct.contains("javascript")` was too loose — `text/plain; charset=javascript-utf8` would satisfy it. **Fix:** split on `;`, lowercase, then strict equality against `text/javascript` OR `application/javascript` (the two canonical MIME types `tower-http`'s `mime_guess` returns for `.js`).
+- **L1 — JS `data.stale_threshold_secs || 120` swallows configured `0`.** Blind Hunter LOW. **Fix:** changed to `data.stale_threshold_secs != null ? data.stale_threshold_secs : 120` in `static/metrics.js`. Server-side H2 already clamps `0` to default, but the JS guard is belt-and-suspenders.
+- **L6 — Tests assert `as_of` is RFC 3339 parseable but not recent.** Blind Hunter LOW. **Fix:** extended `api_devices_returns_json_with_expected_shape_when_authed` to also assert `(now - as_of_dt).num_seconds().abs() < 5` (subsequently relaxed to `< 30` in iter-2 L4 — see below). Catches a future regression that swapped `Utc::now()` for a fixed timestamp.
+
+#### Deferred — opened as Known Failure GitHub issues
+
+- **H3 → KF GitHub issue [#107](https://github.com/guycorbaz/opcgw/issues/107)** — duplicate `metric_name` within a device's `read_metric_list` collapses silently in `/api/devices`. Edge Case Hunter rated HIGH; classified as **Known Failure** because it's a pre-existing config-validation gap that Story 9-3 surfaces (not introduces). Same shape as Story 9-2's deferred E4 (duplicate `application_id` validation). Operator workaround: review TOML carefully; the dashboard makes the duplication visually obvious post-deployment.
+- **M5 → KF GitHub issue [#108](https://github.com/guycorbaz/opcgw/issues/108)** — `MetricType` is payload-less; every row in `metric_values` has `value == data_type` ("Float" / "Int" / etc.) instead of the actual measurement. Edge Case Hunter rated MED; classified as **Known Failure — BLOCKS production deployment**. Pre-existing project-wide bug (affects Stories 2 / 5 / 8 / 9-3); needs an Epic-1-scale refactor of the storage trait. Operator workaround: none — values are not persisted; SCADA clients see literal type-name strings; dashboards cannot show real data.
+
+#### Deferred — documented LOW carry-forwards (not blocking loop termination)
+
+- **B-M1**: server clock drift / negative-age log — minor UX issue.
+- **B-M2**: HashMap key clones (~800 String allocations per request at 100 dev × 4 metrics) — perf optimization, defer.
+- **B-M4 + E-M3**: no length cap on `/api/devices` (DoS vector at 1000+ devices).
+- **B-L2**: `device_count` field can drift from `devices.len()` — invariant by-construction only (broader pattern surfaced in iter-2 L2 too).
+- **B-L3**: refresh button has no debounce.
+- **B-L4**: `<time datetime="...">` carries raw timestamp into DOM.
+- **B-L5**: `parseTimestamp(data.as_of)` falls back to `Date.now()` silently on malformed `as_of`.
+- **B-L7 / E-L1**: `setInterval` continues firing while tab is hidden (carry-forward LOW from 9-2 dashboard.js iter-2).
+- **E-L4**: `bad_threshold_secs` not configurable but JSON contract suggests it is.
+- **E-L3**: `el()` JS helper footgun for future maintainers (acceptable today; documented).
+
+#### Dismissed
+
+- B-H1 (XSS via `el()` helper): textContent + setAttribute path is XSS-safe; recommendation downgraded to "verify and document" — not a real bug.
+
+### Review Findings (iter-2, 2026-05-03)
+
+Per CLAUDE.md "Code Review & Story Validation Loop Discipline" rule on re-running review after a non-trivial patch round, the 3 adversarial layers re-ran against the patched codebase.
+
+**Auditor verdict (iter-2):** PASS across all 7 ACs (unchanged).
+**Adversarial layers (iter-2):** 4 (Blind) + 3 (Edge) = 7 raw findings → 6 after dedup → all LOW.
+
+#### Iter-2 patches (5 LOW, all applied)
+
+- **L1 — Stale doc comments referencing `metric_names` / `metric_types`** (4 sites: `src/web/mod.rs:134`, `src/web/mod.rs:537-538`, `src/web/api.rs:203`, `src/web/api.rs:353`). H1 refactor renamed the storage but missed the surrounding comments. **Fix:** updated all 4 sites to reference the new `metrics: Vec<MetricSpec>` shape.
+- **L3 — H2 clamp `BAD - 1 = 86399` produces a 1-second-wide "uncertain" band.** Blind Hunter LOW. The clamp's stated intent ("uncertain band stays meaningful") was defeated by a 1-second clamp that effectively makes the dashboard binary good/bad. **Fix:** clamp to `DEFAULT_STALE_THRESHOLD_SECS = 120` instead of `BAD_THRESHOLD_SECS - 1` — produces a generous ~24h uncertain window.
+- **L4 — `as_of` recency assertion `< 5 s` too tight for slow CI runners.** Blind Hunter LOW. **Fix:** loosened to `< 30 s`. Any window << 1970→now (~57 years) catches the EPOCH-regression that motivated the assertion; 30 s buys CI tolerance without losing the regression-detection signal.
+- **L5 — Validation invariant mismatch at `86400` boundary.** Edge Case Hunter LOW. `src/config.rs::validate` accepts `(0, 86400]` but iter-1 H2 clamped `86400` exactly to `86399` with a confusing warn. **Fix:** changed `>=` to `>` in main.rs so `86400` exactly is accepted as-is (matches the documented config bounds).
+- **L6 — `BAD_THRESHOLD_SECS` defined twice as a private const** (once in `src/web/api.rs`, once in `src/main.rs`). Edge Case Hunter LOW. Single-source-of-truth violation. **Fix:** promoted `BAD_THRESHOLD_SECS` to `pub const` in `src/web/api.rs`; `src/main.rs` now references `crate::web::api::BAD_THRESHOLD_SECS`. Mirrors the existing pattern for `DEFAULT_STALE_THRESHOLD_SECS` (already `pub const` since iter-0).
+
+#### Iter-2 LOW (3, accepted as LOW per loop-termination rule)
+
+- **L2** — `device_count` field on `ApplicationSummary` can drift from `devices.len()`. H1 refactor closed the parallel-`Vec` foot-gun for `metric_names`/`metric_types` but the same pattern exists one level up. Pre-existing carry-forward. Accept as LOW.
+- **L7** — Story spec's "Field-shape divergence from spec" section is stale (still describes iter-0 `metric_names`/`metric_types` instead of iter-1 H1's `MetricSpec` refactor). **Addressed in this very Review Findings section** + a divergence-update bullet appended below.
+- **L8** — H2 clamp behaviour (the new operator-visible warn) undocumented in `docs/security.md` / `docs/logging.md`. The warn fires without an `event=` tag (so AC#7 grep contract is preserved by construction); operator-facing docs would benefit from a one-line note. Accept as LOW.
+
+#### Iter-1 H1 Field-shape divergence addendum (closes iter-2 L7)
+
+The iter-0 dev notes documented `DeviceSummary { metric_names: Vec<String>, metric_types: Vec<OpcMetricTypeConfig> }` as the spec-divergent shape. Iter-1 H1 refactored to `DeviceSummary { metrics: Vec<MetricSpec> }` where `MetricSpec { metric_name, metric_type }`. The new shape is **strictly stronger** than both the spec's original `metric_names: Vec<String>` and the iter-0 parallel-Vec extension — it carries everything the spec asked for plus the configured-type fallback, and the type system enforces 1-to-1 pairing.
+
+**Loop terminates per CLAUDE.md:** zero `decision-needed`, zero HIGH, zero MED unresolved (H3 + M5 explicitly accepted as deferred via KF GitHub issues #107 + #108). Only LOW remains.
+
+#### Iter-2 verification
+
+- `cargo test --lib --bins`: **322 (lib) + 345 (bins) = 667 passed / 0 failed / 5 ignored** (unchanged from iter-1).
+- `cargo test --tests`: all 16 integration binaries pass; `tests/web_dashboard.rs` reports **12 passed**.
+- `cargo clippy --all-targets -- -D warnings`: **clean**.
+- `cargo test --doc`: **0 failed / 56 ignored** (issue #100 baseline preserved).
+- AC#6 file invariants reverified: `git diff HEAD --stat src/opc_ua{.,_history,_session_monitor,_auth}.rs src/web/auth.rs static/index.html static/dashboard.js` produces zero output. Both iter-1 and iter-2 patch rounds left these 7 files completely unchanged.
+- AC#7 grep contract reverified: exactly 4 distinct `event=` names in `src/`.
+
 ### Change Log
 
 | Date | Change | Detail |
 |------|--------|--------|
 | 2026-05-03 | Story file created | `bmad-create-story 9-3`. Status set to `ready-for-dev`. |
 | 2026-05-03 | Status flipped `ready-for-dev → in-progress → review` | Single-execution `bmad-dev-story` run. All 7 ACs satisfied on first pass; loop terminates without iteration. Two minor course-corrections (OpcMetricTypeConfig Eq derive; `metrics.html` filename instead of `devices.html`) documented in Debug Log References + Field-shape divergence. AC#6 partial divergence: `src/main.rs` modified +12 LOC for the new `AppState.stale_threshold_secs` plumbing — documented in Field-shape divergence #3. Test count grew by +10 lib+bins (657 → 667); 16 integration binaries all pass; clippy clean; doctest 0 fail. |
+| 2026-05-03 | Status flipped `review → done` after iter-1 + iter-2 code review loop | `bmad-code-review` launched 3 parallel adversarial layers; iter-1 produced 6 patches (H1 type-enforce MetricSpec, H2 stale-threshold clamp+warn, M3 FailingBackend rename, M6 tighter MIME assertion, L1 JS != null guard, L6 as_of recency assertion) + 2 KF GitHub issues opened (#107 H3 duplicate-metric_name, #108 M5 payload-less MetricType). Iter-2 re-review per CLAUDE.md "don't trust a single pass" produced 5 LOW patches (L1 stale doc comments, L3 better clamp value, L4 30s recency window, L5 boundary `>` vs `>=`, L6 const dedup) + 3 accepted LOW. Loop terminates per CLAUDE.md (zero decision-needed / HIGH / unresolved MED; only LOW remains). Final test count stable at 322 lib + 345 bins / 0 fail; clippy clean; AC#6 file invariants intact (`git diff` zero output across all 7 carry-forward files); AC#7 event grep returns exactly 4 names. |

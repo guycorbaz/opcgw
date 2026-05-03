@@ -128,7 +128,13 @@ pub const DEFAULT_STALE_THRESHOLD_SECS: u64 = 120;
 /// dashboard receives both thresholds as JSON fields so the JS
 /// branching logic doesn't hard-code any boundary; future Story can
 /// promote this to a config knob without touching the wire contract.
-const BAD_THRESHOLD_SECS: u64 = 86_400;
+///
+/// **Story 9-3 review iter-2 L6:** promoted to `pub const` so
+/// `src/main.rs` can reference the same value when clamping
+/// `[opcua].stale_threshold_seconds`. Single source of truth — if
+/// future story bumps the cutoff (or makes it configurable), only
+/// this site needs to change and main.rs stays in sync automatically.
+pub const BAD_THRESHOLD_SECS: u64 = 86_400;
 
 /// Map a configured `OpcMetricTypeConfig` to its display string,
 /// matching the `MetricType::Display` impl from `src/storage/types.rs`
@@ -200,7 +206,7 @@ pub struct MetricView {
 /// the operator needs to see "this metric exists but hasn't been
 /// reported yet" as a distinct state from "this metric isn't
 /// configured at all" (for which the metric row simply doesn't
-/// appear in the configured `metric_names`).
+/// appear in the configured `metrics: Vec<MetricSpec>`).
 ///
 /// # Why server-side `as_of`
 ///
@@ -263,22 +269,25 @@ pub async fn api_devices(
                 .devices
                 .iter()
                 .map(|dev| {
+                    // Story 9-3 review iter-1 H1 fix: walk a single
+                    // `Vec<MetricSpec>` instead of zipping two parallel
+                    // `Vec`s — the type system now guarantees the
+                    // metric_name and metric_type stay paired.
                     let metrics: Vec<MetricView> = dev
-                        .metric_names
+                        .metrics
                         .iter()
-                        .zip(dev.metric_types.iter())
-                        .map(|(name, configured_type)| {
-                            let key = (dev.device_id.clone(), name.clone());
+                        .map(|spec| {
+                            let key = (dev.device_id.clone(), spec.metric_name.clone());
                             match metric_by_key.get(&key) {
                                 Some(row) => MetricView {
-                                    metric_name: name.clone(),
+                                    metric_name: spec.metric_name.clone(),
                                     data_type: row.data_type.to_string(),
                                     value: Some(row.value.clone()),
                                     timestamp: Some(row.timestamp.to_rfc3339()),
                                 },
                                 None => MetricView {
-                                    metric_name: name.clone(),
-                                    data_type: config_type_to_display(configured_type)
+                                    metric_name: spec.metric_name.clone(),
+                                    data_type: config_type_to_display(&spec.metric_type)
                                         .to_string(),
                                     value: None,
                                     timestamp: None,
@@ -347,16 +356,16 @@ mod tests {
             .enumerate()
             .map(|(i, &dc)| {
                 // Story 9-3: per-app DeviceSummary list. Test fixtures
-                // don't need real metric_names — empty vecs are
-                // sufficient for the /api/status tests (which only
-                // read application_count + device_count); /api/devices
-                // tests build their own state with populated devices.
+                // don't need real `metrics` (Vec<MetricSpec>) — empty
+                // vecs are sufficient for the /api/status tests (which
+                // only read application_count + device_count);
+                // /api/devices tests build their own state with
+                // populated devices.
                 let devices = (0..dc)
                     .map(|j| crate::web::DeviceSummary {
                         device_id: format!("dev-{i}-{j}"),
                         device_name: format!("Dev {i}-{j}"),
-                        metric_names: vec![],
-                        metric_types: vec![],
+                        metrics: vec![],
                     })
                     .collect();
                 ApplicationSummary {
@@ -381,27 +390,39 @@ mod tests {
         })
     }
 
-    /// Failing backend used by the 500-path test. Returns
-    /// `OpcGwError::Storage` from `get_gateway_health_metrics` and
-    /// from `load_all_metrics` (Story 9-3 extension); no-ops everything
-    /// else (the api_status + api_devices handlers only call those two
-    /// methods).
-    struct FailingBackend;
+    /// Failing backend used by the 500-path tests. Returns
+    /// `Err(OpcGwError::Storage)` from EXACTLY two methods:
+    ///   - `get_gateway_health_metrics` (used by the api_status 500 test)
+    ///   - `load_all_metrics` (used by the api_devices 500 test —
+    ///     Story 9-3 extension)
+    ///
+    /// Every other `StorageBackend` method `panic!()`s with a clear
+    /// message naming the unreachable contract — if a future api_*
+    /// handler accidentally calls one of those methods on this fake,
+    /// the test fails loudly instead of returning a misleading
+    /// `Err`.
+    ///
+    /// **Story 9-3 review iter-1 M3 rename:** was `FailingBackend`;
+    /// renamed to `FailingBackendForApiTests` to make the scope
+    /// explicit. Future handlers that need a different failure
+    /// pattern should add their own fake (e.g. `FailingBackendForCommandTests`)
+    /// rather than overloading this one.
+    struct FailingBackendForApiTests;
 
-    impl StorageBackend for FailingBackend {
+    impl StorageBackend for FailingBackendForApiTests {
         fn get_metric(
             &self,
             _device_id: &str,
             _metric_name: &str,
         ) -> Result<Option<crate::storage::MetricType>, OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn get_metric_value(
             &self,
             _device_id: &str,
             _metric_name: &str,
         ) -> Result<Option<crate::storage::MetricValue>, OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn set_metric(
             &self,
@@ -409,24 +430,24 @@ mod tests {
             _metric_name: &str,
             _value: crate::storage::MetricType,
         ) -> Result<(), OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn get_status(&self) -> Result<ChirpstackStatus, OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn update_status(&self, _status: ChirpstackStatus) -> Result<(), OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn queue_command(
             &self,
             _command: crate::storage::DeviceCommand,
         ) -> Result<(), OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn get_pending_commands(
             &self,
         ) -> Result<Vec<crate::storage::DeviceCommand>, OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn update_command_status(
             &self,
@@ -434,7 +455,7 @@ mod tests {
             _status: crate::storage::CommandStatus,
             _error_message: Option<String>,
         ) -> Result<(), OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn upsert_metric_value(
             &self,
@@ -443,7 +464,7 @@ mod tests {
             _value: &crate::storage::MetricType,
             _now_ts: std::time::SystemTime,
         ) -> Result<(), OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn append_metric_history(
             &self,
@@ -452,13 +473,13 @@ mod tests {
             _value: &crate::storage::MetricType,
             _timestamp: std::time::SystemTime,
         ) -> Result<(), OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn batch_write_metrics(
             &self,
             _metrics: Vec<crate::storage::BatchMetricWrite>,
         ) -> Result<(), OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn load_all_metrics(&self) -> Result<Vec<crate::storage::MetricValue>, OpcGwError> {
             // Story 9-3: synthetic failure for the api_devices 500-path
@@ -468,7 +489,7 @@ mod tests {
             ))
         }
         fn prune_metric_history(&self) -> Result<u32, OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn query_metric_history(
             &self,
@@ -478,53 +499,53 @@ mod tests {
             _end: std::time::SystemTime,
             _max_results: usize,
         ) -> Result<Vec<crate::storage::HistoricalMetricRow>, OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn enqueue_command(
             &self,
             _command: crate::storage::Command,
         ) -> Result<u64, OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn dequeue_command(&self) -> Result<Option<crate::storage::Command>, OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn list_commands(
             &self,
             _filter: &crate::storage::CommandFilter,
         ) -> Result<Vec<crate::storage::Command>, OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn get_queue_depth(&self) -> Result<usize, OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn mark_command_sent(
             &self,
             _command_id: u64,
             _chirpstack_result_id: &str,
         ) -> Result<(), OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn mark_command_confirmed(&self, _command_id: u64) -> Result<(), OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn mark_command_failed(
             &self,
             _command_id: u64,
             _error_message: &str,
         ) -> Result<(), OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn find_pending_confirmations(
             &self,
         ) -> Result<Vec<crate::storage::Command>, OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn find_timed_out_commands(
             &self,
             _ttl_secs: u32,
         ) -> Result<Vec<crate::storage::Command>, OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn update_gateway_status(
             &self,
@@ -532,7 +553,7 @@ mod tests {
             _error_count: i32,
             _chirpstack_available: bool,
         ) -> Result<(), OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
         fn get_gateway_health_metrics(
             &self,
@@ -575,7 +596,7 @@ mod tests {
     /// leak into the response body.
     #[tokio::test]
     async fn api_status_returns_500_with_generic_body_when_storage_errors() {
-        let backend: Arc<dyn StorageBackend> = Arc::new(FailingBackend);
+        let backend: Arc<dyn StorageBackend> = Arc::new(FailingBackendForApiTests);
         let state = build_state(backend, &[]);
 
         let response = api_status(State(state)).await;
@@ -676,8 +697,13 @@ mod tests {
         crate::web::DeviceSummary {
             device_id: id.to_string(),
             device_name: name.to_string(),
-            metric_names: metrics.iter().map(|(n, _)| n.to_string()).collect(),
-            metric_types: metrics.iter().map(|(_, t)| t.clone()).collect(),
+            metrics: metrics
+                .iter()
+                .map(|(n, t)| crate::web::MetricSpec {
+                    metric_name: n.to_string(),
+                    metric_type: t.clone(),
+                })
+                .collect(),
         }
     }
 
@@ -735,7 +761,7 @@ mod tests {
     /// leak into the response body.
     #[tokio::test]
     async fn api_devices_returns_500_with_generic_body_when_storage_errors() {
-        let backend: Arc<dyn StorageBackend> = Arc::new(FailingBackend);
+        let backend: Arc<dyn StorageBackend> = Arc::new(FailingBackendForApiTests);
         let state = build_state_for_devices(backend, vec![]);
 
         let response = api_devices(State(state)).await;

@@ -72,7 +72,7 @@ pub struct ApplicationSummary {
 }
 
 /// Per-device summary for the live-metrics page (Story 9-3) — device
-/// identity plus the canonical list of configured metric names. The
+/// identity plus the canonical list of configured metric specs. The
 /// metric values themselves come from the `metric_values` SQLite
 /// table at request time; this snapshot tells the handler which
 /// metrics to look up + the order to render them in.
@@ -80,17 +80,29 @@ pub struct ApplicationSummary {
 pub struct DeviceSummary {
     pub device_id: String,
     pub device_name: String,
-    /// Configured metric names from `[[application.device.read_metric]].metric_name`,
-    /// in TOML-declaration order. Adding a new metric to the bottom
-    /// of the TOML list shows up at the bottom of the row in the
-    /// dashboard — no random hashmap reordering.
-    pub metric_names: Vec<String>,
-    /// Configured metric data types from `[[application.device.read_metric]].metric_type`,
-    /// in 1-to-1 correspondence with `metric_names`. The `/api/devices`
-    /// handler uses these as the fallback `data_type` for metrics
-    /// that have no row in `metric_values` (configured but never
-    /// polled — operator sees the configured type, not "?").
-    pub metric_types: Vec<crate::config::OpcMetricTypeConfig>,
+    /// Configured metric specs in TOML-declaration order. Adding a new
+    /// metric to the bottom of the TOML list shows up at the bottom of
+    /// the row in the dashboard — no random hashmap reordering.
+    ///
+    /// **Story 9-3 review iter-1 H1 fix:** the previous shape carried
+    /// two parallel `Vec<String>` + `Vec<OpcMetricTypeConfig>` whose
+    /// length invariant was only enforced by-construction in
+    /// `from_config`. A future refactor (filter, partial walk, hot-
+    /// reload Story 9-7) could let the lengths drift; the
+    /// `/api/devices` handler's `.zip()` would silently truncate to
+    /// the shorter Vec, dropping metrics from the dashboard with no
+    /// error. Bundling them into a struct lets the type system
+    /// enforce the invariant.
+    pub metrics: Vec<MetricSpec>,
+}
+
+/// Configured metric: name + data type, in 1-to-1 correspondence by
+/// construction. Ships as a sibling to `DeviceSummary` so external
+/// callers can walk the list without juggling parallel Vecs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MetricSpec {
+    pub metric_name: String,
+    pub metric_type: crate::config::OpcMetricTypeConfig,
 }
 
 /// Frozen-at-startup snapshot of the gateway's configured topology.
@@ -119,7 +131,7 @@ impl DashboardConfigSnapshot {
     /// Pure function; no I/O.
     ///
     /// Story 9-3 deepens the walk by one level — the per-device
-    /// `metric_names` + `metric_types` lists come from each device's
+    /// `metrics: Vec<MetricSpec>` list comes from each device's
     /// `read_metric_list`, in TOML-declaration order.
     pub fn from_config(config: &AppConfig) -> Self {
         let applications: Vec<ApplicationSummary> = config
@@ -130,21 +142,18 @@ impl DashboardConfigSnapshot {
                     .device_list
                     .iter()
                     .map(|dev| {
-                        let metric_names: Vec<String> = dev
+                        let metrics: Vec<MetricSpec> = dev
                             .read_metric_list
                             .iter()
-                            .map(|m| m.metric_name.clone())
-                            .collect();
-                        let metric_types: Vec<crate::config::OpcMetricTypeConfig> = dev
-                            .read_metric_list
-                            .iter()
-                            .map(|m| m.metric_type.clone())
+                            .map(|m| MetricSpec {
+                                metric_name: m.metric_name.clone(),
+                                metric_type: m.metric_type.clone(),
+                            })
                             .collect();
                         DeviceSummary {
                             device_id: dev.device_id.clone(),
                             device_name: dev.device_name.clone(),
-                            metric_names,
-                            metric_types,
+                            metrics,
                         }
                     })
                     .collect();
@@ -517,19 +526,18 @@ mod tests {
         for app in &snapshot.applications {
             assert_eq!(app.devices.len(), 3);
             for dev in &app.devices {
-                assert_eq!(dev.metric_names, vec!["temperature".to_string()]);
-                assert_eq!(dev.metric_types.len(), 1);
-                assert_eq!(dev.metric_types[0], OpcMetricTypeConfig::Float);
+                assert_eq!(dev.metrics.len(), 1);
+                assert_eq!(dev.metrics[0].metric_name, "temperature");
+                assert_eq!(dev.metrics[0].metric_type, OpcMetricTypeConfig::Float);
             }
         }
     }
 
     /// Story 9-3 AC#1 — a device with zero `read_metric_list` entries
-    /// produces a `DeviceSummary` with empty `metric_names` /
-    /// `metric_types` rather than getting dropped from the snapshot.
-    /// Operator deletes all metrics from a device temporarily; the
-    /// device should still appear in the dashboard (as an empty row),
-    /// not vanish.
+    /// produces a `DeviceSummary` with an empty `metrics` Vec rather
+    /// than getting dropped from the snapshot. Operator deletes all
+    /// metrics from a device temporarily; the device should still
+    /// appear in the dashboard (as an empty row), not vanish.
     #[test]
     fn dashboard_snapshot_from_config_handles_device_with_zero_metrics() {
         let mut config = snapshot_test_config(vec![]);
@@ -547,8 +555,7 @@ mod tests {
         assert_eq!(snapshot.application_count, 1);
         assert_eq!(snapshot.device_count, 1);
         assert_eq!(snapshot.applications[0].devices.len(), 1);
-        assert!(snapshot.applications[0].devices[0].metric_names.is_empty());
-        assert!(snapshot.applications[0].devices[0].metric_types.is_empty());
+        assert!(snapshot.applications[0].devices[0].metrics.is_empty());
     }
 
     /// Story 9-2 AC#1 — empty application list produces all-zeros.
