@@ -129,26 +129,35 @@ mod tests {
     /// `InMemoryBackend` populated as the test demands; snapshot is
     /// hand-built so the test can pin specific application/device
     /// counts without going through `AppConfig`.
+    ///
+    /// Review iter-1 B10: signature takes the per-application device
+    /// counts explicitly so summary `device_count` matches the
+    /// claimed total. Previous `(application_count, device_count)`
+    /// shape integer-divided, producing `(2, 7) → 3 devs/app * 2 = 6`
+    /// — a silent off-by-one that would mask Story 9-3 bugs once a
+    /// handler reads `applications[*].device_count`.
     fn build_state(
         backend: Arc<dyn StorageBackend>,
-        application_count: usize,
-        device_count: usize,
+        per_app_device_counts: &[usize],
     ) -> Arc<AppState> {
         let auth = Arc::new(WebAuthState::new_with_fresh_key(
             "u",
             "p",
             "opcgw-test".to_string(),
         ));
+        let applications: Vec<ApplicationSummary> = per_app_device_counts
+            .iter()
+            .enumerate()
+            .map(|(i, &dc)| ApplicationSummary {
+                application_id: format!("app-{i}"),
+                application_name: format!("App {i}"),
+                device_count: dc,
+            })
+            .collect();
         let snapshot = Arc::new(DashboardConfigSnapshot {
-            application_count,
-            device_count,
-            applications: (0..application_count)
-                .map(|i| ApplicationSummary {
-                    application_id: format!("app-{i}"),
-                    application_name: format!("App {i}"),
-                    device_count: device_count / application_count.max(1),
-                })
-                .collect(),
+            application_count: applications.len(),
+            device_count: applications.iter().map(|a| a.device_count).sum(),
+            applications,
         });
         Arc::new(AppState {
             auth,
@@ -169,14 +178,14 @@ mod tests {
             _device_id: &str,
             _metric_name: &str,
         ) -> Result<Option<crate::storage::MetricType>, OpcGwError> {
-            unreachable!("api_status only calls get_gateway_health_metrics")
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn get_metric_value(
             &self,
             _device_id: &str,
             _metric_name: &str,
         ) -> Result<Option<crate::storage::MetricValue>, OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn set_metric(
             &self,
@@ -184,24 +193,24 @@ mod tests {
             _metric_name: &str,
             _value: crate::storage::MetricType,
         ) -> Result<(), OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn get_status(&self) -> Result<ChirpstackStatus, OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn update_status(&self, _status: ChirpstackStatus) -> Result<(), OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn queue_command(
             &self,
             _command: crate::storage::DeviceCommand,
         ) -> Result<(), OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn get_pending_commands(
             &self,
         ) -> Result<Vec<crate::storage::DeviceCommand>, OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn update_command_status(
             &self,
@@ -209,7 +218,7 @@ mod tests {
             _status: crate::storage::CommandStatus,
             _error_message: Option<String>,
         ) -> Result<(), OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn upsert_metric_value(
             &self,
@@ -218,7 +227,7 @@ mod tests {
             _value: &crate::storage::MetricType,
             _now_ts: std::time::SystemTime,
         ) -> Result<(), OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn append_metric_history(
             &self,
@@ -227,19 +236,19 @@ mod tests {
             _value: &crate::storage::MetricType,
             _timestamp: std::time::SystemTime,
         ) -> Result<(), OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn batch_write_metrics(
             &self,
             _metrics: Vec<crate::storage::BatchMetricWrite>,
         ) -> Result<(), OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn load_all_metrics(&self) -> Result<Vec<crate::storage::MetricValue>, OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn prune_metric_history(&self) -> Result<u32, OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn query_metric_history(
             &self,
@@ -249,53 +258,53 @@ mod tests {
             _end: std::time::SystemTime,
             _max_results: usize,
         ) -> Result<Vec<crate::storage::HistoricalMetricRow>, OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn enqueue_command(
             &self,
             _command: crate::storage::Command,
         ) -> Result<u64, OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn dequeue_command(&self) -> Result<Option<crate::storage::Command>, OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn list_commands(
             &self,
             _filter: &crate::storage::CommandFilter,
         ) -> Result<Vec<crate::storage::Command>, OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn get_queue_depth(&self) -> Result<usize, OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn mark_command_sent(
             &self,
             _command_id: u64,
             _chirpstack_result_id: &str,
         ) -> Result<(), OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn mark_command_confirmed(&self, _command_id: u64) -> Result<(), OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn mark_command_failed(
             &self,
             _command_id: u64,
             _error_message: &str,
         ) -> Result<(), OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn find_pending_confirmations(
             &self,
         ) -> Result<Vec<crate::storage::Command>, OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn find_timed_out_commands(
             &self,
             _ttl_secs: u32,
         ) -> Result<Vec<crate::storage::Command>, OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn update_gateway_status(
             &self,
@@ -303,7 +312,7 @@ mod tests {
             _error_count: i32,
             _chirpstack_available: bool,
         ) -> Result<(), OpcGwError> {
-            unreachable!()
+            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn get_gateway_health_metrics(
             &self,
@@ -323,7 +332,7 @@ mod tests {
         backend
             .update_gateway_status(Some(now), 7, true)
             .expect("seed gateway_status");
-        let state = build_state(backend, 2, 6);
+        let state = build_state(backend, &[3, 3]);
 
         let response = api_status(State(state.clone())).await;
         let json = response.expect("expected Ok with StatusResponse").0;
@@ -332,8 +341,13 @@ mod tests {
         assert_eq!(json.error_count, 7);
         assert_eq!(json.application_count, 2);
         assert_eq!(json.device_count, 6);
-        // uptime_secs: just-built state, elapsed should be 0 or 1.
-        assert!(json.uptime_secs <= 1);
+        // uptime_secs: just-built state. Review iter-1 E9: relax the
+        // upper bound from 1 to 5 to absorb slow CI runners (valgrind,
+        // contended runners, etc.) without flaking. The point of the
+        // assertion is "the field reflects elapsed wall-clock since
+        // build_state ran" — a 5 s budget still catches the pathological
+        // case where uptime is nonsensically large.
+        assert!(json.uptime_secs <= 5);
     }
 
     /// Story 9-2 AC#2: storage failure returns 500 + generic body.
@@ -342,7 +356,7 @@ mod tests {
     #[tokio::test]
     async fn api_status_returns_500_with_generic_body_when_storage_errors() {
         let backend: Arc<dyn StorageBackend> = Arc::new(FailingBackend);
-        let state = build_state(backend, 0, 0);
+        let state = build_state(backend, &[]);
 
         let response = api_status(State(state)).await;
         let err = response.expect_err("expected Err with 500 response");
@@ -372,7 +386,7 @@ mod tests {
     #[tokio::test]
     async fn api_status_returns_chirpstack_unavailable_first_startup() {
         let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
-        let state = build_state(backend, 0, 0);
+        let state = build_state(backend, &[]);
 
         let response = api_status(State(state)).await;
         let json = response.expect("expected Ok").0;

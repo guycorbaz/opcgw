@@ -2,7 +2,7 @@
 
 **Epic:** 9 (Web Configuration & Hot-Reload — Phase B)
 **Phase:** Phase B
-**Status:** review
+**Status:** done
 **Created:** 2026-05-03
 **Author:** Claude Code (Automated Story Generation)
 
@@ -748,9 +748,90 @@ issue tracker number itself.
   checkboxes filled, Dev Agent Record + Completion Notes + Field-shape
   divergence + File List populated.
 
+### Review Findings (iter-1, 2026-05-03)
+
+`bmad-code-review` launched 3 parallel adversarial reviewers (Blind Hunter, Edge Case Hunter, Acceptance Auditor) against the implementation commit `e1a42be`.
+
+**Auditor verdict (iter-1):** PASS across all 7 ACs.
+**Adversarial layers (iter-1):** 17 (Blind) + 14 (Edge) = 31 raw findings → 29 after dedup → triaged.
+
+#### Decision-needed (resolved 2026-05-03)
+
+- **D1.** SQLite connection pool size = 3, but Story 9-2 brings the long-lived task-claimer count to 5 (poller, opc_ua, command-status, command-timeout, **+web**). Under contention `/api/status` would busy-wait up to 5 s on `pool.checkout` and surface a generic 500 — the operator dashboard would go red while the gateway is healthy. **User chose option (a):** bump pool size 3 → 5 (one-line change in `src/main.rs:493`, with documenting comment). **Functional impact:** removes the structural off-by-one that made the dashboard's view of the gateway pessimistic under contention.
+
+#### Patches applied (13)
+
+- **B2** — Extended `dashboard_html_contains_viewport_meta_and_status_tiles_markup` test to assert all 10 DOM IDs (`chirpstack-status`, `last-poll-relative`, `last-poll-time`, `error-count`, `application-count`, `device-count`, `uptime`, `last-refresh`, `error-banner`, `refresh-now`) — was 5; the JS reads 10. Catches future renames at build time.
+- **B3** — Replaced 24 × `unreachable!()` in `FailingBackend` mock with descriptive `panic!("FailingBackend: only get_gateway_health_metrics is implemented; …")` so a future test path that calls a non-status method gets a clear failure.
+- **B5+E10** — `tests/web_dashboard.rs::auth_required_for_api_status` now clears `tracing-test::internal::global_buf()` at the top so a polluted buffer (e.g. from a prior failed run) can't false-pass the `web_auth_failed` assertion.
+- **B6** — Replaced 4 × `let _ = handle.await;` with `handle.await.expect("web::run task panicked or was cancelled abnormally")` so server-side panics surface as a test failure rather than vanishing into the JoinError.
+- **B9** — Removed `err.message` interpolation from the dashboard.js network-error banner. Generic "Status unavailable (network error). Check the gateway connection." message — consistent with the server-side NFR7 stance on hiding internals (CORS / SSL / DNS specifics no longer leak into the DOM).
+- **B10** — `build_state` test helper signature changed from `(application_count, device_count)` to `(per_app_device_counts: &[usize])` so the per-application device counts are explicit. Previous `(2, 7)` shape integer-divided to `3 devs/app * 2 = 6` total, a silent off-by-one that would have masked Story 9-3 bugs once a handler reads `applications[*].device_count`.
+- **B11+E12** — `tests/web_dashboard.rs::build_production_static_dir` now anchors `static/` with `env!("CARGO_MANIFEST_DIR")` rather than cwd. Tests no longer fail with a confusing `read static/dashboard.css: No such file or directory` when run from a non-repo cwd.
+- **E2 + E5** — `dashboard.js` adds an in-flight guard + per-call `AbortController`; a click-spammed "Refresh now" or a `setInterval` firing while the previous fetch is still pending now cancels the prior call rather than compounding overlapping fetches.
+- **E3** — New integration test `in_memory_backend_preserves_last_poll_time_when_poll_fails_after_success` pinning the `update_gateway_status(None, n, false)` semantic (the storage trait's "stale poll preserved" contract that the dashboard's "Last poll" tile depends on). Iter-2 M3 re-scoped the docstring to acknowledge it covers only `InMemoryBackend`; the SQL-side equivalent is `src/storage/sqlite.rs::tests::test_null_timestamp_preserves_last_successful_poll`.
+- **E7** — `dashboard.js` `chirpstack_available` rendering now branches on `=== true` (Available) / `=== false` (Unavailable) / `else` (Unknown — `badge-unknown` class). The "field missing" failure mode no longer collapses with "ChirpStack down".
+- **E8** — `dashboard.js` sniffs `Content-Type` via `.indexOf("application/json")` before calling `resp.json()`. A reverse proxy / auth gateway returning a 200 + HTML login page now produces a clear "upstream returned non-JSON; check proxy / auth gateway configuration" banner instead of crashing the dashboard with `SyntaxError: Unexpected token <`.
+- **E9** — Relaxed `uptime_secs <= 1` test assertion to `<= 5` to absorb slow CI runners (valgrind, contended runners) without flaking. The point of the assertion is "the field reflects elapsed wall-clock since `build_state` ran" — a 5 s budget still catches the pathological case.
+- **E13** — `dashboard.js` shares one `parseTimestamp(iso)` parse pass between `formatRelative` and the absolute-timestamp tile so the two no longer disagree on parseability (was: `formatRelative` returned "—" for unparseable but the absolute tile rendered the raw string).
+
+#### Deferred (open as follow-up, not patched in this iteration)
+
+- **B1** — Sync SQLite calls in async handler block the Tokio executor thread. Project-wide established pattern (poller, OPC UA also do this); fixing only the web path doesn't help. **Future epic-level concern** — file as a follow-up GitHub issue if/when async-storage-trait migration is on the roadmap.
+- **B7** — `formatRelative` future-clock-skew renders "0 s ago" indefinitely instead of surfacing a clock-drift warning. Minor UX issue.
+- **B14** — README "10 s" / JS `10000` single-source-of-truth nit. Documentation-level.
+- **B15** — `Cache-Control: no-store` request header sent by JS but not response. Future hardening if a CDN / proxy deployment surfaces.
+- **B16** — Test asserts `as_i64()` for `error_count: i32`. Type-pinning gap that wouldn't catch a future widening to `u64`/`i64`.
+- **B17** — `ErrorResponse::internal_server_error()` allocates per call. Performance trivia.
+- **E4** — `validate()` doesn't reject duplicate `application_id`. Pre-existing config-validation gap surfaced (not introduced) by 9-2's aggregation. Worth a config-validation hardening pass.
+- **E6** — `error_count: i32` overflows after ~24 days @ 1000 errors/sec. Pre-existing storage type; not a 9-2 regression.
+- **E14** — Empty `application_name` not rejected. Pre-existing config-validation gap.
+
+#### Dismissed (noise, false positives, or handled elsewhere)
+
+- **B4** — Unused `applications: Vec<ApplicationSummary>` field. Explicitly designed for Stories 9-3+ per dev notes; no waste at realistic application counts.
+- **B8** — `WebAuthState::new_with_fresh_key` `pub` visibility. Story 9-1 review already considered + documented; production uses `WebAuthState::new`.
+- **B12** — `error!(error = %e)` on `SqliteBackend::with_pool` failure leaks DB path to operator log. NFR7 is about clients, not operators; operator-log full-info is intentional.
+- **B13** — String clones in `from_config`. Explicitly intentional design; documented for Story 9-7.
+- **E11** — `wrap_in_app_state` in `tests/web_auth.rs` test fixture. Future-proofing concern; helper is correct today.
+
+### Review Findings (iter-2, 2026-05-03)
+
+Per CLAUDE.md "Code Review & Story Validation Loop Discipline" rule on re-running review after a non-trivial patch round, the 3 adversarial layers re-ran against the patched codebase.
+
+**Auditor verdict (iter-2):** PASS across all 7 ACs (unchanged).
+**Adversarial layers (iter-2):** 8 (Blind) + 4 (Edge) = 12 raw findings → 9 after dedup → 3 MED patched + 6 LOW accepted.
+
+#### Iter-2 patches (3 MED, all applied)
+
+- **M1** — **`dashboard.js` AbortController + Promise-chain race.** When call N is aborted mid-flight (after headers received but before `.then(render)` runs), the prior call's resolved JSON could land in `render(...)` AFTER call N+1's render — UI flicker / stale-data overwrite. **Patch:** `if (data && inflightToken === thisCallToken) { render(data); }` guard in the second `.then`, and matching guard in the `.catch` so a stale network error from an aborted call can't clobber the new call's `clearError()`.
+- **M2** — **`AbortController` was unconditional — silently raised browser baseline to 2018+.** Older browsers (Safari < 11.1, Edge < 16, Chrome < 66) would throw `ReferenceError: AbortController is not defined` synchronously and freeze the dashboard at "…" placeholders with no diagnostic. **Patch:** feature-detect via `var ABORT_SUPPORTED = typeof AbortController !== "undefined"`. On unsupported browsers, falls back to a plain object identity for `inflightToken` — the M1 stale-render guard still works, only the abort-on-supersede behaviour degrades gracefully.
+- **M3** — **E3 test was misframed.** Iter-1 dev-notes said the new in-memory test "covers the contract for both impls" but the SQL-side `INSERT OR REPLACE … CASE WHEN` is a structurally different code path. **Patch:** rewrote the test docstring to honestly scope it to `InMemoryBackend` and reference `src/storage/sqlite.rs::tests::test_null_timestamp_preserves_last_successful_poll` (line 4366 at the time of this story) which covers the SQL path. Also renamed the test from `storage_preserves_…` to `in_memory_backend_preserves_…` so the name matches the scope. Functional behaviour unchanged — the test still pins the contract for InMemoryBackend.
+
+#### Iter-2 LOW (6, accepted as LOW per loop-termination rule)
+
+- **L1** — `Content-Type` substring sniff is too loose (would accept a hypothetical `application/jsonsoup`) and case-sensitive (would reject `Application/JSON`). Common production shape `application/json; charset=utf-8` works correctly. Accept as LOW.
+- **L2** — `panic!()` message in `FailingBackend` is identical across all 25 trait methods — when one fires, the dev has to read the stack trace to know which method was called. Debugging convenience. Accept as LOW.
+- **L3** — Pool size bump 3 → 5 in `src/main.rs:493` is a literal, not a `const`. If a future story adds a 6th long-lived task, the same off-by-one will recur unless someone remembers to bump 5 → 6. Code organization. Accept as LOW.
+- **L4** — `parseTimestamp` accepts numeric input (`new Date(123456789)` is valid). API contract says `last_poll_time` is `Option<String>`; a server-side bug shipping a numeric timestamp would silently render. Defensive; not a regression (pre-iter-1 code had the same property). Accept as LOW.
+- **L5** — `tracing-test::global_buf()` returns a `Mutex<Vec<u8>>` that poisons on panic; the next test that calls `.lock().unwrap()` panics on `PoisonError`, masking the original failure. Pre-existing project-wide hazard (issue #101 / #102 territory). Accept as LOW.
+- **L6** — Buffer-clear pattern (B5+E10 patch) is inlined rather than extracted to `tests/common/mod.rs`. The `tests/web_auth.rs` helper `clear_captured_buffer` is the precedent. Code organization. Accept as LOW.
+
+**Loop terminates per CLAUDE.md:** zero `decision-needed`, zero HIGH, zero MED unresolved. Only LOW remains.
+
+#### Iter-2 verification
+
+- `cargo test --lib --bins`: **340 passed / 0 failed / 3 ignored** (unchanged from iter-1).
+- `cargo test --tests`: all 16 integration binaries pass; `tests/web_dashboard.rs` reports **8 passed** (was 7 — new E3 test landed; iter-2 M3 patch only renamed/re-documented).
+- `cargo clippy --all-targets -- -D warnings`: **clean**.
+- `cargo test --doc`: **0 failed / 56 ignored** (issue #100 baseline preserved).
+- AC#6 file invariants reverified: `git diff HEAD --stat src/opc_ua{.,_history,_session_monitor,_auth}.rs src/web/auth.rs` produces zero output. Both iter-1 and iter-2 patch rounds left these 5 files completely unchanged.
+- AC#7 grep contract reverified: `grep -rEn 'event = "web_|event="web_|event = "api_|event="api_' src/` returns exactly the 3 expected names with one emit site each.
+
 ### Change Log
 
 | Date | Change | Detail |
 |------|--------|--------|
 | 2026-05-03 | Story file created | `bmad-create-story 9-2`. Status set to `ready-for-dev`. |
 | 2026-05-03 | Status flipped `ready-for-dev → in-progress → review` | Single-execution `bmad-dev-story` run. All 7 ACs satisfied on first pass; loop terminates without iteration. Three minor course-corrections (test-fixture defaults, reqwest feature surface, clippy await-holding-lock) documented in Debug Log References. AC#6 invariants verified by zero-output `git diff`. |
+| 2026-05-03 | Status flipped `review → done` after iter-1 + iter-2 code review loop | `bmad-code-review` launched 3 parallel adversarial layers; iter-1 produced 1 decision-needed (D1, resolved option-a) + 13 patches + 9 deferred + 5 dismissed. Iter-2 re-review per CLAUDE.md "don't trust a single pass" caught 3 MED follow-ups (M1 dashboard.js stale-render race, M2 AbortController browser-baseline, M3 E3 test misframing) — all patched + 6 LOW accepted. Loop terminates per CLAUDE.md (zero decision-needed / HIGH / unresolved MED; only LOW remains). Final test count stable at 340 lib+bins / 0 fail; clippy clean; AC#6 file invariants intact (`git diff` zero output across all 5 carry-forward files); AC#7 event grep returns exactly 3 names. |

@@ -95,9 +95,13 @@ fn build_test_app_state(snapshot: DashboardConfigSnapshot) -> Arc<AppState> {
 /// Build a static directory containing the production-shaped dashboard
 /// assets so `tests/web_dashboard.rs` exercises the same files
 /// `cargo run` would serve. Copies from the repo's `static/` dir.
+///
+/// Review iter-1 B11: anchor with `CARGO_MANIFEST_DIR` rather than
+/// cwd — `cargo test --manifest-path` from another directory used to
+/// fail with a confusing `No such file or directory` panic.
 async fn build_production_static_dir() -> TempDir {
     let dst = TempDir::new().expect("test static tmp dir");
-    let src = PathBuf::from("static");
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
     for name in ["index.html", "dashboard.css", "dashboard.js"] {
         let body = tokio::fs::read(src.join(name))
             .await
@@ -162,6 +166,18 @@ async fn spawn_test_server(
 async fn auth_required_for_api_status() {
     init_test_subscriber();
 
+    // Review iter-1 B5+E10: clear the tracing-test global buffer so
+    // a previous serial test that emitted `web_auth_failed
+    // path=/api/status reason=missing` (e.g. an earlier failure run)
+    // can't false-pass this assertion via stale buffer contents. The
+    // assertion below uses `.is_empty() == false`, so any matching
+    // line in the buffer would satisfy it — must start from a known
+    // empty state.
+    {
+        let mut buf = tracing_test::internal::global_buf().lock().unwrap();
+        buf.clear();
+    }
+
     let snapshot = DashboardConfigSnapshot {
         application_count: 0,
         device_count: 0,
@@ -210,7 +226,13 @@ async fn auth_required_for_api_status() {
     );
 
     cancel.cancel();
-    let _ = handle.await;
+    // Review iter-1 B6: surface server-side panics rather than
+    // silently dropping the JoinError. A panic inside web::run (e.g.
+    // a future StorageBackend mock that hits a panic!() branch) used
+    // to vanish; now it fails the test with a clear message.
+    handle
+        .await
+        .expect("web::run task panicked or was cancelled abnormally");
 }
 
 // =====================================================================
@@ -286,7 +308,13 @@ async fn api_status_returns_json_with_expected_shape_when_authed() {
     chrono::DateTime::parse_from_rfc3339(lpt).expect("RFC 3339 parseable");
 
     cancel.cancel();
-    let _ = handle.await;
+    // Review iter-1 B6: surface server-side panics rather than
+    // silently dropping the JoinError. A panic inside web::run (e.g.
+    // a future StorageBackend mock that hits a panic!() branch) used
+    // to vanish; now it fails the test with a clear message.
+    handle
+        .await
+        .expect("web::run task panicked or was cancelled abnormally");
 }
 
 // =====================================================================
@@ -326,13 +354,22 @@ async fn dashboard_html_contains_viewport_meta_and_status_tiles_markup() {
         "FR41 viewport meta tag missing from dashboard HTML"
     );
 
-    // The five dashboard-tile DOM IDs the JS hooks into.
+    // Every DOM ID the JS reads via getElementById. Renaming any of
+    // these in the HTML without updating dashboard.js used to throw
+    // `Cannot read properties of null` at runtime — the pre-iter-1
+    // test only pinned 5 of the 10 IDs, leaving the other half to
+    // silent breakage. Review iter-1 B2 closes the gap.
     for id in [
         "id=\"chirpstack-status\"",
+        "id=\"last-poll-relative\"",
         "id=\"last-poll-time\"",
         "id=\"error-count\"",
         "id=\"application-count\"",
         "id=\"device-count\"",
+        "id=\"uptime\"",
+        "id=\"last-refresh\"",
+        "id=\"error-banner\"",
+        "id=\"refresh-now\"",
     ] {
         assert!(
             body.contains(id),
@@ -348,7 +385,13 @@ async fn dashboard_html_contains_viewport_meta_and_status_tiles_markup() {
     );
 
     cancel.cancel();
-    let _ = handle.await;
+    // Review iter-1 B6: surface server-side panics rather than
+    // silently dropping the JoinError. A panic inside web::run (e.g.
+    // a future StorageBackend mock that hits a panic!() branch) used
+    // to vanish; now it fails the test with a clear message.
+    handle
+        .await
+        .expect("web::run task panicked or was cancelled abnormally");
 }
 
 // =====================================================================
@@ -391,6 +434,64 @@ async fn dashboard_css_contains_responsive_media_query() {
     );
 
     cancel.cancel();
-    let _ = handle.await;
+    // Review iter-1 B6: surface server-side panics rather than
+    // silently dropping the JoinError. A panic inside web::run (e.g.
+    // a future StorageBackend mock that hits a panic!() branch) used
+    // to vanish; now it fails the test with a clear message.
+    handle
+        .await
+        .expect("web::run task panicked or was cancelled abnormally");
 }
 
+// =====================================================================
+// Review iter-1 E3 (re-scoped iter-2 M3): pin the
+// `update_gateway_status(None, n, false)` semantic for the
+// InMemoryBackend impl — when a poll fails after a previous success,
+// the `last_poll_time` row stays frozen at the prior successful
+// timestamp (per `src/storage/mod.rs:684-686` doc) while `error_count`
+// and `chirpstack_available` update.
+//
+// Scope honesty (iter-2 M3): this test exercises ONLY
+// `InMemoryBackend`. The production `SqliteBackend` path uses an
+// independent SQL `INSERT OR REPLACE ... CASE WHEN ? IS NOT NULL`
+// statement (`src/storage/sqlite.rs:1946-1949`); that path is covered
+// by `src/storage/sqlite.rs::tests::test_null_timestamp_preserves_last_successful_poll`
+// (line 4366 at the time of this story). The two tests together pin
+// the contract for both impls. Re-running the test under both
+// backends (rstest-style parameterisation) was considered for
+// iter-2 but rejected as scope creep — the SQL-side test already
+// exists and the storage trait's contract is documented; the
+// in-memory test here exists to catch a *different* class of
+// regression (an InMemoryBackend rewrite that drifts away from the
+// SQL contract).
+// =====================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn in_memory_backend_preserves_last_poll_time_when_poll_fails_after_success() {
+    init_test_subscriber();
+
+    let backend = InMemoryBackend::new();
+    let now = chrono::Utc::now();
+    backend
+        .update_gateway_status(Some(now), 1, true)
+        .expect("seed initial successful poll");
+    backend
+        .update_gateway_status(None, 5, false)
+        .expect("simulate failed poll after success");
+    let (last_poll, error_count, available) = backend
+        .get_gateway_health_metrics()
+        .expect("read after failed poll");
+    assert_eq!(
+        last_poll
+            .expect("last_poll_time must be preserved (Some) — the operator depends on this")
+            .timestamp_millis(),
+        now.timestamp_millis(),
+        "last_poll_time must stay frozen at the prior successful timestamp \
+         when update_gateway_status is called with None"
+    );
+    assert_eq!(error_count, 5, "error_count must update on failed poll");
+    assert!(
+        !available,
+        "chirpstack_available must flip to false on failed poll"
+    );
+}

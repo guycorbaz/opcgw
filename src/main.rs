@@ -490,7 +490,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create connection pool for per-task SQLite access (Story 2-2x: per-task connections)
     // Pool shared via Arc; each task (poller, OPC UA) gets own connection from pool via Arc::clone()
     // SQLite WAL mode: true concurrent readers + single writer (no Rust Mutex bottleneck)
-    let pool = match ConnectionPool::new("data/opcgw.db", 3) {
+    //
+    // Story 9-2 review iter-1 D1: pool size matches the count of long-lived
+    // task-claimers (poller + opc_ua + command-status + command-timeout +
+    // web = 5). Sized below 5, the 5th task busy-waits up to 5 s on
+    // checkout under contention and surfaces a generic 500 — undersized
+    // pool was the root cause not the underlying request.
+    let pool = match ConnectionPool::new("data/opcgw.db", 5) {
         Ok(pool_inner) => Arc::new(pool_inner),
         Err(e) => {
             error!(error = %e, "Failed to create connection pool");
