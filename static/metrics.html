@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>opcgw — Live Metrics</title>
+<link rel="stylesheet" href="/dashboard.css">
+</head>
+<body>
+<header>
+  <h1>opcgw</h1>
+  <p class="subtitle">Live metric values</p>
+  <p class="header-controls">
+    <span>Last refreshed: <span id="last-refresh">never</span></span>
+    <button type="button" id="refresh-now">Refresh now</button>
+    <a href="/" class="back-link">&larr; Dashboard</a>
+  </p>
+</header>
+
+<main id="grid-container" class="metrics-grid-container">
+  <p class="loading">Loading&hellip;</p>
+</main>
+
+<footer>
+  <p id="error-banner" class="error-banner hidden" role="alert"></p>
+</footer>
+
+<script src="/metrics.js"></script>
+</body>
+</html>

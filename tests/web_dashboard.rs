@@ -89,6 +89,8 @@ fn build_test_app_state(snapshot: DashboardConfigSnapshot) -> Arc<AppState> {
         backend,
         dashboard_snapshot: Arc::new(snapshot),
         start_time: std::time::Instant::now(),
+        // Story 9-3: tests use the production default (120 s).
+        stale_threshold_secs: 120,
     })
 }
 
@@ -102,7 +104,18 @@ fn build_test_app_state(snapshot: DashboardConfigSnapshot) -> Arc<AppState> {
 async fn build_production_static_dir() -> TempDir {
     let dst = TempDir::new().expect("test static tmp dir");
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
-    for name in ["index.html", "dashboard.css", "dashboard.js"] {
+    // Story 9-3 extension: include metrics.html + metrics.js so the
+    // /api/devices integration tests can exercise the same files
+    // `cargo run` would serve. (CSS for the metrics page is bundled
+    // into dashboard.css per the dev-time decision documented in the
+    // 9-3 completion notes.)
+    for name in [
+        "index.html",
+        "dashboard.css",
+        "dashboard.js",
+        "metrics.html",
+        "metrics.js",
+    ] {
         let body = tokio::fs::read(src.join(name))
             .await
             .unwrap_or_else(|e| panic!("read static/{name}: {e}"));
@@ -494,4 +507,277 @@ async fn in_memory_backend_preserves_last_poll_time_when_poll_fails_after_succes
         !available,
         "chirpstack_available must flip to false on failed poll"
     );
+}
+
+// =====================================================================
+// Story 9-3 (FR37) integration tests for /api/devices + metrics.html.
+// =====================================================================
+
+/// Story 9-3 AC#3 (auth carry-forward): unauth'd GET /api/devices
+/// returns 401 + emits the Story 9-1 web_auth_failed audit event with
+/// path=/api/devices reason=missing. This proves the auth middleware
+/// from Story 9-1 wraps the new /api/devices route via the
+/// layer-after-route invariant in src/web/mod.rs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn auth_required_for_api_devices() {
+    init_test_subscriber();
+
+    // Buffer-clear pattern (mirrors Story 9-2 iter-1 B5+E10) — prevents
+    // a polluted buffer from a previous serial test from false-passing.
+    {
+        let mut buf = tracing_test::internal::global_buf().lock().unwrap();
+        buf.clear();
+    }
+
+    let snapshot = DashboardConfigSnapshot {
+        application_count: 0,
+        device_count: 0,
+        applications: vec![],
+    };
+    let (addr, cancel, handle, _static_tmp) = spawn_test_server(snapshot).await;
+
+    let client = common::build_http_client(Duration::from_secs(5));
+    let resp = client
+        .get(format!("http://{addr}/api/devices"))
+        .send()
+        .await
+        .expect("GET /api/devices (unauth)");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let www = resp
+        .headers()
+        .get(header::WWW_AUTHENTICATE)
+        .expect("WWW-Authenticate header present");
+    assert!(
+        www.to_str().unwrap_or("").contains(TEST_REALM),
+        "WWW-Authenticate should carry the realm, got {www:?}"
+    );
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let captured: String = {
+        let buf = tracing_test::internal::global_buf().lock().unwrap();
+        String::from_utf8_lossy(&buf).to_string()
+    };
+    let matching: Vec<&str> = captured
+        .lines()
+        .filter(|l| {
+            l.contains("event=\"web_auth_failed\"")
+                && l.contains("path=/api/devices")
+                && l.contains("reason=\"missing\"")
+        })
+        .collect();
+    assert!(
+        !matching.is_empty(),
+        "expected at least one web_auth_failed audit line for path=/api/devices reason=missing, got captured log:\n{captured}"
+    );
+
+    cancel.cancel();
+    handle
+        .await
+        .expect("web::run task panicked or was cancelled abnormally");
+}
+
+/// Story 9-3 AC#2: auth'd GET /api/devices returns 200 + JSON with
+/// the 4 expected top-level fields (`as_of`, `stale_threshold_secs`,
+/// `bad_threshold_secs`, `applications`) and the application/device
+/// shape walks the snapshot's order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn api_devices_returns_json_with_expected_shape_when_authed() {
+    init_test_subscriber();
+
+    let snapshot = DashboardConfigSnapshot {
+        application_count: 1,
+        device_count: 2,
+        applications: vec![opcgw::web::ApplicationSummary {
+            application_id: "app-test".to_string(),
+            application_name: "Test App".to_string(),
+            device_count: 2,
+            devices: vec![
+                opcgw::web::DeviceSummary {
+                    device_id: "d1".to_string(),
+                    device_name: "Device One".to_string(),
+                    metric_names: vec!["temperature".to_string()],
+                    metric_types: vec![opcgw::config::OpcMetricTypeConfig::Float],
+                },
+                opcgw::web::DeviceSummary {
+                    device_id: "d2".to_string(),
+                    device_name: "Device Two".to_string(),
+                    metric_names: vec![],
+                    metric_types: vec![],
+                },
+            ],
+        }],
+    };
+    let (addr, cancel, handle, _static_tmp) = spawn_test_server(snapshot).await;
+
+    let client = common::build_http_client(Duration::from_secs(5));
+    let resp = client
+        .get(format!("http://{addr}/api/devices"))
+        .header(
+            header::AUTHORIZATION,
+            build_basic_auth(TEST_USER, TEST_PASSWORD),
+        )
+        .send()
+        .await
+        .expect("GET /api/devices (auth'd)");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = resp.text().await.expect("response body");
+    let json: Value =
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("body not JSON: {e}; body={body}"));
+
+    for field in ["as_of", "stale_threshold_secs", "bad_threshold_secs", "applications"] {
+        assert!(
+            json.get(field).is_some(),
+            "missing field {field} in /api/devices response: {json}"
+        );
+    }
+    // as_of must parse as RFC 3339.
+    let as_of = json["as_of"].as_str().expect("as_of string");
+    chrono::DateTime::parse_from_rfc3339(as_of).expect("RFC 3339 parseable");
+    // Threshold defaults from Story 5-2.
+    assert_eq!(json["stale_threshold_secs"].as_u64(), Some(120));
+    assert_eq!(json["bad_threshold_secs"].as_u64(), Some(86_400));
+
+    let apps = json["applications"].as_array().expect("applications array");
+    assert_eq!(apps.len(), 1);
+    assert_eq!(apps[0]["application_id"].as_str(), Some("app-test"));
+    let devs = apps[0]["devices"].as_array().expect("devices array");
+    assert_eq!(devs.len(), 2);
+    assert_eq!(devs[0]["device_id"].as_str(), Some("d1"));
+    let metrics = devs[0]["metrics"].as_array().expect("metrics array");
+    assert_eq!(metrics.len(), 1);
+    assert_eq!(metrics[0]["metric_name"].as_str(), Some("temperature"));
+    // Metric is configured but not seeded → null value.
+    assert!(metrics[0]["value"].is_null());
+    assert!(metrics[0]["timestamp"].is_null());
+    assert_eq!(metrics[0]["data_type"].as_str(), Some("Float"));
+    // Second device has empty metrics array — must serialise as [].
+    let m2 = devs[1]["metrics"].as_array().expect("metrics array on d2");
+    assert!(m2.is_empty());
+
+    cancel.cancel();
+    handle
+        .await
+        .expect("web::run task panicked or was cancelled abnormally");
+}
+
+/// Story 9-3 AC#4: metrics.html ships the viewport meta + the DOM
+/// IDs the JS hooks into. Pinning these makes a future rename a
+/// build-time error rather than a silent runtime null-deref. Mirrors
+/// Story 9-2's dashboard_html_contains_viewport_meta_and_status_tiles_markup
+/// test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn metrics_html_contains_viewport_meta_and_grid_markup() {
+    init_test_subscriber();
+
+    let (addr, cancel, handle, _static_tmp) = spawn_test_server(DashboardConfigSnapshot {
+        application_count: 0,
+        device_count: 0,
+        applications: vec![],
+    })
+    .await;
+
+    let client = common::build_http_client(Duration::from_secs(5));
+    let resp = client
+        .get(format!("http://{addr}/metrics.html"))
+        .header(
+            header::AUTHORIZATION,
+            build_basic_auth(TEST_USER, TEST_PASSWORD),
+        )
+        .send()
+        .await
+        .expect("GET /metrics.html (auth'd)");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.text().await.expect("html body");
+
+    // FR41 marker.
+    assert!(
+        body.contains("<meta name=\"viewport\""),
+        "FR41 viewport meta tag missing from metrics.html"
+    );
+    // DOM IDs that metrics.js binds via getElementById.
+    for id in [
+        "id=\"grid-container\"",
+        "id=\"last-refresh\"",
+        "id=\"error-banner\"",
+        "id=\"refresh-now\"",
+    ] {
+        assert!(
+            body.contains(id),
+            "metrics.html must contain {id} for metrics.js to bind to"
+        );
+    }
+    // Script reference.
+    assert!(
+        body.contains("src=\"/metrics.js\""),
+        "metrics.html must reference /metrics.js"
+    );
+
+    cancel.cancel();
+    handle
+        .await
+        .expect("web::run task panicked or was cancelled abnormally");
+}
+
+/// Story 9-3 AC#4: metrics.js is served with a JS Content-Type and
+/// references the /api/devices endpoint. Doesn't execute the JS (no
+/// headless browser); just pins that the file exists, is reachable
+/// through the auth middleware, and contains the API hook the spec
+/// requires.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn metrics_js_is_served_and_references_api_devices() {
+    init_test_subscriber();
+
+    let (addr, cancel, handle, _static_tmp) = spawn_test_server(DashboardConfigSnapshot {
+        application_count: 0,
+        device_count: 0,
+        applications: vec![],
+    })
+    .await;
+
+    let client = common::build_http_client(Duration::from_secs(5));
+    let resp = client
+        .get(format!("http://{addr}/metrics.js"))
+        .header(
+            header::AUTHORIZATION,
+            build_basic_auth(TEST_USER, TEST_PASSWORD),
+        )
+        .send()
+        .await
+        .expect("GET /metrics.js (auth'd)");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let ct = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    // ServeDir's Content-Type sniff should yield application/javascript
+    // or text/javascript for .js files. Accept either + tolerate
+    // charset suffixes.
+    assert!(
+        ct.contains("javascript"),
+        "metrics.js must be served with a JS Content-Type, got {ct:?}"
+    );
+
+    let body = resp.text().await.expect("js body");
+    assert!(
+        body.contains("/api/devices"),
+        "metrics.js must reference the /api/devices endpoint"
+    );
+    assert!(
+        body.contains("setInterval"),
+        "metrics.js must wire up setInterval for periodic refresh"
+    );
+
+    cancel.cancel();
+    handle
+        .await
+        .expect("web::run task panicked or was cancelled abnormally");
 }

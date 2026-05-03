@@ -178,6 +178,7 @@ index of the event names introduced so far.
 | `web_auth_failed` | `warn` (audit) | 9-1 | `security.md` § Web UI authentication |
 | `web_server_started` | `info` (diag) | 9-1 | `security.md` § Web UI authentication |
 | `api_status_storage_error` | `warn` (diag) | 9-2 | `security.md` § Web UI authentication → API endpoints |
+| `api_devices_storage_error` | `warn` (diag) | 9-3 | `security.md` § Web UI authentication → API endpoints |
 
 Pinning rules (apply to every entry above):
 

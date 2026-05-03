@@ -54,14 +54,43 @@ use crate::utils::OpcGwError;
 use auth::{basic_auth_middleware, WebAuthState};
 
 /// Per-application summary for the dashboard — application identity
-/// plus how many devices are configured under it. Story 9-3 (live
-/// metric values) will consume the `application_id` to look up
-/// per-device metrics.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// plus how many devices are configured under it. Story 9-3 extends
+/// this with the actual per-device list so the live-metrics page can
+/// walk the topology without re-reading `AppConfig.application_list`.
+#[derive(Clone, Debug, PartialEq)]
 pub struct ApplicationSummary {
     pub application_id: String,
     pub application_name: String,
+    /// Number of configured devices. Equals `devices.len()` by
+    /// construction; kept as its own field so `/api/status` (Story
+    /// 9-2) doesn't have to walk `devices` to compute the count.
     pub device_count: usize,
+    /// Per-device summary in TOML-declaration order so the dashboard
+    /// renders devices in a stable, operator-controlled sequence
+    /// rather than HashMap iteration order. Story 9-3 addition.
+    pub devices: Vec<DeviceSummary>,
+}
+
+/// Per-device summary for the live-metrics page (Story 9-3) — device
+/// identity plus the canonical list of configured metric names. The
+/// metric values themselves come from the `metric_values` SQLite
+/// table at request time; this snapshot tells the handler which
+/// metrics to look up + the order to render them in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeviceSummary {
+    pub device_id: String,
+    pub device_name: String,
+    /// Configured metric names from `[[application.device.read_metric]].metric_name`,
+    /// in TOML-declaration order. Adding a new metric to the bottom
+    /// of the TOML list shows up at the bottom of the row in the
+    /// dashboard — no random hashmap reordering.
+    pub metric_names: Vec<String>,
+    /// Configured metric data types from `[[application.device.read_metric]].metric_type`,
+    /// in 1-to-1 correspondence with `metric_names`. The `/api/devices`
+    /// handler uses these as the fallback `data_type` for metrics
+    /// that have no row in `metric_values` (configured but never
+    /// polled — operator sees the configured type, not "?").
+    pub metric_types: Vec<crate::config::OpcMetricTypeConfig>,
 }
 
 /// Frozen-at-startup snapshot of the gateway's configured topology.
@@ -78,7 +107,7 @@ pub struct ApplicationSummary {
 /// poll", which is the operator-relevant question for "is my config
 /// loaded correctly". A live-discovered count would require querying
 /// ChirpStack's gRPC API on every dashboard refresh.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DashboardConfigSnapshot {
     pub application_count: usize,
     pub device_count: usize,
@@ -88,14 +117,44 @@ pub struct DashboardConfigSnapshot {
 impl DashboardConfigSnapshot {
     /// Walk `config.application_list` once and build the summary.
     /// Pure function; no I/O.
+    ///
+    /// Story 9-3 deepens the walk by one level — the per-device
+    /// `metric_names` + `metric_types` lists come from each device's
+    /// `read_metric_list`, in TOML-declaration order.
     pub fn from_config(config: &AppConfig) -> Self {
         let applications: Vec<ApplicationSummary> = config
             .application_list
             .iter()
-            .map(|app| ApplicationSummary {
-                application_id: app.application_id.clone(),
-                application_name: app.application_name.clone(),
-                device_count: app.device_list.len(),
+            .map(|app| {
+                let devices: Vec<DeviceSummary> = app
+                    .device_list
+                    .iter()
+                    .map(|dev| {
+                        let metric_names: Vec<String> = dev
+                            .read_metric_list
+                            .iter()
+                            .map(|m| m.metric_name.clone())
+                            .collect();
+                        let metric_types: Vec<crate::config::OpcMetricTypeConfig> = dev
+                            .read_metric_list
+                            .iter()
+                            .map(|m| m.metric_type.clone())
+                            .collect();
+                        DeviceSummary {
+                            device_id: dev.device_id.clone(),
+                            device_name: dev.device_name.clone(),
+                            metric_names,
+                            metric_types,
+                        }
+                    })
+                    .collect();
+                let device_count = devices.len();
+                ApplicationSummary {
+                    application_id: app.application_id.clone(),
+                    application_name: app.application_name.clone(),
+                    device_count,
+                    devices,
+                }
             })
             .collect();
         let application_count = applications.len();
@@ -125,6 +184,17 @@ pub struct AppState {
     pub backend: Arc<dyn StorageBackend>,
     pub dashboard_snapshot: Arc<DashboardConfigSnapshot>,
     pub start_time: Instant,
+    /// Story 9-3 (FR37): resolved `[opcua].stale_threshold_seconds`
+    /// (default 120) — used as the "Good → Uncertain" boundary in
+    /// `/api/devices` JSON. Resolved once at AppState construction
+    /// time; Story 9-7 hot-reload will need to make this dynamic if
+    /// operators want to retune without restart. Kept here rather
+    /// than re-reading `AppConfig` per request because (a) AppState
+    /// doesn't currently carry `Arc<AppConfig>` (would force a
+    /// heavier construction-time clone) and (b) the value is a
+    /// scalar — a single field is cheaper than threading a
+    /// reference.
+    pub stale_threshold_secs: u64,
 }
 
 /// Inner timeout for the graceful-shutdown drain. After [`run`] sees
@@ -190,6 +260,7 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
     Router::new()
         .route("/api/health", get(api_health))
         .route("/api/status", get(api::api_status))
+        .route("/api/devices", get(api::api_devices))
         .fallback_service(ServeDir::new(static_dir))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
@@ -429,6 +500,8 @@ mod tests {
 
     /// Story 9-2 AC#1 — frozen-at-startup snapshot walks the
     /// application list once and produces correct totals.
+    /// Story 9-3 extension — the snapshot also carries the per-device
+    /// list with metric names + types in TOML-declaration order.
     #[test]
     fn dashboard_snapshot_from_config_walks_application_list_once() {
         let config = snapshot_test_config(vec![
@@ -440,6 +513,42 @@ mod tests {
         assert_eq!(snapshot.device_count, 6);
         assert_eq!(snapshot.applications.len(), 2);
         assert!(snapshot.applications.iter().all(|a| a.device_count == 3));
+        // Story 9-3 — devices list mirrors the configured topology.
+        for app in &snapshot.applications {
+            assert_eq!(app.devices.len(), 3);
+            for dev in &app.devices {
+                assert_eq!(dev.metric_names, vec!["temperature".to_string()]);
+                assert_eq!(dev.metric_types.len(), 1);
+                assert_eq!(dev.metric_types[0], OpcMetricTypeConfig::Float);
+            }
+        }
+    }
+
+    /// Story 9-3 AC#1 — a device with zero `read_metric_list` entries
+    /// produces a `DeviceSummary` with empty `metric_names` /
+    /// `metric_types` rather than getting dropped from the snapshot.
+    /// Operator deletes all metrics from a device temporarily; the
+    /// device should still appear in the dashboard (as an empty row),
+    /// not vanish.
+    #[test]
+    fn dashboard_snapshot_from_config_handles_device_with_zero_metrics() {
+        let mut config = snapshot_test_config(vec![]);
+        config.application_list = vec![ChirpStackApplications {
+            application_name: "App".to_string(),
+            application_id: "id-1".to_string(),
+            device_list: vec![ChirpstackDevice {
+                device_id: "dev-empty".to_string(),
+                device_name: "Empty Device".to_string(),
+                read_metric_list: vec![],
+                device_command_list: None,
+            }],
+        }];
+        let snapshot = DashboardConfigSnapshot::from_config(&config);
+        assert_eq!(snapshot.application_count, 1);
+        assert_eq!(snapshot.device_count, 1);
+        assert_eq!(snapshot.applications[0].devices.len(), 1);
+        assert!(snapshot.applications[0].devices[0].metric_names.is_empty());
+        assert!(snapshot.applications[0].devices[0].metric_types.is_empty());
     }
 
     /// Story 9-2 AC#1 — empty application list produces all-zeros.
@@ -487,6 +596,7 @@ mod tests {
             backend,
             dashboard_snapshot: snapshot,
             start_time: Instant::now(),
+            stale_threshold_secs: api::DEFAULT_STALE_THRESHOLD_SECS,
         });
         let dir = PathBuf::from("static");
         let _router: Router = build_router(app_state, dir);

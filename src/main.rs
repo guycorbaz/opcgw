@@ -785,11 +785,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // + start_time. One Arc<AppState> per process, shared across
         // every /api/* handler and the auth middleware (extracted via
         // `app_state.auth.clone()` in build_router).
+        //
+        // Story 9-3 (FR37) addition: `stale_threshold_secs` resolved
+        // here so /api/devices doesn't have to thread the AppConfig
+        // through to the handler (or re-walk the OpcUaConfig per
+        // request). Defaults to 120 s when [opcua].stale_threshold_seconds
+        // is unset — matches the OPC UA path's DEFAULT_STALE_THRESHOLD_SECS.
+        let stale_threshold_secs = application_config
+            .opcua
+            .stale_threshold_seconds
+            .unwrap_or(crate::web::api::DEFAULT_STALE_THRESHOLD_SECS);
         let app_state = std::sync::Arc::new(web::AppState {
             auth: auth_state,
             backend: web_backend,
             dashboard_snapshot,
             start_time: std::time::Instant::now(),
+            stale_threshold_secs,
         });
 
         // Bind synchronously; fail-fast on bind failure.

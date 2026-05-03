@@ -78,6 +78,8 @@ fn wrap_in_app_state(auth: Arc<WebAuthState>) -> Arc<AppState> {
         backend,
         dashboard_snapshot: snapshot,
         start_time: std::time::Instant::now(),
+        // Story 9-3: 9-1 tests don't exercise /api/devices; default fine.
+        stale_threshold_secs: 120,
     })
 }
 

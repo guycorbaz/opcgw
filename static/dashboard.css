@@ -189,3 +189,204 @@ footer button:hover {
     color: #fecaca;
   }
 }
+
+/* ============================================================
+ * Story 9-3 (FR37) — Live metric values grid (metrics.html).
+ *
+ * Scoped to `.metrics-grid-container` so the dashboard tile styles
+ * (Story 9-2) above stay completely unaffected. The Story 9-2 CSS
+ * is untouched; only NEW selectors are appended below.
+ * ============================================================ */
+
+.header-controls {
+  margin: 0.5rem 0 0;
+  font-size: 0.9rem;
+  color: #d1d5db;
+}
+
+.header-controls a.back-link {
+  margin-left: 0.75rem;
+  color: #a7f3d0;
+  text-decoration: none;
+}
+
+.header-controls a.back-link:hover {
+  text-decoration: underline;
+}
+
+.metrics-grid-container {
+  /* Override the dashboard's two-column tile grid. The metrics page
+   * is one column of application sections (each with its own table),
+   * stacked vertically. */
+  display: block;
+  padding: 1rem;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.metrics-grid-container .application {
+  margin: 0 0 1.5rem;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+}
+
+.metrics-grid-container .application h2 {
+  margin: 0 0 0.25rem;
+  font-size: 1.1rem;
+}
+
+.metrics-grid-container .application .device-count-badge {
+  font-size: 0.75rem;
+  color: #6b7280;
+  font-weight: normal;
+  margin-left: 0.5rem;
+}
+
+.metrics-grid-container .device {
+  margin: 1rem 0 0;
+  padding-top: 0.75rem;
+  border-top: 1px solid #f3f4f6;
+}
+
+.metrics-grid-container .device:first-of-type {
+  border-top: none;
+  margin-top: 0;
+  padding-top: 0;
+}
+
+.metrics-grid-container .device h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+
+.metrics-grid-container .device h3 .device-id {
+  font-size: 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  color: #6b7280;
+  font-weight: normal;
+  margin-left: 0.5rem;
+}
+
+.metrics-grid-container table.metrics-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.metrics-grid-container table.metrics-table th,
+.metrics-grid-container table.metrics-table td {
+  text-align: left;
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.metrics-grid-container table.metrics-table th {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.metrics-grid-container table.metrics-table td.metric-value {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}
+
+.metrics-grid-container .row-good td.metric-status::before {
+  content: "● ";
+  color: #16a34a;
+}
+
+.metrics-grid-container .row-uncertain td.metric-status::before {
+  content: "● ";
+  color: #ca8a04;
+}
+
+.metrics-grid-container .row-bad td.metric-status::before {
+  content: "● ";
+  color: #dc2626;
+}
+
+.metrics-grid-container .row-missing td.metric-status::before {
+  content: "● ";
+  color: #9ca3af;
+}
+
+.metrics-grid-container .row-missing td {
+  color: #9ca3af;
+  font-style: italic;
+}
+
+.metrics-grid-container .loading {
+  text-align: center;
+  color: #6b7280;
+  padding: 2rem;
+}
+
+.metrics-grid-container .empty-application {
+  color: #9ca3af;
+  font-style: italic;
+  margin: 0.5rem 0 0;
+}
+
+/* Mobile-first stack: tables collapse into key/value pairs below 600 px. */
+@media (max-width: 600px) {
+  .metrics-grid-container table.metrics-table thead {
+    display: none;
+  }
+  .metrics-grid-container table.metrics-table tbody tr {
+    display: block;
+    margin: 0.5rem 0;
+    padding: 0.5rem;
+    border: 1px solid #f3f4f6;
+    border-radius: 4px;
+  }
+  .metrics-grid-container table.metrics-table tbody tr td {
+    display: flex;
+    justify-content: space-between;
+    border-bottom: none;
+    padding: 0.2rem 0;
+  }
+  .metrics-grid-container table.metrics-table tbody tr td::before {
+    content: attr(data-label);
+    font-weight: 600;
+    color: #6b7280;
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    align-self: center;
+    margin-right: 0.75rem;
+  }
+}
+
+/* Dark-mode overrides for the metrics grid. */
+@media (prefers-color-scheme: dark) {
+  .metrics-grid-container .application {
+    background: #1e293b;
+    border-color: #334155;
+  }
+  .metrics-grid-container .device {
+    border-top-color: #334155;
+  }
+  .metrics-grid-container .application h2 .device-count-badge,
+  .metrics-grid-container .device h3 .device-id,
+  .metrics-grid-container table.metrics-table th,
+  .metrics-grid-container .loading,
+  .metrics-grid-container .empty-application {
+    color: #94a3b8;
+  }
+  .metrics-grid-container table.metrics-table th,
+  .metrics-grid-container table.metrics-table td {
+    border-bottom-color: #334155;
+  }
+  .metrics-grid-container .row-missing td {
+    color: #6b7280;
+  }
+  @media (max-width: 600px) {
+    .metrics-grid-container table.metrics-table tbody tr {
+      border-color: #334155;
+    }
+  }
+}
+

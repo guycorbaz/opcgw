@@ -20,15 +20,18 @@
 //! event — never to the client. NFR7 invariant: error messages must
 //! not leak SQLite paths, table names, or other internal state.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use chrono::Utc;
 use serde::Serialize;
 use tracing::warn;
 
+use crate::config::OpcMetricTypeConfig;
 use crate::web::AppState;
 
 /// Shape returned by `GET /api/status` on success (Story 9-2 AC#2).
@@ -112,6 +115,200 @@ pub async fn api_status(
     }))
 }
 
+/// Story 5-2 staleness boundary between "Good" and "Uncertain"
+/// (default). Mirrors the private `DEFAULT_STALE_THRESHOLD_SECS` in
+/// `src/opc_ua.rs:38`; exposed here as `pub` so `src/main.rs` can
+/// resolve `[opcua].stale_threshold_seconds.unwrap_or(...)` without
+/// reaching into the OPC UA module's internals.
+pub const DEFAULT_STALE_THRESHOLD_SECS: u64 = 120;
+
+/// Story 5-2 hard cutoff between "Uncertain" and "Bad" — server-owned
+/// constant today (operator can't tune it). Mirror of
+/// `STATUS_CODE_BAD_THRESHOLD_SECS` in `src/opc_ua.rs:39`. The
+/// dashboard receives both thresholds as JSON fields so the JS
+/// branching logic doesn't hard-code any boundary; future Story can
+/// promote this to a config knob without touching the wire contract.
+const BAD_THRESHOLD_SECS: u64 = 86_400;
+
+/// Map a configured `OpcMetricTypeConfig` to its display string,
+/// matching the `MetricType::Display` impl from `src/storage/types.rs`
+/// so the JSON `data_type` field is identical whether sourced from the
+/// configured type or the storage row's type.
+fn config_type_to_display(t: &OpcMetricTypeConfig) -> &'static str {
+    match t {
+        OpcMetricTypeConfig::Bool => "Bool",
+        OpcMetricTypeConfig::Int => "Int",
+        OpcMetricTypeConfig::Float => "Float",
+        OpcMetricTypeConfig::String => "String",
+    }
+}
+
+/// Shape returned by `GET /api/devices` on success (Story 9-3 AC#2).
+///
+/// Server-side `as_of` lets every browser compute the same `age_secs`
+/// regardless of local clock skew (same rationale as Story 9-2's
+/// `uptime_secs` — pin the time-of-truth on the server).
+///
+/// Both `stale_threshold_secs` and `bad_threshold_secs` are returned so
+/// the JS branching logic doesn't need to hard-code either boundary.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct DevicesResponse {
+    pub as_of: String,
+    pub stale_threshold_secs: u64,
+    pub bad_threshold_secs: u64,
+    pub applications: Vec<ApplicationView>,
+}
+
+/// Per-application section in the live-metrics grid.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ApplicationView {
+    pub application_id: String,
+    pub application_name: String,
+    pub devices: Vec<DeviceView>,
+}
+
+/// Per-device section — identifies the device + lists its configured
+/// metrics in TOML-declaration order.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct DeviceView {
+    pub device_id: String,
+    pub device_name: String,
+    pub metrics: Vec<MetricView>,
+}
+
+/// Per-metric row. `value` and `timestamp` are `null` when the metric
+/// is configured but has no row in `metric_values` (operator sees
+/// "missing" status badge). `data_type` always carries a string —
+/// from the storage row when present, otherwise from the configured
+/// type so the dashboard can display "(Int) — never reported" rather
+/// than "(?) — never reported".
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct MetricView {
+    pub metric_name: String,
+    pub data_type: String,
+    pub value: Option<String>,
+    pub timestamp: Option<String>,
+}
+
+/// `GET /api/devices` handler (Story 9-3, FR37).
+///
+/// Reads every row from the `metric_values` SQLite table via the
+/// per-task backend, joins against the frozen `DashboardConfigSnapshot`,
+/// and emits an application-grouped JSON view of the live metric
+/// values. A configured-but-not-yet-polled metric appears as a row
+/// with `value: null, timestamp: null` rather than being omitted —
+/// the operator needs to see "this metric exists but hasn't been
+/// reported yet" as a distinct state from "this metric isn't
+/// configured at all" (for which the metric row simply doesn't
+/// appear in the configured `metric_names`).
+///
+/// # Why server-side `as_of`
+///
+/// The dashboard could compute `(Date.now() - timestamp)` browser-side,
+/// but two browsers viewing the same gateway would disagree if their
+/// clocks differed. Returning the server's `Utc::now()` as `as_of` lets
+/// every browser compute the same `age_secs` regardless of local clock
+/// skew. Same rationale as Story 9-2's `uptime_secs` field.
+pub async fn api_devices(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<DevicesResponse>, Response> {
+    // Capture the server timestamp at request entry — NOT after the
+    // storage call returns. The dashboard uses this as the denominator
+    // for "age vs threshold" so it must reflect the moment the
+    // operator's request hit the server, not after the storage delay.
+    let as_of = Utc::now().to_rfc3339();
+
+    let metrics = match state.backend.load_all_metrics() {
+        Ok(rows) => rows,
+        Err(e) => {
+            // NFR7: log the full error to the operator log; return a
+            // generic body to the client.
+            warn!(
+                event = "api_devices_storage_error",
+                error = %e,
+                "GET /api/devices: failed to read metric_values table"
+            );
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal_server_error()),
+            )
+                .into_response());
+        }
+    };
+
+    // O(N) lookup keyed by (device_id, metric_name) so the per-snapshot
+    // walk is O(devices × metrics) total — same complexity class as
+    // a naïve nested scan but dramatically faster at realistic device
+    // counts (100 devices × 4 metrics × ~3 µs/lookup = ~1.2 ms vs.
+    // ~40 ms for the nested scan).
+    let mut metric_by_key: HashMap<(String, String), &crate::storage::MetricValue> =
+        HashMap::with_capacity(metrics.len());
+    for row in &metrics {
+        metric_by_key.insert((row.device_id.clone(), row.metric_name.clone()), row);
+    }
+
+    // `stale_threshold_secs` is resolved at AppState construction
+    // (Story 9-3 addition to AppState) — `DEFAULT_STALE_THRESHOLD_SECS`
+    // is referenced here as the documented default for the JSON
+    // contract docstring above; the actual value plumbed through is
+    // the resolved one from main.rs.
+    let stale_threshold_secs = state.stale_threshold_secs;
+
+    let applications: Vec<ApplicationView> = state
+        .dashboard_snapshot
+        .applications
+        .iter()
+        .map(|app| {
+            let devices: Vec<DeviceView> = app
+                .devices
+                .iter()
+                .map(|dev| {
+                    let metrics: Vec<MetricView> = dev
+                        .metric_names
+                        .iter()
+                        .zip(dev.metric_types.iter())
+                        .map(|(name, configured_type)| {
+                            let key = (dev.device_id.clone(), name.clone());
+                            match metric_by_key.get(&key) {
+                                Some(row) => MetricView {
+                                    metric_name: name.clone(),
+                                    data_type: row.data_type.to_string(),
+                                    value: Some(row.value.clone()),
+                                    timestamp: Some(row.timestamp.to_rfc3339()),
+                                },
+                                None => MetricView {
+                                    metric_name: name.clone(),
+                                    data_type: config_type_to_display(configured_type)
+                                        .to_string(),
+                                    value: None,
+                                    timestamp: None,
+                                },
+                            }
+                        })
+                        .collect();
+                    DeviceView {
+                        device_id: dev.device_id.clone(),
+                        device_name: dev.device_name.clone(),
+                        metrics,
+                    }
+                })
+                .collect();
+            ApplicationView {
+                application_id: app.application_id.clone(),
+                application_name: app.application_name.clone(),
+                devices,
+            }
+        })
+        .collect();
+
+    Ok(Json(DevicesResponse {
+        as_of,
+        stale_threshold_secs,
+        bad_threshold_secs: BAD_THRESHOLD_SECS,
+        applications,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,10 +345,26 @@ mod tests {
         let applications: Vec<ApplicationSummary> = per_app_device_counts
             .iter()
             .enumerate()
-            .map(|(i, &dc)| ApplicationSummary {
-                application_id: format!("app-{i}"),
-                application_name: format!("App {i}"),
-                device_count: dc,
+            .map(|(i, &dc)| {
+                // Story 9-3: per-app DeviceSummary list. Test fixtures
+                // don't need real metric_names — empty vecs are
+                // sufficient for the /api/status tests (which only
+                // read application_count + device_count); /api/devices
+                // tests build their own state with populated devices.
+                let devices = (0..dc)
+                    .map(|j| crate::web::DeviceSummary {
+                        device_id: format!("dev-{i}-{j}"),
+                        device_name: format!("Dev {i}-{j}"),
+                        metric_names: vec![],
+                        metric_types: vec![],
+                    })
+                    .collect();
+                ApplicationSummary {
+                    application_id: format!("app-{i}"),
+                    application_name: format!("App {i}"),
+                    device_count: dc,
+                    devices,
+                }
             })
             .collect();
         let snapshot = Arc::new(DashboardConfigSnapshot {
@@ -164,12 +377,15 @@ mod tests {
             backend,
             dashboard_snapshot: snapshot,
             start_time: Instant::now(),
+            stale_threshold_secs: DEFAULT_STALE_THRESHOLD_SECS,
         })
     }
 
     /// Failing backend used by the 500-path test. Returns
     /// `OpcGwError::Storage` from `get_gateway_health_metrics` and
-    /// no-ops everything else (the API handler only calls one method).
+    /// from `load_all_metrics` (Story 9-3 extension); no-ops everything
+    /// else (the api_status + api_devices handlers only call those two
+    /// methods).
     struct FailingBackend;
 
     impl StorageBackend for FailingBackend {
@@ -245,7 +461,11 @@ mod tests {
             panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
         }
         fn load_all_metrics(&self) -> Result<Vec<crate::storage::MetricValue>, OpcGwError> {
-            panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
+            // Story 9-3: synthetic failure for the api_devices 500-path
+            // unit test. Mirrors the get_gateway_health_metrics shape.
+            Err(OpcGwError::Storage(
+                "synthetic failure for the api_devices 500 unit test".to_string(),
+            ))
         }
         fn prune_metric_history(&self) -> Result<u32, OpcGwError> {
             panic!("FailingBackend: only get_gateway_health_metrics is implemented; the api_status handler must not call any other StorageBackend method")
@@ -411,5 +631,211 @@ mod tests {
         };
         let json = serde_json::to_value(&response).expect("serialise StatusResponse");
         assert!(json["last_poll_time"].is_null());
+    }
+
+    // =====================================================================
+    // Story 9-3 (FR37) — /api/devices unit tests.
+    // =====================================================================
+
+    /// Build an `AppState` with a hand-built `applications` list so the
+    /// test can pin specific (device_id, metric_name, configured_type)
+    /// triples without going through `AppConfig`. Snapshot
+    /// `application_count` / `device_count` are derived from
+    /// `applications.len()` / sum-of-`devices.len()` to keep them in
+    /// sync.
+    fn build_state_for_devices(
+        backend: Arc<dyn StorageBackend>,
+        applications: Vec<crate::web::ApplicationSummary>,
+    ) -> Arc<AppState> {
+        let auth = Arc::new(WebAuthState::new_with_fresh_key(
+            "u",
+            "p",
+            "opcgw-test".to_string(),
+        ));
+        let application_count = applications.len();
+        let device_count = applications.iter().map(|a| a.device_count).sum();
+        let snapshot = Arc::new(crate::web::DashboardConfigSnapshot {
+            application_count,
+            device_count,
+            applications,
+        });
+        Arc::new(AppState {
+            auth,
+            backend,
+            dashboard_snapshot: snapshot,
+            start_time: Instant::now(),
+            stale_threshold_secs: DEFAULT_STALE_THRESHOLD_SECS,
+        })
+    }
+
+    fn make_dev(
+        id: &str,
+        name: &str,
+        metrics: &[(&str, OpcMetricTypeConfig)],
+    ) -> crate::web::DeviceSummary {
+        crate::web::DeviceSummary {
+            device_id: id.to_string(),
+            device_name: name.to_string(),
+            metric_names: metrics.iter().map(|(n, _)| n.to_string()).collect(),
+            metric_types: metrics.iter().map(|(_, t)| t.clone()).collect(),
+        }
+    }
+
+    /// Story 9-3 AC#2: success path returns 200 + JSON walks the
+    /// snapshot's application/device order, joining metric_values rows
+    /// against the configured metric names. Asserts: top-level fields
+    /// present, `applications` array shape mirrors the snapshot, the
+    /// seeded metric appears with its real value/timestamp/type.
+    #[tokio::test]
+    async fn api_devices_returns_200_with_application_grouped_grid_when_storage_healthy() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        // Seed one metric: device "d1", metric "temperature", value
+        // 23.5, type Float — matches what the snapshot configures.
+        let now = std::time::SystemTime::now();
+        backend
+            .upsert_metric_value("d1", "temperature", &crate::storage::MetricType::Float, now)
+            .expect("seed metric");
+
+        let app = crate::web::ApplicationSummary {
+            application_id: "app-1".to_string(),
+            application_name: "Sensors".to_string(),
+            device_count: 1,
+            devices: vec![make_dev(
+                "d1",
+                "Device 1",
+                &[("temperature", OpcMetricTypeConfig::Float)],
+            )],
+        };
+        let state = build_state_for_devices(backend, vec![app]);
+
+        let response = api_devices(State(state)).await;
+        let json = response.expect("expected Ok").0;
+
+        // Top-level fields.
+        assert_eq!(json.stale_threshold_secs, 120);
+        assert_eq!(json.bad_threshold_secs, 86_400);
+        assert!(!json.as_of.is_empty(), "as_of must be RFC 3339");
+
+        // Snapshot shape preserved.
+        assert_eq!(json.applications.len(), 1);
+        assert_eq!(json.applications[0].application_id, "app-1");
+        assert_eq!(json.applications[0].devices.len(), 1);
+        assert_eq!(json.applications[0].devices[0].device_id, "d1");
+        assert_eq!(json.applications[0].devices[0].metrics.len(), 1);
+
+        let m = &json.applications[0].devices[0].metrics[0];
+        assert_eq!(m.metric_name, "temperature");
+        assert_eq!(m.data_type, "Float");
+        assert!(m.value.is_some(), "seeded metric must have a value");
+        assert!(m.timestamp.is_some(), "seeded metric must have a timestamp");
+    }
+
+    /// Story 9-3 AC#2: storage failure returns 500 + generic body.
+    /// **Critical NFR7 invariant**: the inner error string must NOT
+    /// leak into the response body.
+    #[tokio::test]
+    async fn api_devices_returns_500_with_generic_body_when_storage_errors() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(FailingBackend);
+        let state = build_state_for_devices(backend, vec![]);
+
+        let response = api_devices(State(state)).await;
+        let err = response.expect_err("expected Err with 500 response");
+        let (parts, body) = err.into_parts();
+        assert_eq!(parts.status, StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(body, 4096)
+            .await
+            .expect("collect body");
+        let text = String::from_utf8(bytes.to_vec()).expect("utf-8 body");
+        assert!(
+            text.contains("internal server error"),
+            "expected generic message, got: {text}"
+        );
+        assert!(
+            !text.contains("synthetic failure"),
+            "inner error must not leak into the response body, got: {text}"
+        );
+    }
+
+    /// Story 9-3 AC#2: a configured metric with no row in
+    /// metric_values renders as `value: null, timestamp: null`. The
+    /// data_type field still carries the configured type so the
+    /// dashboard can display "(Int) — never reported" rather than "(?)".
+    #[tokio::test]
+    async fn api_devices_returns_null_value_for_unpolled_metric() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        // Don't seed any metrics. Configure 1 device with 2 metrics
+        // and assert both come back as null.
+        let app = crate::web::ApplicationSummary {
+            application_id: "app-1".to_string(),
+            application_name: "Sensors".to_string(),
+            device_count: 1,
+            devices: vec![make_dev(
+                "d1",
+                "Device 1",
+                &[
+                    ("temperature", OpcMetricTypeConfig::Float),
+                    ("humidity", OpcMetricTypeConfig::Int),
+                ],
+            )],
+        };
+        let state = build_state_for_devices(backend, vec![app]);
+
+        let response = api_devices(State(state)).await;
+        let json = response.expect("expected Ok").0;
+
+        let metrics = &json.applications[0].devices[0].metrics;
+        assert_eq!(metrics.len(), 2);
+        assert!(metrics[0].value.is_none(), "temperature must be null");
+        assert!(metrics[0].timestamp.is_none());
+        assert_eq!(metrics[0].data_type, "Float", "configured type wins on missing row");
+        assert!(metrics[1].value.is_none(), "humidity must be null");
+        assert!(metrics[1].timestamp.is_none());
+        assert_eq!(metrics[1].data_type, "Int");
+    }
+
+    /// Story 9-3 AC#2: when the storage row's data_type differs from
+    /// the configured type (poller-side type drift), the storage row
+    /// wins so the dashboard surfaces the actual stored type. The
+    /// configured type is the fallback only when no row exists.
+    #[tokio::test]
+    async fn api_devices_uses_storage_data_type_when_present_and_configured_data_type_when_missing(
+    ) {
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        // Seed a Float row for a metric that's CONFIGURED as Int.
+        let now = std::time::SystemTime::now();
+        backend
+            .upsert_metric_value(
+                "d1",
+                "drifted",
+                &crate::storage::MetricType::Float,
+                now,
+            )
+            .expect("seed Float row for an Int-configured metric");
+
+        let app = crate::web::ApplicationSummary {
+            application_id: "app-1".to_string(),
+            application_name: "Sensors".to_string(),
+            device_count: 1,
+            devices: vec![make_dev(
+                "d1",
+                "Device 1",
+                &[
+                    ("drifted", OpcMetricTypeConfig::Int),
+                    ("absent", OpcMetricTypeConfig::Bool),
+                ],
+            )],
+        };
+        let state = build_state_for_devices(backend, vec![app]);
+
+        let response = api_devices(State(state)).await;
+        let json = response.expect("expected Ok").0;
+        let metrics = &json.applications[0].devices[0].metrics;
+        assert_eq!(metrics.len(), 2);
+        // Storage row's Float wins over configured Int.
+        assert_eq!(metrics[0].data_type, "Float", "storage data_type wins when row exists");
+        assert!(metrics[0].value.is_some());
+        // No row for "absent" — configured Bool surfaces.
+        assert_eq!(metrics[1].data_type, "Bool", "configured data_type wins when row is missing");
+        assert!(metrics[1].value.is_none());
     }
 }

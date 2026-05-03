@@ -1258,21 +1258,33 @@ indistinguishable from any other unauthenticated request: same
 `event="web_auth_failed"` audit event.
 
 Story 9-2 ships `GET /api/status` (gateway health summary read from
-the `gateway_status` SQLite table); Stories 9-3 / 9-4 / 9-5 / 9-6 will
-add more endpoints. **All future routes inherit the auth middleware
-automatically** via the `route(...) → fallback_service(...) →
-layer(...)` ordering invariant in `src/web/mod.rs::build_router` — no
-per-route auth wiring is needed (and a contributor adding a new route
-that bypasses the middleware would have to actively work around the
-layer composition).
+the `gateway_status` SQLite table); **Story 9-3 ships `GET /api/devices`**
+(per-device live metric values read from the `metric_values` table,
+joined against the configured `[[application.device]]` topology);
+Stories 9-4 / 9-5 / 9-6 will add more endpoints. **All future routes
+inherit the auth middleware automatically** via the `route(...) →
+fallback_service(...) → layer(...)` ordering invariant in
+`src/web/mod.rs::build_router` — no per-route auth wiring is needed
+(and a contributor adding a new route that bypasses the middleware
+would have to actively work around the layer composition).
 
-Storage-layer failures on `/api/status` (and future read-side
-endpoints) return `500 Internal Server Error` with a generic body
-(`{"error":"internal server error"}`). The inner error is logged via
-`event="api_status_storage_error"` (`warn`) — operators see the
+Storage-layer failures on `/api/status`, `/api/devices` (and future
+read-side endpoints) return `500 Internal Server Error` with a generic
+body (`{"error":"internal server error"}`). The inner error is logged
+via `event="api_status_storage_error"` or
+`event="api_devices_storage_error"` (`warn`) — operators see the
 underlying cause in the gateway log, not in the HTTP response. This
 mirrors the NFR7 invariant that error messages must not leak
 internal state (SQLite paths, table names, etc.) to clients.
+
+The `/api/devices` JSON contract returns server-side `as_of` plus the
+two staleness thresholds (`stale_threshold_secs`, `bad_threshold_secs`)
+so the dashboard JS computes per-row staleness client-side without
+hard-coding either boundary. The `stale_threshold_secs` field reflects
+`[opcua].stale_threshold_seconds` (default 120) — same staleness
+contract Story 5-2 established for the OPC UA path. A configured-but-
+not-yet-polled metric appears with `value: null` + `timestamp: null`
+(rendered as a "missing" badge in the UI) rather than being omitted.
 
 ---
 
