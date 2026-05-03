@@ -1,0 +1,191 @@
+/* opcgw dashboard — Story 9-2 (FR38, FR41).
+ *
+ * Mobile-first responsive layout.
+ * - Default (≤ 600 px viewport): single-column.
+ * - ≥ 601 px viewport: two-column grid.
+ * - System-stack font; no webfonts (no FOUT, no external HTTP).
+ * - prefers-color-scheme: dark for OS-driven dark mode.
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.4;
+  color: #1a1a1a;
+  background: #f7f7f8;
+}
+
+header {
+  padding: 1.25rem 1rem;
+  background: #1f2937;
+  color: #f9fafb;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 1.5rem;
+  letter-spacing: 0.02em;
+}
+
+header .subtitle {
+  margin: 0.2rem 0 0;
+  font-size: 0.9rem;
+  opacity: 0.8;
+}
+
+main {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+  padding: 1rem;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+.tile {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+}
+
+.tile h2 {
+  margin: 0 0 0.5rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #6b7280;
+}
+
+.tile .value {
+  margin: 0;
+  font-size: 1.75rem;
+  font-weight: 700;
+}
+
+.tile .hint {
+  margin: 0.4rem 0 0;
+  font-size: 0.85rem;
+  color: #6b7280;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.badge-available {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.badge-unavailable {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.badge-unknown {
+  background: #e5e7eb;
+  color: #4b5563;
+}
+
+footer {
+  max-width: 960px;
+  margin: 1rem auto 2rem;
+  padding: 0 1rem;
+  font-size: 0.85rem;
+  color: #6b7280;
+}
+
+footer button {
+  margin-left: 0.5rem;
+  padding: 0.3rem 0.75rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #ffffff;
+  cursor: pointer;
+  font-size: inherit;
+}
+
+footer button:hover {
+  background: #f3f4f6;
+}
+
+.error-banner {
+  margin: 0.75rem 0 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.hidden {
+  display: none;
+}
+
+/* Two-column layout above 600 px (FR41 mobile-first responsive). */
+@media (min-width: 601px) {
+  main {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* OS-preference dark mode — no in-page toggle, no preference store. */
+@media (prefers-color-scheme: dark) {
+  html, body {
+    color: #f3f4f6;
+    background: #0f172a;
+  }
+
+  .tile {
+    background: #1e293b;
+    border-color: #334155;
+  }
+
+  .tile h2,
+  .tile .hint,
+  footer {
+    color: #94a3b8;
+  }
+
+  .badge-available {
+    background: #064e3b;
+    color: #a7f3d0;
+  }
+
+  .badge-unavailable {
+    background: #7f1d1d;
+    color: #fecaca;
+  }
+
+  .badge-unknown {
+    background: #334155;
+    color: #cbd5e1;
+  }
+
+  footer button {
+    background: #1e293b;
+    border-color: #475569;
+    color: inherit;
+  }
+
+  footer button:hover {
+    background: #334155;
+  }
+
+  .error-banner {
+    background: #450a0a;
+    border-color: #7f1d1d;
+    color: #fecaca;
+  }
+}

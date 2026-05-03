@@ -4,8 +4,61 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>opcgw — Dashboard</title>
+<link rel="stylesheet" href="/dashboard.css">
 </head>
 <body>
-<p>Story 9-2 will fill this in (gateway status dashboard).</p>
+<header>
+  <h1>opcgw</h1>
+  <p class="subtitle">ChirpStack &rarr; OPC UA gateway</p>
+</header>
+
+<main>
+  <section class="tile" id="tile-chirpstack">
+    <h2>ChirpStack</h2>
+    <p class="value"><span id="chirpstack-status" class="badge badge-unknown">…</span></p>
+    <p class="hint">Most recent poll outcome.</p>
+  </section>
+
+  <section class="tile" id="tile-last-poll">
+    <h2>Last poll</h2>
+    <p class="value"><span id="last-poll-relative">…</span></p>
+    <p class="hint"><time id="last-poll-time" datetime="">—</time></p>
+  </section>
+
+  <section class="tile" id="tile-errors">
+    <h2>Errors (cumulative)</h2>
+    <p class="value"><span id="error-count">…</span></p>
+    <p class="hint">Since gateway startup. Never resets.</p>
+  </section>
+
+  <section class="tile" id="tile-applications">
+    <h2>Applications</h2>
+    <p class="value"><span id="application-count">…</span></p>
+    <p class="hint">Configured in TOML.</p>
+  </section>
+
+  <section class="tile" id="tile-devices">
+    <h2>Devices</h2>
+    <p class="value"><span id="device-count">…</span></p>
+    <p class="hint">Across all applications.</p>
+  </section>
+
+  <section class="tile" id="tile-uptime">
+    <h2>Uptime</h2>
+    <p class="value"><span id="uptime">…</span></p>
+    <p class="hint">Web server uptime.</p>
+  </section>
+</main>
+
+<footer>
+  <p>
+    Last refreshed:
+    <span id="last-refresh">never</span>
+    <button type="button" id="refresh-now">Refresh now</button>
+  </p>
+  <p id="error-banner" class="error-banner hidden" role="alert"></p>
+</footer>
+
+<script src="/dashboard.js"></script>
 </body>
 </html>

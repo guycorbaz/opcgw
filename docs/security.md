@@ -1245,6 +1245,35 @@ at `error`/`off` lose the audit trail entirely (their explicit choice).
   web auth surface is exposed — consider opening a follow-up issue if
   brute-force probing becomes a near-term operator concern.
 
+### API endpoints (Story 9-2+)
+
+All `/api/*` endpoints (`/api/health`, `/api/status`, future
+`/api/applications`, `/api/devices`, `/api/commands`) inherit the
+same `basic_auth_middleware` that gates the static-file routes.
+There is **no anonymous probe surface** — every route, including
+`/api/health`, requires the same `[opcua].user_name` /
+`[opcua].user_password` credentials. An unauthenticated request is
+indistinguishable from any other unauthenticated request: same
+401 Unauthorized + same `WWW-Authenticate` header + same
+`event="web_auth_failed"` audit event.
+
+Story 9-2 ships `GET /api/status` (gateway health summary read from
+the `gateway_status` SQLite table); Stories 9-3 / 9-4 / 9-5 / 9-6 will
+add more endpoints. **All future routes inherit the auth middleware
+automatically** via the `route(...) → fallback_service(...) →
+layer(...)` ordering invariant in `src/web/mod.rs::build_router` — no
+per-route auth wiring is needed (and a contributor adding a new route
+that bypasses the middleware would have to actively work around the
+layer composition).
+
+Storage-layer failures on `/api/status` (and future read-side
+endpoints) return `500 Internal Server Error` with a generic body
+(`{"error":"internal server error"}`). The inner error is logged via
+`event="api_status_storage_error"` (`warn`) — operators see the
+underlying cause in the gateway log, not in the HTTP response. This
+mirrors the NFR7 invariant that error messages must not leak
+internal state (SQLite paths, table names, etc.) to clients.
+
 ---
 
 ## References

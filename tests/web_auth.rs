@@ -50,11 +50,36 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{fmt as tracing_fmt, layer::SubscriberExt, Layer};
 
 use opcgw::utils::{WEB_DEFAULT_AUTH_REALM, WEB_DEFAULT_BIND_ADDRESS};
-use opcgw::web::{auth::WebAuthState, bind as web_bind, build_router, run as web_run};
+use opcgw::storage::memory::InMemoryBackend;
+use opcgw::storage::StorageBackend;
+use opcgw::web::{
+    auth::WebAuthState, bind as web_bind, build_router, run as web_run, AppState,
+    DashboardConfigSnapshot,
+};
 
 const TEST_USER: &str = "opcua-user";
 const TEST_PASSWORD: &str = "test-password-9-1";
 const TEST_REALM: &str = "opcgw-9-1";
+
+/// Story 9-2: build a minimal `AppState` wrapping the supplied
+/// `WebAuthState` plus an empty `InMemoryBackend` and a zero-count
+/// `DashboardConfigSnapshot`. Used by the Story 9-1 auth tests so they
+/// can keep their existing `WebAuthState::new_with_fresh_key` setup
+/// without re-deriving the new `AppState` fields per test.
+fn wrap_in_app_state(auth: Arc<WebAuthState>) -> Arc<AppState> {
+    let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+    let snapshot = Arc::new(DashboardConfigSnapshot {
+        application_count: 0,
+        device_count: 0,
+        applications: vec![],
+    });
+    Arc::new(AppState {
+        auth,
+        backend,
+        dashboard_snapshot: snapshot,
+        start_time: std::time::Instant::now(),
+    })
+}
 
 /// Install a global tracing subscriber that pipes events into
 /// `tracing_test`'s capture buffer. Same shape as
@@ -180,7 +205,8 @@ async fn setup_test_web_server() -> TestWebServer {
         TEST_PASSWORD,
         TEST_REALM.to_string(),
     ));
-    let router = build_router(auth_state, static_tmp.path().to_path_buf());
+    let app_state = wrap_in_app_state(auth_state);
+    let router = build_router(app_state, static_tmp.path().to_path_buf());
     let cancel = CancellationToken::new();
     let cancel_for_run = cancel.clone();
     let realm = TEST_REALM.to_string();
@@ -524,7 +550,8 @@ async fn test_route_wins_over_fallback_service() {
         TEST_PASSWORD,
         TEST_REALM.to_string(),
     ));
-    let router = build_router(auth_state, static_tmp.path().to_path_buf());
+    let app_state = wrap_in_app_state(auth_state);
+    let router = build_router(app_state, static_tmp.path().to_path_buf());
     let cancel = CancellationToken::new();
     let cancel_for_run = cancel.clone();
     let realm = TEST_REALM.to_string();

@@ -31,12 +31,13 @@
 //! existing `CancellationToken`-driven shutdown sequence in
 //! `src/main.rs`.
 
+pub mod api;
 pub mod auth;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -47,8 +48,84 @@ use tokio_util::sync::CancellationToken;
 use tower_http::services::ServeDir;
 use tracing::{info, warn};
 
+use crate::config::AppConfig;
+use crate::storage::StorageBackend;
 use crate::utils::OpcGwError;
 use auth::{basic_auth_middleware, WebAuthState};
+
+/// Per-application summary for the dashboard — application identity
+/// plus how many devices are configured under it. Story 9-3 (live
+/// metric values) will consume the `application_id` to look up
+/// per-device metrics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplicationSummary {
+    pub application_id: String,
+    pub application_name: String,
+    pub device_count: usize,
+}
+
+/// Frozen-at-startup snapshot of the gateway's configured topology.
+///
+/// Built once in `main.rs::main` from `AppConfig.application_list` and
+/// shared via `Arc<AppState>` to every `/api/*` handler. Story 9-7
+/// (configuration hot-reload) will replace the field type with a
+/// `tokio::sync::watch::Receiver<DashboardConfigSnapshot>` so a
+/// hot-reload re-publishes a fresh snapshot without restarting the
+/// web server.
+///
+/// Counts are **configured**, not **live ChirpStack-discovered** — the
+/// dashboard answers "how many devices is the gateway *trying to*
+/// poll", which is the operator-relevant question for "is my config
+/// loaded correctly". A live-discovered count would require querying
+/// ChirpStack's gRPC API on every dashboard refresh.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DashboardConfigSnapshot {
+    pub application_count: usize,
+    pub device_count: usize,
+    pub applications: Vec<ApplicationSummary>,
+}
+
+impl DashboardConfigSnapshot {
+    /// Walk `config.application_list` once and build the summary.
+    /// Pure function; no I/O.
+    pub fn from_config(config: &AppConfig) -> Self {
+        let applications: Vec<ApplicationSummary> = config
+            .application_list
+            .iter()
+            .map(|app| ApplicationSummary {
+                application_id: app.application_id.clone(),
+                application_name: app.application_name.clone(),
+                device_count: app.device_list.len(),
+            })
+            .collect();
+        let application_count = applications.len();
+        let device_count = applications.iter().map(|a| a.device_count).sum();
+        Self {
+            application_count,
+            device_count,
+            applications,
+        }
+    }
+}
+
+/// Shared state for every `/api/*` handler + the auth middleware.
+///
+/// One `Arc<AppState>` per process, constructed in `main.rs::main`
+/// after the OPC UA / poller / command-status / command-timeout
+/// backends. The web server's own `SqliteBackend` lives in the
+/// `backend` field — same per-task ownership pattern as the other
+/// four tokio tasks (Story 4-1 / 5-1 / 8-3 precedent).
+///
+/// `start_time` is captured at `AppState` construction (not at
+/// process start) so `uptime_secs` reflects "web-server uptime" —
+/// close enough to "gateway uptime" because the web server spawns
+/// alongside the other tasks at startup.
+pub struct AppState {
+    pub auth: Arc<WebAuthState>,
+    pub backend: Arc<dyn StorageBackend>,
+    pub dashboard_snapshot: Arc<DashboardConfigSnapshot>,
+    pub start_time: Instant,
+}
 
 /// Inner timeout for the graceful-shutdown drain. After [`run`] sees
 /// `cancel.cancelled()` it gives `axum::serve` up to this many seconds
@@ -108,14 +185,17 @@ const GRACEFUL_SHUTDOWN_BUDGET_SECS: u64 = 5;
 ///   `WorkingDirectory` (systemd) / `WORKDIR` (Docker) / the cwd of
 ///   the spawning shell. See `docs/security.md § Web UI authentication
 ///   § Deployment requirements`.
-pub fn build_router(auth_state: Arc<WebAuthState>, static_dir: PathBuf) -> Router {
+pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
+    let auth_state = app_state.auth.clone();
     Router::new()
         .route("/api/health", get(api_health))
+        .route("/api/status", get(api::api_status))
         .fallback_service(ServeDir::new(static_dir))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             basic_auth_middleware,
         ))
+        .with_state(app_state)
 }
 
 /// Trivial health-check endpoint. Returns `{"status":"ok"}` with a
@@ -264,20 +344,151 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{
+        AppConfig, ChirpStackApplications, ChirpstackDevice, ChirpstackPollerConfig,
+        CommandValidationConfig, Global, OpcMetricTypeConfig, OpcUaConfig, ReadMetric,
+        StorageConfig, WebConfig,
+    };
+    use crate::storage::memory::InMemoryBackend;
     use crate::web::auth::WebAuthState;
 
-    /// `build_router` returns a `Router` shape that compiles cleanly.
-    /// The actual request-routing behaviour is exercised by the
-    /// `tests/web_auth.rs` integration tests; this is a smoke test
+    /// Minimal valid `AppConfig` for the dashboard-snapshot unit tests.
+    /// Mirrors the explicit-field pattern in
+    /// `src/web/auth.rs::tests::web_auth_test_config` because `Global`,
+    /// `ChirpstackPollerConfig`, and `OpcUaConfig` do not derive Default.
+    fn snapshot_test_config(applications: Vec<ChirpStackApplications>) -> AppConfig {
+        AppConfig {
+            global: Global {
+                debug: true,
+                prune_interval_minutes: 60,
+                command_delivery_poll_interval_secs: 5,
+                command_delivery_timeout_secs: 60,
+                command_timeout_check_interval_secs: 10,
+                history_retention_days: 7,
+            },
+            logging: None,
+            chirpstack: ChirpstackPollerConfig {
+                server_address: "http://127.0.0.1:18080".to_string(),
+                api_token: "t".to_string(),
+                tenant_id: "00000000-0000-0000-0000-000000000000".to_string(),
+                polling_frequency: 10,
+                retry: 1,
+                delay: 1,
+                list_page_size: 100,
+            },
+            opcua: OpcUaConfig {
+                application_name: "test".to_string(),
+                application_uri: "urn:test".to_string(),
+                product_uri: "urn:test:product".to_string(),
+                diagnostics_enabled: false,
+                hello_timeout: Some(5),
+                host_ip_address: Some("127.0.0.1".to_string()),
+                host_port: Some(0),
+                create_sample_keypair: true,
+                certificate_path: "own/cert.der".to_string(),
+                private_key_path: "private/private.pem".to_string(),
+                trust_client_cert: false,
+                check_cert_time: false,
+                pki_dir: "./pki".to_string(),
+                user_name: "opcua-user".to_string(),
+                user_password: "secret".to_string(),
+                stale_threshold_seconds: Some(120),
+                max_connections: None,
+                max_subscriptions_per_session: None,
+                max_monitored_items_per_sub: None,
+                max_message_size: None,
+                max_chunk_count: None,
+                max_history_data_results_per_node: None,
+            },
+            storage: StorageConfig::default(),
+            command_validation: CommandValidationConfig::default(),
+            web: WebConfig::default(),
+            application_list: applications,
+        }
+    }
+
+    fn make_app(name: &str, id: &str, devices: usize) -> ChirpStackApplications {
+        ChirpStackApplications {
+            application_name: name.to_string(),
+            application_id: id.to_string(),
+            device_list: (0..devices)
+                .map(|i| ChirpstackDevice {
+                    device_id: format!("dev-{name}-{i}"),
+                    device_name: format!("Device {i}"),
+                    read_metric_list: vec![ReadMetric {
+                        metric_name: "temperature".to_string(),
+                        chirpstack_metric_name: "temp".to_string(),
+                        metric_type: OpcMetricTypeConfig::Float,
+                        metric_unit: None,
+                    }],
+                    device_command_list: None,
+                })
+                .collect(),
+        }
+    }
+
+    /// Story 9-2 AC#1 — frozen-at-startup snapshot walks the
+    /// application list once and produces correct totals.
+    #[test]
+    fn dashboard_snapshot_from_config_walks_application_list_once() {
+        let config = snapshot_test_config(vec![
+            make_app("Sensors", "550e8400-e29b-41d4-a716-446655440001", 3),
+            make_app("Valves", "550e8400-e29b-41d4-a716-446655440002", 3),
+        ]);
+        let snapshot = DashboardConfigSnapshot::from_config(&config);
+        assert_eq!(snapshot.application_count, 2);
+        assert_eq!(snapshot.device_count, 6);
+        assert_eq!(snapshot.applications.len(), 2);
+        assert!(snapshot.applications.iter().all(|a| a.device_count == 3));
+    }
+
+    /// Story 9-2 AC#1 — empty application list produces all-zeros.
+    #[test]
+    fn dashboard_snapshot_from_config_handles_empty_application_list() {
+        let snapshot = DashboardConfigSnapshot::from_config(&snapshot_test_config(vec![]));
+        assert_eq!(snapshot.application_count, 0);
+        assert_eq!(snapshot.device_count, 0);
+        assert!(snapshot.applications.is_empty());
+    }
+
+    /// Story 9-2 AC#1 — application with zero devices contributes 0
+    /// to `device_count` and is preserved as a 0-count summary entry.
+    #[test]
+    fn dashboard_snapshot_from_config_handles_application_with_zero_devices() {
+        let config = snapshot_test_config(vec![
+            make_app("EmptyApp", "id-1", 0),
+            make_app("OneDev", "id-2", 1),
+        ]);
+        let snapshot = DashboardConfigSnapshot::from_config(&config);
+        assert_eq!(snapshot.application_count, 2);
+        assert_eq!(snapshot.device_count, 1);
+        assert_eq!(snapshot.applications[0].device_count, 0);
+        assert_eq!(snapshot.applications[1].device_count, 1);
+    }
+
+    /// `build_router` returns a `Router` shape that compiles cleanly
+    /// under the new `Arc<AppState>` shape. The actual request-routing
+    /// behaviour is exercised by the `tests/web_auth.rs` and
+    /// `tests/web_dashboard.rs` integration tests; this is a smoke test
     /// that the builder type-checks under the current axum version.
     #[test]
     fn build_router_smoke() {
-        let state = Arc::new(WebAuthState::new_with_fresh_key(
+        let auth = Arc::new(WebAuthState::new_with_fresh_key(
             "opcua-user",
             "secret",
             "opcgw-test".to_string(),
         ));
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let snapshot = Arc::new(DashboardConfigSnapshot::from_config(&snapshot_test_config(
+            vec![],
+        )));
+        let app_state = Arc::new(AppState {
+            auth,
+            backend,
+            dashboard_snapshot: snapshot,
+            start_time: Instant::now(),
+        });
         let dir = PathBuf::from("static");
-        let _router: Router = build_router(state, dir);
+        let _router: Router = build_router(app_state, dir);
     }
 }

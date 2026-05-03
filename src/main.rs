@@ -755,6 +755,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             realm.clone(),
         )?);
 
+        // Story 9-2 AC#1: dedicated SqliteBackend for the web server,
+        // mirroring the per-task pattern at lines 614, 640, 673, 690.
+        // Each async task owns its own connection; the shared pool's
+        // WAL mode permits concurrent readers + a single writer.
+        let web_backend: std::sync::Arc<dyn crate::storage::StorageBackend> =
+            match crate::storage::SqliteBackend::with_pool(pool.clone()) {
+                Ok(backend) => std::sync::Arc::new(backend),
+                Err(e) => {
+                    error!(error = %e, "Failed to create SQLite backend for embedded web server — aborting startup");
+                    return Err(e.into());
+                }
+            };
+
+        // Story 9-2 AC#1: frozen-at-startup snapshot of the configured
+        // application + device topology. Story 9-7 will refresh this on
+        // configuration hot-reload via tokio::sync::watch.
+        let dashboard_snapshot = std::sync::Arc::new(
+            web::DashboardConfigSnapshot::from_config(&application_config),
+        );
+
+        // Story 9-2 AC#1: composite AppState — auth + backend + snapshot
+        // + start_time. One Arc<AppState> per process, shared across
+        // every /api/* handler and the auth middleware (extracted via
+        // `app_state.auth.clone()` in build_router).
+        let app_state = std::sync::Arc::new(web::AppState {
+            auth: auth_state,
+            backend: web_backend,
+            dashboard_snapshot,
+            start_time: std::time::Instant::now(),
+        });
+
         // Bind synchronously; fail-fast on bind failure.
         let listener = match web::bind(addr).await {
             Ok(l) => l,
@@ -766,7 +797,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Build the router and spawn the serve task on the bound listener.
         let static_dir = std::path::PathBuf::from("static");
-        let router = web::build_router(auth_state, static_dir);
+        let router = web::build_router(app_state, static_dir);
         let cancel_web = cancel_token.clone();
         Some(tokio::spawn(async move {
             if let Err(e) = web::run(listener, router, &realm, cancel_web).await {
