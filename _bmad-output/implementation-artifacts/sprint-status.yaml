@@ -132,6 +132,16 @@ development_status:
   # after 9-1/9-2/9-3 (those don't touch OPC UA address space) and before
   # 9-7 (hot-reload depends on the spike's findings about address-space
   # mutation under live subscriptions).
+  #
+  # PRODUCTION-DEPLOYMENT BLOCKER (Story 9-3 review iter-1, 2026-05-03):
+  # Issue #108 — MetricType is payload-less, every metric_values row has
+  # value == data_type string ("Float" / "Int" / etc.) instead of the
+  # actual measurement. Affects 4 epics (2, 5, 8, 9-3). opcgw has never
+  # actually persisted real metric values. Fix is an Epic-1-scale storage
+  # trait refactor (proposed: "Epic A — Storage Payload Migration").
+  # Epic 9 retrospective is BLOCKED on #108: any "lessons learned" pass
+  # over Epic 9 needs to acknowledge that Stories 9-2 + 9-3 are
+  # surface-correct but data-incorrect until #108 lands.
   epic-9: in-progress
   9-0-async-opcua-runtime-address-space-mutation-spike: backlog
   9-1-axum-web-server-and-basic-authentication: done
@@ -142,7 +152,7 @@ development_status:
   9-6-command-crud-via-web-ui: backlog
   9-7-configuration-hot-reload: backlog  # depends on 9-0 spike findings
   9-8-dynamic-opc-ua-address-space-mutation: backlog  # depends on 9-0 spike findings
-  epic-9-retrospective: optional
+  epic-9-retrospective: optional  # BLOCKED on issue #108 (storage payload-less MetricType — production-deployment blocker)
 
 ---
 

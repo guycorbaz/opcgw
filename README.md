@@ -187,6 +187,14 @@ layout + dark mode as the dashboard. JSON contract at `GET /api/devices`.
 
 ## Planning
 
+> ### ⚠️ Production-deployment blocker
+>
+> **GitHub issue [#108](https://github.com/guycorbaz/opcgw/issues/108)** — surfaced during Story 9-3 code review (2026-05-03) — flags a pre-existing project-wide storage bug: the `MetricType` enum is payload-less, so every row in `metric_values` has `value == data_type` (literally the string `"Float"` / `"Int"` / `"Bool"` / `"String"`) instead of the actual measurement. **This means opcgw has never persisted real metric values.** Affects 4 epics (2, 5, 8, 9-3); SCADA clients see literal type-name strings via OPC UA, dashboards show `"Float"` instead of `23.5`, HistoryRead returns type-strings.
+>
+> **Fix is an Epic-1-scale storage-trait refactor** (provisionally tracked as "Epic A — Storage Payload Migration"). Until #108 lands, **opcgw is suitable for device-presence monitoring only** ("is the sensor reporting?") — not for actual measurement collection.
+>
+> Epic 9 retrospective is blocked on #108. See `_bmad-output/implementation-artifacts/sprint-status.yaml` for the formal annotation.
+
 **Current Version:** 2.0.0 — last updated 2026-05-03 (Story 9-3 done after iter-1 + iter-2 code review; live metric values page at /metrics.html with per-row staleness badges; 2 KF GitHub issues opened during review — #107 duplicate-metric_name validation gap, #108 payload-less MetricType which BLOCKS production deployment until storage trait refactor lands).
 
 The roadmap is tracked in [`_bmad-output/implementation-artifacts/sprint-status.yaml`](./_bmad-output/implementation-artifacts/sprint-status.yaml). The table below mirrors the current state of every epic; story-level detail lives in the sprint status file and the per-story documents under `_bmad-output/implementation-artifacts/`.
