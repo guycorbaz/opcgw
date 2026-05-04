@@ -57,6 +57,64 @@ static GATEWAY_STATUS_INIT_LOGGED: std::sync::atomic::AtomicBool =
 /// value (`Option<V>`), preserving the prior `Mutex<HashMap>` semantics.
 type StatusCache = Arc<DashMap<(String, String), opcua::types::StatusCode>>;
 
+/// Lifecycle handles produced by [`OpcUa::build`] and consumed by
+/// [`OpcUa::run_handles`] (Story 9-0 AC#5 Shape B).
+///
+/// Splitting `OpcUa::run` into `build` + `run_handles` exposes the post-build
+/// state (server, server handle, node-manager Arc) to callers between the
+/// two phases. The Story 9-0 spike test uses this seam to mutate the address
+/// space at runtime under a live subscription; production hot-reload (Story
+/// 9-7) will reuse the same seam to land mutations from a `tokio::sync::watch`
+/// channel listener.
+///
+/// **Drop semantics:** the field declaration order is significant. `Drop`
+/// runs top-to-bottom. The Server is dropped first (releases the listening
+/// socket); then the `ServerHandle` (a clonable token); then the manager
+/// Arc; then the `cancel_token` (cooperative-shutdown signal); then the
+/// gauge `JoinHandle` — its `Drop` detaches the task, which is acceptable
+/// because the task observes `cancel_token` and will exit naturally; finally
+/// the [`MonitorStateGuard`](crate::opc_ua_session_monitor::MonitorStateGuard)
+/// clears the shared session-monitor static so a subsequent `OpcUa::build`
+/// can re-initialise it.
+///
+/// **Early-drop scenario** (e.g. a spike test that builds then drops without
+/// calling `run_handles`): each field's `Drop` runs in order; the gauge
+/// task may not be reaped synchronously (Drop on `JoinHandle` is detach,
+/// not abort+await), but `cancel_token.cancel()` *is* called by `Drop` on
+/// `tokio_util::sync::CancellationToken` — wait no, `CancellationToken` has
+/// no `Drop` that fires `cancel`; the token simply releases. To support
+/// clean early-drop the spike test must either (a) call
+/// `cancel_token.cancel()` explicitly before dropping `RunHandles`, or
+/// (b) call `run_handles` (which fires cancel internally). We keep the
+/// struct's `Drop` impl-less to avoid cross-field Drop-order surprises;
+/// the spike test's `DynTestServer` wrapper handles cleanup explicitly.
+pub struct RunHandles {
+    /// The async-opcua `Server` instance, ready to be driven by
+    /// `server.run().await`. Consumed by `run_handles`.
+    pub server: Server,
+    /// Clonable handle to the running server. Used to retrieve namespace
+    /// metadata and node managers from outside the build path. Cheap to
+    /// clone (internally `Arc`-backed).
+    pub server_handle: ServerHandle,
+    /// The wrapped `InMemoryNodeManager<OpcgwHistoryNodeManagerImpl>` whose
+    /// `address_space()` accessor exposes the runtime-mutable address space
+    /// (Story 9-0 spike target). Story 9-7 / 9-8 will use the same Arc
+    /// from production hot-reload code.
+    pub manager: Arc<OpcgwHistoryNodeManager>,
+    /// Cancellation token threaded through to all spawned tasks. Cloned
+    /// from `OpcUa.cancel_token` during `build`. `run_handles` calls
+    /// `cancel()` on this after `server.run()` resolves to wind down the
+    /// gauge task.
+    pub(crate) cancel_token: tokio_util::sync::CancellationToken,
+    /// Join-handle for the periodic session-count gauge task spawned by
+    /// `build`. Reaped by `run_handles` (cancel + abort + await).
+    pub(crate) gauge_handle: tokio::task::JoinHandle<()>,
+    /// RAII guard that clears the shared session-monitor static on drop.
+    /// Held in `RunHandles` so the static is cleared on either
+    /// `run_handles` completion *or* early `RunHandles` drop.
+    pub(crate) state_guard: crate::opc_ua_session_monitor::MonitorStateGuard,
+}
+
 /// Structure for storing OpcUa server parameters
 pub struct OpcUa {
     /// Configuration for the OPC UA server
@@ -182,7 +240,9 @@ impl OpcUa {
     ///     Err(e) => eprintln!("Failed to create server: {}", e),
     /// }
     /// ```
-    fn create_server(&mut self) -> Result<(Server, ServerHandle), OpcGwError> {
+    fn create_server(
+        &mut self,
+    ) -> Result<(Server, ServerHandle, Arc<OpcgwHistoryNodeManager>), OpcGwError> {
         let discovery_url = "opc.tcp://".to_owned()
             + &self.host_ip_address
             + ":"
@@ -270,9 +330,14 @@ impl OpcUa {
             })?;
         debug!(namespace_id = %ns, "Creating namespace");
 
-        self.add_nodes(ns, node_manager);
+        // Story 9-0 (AC#5 Shape B): clone the manager Arc before passing
+        // to `add_nodes` so we can return it to the caller. `add_nodes`
+        // takes the Arc by value; the clone is cheap (Arc::clone =
+        // refcount bump) and lets the build path expose the manager to
+        // production-future hot-reload code (Story 9-7).
+        self.add_nodes(ns, node_manager.clone());
 
-        Ok((server, handle))
+        Ok((server, handle, node_manager))
     }
 
     /// Configures network settings for the OPC UA server.
@@ -670,14 +735,34 @@ impl OpcUa {
     ///     eprintln!("Server failed: {}", e);
     /// }
     /// ```
-    pub async fn run(mut self) -> Result<(), OpcGwError> {
-        trace!("Running OPC UA server");
+    pub async fn run(self) -> Result<(), OpcGwError> {
+        let handles = self.build().await?;
+        Self::run_handles(handles).await
+    }
+
+    /// Build phase of the OPC UA server lifecycle (Story 9-0 AC#5 Shape B).
+    ///
+    /// Runs `create_server`, configures the session-count monitor static
+    /// state, emits the one-shot `opcua_limits_configured` diagnostic event,
+    /// and spawns the gauge task. Returns `RunHandles` carrying the server,
+    /// server handle, node-manager Arc, and gauge join-handle so callers can
+    /// either drive the server to completion via `run_handles` or perform
+    /// in-process operations (e.g. runtime address-space mutation as
+    /// exercised by the Story 9-0 spike tests) before handing back to
+    /// `run_handles`.
+    ///
+    /// **Production-future intent (Story 9-7 hot-reload):** the watch-channel
+    /// listener task obtains its `Arc<OpcgwHistoryNodeManager>` clone from
+    /// `RunHandles.manager`, runs alongside `run_handles`, and applies
+    /// mutations as configuration changes arrive.
+    pub async fn build(mut self) -> Result<RunHandles, OpcGwError> {
+        trace!("Building OPC UA server");
 
         // Error management for server creation
-        let (server, handle) = match self.create_server() {
-            Ok(pair) => {
+        let (server, server_handle, manager) = match self.create_server() {
+            Ok(triple) => {
                 debug!("OPC UA server built");
-                pair
+                triple
             }
             Err(e) => {
                 error!(error = %e, "OPC UA server error");
@@ -694,10 +779,17 @@ impl OpcUa {
         // `MonitorStateGuard` ensures the static state is cleared even
         // if `server.run()` panics (code-review feedback 2026-04-29 —
         // panic-safety guarantee that lifts the "stale handle in static
-        // OnceLock" hazard).
+        // OnceLock" hazard). Story 9-0 Shape B keeps the guard as a
+        // field of `RunHandles` so its Drop fires on either
+        // `run_handles` completion *or* early `RunHandles` drop (spike
+        // test scenarios that mutate the address space then drop the
+        // handles without entering `server.run()`).
         let max_sessions = self.max_sessions();
-        crate::opc_ua_session_monitor::set_session_monitor_state(handle.clone(), max_sessions);
-        let _state_guard = crate::opc_ua_session_monitor::MonitorStateGuard;
+        crate::opc_ua_session_monitor::set_session_monitor_state(
+            server_handle.clone(),
+            max_sessions,
+        );
+        let state_guard = crate::opc_ua_session_monitor::MonitorStateGuard;
 
         // Story 8-2 (AC#2, FR21): one-shot diagnostic emit of the
         // resolved limits so operators can verify the configuration on
@@ -723,12 +815,38 @@ impl OpcUa {
 
         let gauge_handle = tokio::spawn(
             crate::opc_ua_session_monitor::SessionMonitor::new(
-                handle.clone(),
+                server_handle.clone(),
                 max_sessions,
                 self.cancel_token.clone(),
             )
             .run_gauge_loop(),
         );
+
+        Ok(RunHandles {
+            server,
+            server_handle,
+            manager,
+            cancel_token: self.cancel_token,
+            gauge_handle,
+            state_guard,
+        })
+    }
+
+    /// Run phase of the OPC UA server lifecycle (Story 9-0 AC#5 Shape B).
+    ///
+    /// Awaits `server.run()`, reaps the gauge task, and lets the
+    /// `MonitorStateGuard` clear the shared session-monitor static via its
+    /// `Drop`. Equivalent to the post-build steps of the pre-9-0 monolithic
+    /// `run` body. Consumes `RunHandles`.
+    pub async fn run_handles(handles: RunHandles) -> Result<(), OpcGwError> {
+        let RunHandles {
+            server,
+            server_handle: _server_handle,
+            manager: _manager,
+            cancel_token,
+            gauge_handle,
+            state_guard,
+        } = handles;
 
         let run_result = match server.run().await {
             Ok(_) => {
@@ -745,7 +863,7 @@ impl OpcUa {
         // the server task across Ctrl+C. Fire the cancel token first
         // so the gauge has a chance to exit naturally; `abort` + the
         // post-await JoinError check are the belt-and-braces.
-        self.cancel_token.cancel();
+        cancel_token.cancel();
         gauge_handle.abort();
         match gauge_handle.await {
             Ok(()) => {}
@@ -754,8 +872,9 @@ impl OpcUa {
                 error!(error = ?e, "Session-count gauge task ended abnormally");
             }
         }
-        // _state_guard's Drop clears the shared MonitorState (including
+        // state_guard's Drop clears the shared MonitorState (including
         // on the panic-unwind path).
+        drop(state_guard);
 
         run_result
     }
