@@ -79,15 +79,22 @@ type StatusCache = Arc<DashMap<(String, String), opcua::types::StatusCode>>;
 ///
 /// **Early-drop scenario** (e.g. a spike test that builds then drops without
 /// calling `run_handles`): each field's `Drop` runs in order; the gauge
-/// task may not be reaped synchronously (Drop on `JoinHandle` is detach,
-/// not abort+await), but `cancel_token.cancel()` *is* called by `Drop` on
-/// `tokio_util::sync::CancellationToken` — wait no, `CancellationToken` has
-/// no `Drop` that fires `cancel`; the token simply releases. To support
-/// clean early-drop the spike test must either (a) call
-/// `cancel_token.cancel()` explicitly before dropping `RunHandles`, or
-/// (b) call `run_handles` (which fires cancel internally). We keep the
-/// struct's `Drop` impl-less to avoid cross-field Drop-order surprises;
-/// the spike test's `DynTestServer` wrapper handles cleanup explicitly.
+/// task is not reaped synchronously (`JoinHandle::drop` detaches rather than
+/// abort+await), and `tokio_util::sync::CancellationToken` has no `Drop`
+/// that fires `cancel` — the token simply releases. To support
+/// clean early-drop the consumer must either (a) call
+/// `cancel_token.cancel()` explicitly before dropping `RunHandles`
+/// (the spike test does this via `DynTestServer::drop` — same
+/// pattern Story 9-7 / 9-8 production code will use), or (b) call
+/// `run_handles` (which fires cancel internally). We keep the
+/// struct's `Drop` impl-less because `run_handles` consumes
+/// `server: Server` by value via destructuring, and a custom
+/// `Drop` would forbid that move (E0509 — cannot move out of a
+/// type implementing `Drop`). The cleanup-on-early-drop hazard is
+/// tracked at GitHub issue #110 (Story 9-0 KF — code review iter-1,
+/// 2026-05-05); Story 9-7 will revisit when designing the hot-reload
+/// listener's lifecycle. At present every consumer has a separate
+/// cancel-fire path so the gauge task always observes cancel.
 pub struct RunHandles {
     /// The async-opcua `Server` instance, ready to be driven by
     /// `server.run().await`. Consumed by `run_handles`.

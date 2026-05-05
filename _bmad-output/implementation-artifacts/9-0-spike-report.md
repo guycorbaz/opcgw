@@ -93,6 +93,8 @@ The notification's value field equals the sentinel `Variant::Float(42.0)` exactl
 
 **Implication:** for hot-reload (Story 9-7), a new device added via the watch channel can call `address_space.write().add_variables(...)` then `add_read_callback(...)`, and SCADA clients that subscribe to the new node afterwards will receive notifications. **No additional infrastructure needed for the add path.**
 
+**Note on the AC#1 baseline-stream check (post-review addendum, 2026-05-05):** the original AC#1 specified an assert that the baseline `Temperature` subscription "continues to receive notifications uninterrupted ... no gap longer than 2 s bracketing the add". The implementation demotes this to an informational `eprintln!` drain because a static-value baseline subscription cannot emit follow-up notifications under OPC UA's value-change model — asserting on a gap would false-fail at the first sampler tick after warm-up. The substitution was ratified during `bmad-code-review` iter-1 (P9). The Q1 load-bearing check (Humidity sentinel arrival) is intact and asserts strictly.
+
 ---
 
 ## 5. Q2 remove path
@@ -120,6 +122,8 @@ The client's view: the last `DataValue` it received before the delete remains th
 **One-line recommendation for Story 9-8:** before calling `address_space.write().delete(...)`, the caller MUST emit a final `DataValue` with `status = Some(StatusCode::BadNodeIdUnknown)` (or equivalent) for the doomed NodeId via `manager.set_attributes(...)`, so subscribed clients see an explicit transition. Then `delete` can run and the client's monitored item resolves correctly on the next publish (no more samples; the client knows the node is gone).
 
 Alternative: 9-8 documents the silence-on-delete behaviour as known-acceptable and relies on operators to reconnect SCADA clients after each device removal. **Not recommended** — silent stream stalls are an operations nightmare.
+
+**Note on the AC#2 baseline-stream check + warm-up assert (post-review addendum, 2026-05-05):** the original AC#2 specified an assert that the baseline `Temperature` subscription continues to receive notifications uninterrupted during the delete operation. The implementation demotes this to an informational `eprintln!` drain for the same value-change-semantics reason described in § 4. The substitution was ratified during `bmad-code-review` iter-1 (P9). Separately, the Q2 setup's humidity warm-up notification is now asserted to carry sentinel `Variant::Float(42.0)` (P6) — this confirms the read callback was actually invoked before the delete, ruling out a degenerate "frozen-last-good" verdict on a never-active subscription.
 
 ---
 
@@ -151,15 +155,22 @@ Sampler interval is `min_sampling_interval_ms = 100` (default). Lock-hold is **~
 
 **Note on the simplified Q3 verdict:** the original AC#3 specified a "sibling stream max-gap" measurement, but the OPC UA subscription model only emits notifications on **value changes**. With static-value read callbacks, sibling subscriptions naturally produce only their first notification — measuring inter-publish gaps records sampler-interval noise, not write-lock contention. The revised verdict (lock-hold < 100 ms + bulk-added node subscribable) measures the real concern: "does bulk mutation stall sampling for unaffected nodes". At microsecond hold times, the answer is empirically no.
 
+**Post-review ratification (2026-05-05):** the AC#3 measurement substitution was ratified by Guy during `bmad-code-review` iter-1 (P11). Lock-hold-duration is mathematically conclusive: if the lock is shorter than one sampler tick (`min_sampling_interval_ms = 100 ms`), the sampler cannot be starved by the write — and 117.604 µs is ~850× shorter than that. Implementing the original max-gap measurement would have required ~50 LOC of additional infrastructure (dynamic value-changing callbacks via a periodic `set_attributes` task) beyond what the spec authorised. The lesson for Story 9-7 / 9-8 spec authors: assertions that depend on subscription-stream continuity require dynamic value-changing callbacks; sentinel-value read callbacks alone produce only a first notification per monitored item. Separately, the `lock_hold_duration < Duration::from_secs(1)` hard assert was removed during P4 because wall-clock measurements based on `Instant::now()` are CI flake sources under loaded containers; the verdict tier classification remains in the eprintln output for spike-report capture.
+
 **Implication:** for hot-reload (Story 9-7), bulk reload of dozens of devices is safe under a single write-lock acquisition. No mutation chunking needed at typical scales (100-1000 nodes per reload).
 
 ---
 
-## 7. Throughput measurement (out of scope — see Story 8-1)
+## 7. Pattern reuse
 
-Not measured. Story 8-1 carries the throughput-measurement responsibility (issue #95, `--load-probe` 5-min run). The 9-0 spike is binary-yes/no on the three questions, not quantitative throughput.
+The **library-wrap-not-fork pattern** (`epics.md:796`) still applies for runtime address-space mutation. Concretely:
 
-If 9-7 hot-reload exercises mutation under sustained subscription load, that load profile should be re-run against issue #95's probe — not 9-0's spike.
+- **No new wrap is required.** The existing public API of `InMemoryNodeManager` (`address_space() -> &Arc<RwLock<AddressSpace>>` + `set_attributes` / `set_values` for notification-emission) is sufficient for opcgw's hot-reload + dynamic-mutation needs. `OpcgwHistoryNodeManager` (Story 8-3 wrap) is the only opcgw-side wrap; nothing about runtime mutation requires extending it.
+- **The composition shape is identical to startup.** `OpcUa::add_nodes` (the canonical startup add path at `src/opc_ua.rs:801-957`) acquires `manager.address_space().write()` and calls `add_folder` / `add_variables` plus `manager.inner().simple().add_read_callback(...)`. The runtime path (Story 9-7's hot-reload listener, Story 9-8's `apply_config_diff` consumer) calls the **same** sequence on the **same** lock — no new lock discipline, no new ordering invariant.
+- **Single targeted production-code change in 9-0.** AC#5's Shape B refactor (`OpcUa::run` split into `build` + `run_handles` + a backward-compat wrapper) is the only production code introduced. It is forward infrastructure for 9-7's watch-channel listener task, not a wrap or fork. Three preceding epics in a row (Story 7-2 `OpcgwAuthManager`, Story 7-3 `AtLimitAcceptLayer`, Story 8-3 `OpcgwHistoryNodeManager`) all chose composition + targeted override over forking; Story 9-0 confirms the same applies to dynamic mutation.
+- **Stale read-callback closure removal is the one place the wrap pattern *may* extend.** See § 8: if 9-8 needs a `remove_read_callback` API and async-opcua does not expose one, extending `OpcgwHistoryNodeManager` with a wrap method that mutates the inner `SimpleNodeManagerImpl`'s registry is the same shape Story 8-3 used for `history_read_raw_modified`.
+
+**Throughput measurement out of scope.** Story 8-1 carries throughput-measurement responsibility (issue #95, `--load-probe` 5-min run). The 9-0 spike is binary-yes/no on the three questions, not quantitative throughput. If 9-7 hot-reload exercises mutation under sustained subscription load, re-run that load profile against issue #95's probe — not 9-0's spike.
 
 ---
 
@@ -175,7 +186,7 @@ When the spike's Q2 test deletes a variable from the address space, the closure 
 
 **Alternative mitigation:** periodic restart of the OPC UA server task (a "GC pause" every N hours) if the leak rate is operationally significant. **Not recommended** — interrupts subscriptions; defeats the hot-reload UX.
 
-**Story 9-0 does NOT decide between these mitigations.** Logged in `deferred-work.md` under "Deferred from: Story 9-0" for 9-7/9-8 to inherit.
+**Story 9-0 does NOT decide between these mitigations.** The leak is logged in `_bmad-output/implementation-artifacts/deferred-work.md` under the heading **"Deferred from: Story 9-0 (2026-05-05)"** for Story 9-7 / 9-8 to inherit. (The entry was added during `bmad-code-review` iter-1 (P2) — the original spike report claimed the entry but the file edit had been forgotten.)
 
 ---
 
