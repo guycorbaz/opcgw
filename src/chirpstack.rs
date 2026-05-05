@@ -241,6 +241,25 @@ pub(crate) fn format_last_successful_poll(
         .unwrap_or_else(|| "null".to_string())
 }
 
+/// (Story 4-4) Outcome of a single ChirpStack outage recovery loop run.
+///
+/// Returned by `ChirpstackPoller::recover_from_chirpstack_outage` so the
+/// outer `poll_metrics` cycle can branch on whether the loop restored
+/// connectivity (`Recovered`) or exhausted its retry budget (`Exhausted`).
+/// Either way the poller's `run()` outer loop continues — `Exhausted` does
+/// NOT terminate the poller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RecoveryOutcome {
+    /// TCP probe succeeded within the configured retry budget.
+    Recovered { attempts_used: u32 },
+    /// Retry budget exhausted (or cancellation token fired) without
+    /// restoring connectivity.
+    Exhausted {
+        attempts_used: u32,
+        last_error: String,
+    },
+}
+
 /// (Story 6-3 AC#5 — iter-3 review pending #1 helper extraction) Emit the
 /// `chirpstack_outage` warn iff this is the first connectivity failure of
 /// the cycle. Mutates `outage_already_logged` to `true` so subsequent
@@ -495,9 +514,20 @@ impl ChirpstackPoller {
             "gRPC channel connect attempt"
         );
         let connect_start = Instant::now();
+        // Story 4-4 (resolves deferred-work.md:86 6-3 carry-forward):
+        // wrap `builder.connect()` with a 5s timeout. Smaller than NFR17's
+        // 30s SLA so a single channel rebuild doesn't blow the recovery
+        // budget; larger than the TCP probe's 1s timeout so transient
+        // slow-but-reachable servers don't get falsely flagged.
+        const CHANNEL_CONNECT_TIMEOUT_SECS: u64 = 5;
         let channel = match Channel::from_shared(endpoint.clone()) {
-            Ok(builder) => match builder.connect().await {
-                Ok(channel) => {
+            Ok(builder) => match tokio::time::timeout(
+                Duration::from_secs(CHANNEL_CONNECT_TIMEOUT_SECS),
+                builder.connect(),
+            )
+            .await
+            {
+                Ok(Ok(channel)) => {
                     let latency_ms = connect_start.elapsed().as_millis() as u64;
                     info!(
                         operation = "chirpstack_connect",
@@ -508,7 +538,7 @@ impl ChirpstackPoller {
                     );
                     channel
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     warn!(
                         operation = "chirpstack_connect",
                         attempt = 1u32,
@@ -521,6 +551,19 @@ impl ChirpstackPoller {
                     return Err(OpcGwError::Configuration(format!(
                         "Failed to intercept channel: {}",
                         e
+                    )));
+                }
+                Err(_elapsed) => {
+                    warn!(
+                        operation = "chirpstack_connect",
+                        attempt = 1u32,
+                        timeout_secs = CHANNEL_CONNECT_TIMEOUT_SECS,
+                        success = false,
+                        "gRPC channel connect timed out"
+                    );
+                    return Err(OpcGwError::Configuration(format!(
+                        "Failed to connect channel: timed out after {}s",
+                        CHANNEL_CONNECT_TIMEOUT_SECS
                     )));
                 }
             },
@@ -765,6 +808,123 @@ impl ChirpstackPoller {
             Err(OpcGwError::Configuration(
                 "No host found in server address".to_string(),
             ))
+        }
+    }
+
+    /// (Story 4-4 AC#1/2/3/4/5/6) Run an explicit recovery loop after the
+    /// cycle's first `chirpstack_outage` warn fires.
+    ///
+    /// Reads `chirpstack.retry` and `chirpstack.delay` once at entry,
+    /// surfaces the outage to `gateway_status` via
+    /// `update_gateway_status(None, error_count_at_entry, false)` so OPC UA
+    /// (Story 5-3) and the web dashboard (Story 9-2) see
+    /// `chirpstack_available = false` during the retry window, then probes
+    /// `check_server_availability` up to `R` times with `D`-second sleeps
+    /// between attempts. The sleep is `tokio::select!`-paired with
+    /// `cancel_token.cancelled()` so Ctrl+C aborts the wait cleanly.
+    ///
+    /// Emits the three reserved operations from `docs/logging.md:240-242`:
+    /// `recovery_attempt` (info), `recovery_complete` (info on success
+    /// with `downtime_secs`), `recovery_failed` (warn on budget exhaustion).
+    ///
+    /// On recovery success, does NOT explicitly reset `chirpstack_available`
+    /// to `true` — the next normal `poll_metrics` cycle's existing
+    /// Story 5-3 cycle-end write handles it (avoids a small race window
+    /// where a stale `false` could overwrite a fresh `true`).
+    async fn recover_from_chirpstack_outage(
+        &mut self,
+        error_count_at_entry: i32,
+        last_error: &OpcGwError,
+    ) -> RecoveryOutcome {
+        let retry = self.config.chirpstack.retry;
+        let delay_secs = self.config.chirpstack.delay;
+        let delay = Duration::from_secs(delay_secs);
+
+        // Surface the outage to gateway_status immediately. Passing `None`
+        // for last_poll_timestamp preserves the existing DB value per the
+        // trait contract at src/storage/mod.rs:685-688.
+        if let Err(status_err) = self
+            .backend
+            .update_gateway_status(None, error_count_at_entry, false)
+        {
+            warn!(
+                error = %status_err,
+                "Failed to update gateway_status during recovery loop entry (non-fatal)"
+            );
+        }
+
+        let mut last_attempt_error: String = format!("{}", last_error);
+
+        for attempt_idx in 0..retry {
+            let attempt_num = attempt_idx + 1;
+            info!(
+                operation = "recovery_attempt",
+                attempt = attempt_num,
+                max_retries = retry,
+                delay_secs = delay_secs,
+                last_error = %last_attempt_error,
+                "ChirpStack recovery attempt"
+            );
+
+            // Cancel-safe sleep — Ctrl+C aborts cleanly without leaking
+            // the recovery loop. Mirrors the pattern at run() line ~822.
+            tokio::select! {
+                _ = self.cancel_token.cancelled() => {
+                    return RecoveryOutcome::Exhausted {
+                        attempts_used: attempt_idx,
+                        last_error: "cancelled during recovery wait".to_string(),
+                    };
+                }
+                _ = tokio::time::sleep(delay) => {}
+            }
+
+            match self.check_server_availability() {
+                Ok(_) => {
+                    // Compute downtime if known. Cold-start (no prior
+                    // successful poll) emits `from_startup = true` instead
+                    // of a downtime_secs field.
+                    match self.last_successful_poll {
+                        Some(ts) => {
+                            let elapsed = chrono::Utc::now().signed_duration_since(ts);
+                            let downtime_secs = elapsed.num_seconds().max(0) as u64;
+                            info!(
+                                operation = "recovery_complete",
+                                attempts_used = attempt_num,
+                                downtime_secs = downtime_secs,
+                                last_error = %last_attempt_error,
+                                "ChirpStack recovery complete"
+                            );
+                        }
+                        None => {
+                            info!(
+                                operation = "recovery_complete",
+                                attempts_used = attempt_num,
+                                from_startup = true,
+                                last_error = %last_attempt_error,
+                                "ChirpStack recovery complete (cold start)"
+                            );
+                        }
+                    }
+                    return RecoveryOutcome::Recovered {
+                        attempts_used: attempt_num,
+                    };
+                }
+                Err(probe_err) => {
+                    last_attempt_error = format!("{}", probe_err);
+                }
+            }
+        }
+
+        // Budget exhausted without recovery.
+        warn!(
+            operation = "recovery_failed",
+            attempts_used = retry,
+            last_error = %last_attempt_error,
+            "ChirpStack recovery failed — retry budget exhausted"
+        );
+        RecoveryOutcome::Exhausted {
+            attempts_used: retry,
+            last_error: last_attempt_error,
         }
     }
 
@@ -1053,19 +1213,34 @@ impl ChirpstackPoller {
                         chirpstack_available = false;
                         // Story 6-3, AC#5: chirpstack_outage diagnostic on
                         // the first per-device connectivity failure of the
-                        // cycle. No new recovery — Story 4-4 will pick up
-                        // the `recovery_attempt` / `recovery_complete` /
-                        // `recovery_failed` operations reserved in
-                        // docs/logging.md.
+                        // cycle. Returns true when this is the first
+                        // emission of the cycle (it internally checks +
+                        // flips the cycle-local bool), false on subsequent
+                        // calls within the same cycle.
                         // Iter-3 review pending #1: helper-extracted so tests
                         // drive `maybe_emit_chirpstack_outage` directly. P9
                         // (rfc3339 `last_successful_poll`) is preserved
                         // inside the helper.
-                        maybe_emit_chirpstack_outage(
+                        let just_logged = maybe_emit_chirpstack_outage(
                             &mut chirpstack_outage_logged,
                             self.last_successful_poll,
                             &e,
                         );
+                        // Story 4-4: on the first per-cycle outage detection,
+                        // run the recovery loop. The loop fires at most once
+                        // per cycle naturally because `maybe_emit_chirpstack_outage`
+                        // returns false on subsequent calls within the same cycle.
+                        if just_logged {
+                            let _outcome = self
+                                .recover_from_chirpstack_outage(error_count, &e)
+                                .await;
+                            // Outcome is informational here — the for-loop
+                            // continues to the next device regardless. Recovered
+                            // means subsequent devices may succeed; Exhausted
+                            // means they'll keep failing the TCP probe but the
+                            // outage_logged bool prevents re-firing the recovery
+                            // loop within this cycle.
+                        }
                     }
                     debug!(
                         operation = "device_polled",
@@ -2749,5 +2924,340 @@ mod tests {
                 attempt, expected_secs
             );
         }
+    }
+
+    // =====================================================================
+    // Story 4-4: ChirpStack outage recovery loop tests
+    // =====================================================================
+
+    /// (Story 4-4 helper) Build a ChirpstackPoller fixture with a chosen
+    /// `chirpstack.server_address`, retry, and delay. Bypasses validation
+    /// (delay=0 would fail `validate()`) so tests can run with sub-second
+    /// budgets.
+    async fn make_recovery_test_poller(
+        server_address: String,
+        retry: u32,
+        delay: u64,
+        backend: Arc<dyn StorageBackend>,
+        cancel_token: CancellationToken,
+    ) -> ChirpstackPoller {
+        let mut config = get_test_config();
+        config.chirpstack.server_address = server_address;
+        config.chirpstack.retry = retry;
+        config.chirpstack.delay = delay;
+        let restore_barrier = Arc::new(std::sync::Barrier::new(2));
+        ChirpstackPoller::new(&config, backend, cancel_token, restore_barrier)
+            .await
+            .expect("poller fixture must build")
+    }
+
+    /// AC#1 + AC#5 + AC#6: when the TCP probe succeeds on the first
+    /// attempt, the recovery loop emits `recovery_attempt` then
+    /// `recovery_complete` and returns `Recovered { attempts_used: 1 }`.
+    #[tokio::test]
+    #[traced_test]
+    async fn recovery_succeeds_when_server_returns_available() {
+        // Bind a real TCP listener so check_server_availability succeeds.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        let server_address = format!("http://127.0.0.1:{port}");
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let cancel_token = CancellationToken::new();
+        let mut poller = make_recovery_test_poller(
+            server_address,
+            3,
+            0,
+            backend.clone(),
+            cancel_token,
+        )
+        .await;
+
+        let last_error = OpcGwError::ChirpStack("simulated outage".to_string());
+        let outcome = poller
+            .recover_from_chirpstack_outage(0, &last_error)
+            .await;
+
+        assert_eq!(
+            outcome,
+            RecoveryOutcome::Recovered { attempts_used: 1 },
+            "first-attempt success must return Recovered with attempts_used=1"
+        );
+        assert!(logs_contain("operation=\"recovery_attempt\""));
+        assert!(logs_contain("operation=\"recovery_complete\""));
+        assert!(logs_contain("attempts_used=1"));
+        assert!(
+            !logs_contain("operation=\"recovery_failed\""),
+            "must not emit recovery_failed when probe succeeds"
+        );
+
+        drop(listener);
+    }
+
+    /// AC#1 + AC#2: when the TCP probe fails for the entire retry budget,
+    /// the recovery loop emits `recovery_attempt` × R, then
+    /// `recovery_failed`, and returns `Exhausted { attempts_used: R }`.
+    #[tokio::test]
+    #[traced_test]
+    async fn recovery_exhausts_when_server_stays_down() {
+        // Pick a port that nobody is listening on. Bind+drop yields a
+        // (probabilistically) free port — connect_timeout will fail.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        drop(listener); // close before recovery loop probes
+        let server_address = format!("http://127.0.0.1:{port}");
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let cancel_token = CancellationToken::new();
+        let mut poller = make_recovery_test_poller(
+            server_address,
+            3,
+            0,
+            backend.clone(),
+            cancel_token,
+        )
+        .await;
+
+        let last_error = OpcGwError::ChirpStack("simulated outage".to_string());
+        let outcome = poller
+            .recover_from_chirpstack_outage(7, &last_error)
+            .await;
+
+        match outcome {
+            RecoveryOutcome::Exhausted {
+                attempts_used,
+                last_error: _,
+            } => {
+                assert_eq!(attempts_used, 3, "exhaustion uses all 3 retries");
+            }
+            other => panic!("expected Exhausted, got {other:?}"),
+        }
+        assert!(logs_contain("operation=\"recovery_attempt\""));
+        assert!(logs_contain("operation=\"recovery_failed\""));
+        assert!(logs_contain("attempts_used=3"));
+    }
+
+    /// AC#3: on recovery loop entry the poller calls
+    /// `update_gateway_status(None, error_count_at_entry, false)` so OPC UA
+    /// (Story 5-3) and the web dashboard (Story 9-2) see
+    /// `chirpstack_available=false` during the retry window.
+    #[tokio::test]
+    #[traced_test]
+    async fn recovery_updates_gateway_status_to_unavailable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        drop(listener);
+        let server_address = format!("http://127.0.0.1:{port}");
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let cancel_token = CancellationToken::new();
+        let mut poller = make_recovery_test_poller(
+            server_address,
+            1,
+            0,
+            backend.clone(),
+            cancel_token,
+        )
+        .await;
+
+        let last_error = OpcGwError::ChirpStack("simulated outage".to_string());
+        let _ = poller
+            .recover_from_chirpstack_outage(42, &last_error)
+            .await;
+
+        let (last_poll_ts, error_count, available) = backend
+            .get_gateway_health_metrics()
+            .expect("read gateway_status after recovery loop");
+        assert!(!available, "chirpstack_available must be false after recovery loop entry");
+        assert_eq!(error_count, 42, "error_count_at_entry must propagate to gateway_status");
+        // last_poll_timestamp was None at fixture start; passing None to
+        // update_gateway_status preserves the existing DB value (which was
+        // None on a fresh InMemoryBackend).
+        assert!(
+            last_poll_ts.is_none(),
+            "last_poll_timestamp must be preserved (None on fresh backend); got {:?}",
+            last_poll_ts
+        );
+    }
+
+    /// AC#6: when `last_successful_poll` is None (cold start, no prior
+    /// successful poll), `recovery_complete` carries `from_startup=true`
+    /// instead of `downtime_secs`.
+    #[tokio::test]
+    #[traced_test]
+    async fn recovery_complete_emits_from_startup_when_no_prior_poll() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        let server_address = format!("http://127.0.0.1:{port}");
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let cancel_token = CancellationToken::new();
+        let mut poller = make_recovery_test_poller(
+            server_address,
+            1,
+            0,
+            backend,
+            cancel_token,
+        )
+        .await;
+        // last_successful_poll defaults to None on construction (line 441).
+
+        let last_error = OpcGwError::ChirpStack("cold-start outage".to_string());
+        let outcome = poller
+            .recover_from_chirpstack_outage(0, &last_error)
+            .await;
+
+        assert_eq!(outcome, RecoveryOutcome::Recovered { attempts_used: 1 });
+        assert!(logs_contain("operation=\"recovery_complete\""));
+        assert!(logs_contain("from_startup=true"));
+        assert!(
+            !logs_contain("downtime_secs"),
+            "must not emit downtime_secs on cold start"
+        );
+
+        drop(listener);
+    }
+
+    /// AC#6: when `last_successful_poll` is `Some(t)` and recovery
+    /// succeeds, `recovery_complete` carries `downtime_secs` reflecting
+    /// `now - t`.
+    #[tokio::test]
+    #[traced_test]
+    async fn recovery_complete_carries_downtime_secs() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        let server_address = format!("http://127.0.0.1:{port}");
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let cancel_token = CancellationToken::new();
+        let mut poller = make_recovery_test_poller(
+            server_address,
+            1,
+            0,
+            backend,
+            cancel_token,
+        )
+        .await;
+        // Pretend the poller had a successful cycle 10 seconds ago.
+        poller.last_successful_poll =
+            Some(chrono::Utc::now() - chrono::Duration::seconds(10));
+
+        let last_error = OpcGwError::ChirpStack("outage with prior history".to_string());
+        let outcome = poller
+            .recover_from_chirpstack_outage(0, &last_error)
+            .await;
+
+        assert_eq!(outcome, RecoveryOutcome::Recovered { attempts_used: 1 });
+        assert!(logs_contain("operation=\"recovery_complete\""));
+        assert!(
+            logs_contain("downtime_secs=10") || logs_contain("downtime_secs=11"),
+            "downtime_secs must be ~10 (allow ±1 for test scheduling jitter); see captured logs"
+        );
+
+        drop(listener);
+    }
+
+    /// AC#1 cancel-safety: firing the cancel token during the retry sleep
+    /// aborts the loop within `delay + ε` and returns Exhausted with a
+    /// `cancelled` last_error.
+    #[tokio::test]
+    #[traced_test]
+    async fn recovery_aborts_on_cancel_during_sleep() {
+        // No listener — ensure the probe would fail if we ever reached it.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        drop(listener);
+        let server_address = format!("http://127.0.0.1:{port}");
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let cancel_token = CancellationToken::new();
+        let cancel_clone = cancel_token.clone();
+        // Long delay so the cancel arrives during the sleep, not after.
+        let mut poller = make_recovery_test_poller(
+            server_address,
+            5,
+            10,
+            backend,
+            cancel_token,
+        )
+        .await;
+
+        // Fire cancel after a brief moment.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel_clone.cancel();
+        });
+
+        let last_error = OpcGwError::ChirpStack("outage during cancel".to_string());
+        let start = Instant::now();
+        let outcome = poller
+            .recover_from_chirpstack_outage(0, &last_error)
+            .await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "cancel must abort the recovery loop quickly (elapsed {:?})",
+            elapsed
+        );
+        match outcome {
+            RecoveryOutcome::Exhausted {
+                attempts_used: _,
+                last_error,
+            } => {
+                assert!(
+                    last_error.contains("cancelled"),
+                    "Exhausted reason must mention cancellation; got {last_error}"
+                );
+            }
+            other => panic!("expected Exhausted on cancel, got {other:?}"),
+        }
+    }
+
+    /// AC#2: a single retry budget (R=1, D=0) makes exactly one attempt.
+    #[tokio::test]
+    #[traced_test]
+    async fn recovery_single_retry_budget_makes_exactly_one_attempt() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        drop(listener);
+        let server_address = format!("http://127.0.0.1:{port}");
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let cancel_token = CancellationToken::new();
+        let mut poller = make_recovery_test_poller(
+            server_address,
+            1,
+            0,
+            backend,
+            cancel_token,
+        )
+        .await;
+
+        let last_error = OpcGwError::ChirpStack("outage".to_string());
+        let outcome = poller
+            .recover_from_chirpstack_outage(0, &last_error)
+            .await;
+
+        match outcome {
+            RecoveryOutcome::Exhausted {
+                attempts_used,
+                last_error: _,
+            } => {
+                assert_eq!(attempts_used, 1, "R=1 budget makes exactly one attempt");
+            }
+            other => panic!("expected Exhausted with attempts_used=1, got {other:?}"),
+        }
+        assert!(logs_contain("operation=\"recovery_attempt\""));
+        assert!(logs_contain("attempt=1"));
+        assert!(logs_contain("max_retries=1"));
+        assert!(logs_contain("operation=\"recovery_failed\""));
     }
 }

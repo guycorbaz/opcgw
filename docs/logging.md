@@ -144,7 +144,10 @@ Every event log line carries a structured `operation=` field. The table below is
 | `device_poll` | `warn` | A specific device failed inside a cycle (Story 6-3, AC#7). | Investigate the device's connectivity. Multiple devices failing → likely fleet-wide issue. |
 | `chirpstack_connect` | `info` (attempt/success) / `warn` (failure) | TCP availability probe or gRPC channel connect. Carries `attempt`, `endpoint`, `latency_ms`/`error`, `success`. | Repeated `success=false` → ChirpStack server reachability. |
 | `retry_schedule` | `info` | Logged just before the retry sleep; carries `attempt`, `delay_secs`, `next_retry`. | Operator visibility only. |
-| `chirpstack_outage` | `warn` | First per-device connectivity failure of a cycle that flips `chirpstack_available` to false. Carries `last_successful_poll`. | If `last_successful_poll` is far in the past, recovery has not landed (Story 4-4 owns auto-recovery). |
+| `chirpstack_outage` | `warn` | First per-device connectivity failure of a cycle that flips `chirpstack_available` to false. Carries `last_successful_poll`. | If `last_successful_poll` is far in the past, the recovery loop has been failing — check `recovery_failed` warns. |
+| `recovery_attempt` | `info` | Story 4-4: a single attempt within the ChirpStack recovery loop. Carries `attempt`, `max_retries`, `delay_secs`, `last_error`. | Monitor frequency. A spike of `recovery_attempt` lines correlates with a `chirpstack_outage` warn — investigate ChirpStack server health. |
+| `recovery_complete` | `info` | Story 4-4: recovery loop succeeded. Carries `attempts_used`, `downtime_secs` (or `from_startup=true` on cold start), `last_error`. | `downtime_secs` identifies outage duration; investigate ChirpStack-side root cause if persistent. |
+| `recovery_failed` | `warn` | Story 4-4: recovery loop exhausted its retry budget without restoring connectivity. Carries `attempts_used`, `last_error`. | Manual intervention may be needed — check ChirpStack server status, network, credentials. |
 | `chirpstack_request` | `warn` | gRPC request to ChirpStack returned an error. `exceeded=true` flags timeout (DeadlineExceeded); otherwise transient (Unavailable / Cancelled). | Repeated timeouts → upstream slow; repeated Unavailable → network partition. |
 | `metric_parse` | `warn` | A metric value couldn't be coerced to its declared type (e.g. boolean got 0.5). Drop with `fallback_value=none`. | Verify the device firmware's emit format matches the configured metric type. |
 | `error_spike` | `warn` | Error count jumped by `>= 5` between consecutive cycles. Carries `previous`, `current`, `delta`. | Cross-reference with `device_poll` / `chirpstack_outage` from the same cycle. |
@@ -218,7 +221,7 @@ A symptom-first cookbook for the most common production incidents:
 1. Look for `chirpstack_outage` warns — the first one of a cycle reports `last_successful_poll` and the underlying error.
 2. Walk back through `chirpstack_connect` warns to see the failure mode (timeout vs. connection refused).
 3. If `error_spike` fires, multiple devices failed at once → upstream issue, not single-device.
-4. Recovery is Story 4-4 territory; until then, fix the upstream and the next cycle will heal.
+4. Story 4-4 recovery loop fires automatically: look for `recovery_attempt` info lines (cycle entries) and `recovery_complete` (success — `downtime_secs` carries the outage duration) or `recovery_failed` (retry budget exhausted — manual investigation needed).
 
 ### "Reads are slow" — budget warnings
 
@@ -230,18 +233,6 @@ A symptom-first cookbook for the most common production incidents:
 ### "I see `staleness_boundary` lines" — flickering metrics
 
 A metric near the staleness threshold flips between Good and Uncertain on consecutive reads. Either raise `[opcua].stale_threshold_secs` (in `config.toml`) above the device's actual emit interval, or fix the device's emit cadence to be faster than the threshold.
-
-## Future operations (Story 4-4)
-
-Story 4-4 (auto-recovery from ChirpStack outages, currently `backlog`) will add a recovery state machine on top of the diagnostics added by Story 6-3. The following `operation=` names are **reserved** so that 4-4's logs slot in cleanly alongside the existing `chirpstack_connect` / `chirpstack_outage` lines — do not reuse them for unrelated diagnostics:
-
-| Operation | Emitted by Story 4-4 when | Expected level |
-|-----------|---------------------------|----------------|
-| `recovery_attempt` | A recovery cycle starts (e.g. after a `chirpstack_outage` warn) | `info` |
-| `recovery_complete` | A recovery cycle returns the gateway to a healthy poll | `info` |
-| `recovery_failed` | A recovery cycle exhausts retries without restoring connectivity | `warn` |
-
-Until Story 4-4 ships, the gateway emits `chirpstack_outage` and lets the next poll cycle continue without retry — there is no recovery loop yet.
 
 ## Related stories
 
