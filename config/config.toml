@@ -56,10 +56,15 @@ tenant_id = "00000000-0000-0000-0000-000000000000"
 
 # Frequency to poll ChirpStack server, in seconds.
 polling_frequency = 10
-# Maximum number of connection retries when ChirpStack is unreachable.
-retry = 10
-# Delay (seconds) between successive retries.
-delay = 10
+# Number of recovery probe attempts when ChirpStack is unreachable.
+# Note: this is an attempt count, not a retry count — `retry = 1` means one
+# probe before giving up (zero retries after the original failure).
+# AC#4 / NFR17: shipped defaults must satisfy `retry × delay ≤ 30s` so the
+# auto-recovery loop stays within the 30s SLA. Operators tuning these
+# knobs should preserve that invariant.
+retry = 30
+# Delay (seconds) between successive recovery probes.
+delay = 1
 # Page size for pagination in list API calls (Story 4-3). Range: 1-1000.
 list_page_size = 100
 
