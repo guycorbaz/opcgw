@@ -105,12 +105,40 @@ pub async fn api_status(
 
     let uptime_secs = state.start_time.elapsed().as_secs();
 
+    // Story 9-7: read the snapshot through the RwLock so a hot-reload
+    // swap is visible immediately. The clone of the inner Arc is
+    // O(1) and the lock is released before any subsequent work.
+    //
+    // Iter-1 review P5: recover from poison via `into_inner()` so a
+    // single panic in another holder doesn't cascade — every
+    // subsequent request would otherwise also panic, taking the
+    // whole web subsystem down.
+    //
+    // Iter-2 review P34: surface poison-recovery to operator audit
+    // log. A poisoned lock means SOMETHING panicked while holding
+    // it — the operator should be able to correlate the original
+    // panic with subsequent dashboard behaviour. Logged on each
+    // recovery (rare event in practice; per-site spam acceptable).
+    let snapshot = state
+        .dashboard_snapshot
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                operation = "rwlock_poison_recovered",
+                site = "api_status",
+                "dashboard_snapshot RwLock was poisoned; recovering inner value \
+                 (a prior holder panicked — investigate)"
+            );
+            e.into_inner().clone()
+        });
+
     Ok(Json(StatusResponse {
         chirpstack_available: available,
         last_poll_time: last_poll.map(|t| t.to_rfc3339()),
         error_count,
-        application_count: state.dashboard_snapshot.application_count,
-        device_count: state.dashboard_snapshot.device_count,
+        application_count: snapshot.application_count,
+        device_count: snapshot.device_count,
         uptime_secs,
     }))
 }
@@ -258,10 +286,34 @@ pub async fn api_devices(
     // is referenced here as the documented default for the JSON
     // contract docstring above; the actual value plumbed through is
     // the resolved one from main.rs.
-    let stale_threshold_secs = state.stale_threshold_secs;
+    //
+    // Story 9-7: `AtomicU64::load(Relaxed)` so a hot-reload that
+    // swaps the threshold is visible to subsequent requests
+    // immediately. Relaxed is sufficient — the field is
+    // monotonically updated by a single listener task; no
+    // happens-before relation needs to be observed across threads.
+    let stale_threshold_secs = state
+        .stale_threshold_secs
+        .load(std::sync::atomic::Ordering::Relaxed);
 
-    let applications: Vec<ApplicationView> = state
+    // Story 9-7: same RwLock-clone pattern as `api_status` above
+    // (iter-1 review P5: poison-recovery via `into_inner`;
+    // iter-2 review P34: emit poison-recovery audit log).
+    let snapshot = state
         .dashboard_snapshot
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                operation = "rwlock_poison_recovered",
+                site = "api_devices",
+                "dashboard_snapshot RwLock was poisoned; recovering inner value \
+                 (a prior holder panicked — investigate)"
+            );
+            e.into_inner().clone()
+        });
+
+    let applications: Vec<ApplicationView> = snapshot
         .applications
         .iter()
         .map(|app| {
@@ -384,9 +436,9 @@ mod tests {
         Arc::new(AppState {
             auth,
             backend,
-            dashboard_snapshot: snapshot,
+            dashboard_snapshot: std::sync::RwLock::new(snapshot),
             start_time: Instant::now(),
-            stale_threshold_secs: DEFAULT_STALE_THRESHOLD_SECS,
+            stale_threshold_secs: std::sync::atomic::AtomicU64::new(DEFAULT_STALE_THRESHOLD_SECS),
         })
     }
 
@@ -683,9 +735,9 @@ mod tests {
         Arc::new(AppState {
             auth,
             backend,
-            dashboard_snapshot: snapshot,
+            dashboard_snapshot: std::sync::RwLock::new(snapshot),
             start_time: Instant::now(),
-            stale_threshold_secs: DEFAULT_STALE_THRESHOLD_SECS,
+            stale_threshold_secs: std::sync::atomic::AtomicU64::new(DEFAULT_STALE_THRESHOLD_SECS),
         })
     }
 

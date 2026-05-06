@@ -8,6 +8,7 @@
 pub mod chirpstack;
 pub mod command_validation;
 pub mod config;
+pub mod config_reload;
 pub mod opc_ua;
 pub mod opc_ua_auth;
 pub mod opc_ua_history;

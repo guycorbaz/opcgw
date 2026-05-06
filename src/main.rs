@@ -24,6 +24,7 @@
 mod chirpstack;
 mod command_validation;
 mod config;
+mod config_reload;
 mod opc_ua;
 mod opc_ua_auth;
 mod opc_ua_history;
@@ -487,6 +488,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create cancellation token for graceful shutdown
     let cancel_token = CancellationToken::new();
 
+    // Story 9-7: build the configuration-reload handle now so every
+    // subsystem we spawn below can subscribe to its watch channel.
+    // The handle owns the `tokio::sync::watch::Sender<Arc<AppConfig>>`
+    // and the canonical config-file path; the SIGHUP listener (spawned
+    // later in this function) calls `handle.reload()` on each
+    // SIGHUP. The poller, web server, and OPC UA server each receive
+    // a fresh `Receiver` clone via `handle.subscribe()`. The
+    // initial-receiver returned alongside the handle is dropped
+    // immediately (bare `_` not `_name`) because each subsystem
+    // subscribes independently via `handle.subscribe()`.
+    //
+    // Iter-2 review P38: previously bound to `_initial_reload_rx`
+    // which kept the receiver alive until `main` returned (Rust's
+    // `_name` is a real binding, not an immediate drop). The pinned
+    // Arc was harmless but the comment lied. Now actually dropped.
+    let (reload_handle, _) =
+        crate::config_reload::ConfigReloadHandle::new(
+            application_config.clone(),
+            std::path::PathBuf::from(&config_path),
+        );
+    let reload_handle = Arc::new(reload_handle);
+
     // Create connection pool for per-task SQLite access (Story 2-2x: per-task connections)
     // Pool shared via Arc; each task (poller, OPC UA) gets own connection from pool via Arc::clone()
     // SQLite WAL mode: true concurrent readers + single writer (no Rust Mutex bottleneck)
@@ -625,13 +648,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Create chirpstack poller with restore barrier
+    // Create chirpstack poller with restore barrier.
+    //
+    // Story 9-7: subscribe the poller to the reload channel so its
+    // outer-loop `tokio::select!` arm picks up new `polling_frequency`,
+    // `retry`, `delay` (and any other hot-reload-safe knob) at the
+    // next cycle boundary. Story 4-4's recovery loop reads
+    // `retry`/`delay` at loop entry — no 4-4 code change needed.
     let mut chirpstack_poller =
-        match ChirpstackPoller::new(
+        match ChirpstackPoller::new_with_reload(
             &application_config,
             poller_backend,
             cancel_token.clone(),
             Arc::clone(&restore_barrier),
+            Some(reload_handle.subscribe()),
         )
             .await
         {
@@ -651,8 +681,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Create OPC UA server
+    // Create OPC UA server.
+    //
+    // Story 9-7 (AC#8 invariant): use the Story 9-0 split form
+    // (`build` + `run_handles`) so we can spawn the OPC UA
+    // config-listener task between them. The listener clones
+    // `RunHandles.manager` (already pub at `src/opc_ua.rs:103`) for
+    // future Story 9-8 integration; v1 only logs the topology diff.
+    // The legacy `OpcUa::run` wrapper does NOT expose `RunHandles`,
+    // so we build first, spawn the listener, then drive the server
+    // via `OpcUa::run_handles`.
     let opc_ua = OpcUa::new(&application_config, opcua_backend, cancel_token.clone());
+    let run_handles = match opc_ua.build().await {
+        Ok(handles) => handles,
+        Err(e) => {
+            error!(error = %e, "OPC UA build error");
+            return Err(e.into());
+        }
+    };
+    let opcua_listener_handle = {
+        let manager = run_handles.manager.clone();
+        let rx = reload_handle.subscribe();
+        let cancel = cancel_token.clone();
+        let initial = application_config.clone();
+        tokio::spawn(async move {
+            crate::config_reload::run_opcua_config_listener(manager, initial, rx, cancel).await;
+        })
+    };
 
     // Signal poller that restore is complete (Task 11)
     info!("Metric restore phase complete; signaling poller to start");
@@ -666,7 +721,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let opcua_handle = tokio::spawn(async move {
-        if let Err(e) = opc_ua.run().await {
+        if let Err(e) = OpcUa::run_handles(run_handles).await {
             error!(error = ?e, "OPC UA server error");
         }
     });
@@ -724,6 +779,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .web
         .enabled
         .unwrap_or(crate::utils::WEB_DEFAULT_ENABLED);
+    // Iter-1 review P8: capture the web-config-listener handle alongside
+    // the web-server handle so the shutdown path can await both, matching
+    // the SIGHUP and OPC UA listener join pattern.
+    let mut web_config_listener_handle: Option<tokio::task::JoinHandle<()>> = None;
     let web_handle: Option<tokio::task::JoinHandle<()>> = if web_enabled {
         let port = application_config
             .web
@@ -820,36 +879,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // **Iter-2 L6:** `BAD_THRESHOLD_SECS` is referenced from
         // `crate::web::api::BAD_THRESHOLD_SECS` (single source of
         // truth) rather than re-declared locally.
+        // Iter-2 review P32: replaced the inline clamp logic with a
+        // call to `crate::web::clamp_stale_threshold` so startup and
+        // the hot-reload listener share a single source of truth.
+        // Eliminates the behaviour-drift risk the duplication created.
         let configured = application_config
             .opcua
             .stale_threshold_seconds
             .unwrap_or(crate::web::api::DEFAULT_STALE_THRESHOLD_SECS);
-        let stale_threshold_secs = if configured == 0 {
+        let (stale_threshold_secs, outcome) = crate::web::clamp_stale_threshold(configured);
+        if outcome != crate::web::StaleThresholdClampOutcome::Accepted {
             warn!(
                 configured = configured,
-                clamped_to = crate::web::api::DEFAULT_STALE_THRESHOLD_SECS,
-                "Configured [opcua].stale_threshold_seconds = 0 makes every metric \
-                 immediately stale on the web dashboard; clamping to default"
-            );
-            crate::web::api::DEFAULT_STALE_THRESHOLD_SECS
-        } else if configured > crate::web::api::BAD_THRESHOLD_SECS {
-            warn!(
-                configured = configured,
-                bad_threshold_secs = crate::web::api::BAD_THRESHOLD_SECS,
-                clamped_to = crate::web::api::DEFAULT_STALE_THRESHOLD_SECS,
-                "Configured [opcua].stale_threshold_seconds > bad threshold (86400 s); \
+                clamped_to = stale_threshold_secs,
+                clamp_outcome = ?outcome,
+                "Configured [opcua].stale_threshold_seconds outside the valid (0, 86400] band; \
                  clamping to default so the web dashboard's 'uncertain' band stays meaningful"
             );
-            crate::web::api::DEFAULT_STALE_THRESHOLD_SECS
-        } else {
-            configured
-        };
+        }
         let app_state = std::sync::Arc::new(web::AppState {
             auth: auth_state,
             backend: web_backend,
-            dashboard_snapshot,
+            dashboard_snapshot: std::sync::RwLock::new(dashboard_snapshot),
             start_time: std::time::Instant::now(),
-            stale_threshold_secs,
+            stale_threshold_secs: std::sync::atomic::AtomicU64::new(stale_threshold_secs),
         });
 
         // Bind synchronously; fail-fast on bind failure.
@@ -860,6 +913,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err(e.into());
             }
         };
+
+        // Story 9-7 (Task 4): spawn the web-config-listener task that
+        // refreshes `app_state.dashboard_snapshot` and
+        // `app_state.stale_threshold_secs` on every SIGHUP-triggered
+        // reload. Lives outside the web::run task so the listener can
+        // outlive a hypothetical web-server restart (not used in v1
+        // but cheap insurance).
+        let web_listener_state = app_state.clone();
+        let web_listener_rx = reload_handle.subscribe();
+        let web_listener_cancel = cancel_token.clone();
+        web_config_listener_handle = Some(tokio::spawn(async move {
+            crate::config_reload::run_web_config_listener(
+                web_listener_state,
+                web_listener_rx,
+                web_listener_cancel,
+            )
+            .await;
+        }));
 
         // Build the router and spawn the serve task on the bound listener.
         let static_dir = std::path::PathBuf::from("static");
@@ -876,6 +947,120 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // `web_server_started`).
         info!("[web].enabled = false; embedded web server not started (set OPCGW_WEB__ENABLED=true to enable)");
         None
+    };
+
+    // Story 9-7 (Task 2): SIGHUP listener task. Lives alongside
+    // ctrl_c / SIGTERM listeners but in a separate spawned task
+    // because reloads are not a shutdown signal — the gateway
+    // continues running after a successful (or failed) reload.
+    //
+    // The listener emits three event= log lines:
+    //   - `config_reload_attempted` (info) — every SIGHUP
+    //   - `config_reload_succeeded` (info) — on Ok(...)
+    //   - `config_reload_failed`    (warn) — on Err(...)
+    //
+    // Issue #110 constraint: cooperates with `cancel_token`
+    // explicitly via `tokio::select!` — no RAII drop reliance.
+    //
+    // Iter-1 review P4: register the signal handler in the main
+    // task BEFORE spawning the listener so a registration failure
+    // surfaces at startup via `?` rather than getting silently
+    // dropped into a `JoinHandle<Result<...>>` whose inner Err
+    // the shutdown await doesn't unwrap.
+    let mut sighup_signal =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+    let sighup_listener_handle: tokio::task::JoinHandle<()> = {
+        let handle = reload_handle.clone();
+        let cancel = cancel_token.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        info!("SIGHUP listener stopping (cancel)");
+                        return;
+                    }
+                    sig = sighup_signal.recv() => {
+                        if sig.is_none() {
+                            // Iter-1 review P9 + P19: tokio's
+                            // `Signal::recv` returns None when the
+                            // runtime's signal driver shuts down
+                            // (e.g., the runtime is being torn
+                            // down). It would be unusual to reach
+                            // this branch outside of shutdown, so
+                            // surface it loudly — once None is
+                            // returned, hot-reload is permanently
+                            // broken for the rest of the process
+                            // lifetime.
+                            warn!(
+                                operation = "config_reload_listener_stopped",
+                                subsystem = "sighup",
+                                "SIGHUP listener exiting: signal driver returned None \
+                                 (hot-reload permanently disabled until process restart)"
+                            );
+                            return;
+                        }
+                        info!(
+                            event = "config_reload_attempted",
+                            trigger = "sighup",
+                            "SIGHUP received; attempting configuration reload"
+                        );
+                        // Iter-2 review P35: wrap the reload in a
+                        // select-on-cancel so a shutdown signal
+                        // arriving mid-reload (during figment IO or
+                        // validation) aborts the reload promptly
+                        // rather than waiting for it to complete.
+                        // Dropping the reload future releases the
+                        // internal `reload_lock` (`tokio::sync::Mutex`
+                        // doesn't poison on drop).
+                        let reload_outcome = tokio::select! {
+                            res = handle.reload() => Some(res),
+                            _ = cancel.cancelled() => None,
+                        };
+                        let Some(reload_result) = reload_outcome else {
+                            info!("SIGHUP listener stopping mid-reload (cancel)");
+                            return;
+                        };
+                        match reload_result {
+                            Ok(crate::config_reload::ReloadOutcome::Changed {
+                                changed_section_count,
+                                includes_topology_change,
+                                duration_ms,
+                            }) => {
+                                info!(
+                                    event = "config_reload_succeeded",
+                                    trigger = "sighup",
+                                    changed_section_count = changed_section_count,
+                                    includes_topology_change = includes_topology_change,
+                                    duration_ms = duration_ms,
+                                    "Configuration reloaded"
+                                );
+                            }
+                            Ok(crate::config_reload::ReloadOutcome::NoChange) => {
+                                info!(
+                                    event = "config_reload_succeeded",
+                                    trigger = "sighup",
+                                    changed_section_count = 0,
+                                    includes_topology_change = false,
+                                    duration_ms = 0,
+                                    "Configuration unchanged"
+                                );
+                            }
+                            Err(e) => {
+                                let knob = e.changed_knob().unwrap_or("");
+                                warn!(
+                                    event = "config_reload_failed",
+                                    trigger = "sighup",
+                                    reason = e.reason(),
+                                    changed_knob = knob,
+                                    error = %e,
+                                    "Configuration reload failed"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        })
     };
 
     // Wait for shutdown signal (SIGINT or SIGTERM)
@@ -920,6 +1105,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(web_h) = web_handle {
                 if let Err(e) = web_h.await {
                     error!(error = %e, "Web server task error during shutdown");
+                }
+            }
+            // Story 9-7: join the SIGHUP + OPC UA config-listener
+            // tasks asymmetrically (same shape as the web handle —
+            // they are not part of the core try_join because they
+            // are not load-bearing for the gateway's data plane).
+            // Both observe `cancel_token.cancelled()` and exit
+            // promptly; their error paths are best-effort logged.
+            if let Err(e) = sighup_listener_handle.await {
+                error!(error = %e, "SIGHUP listener task error during shutdown");
+            }
+            if let Err(e) = opcua_listener_handle.await {
+                error!(error = %e, "OPC UA config-listener task error during shutdown");
+            }
+            // Iter-1 review P8: web config-listener was previously
+            // dropped without being awaited. Surface any panic via
+            // the same join-error channel as its sister listeners.
+            if let Some(h) = web_config_listener_handle {
+                if let Err(e) = h.await {
+                    error!(error = %e, "Web config-listener task error during shutdown");
                 }
             }
             core

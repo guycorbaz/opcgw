@@ -182,6 +182,9 @@ index of the event names introduced so far.
 | `web_server_started` | `info` (diag) | 9-1 | `security.md` § Web UI authentication |
 | `api_status_storage_error` | `warn` (diag) | 9-2 | `security.md` § Web UI authentication → API endpoints |
 | `api_devices_storage_error` | `warn` (diag) | 9-3 | `security.md` § Web UI authentication → API endpoints |
+| `config_reload_attempted` | `info` (diag) | 9-7 | `security.md` § Configuration hot-reload |
+| `config_reload_succeeded` | `info` (diag) | 9-7 | `security.md` § Configuration hot-reload |
+| `config_reload_failed` | `warn` (audit) | 9-7 | `security.md` § Configuration hot-reload |
 
 Pinning rules (apply to every entry above):
 

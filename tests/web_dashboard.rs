@@ -87,10 +87,13 @@ fn build_test_app_state(snapshot: DashboardConfigSnapshot) -> Arc<AppState> {
     Arc::new(AppState {
         auth,
         backend,
-        dashboard_snapshot: Arc::new(snapshot),
+        // Story 9-7: AppState fields wrapped in interior-mutability
+        // primitives so the web-config-listener task can swap them
+        // on a hot-reload.
+        dashboard_snapshot: std::sync::RwLock::new(Arc::new(snapshot)),
         start_time: std::time::Instant::now(),
         // Story 9-3: tests use the production default (120 s).
-        stale_threshold_secs: 120,
+        stale_threshold_secs: std::sync::atomic::AtomicU64::new(120),
     })
 }
 

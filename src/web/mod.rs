@@ -188,22 +188,88 @@ impl DashboardConfigSnapshot {
 /// process start) so `uptime_secs` reflects "web-server uptime" —
 /// close enough to "gateway uptime" because the web server spawns
 /// alongside the other tasks at startup.
+///
+/// # Story 9-7 hot-reload swap discipline
+///
+/// `dashboard_snapshot` and `stale_threshold_secs` are wrapped in
+/// interior-mutability primitives (`std::sync::RwLock` and
+/// `AtomicU64`) so the web-config-listener task in `main.rs` can
+/// atomically replace them when the configuration is hot-reloaded
+/// via SIGHUP. Handlers read through `.read().unwrap().clone()` /
+/// `.load(Ordering::Relaxed)` — both are O(1) and lock-free in the
+/// uncontended path. The `auth` field stays `Arc<WebAuthState>`
+/// because rotating credentials at runtime would require modifying
+/// the auth-middleware's captured Arc — `src/web/auth.rs` is a
+/// Story 9-7 file invariant, so credential rotation is
+/// restart-required in v1 (caught by `config_reload::classify_diff`).
 pub struct AppState {
     pub auth: Arc<WebAuthState>,
     pub backend: Arc<dyn StorageBackend>,
-    pub dashboard_snapshot: Arc<DashboardConfigSnapshot>,
+    /// Story 9-7: wrapped in `RwLock<Arc<...>>` so the
+    /// web-config-listener task can atomically swap the snapshot
+    /// after a hot-reload. Read-side is a brief `.read().unwrap()`
+    /// followed by a clone of the Arc — sub-microsecond in the
+    /// uncontended path.
+    pub dashboard_snapshot: std::sync::RwLock<Arc<DashboardConfigSnapshot>>,
     pub start_time: Instant,
     /// Story 9-3 (FR37): resolved `[opcua].stale_threshold_seconds`
     /// (default 120) — used as the "Good → Uncertain" boundary in
-    /// `/api/devices` JSON. Resolved once at AppState construction
-    /// time; Story 9-7 hot-reload will need to make this dynamic if
-    /// operators want to retune without restart. Kept here rather
-    /// than re-reading `AppConfig` per request because (a) AppState
-    /// doesn't currently carry `Arc<AppConfig>` (would force a
-    /// heavier construction-time clone) and (b) the value is a
-    /// scalar — a single field is cheaper than threading a
-    /// reference.
-    pub stale_threshold_secs: u64,
+    /// `/api/devices` JSON. Story 9-7 makes this an `AtomicU64` so
+    /// hot-reload can swap the value without restarting the web
+    /// server. **Note (v1 limitation):** the OPC UA path
+    /// (`src/opc_ua.rs`) captures the threshold into per-variable
+    /// read-callback closures at startup; hot-reload of this knob
+    /// therefore affects **only** the web dashboard's "Good →
+    /// Uncertain" boundary in v1. Documented in
+    /// `docs/security.md § Configuration hot-reload`.
+    pub stale_threshold_secs: std::sync::atomic::AtomicU64,
+}
+
+/// Story 9-7 Task 4 — extracted from the inline clamp at
+/// `src/main.rs:823-846` so startup AND the web-config-listener task
+/// share a single source of truth for the
+/// `[opcua].stale_threshold_seconds` clamp logic.
+///
+/// Returns the clamped threshold along with an
+/// [`StaleThresholdClampOutcome`] that the caller uses to decide
+/// whether to emit the `warn!` log line (we don't log from inside
+/// this helper because the clamp is called from both startup and
+/// hot-reload, and the appropriate operator-action text differs in
+/// the two cases).
+///
+/// Two invariants enforced:
+///   - `0` is replaced with `DEFAULT_STALE_THRESHOLD_SECS` (would
+///     otherwise mark every metric immediately stale on the dashboard).
+///   - Anything strictly greater than `BAD_THRESHOLD_SECS` is replaced
+///     with `DEFAULT_STALE_THRESHOLD_SECS` (would otherwise compress
+///     the "uncertain" band to nothing).
+///
+/// Boundary is exclusive on the upper side (`>` not `>=`) — `86400`
+/// exactly is allowed because `AppConfig::validate` accepts the range
+/// `(0, 86400]`.
+pub fn clamp_stale_threshold(raw: u64) -> (u64, StaleThresholdClampOutcome) {
+    if raw == 0 {
+        (
+            api::DEFAULT_STALE_THRESHOLD_SECS,
+            StaleThresholdClampOutcome::ClampedFromZero,
+        )
+    } else if raw > api::BAD_THRESHOLD_SECS {
+        (
+            api::DEFAULT_STALE_THRESHOLD_SECS,
+            StaleThresholdClampOutcome::ClampedFromAboveBad,
+        )
+    } else {
+        (raw, StaleThresholdClampOutcome::Accepted)
+    }
+}
+
+/// Outcome of [`clamp_stale_threshold`] — the caller uses this to
+/// decide whether to emit a warn log line and which template to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaleThresholdClampOutcome {
+    Accepted,
+    ClampedFromZero,
+    ClampedFromAboveBad,
 }
 
 /// Inner timeout for the graceful-shutdown drain. After [`run`] sees
@@ -601,11 +667,45 @@ mod tests {
         let app_state = Arc::new(AppState {
             auth,
             backend,
-            dashboard_snapshot: snapshot,
+            dashboard_snapshot: std::sync::RwLock::new(snapshot),
             start_time: Instant::now(),
-            stale_threshold_secs: api::DEFAULT_STALE_THRESHOLD_SECS,
+            stale_threshold_secs: std::sync::atomic::AtomicU64::new(
+                api::DEFAULT_STALE_THRESHOLD_SECS,
+            ),
         });
         let dir = PathBuf::from("static");
         let _router: Router = build_router(app_state, dir);
+    }
+
+    /// Story 9-7 Task 4 unit test — clamp helper rejects `0` (would
+    /// flag every metric stale on the dashboard).
+    #[test]
+    fn clamp_stale_threshold_rejects_zero() {
+        let (clamped, outcome) = clamp_stale_threshold(0);
+        assert_eq!(clamped, api::DEFAULT_STALE_THRESHOLD_SECS);
+        assert_eq!(outcome, StaleThresholdClampOutcome::ClampedFromZero);
+    }
+
+    /// Story 9-7 Task 4 unit test — clamp helper rejects values strictly
+    /// above `BAD_THRESHOLD_SECS` (would compress the uncertain band).
+    #[test]
+    fn clamp_stale_threshold_rejects_above_bad() {
+        let (clamped, outcome) = clamp_stale_threshold(api::BAD_THRESHOLD_SECS + 1);
+        assert_eq!(clamped, api::DEFAULT_STALE_THRESHOLD_SECS);
+        assert_eq!(outcome, StaleThresholdClampOutcome::ClampedFromAboveBad);
+    }
+
+    /// Story 9-7 Task 4 unit test — clamp helper accepts the boundary
+    /// value (BAD_THRESHOLD_SECS exactly) and ordinary values per the
+    /// `AppConfig::validate` contract `(0, 86400]`.
+    #[test]
+    fn clamp_stale_threshold_accepts_boundary_and_ordinary() {
+        let (clamped, outcome) = clamp_stale_threshold(api::BAD_THRESHOLD_SECS);
+        assert_eq!(clamped, api::BAD_THRESHOLD_SECS);
+        assert_eq!(outcome, StaleThresholdClampOutcome::Accepted);
+
+        let (clamped, outcome) = clamp_stale_threshold(120);
+        assert_eq!(clamped, 120);
+        assert_eq!(outcome, StaleThresholdClampOutcome::Accepted);
     }
 }

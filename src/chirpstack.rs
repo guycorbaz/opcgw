@@ -393,6 +393,20 @@ pub struct ChirpstackPoller {
     /// `chirpstack_outage` warn so an operator can see how long the gateway
     /// has been blind. `None` until the first cycle succeeds.
     last_successful_poll: Option<DateTime<Utc>>,
+    /// Story 9-7: configuration hot-reload receiver. The poller's outer
+    /// `tokio::select!` arm awaits `config_rx.changed()` and refreshes
+    /// `self.config` from the published `Arc<AppConfig>` at the next
+    /// cycle boundary. Story 4-4's recovery loop reads `retry`/`delay`
+    /// at loop entry — this gives 4-4 hot-reload integration without
+    /// modifying the recovery routine.
+    ///
+    /// `Option` rather than required so the historical
+    /// `ChirpstackPoller::new` API stays compatible: production
+    /// (`src/main.rs`) constructs the poller with `Some(rx)`; legacy
+    /// tests that don't exercise hot-reload pass `None` and the
+    /// outer-loop arm becomes a no-op (await on a future that never
+    /// completes).
+    config_rx: Option<tokio::sync::watch::Receiver<Arc<AppConfig>>>,
 }
 
 /// Exponential backoff state for prune failures
@@ -438,13 +452,44 @@ impl ChirpstackPoller {
     ///     ChirpstackPoller::new(&config, storage).await
     /// }
     /// ```
+    /// Story 9-7 retains this entry point for legacy lib callers
+    /// (chirpstack tests, integration test fixtures) that don't need
+    /// hot-reload. `src/main.rs` uses [`new_with_reload`] instead.
+    #[allow(dead_code)]
     pub async fn new(
         config: &AppConfig,
         backend: Arc<dyn StorageBackend>,
         cancel_token: tokio_util::sync::CancellationToken,
         restore_barrier: Arc<std::sync::Barrier>,
     ) -> Result<Self, OpcGwError> {
+        Self::new_with_reload(config, backend, cancel_token, restore_barrier, None).await
+    }
+
+    /// Story 9-7 constructor variant that takes an explicit
+    /// configuration-reload receiver. Production wiring (`src/main.rs`)
+    /// passes `Some(rx)` cloned off `ConfigReloadHandle`. The legacy
+    /// [`new`] constructor delegates here with `None`, preserving the
+    /// pre-9-7 contract for callers that don't care about hot-reload
+    /// (notably the chirpstack tests + the legacy command-status
+    /// poller paths).
+    pub async fn new_with_reload(
+        config: &AppConfig,
+        backend: Arc<dyn StorageBackend>,
+        cancel_token: tokio_util::sync::CancellationToken,
+        restore_barrier: Arc<std::sync::Barrier>,
+        mut config_rx: Option<tokio::sync::watch::Receiver<Arc<AppConfig>>>,
+    ) -> Result<Self, OpcGwError> {
         debug!("Create a new Chirpstack poller");
+
+        // Iter-2 review P31: consume the initial publish so the
+        // first `changed()` in the run-loop waits for the next
+        // SIGHUP rather than firing immediately on a freshly-
+        // subscribed receiver. Without this, the poller would emit
+        // a spurious `config_reload_applied` log line on its first
+        // outer-loop iteration.
+        if let Some(rx) = config_rx.as_mut() {
+            let _ = rx.borrow_and_update();
+        }
 
         Ok(ChirpstackPoller {
             config: config.clone(),
@@ -458,6 +503,7 @@ impl ChirpstackPoller {
             })),
             previous_error_count: 0,
             last_successful_poll: None,
+            config_rx,
         })
     }
 
@@ -999,9 +1045,13 @@ impl ChirpstackPoller {
         });
         info!("ChirpStack poller starting metric collection");
 
-        // Define wait time
-        let wait_time = Duration::from_secs(self.config.chirpstack.polling_frequency);
-        // Start the poller
+        // Story 9-7: re-read `polling_frequency` from `self.config` on
+        // every iteration so a hot-reload that bumps the cadence takes
+        // effect at the next cycle boundary (no longer captured once
+        // before the loop). The 4-4 recovery loop's read-at-entry
+        // semantics naturally pick up new `retry`/`delay` values for
+        // the same reason — this loop only owns its own scheduling
+        // wait.
         loop {
             // Polling metrics (AC#1: poll_once equivalent)
             if let Err(e) = self.poll_metrics().await {
@@ -1014,11 +1064,56 @@ impl ChirpstackPoller {
                 // Continue polling even if pruning fails per AC#5 (graceful degradation)
             }
 
-            // Wait for next poll cycle or cancellation
+            // Wait for next poll cycle, cancellation, or hot-reload.
+            // Story 9-7: the `config_rx.changed()` arm picks up a fresh
+            // `Arc<AppConfig>` and refreshes `self.config`, then loops
+            // immediately into the next poll cycle (so the operator sees
+            // the new behaviour without waiting a full polling-frequency
+            // interval). When `config_rx` is `None` (legacy callers
+            // without hot-reload wiring), the changed-arm becomes a
+            // pending future that never resolves — equivalent to the
+            // pre-9-7 two-arm select.
+            let wait_time = Duration::from_secs(self.config.chirpstack.polling_frequency);
+            // Build the changed future outside the macro so the
+            // `Option`-aware branching is explicit. The `Future`
+            // output type is `Result<(), watch::RecvError>`; for the
+            // None case we use `std::future::pending()` typed via the
+            // boxed return so the select arm types match.
+            let changed_future: std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), tokio::sync::watch::error::RecvError>> + Send>> =
+                match self.config_rx.as_mut() {
+                    Some(rx) => Box::pin(rx.changed()),
+                    None => Box::pin(std::future::pending()),
+                };
             tokio::select! {
                 _ = self.cancel_token.cancelled() => {
                     info!("ChirpStack poller shutting down");
                     return Ok(());
+                }
+                changed = changed_future => {
+                    if changed.is_ok() {
+                        // The watch sender published a new config —
+                        // pull it out and replace `self.config`. The
+                        // 4-4 recovery loop reads at entry, so an in-
+                        // flight recovery is unaffected; the next
+                        // entry uses the new values.
+                        if let Some(rx) = self.config_rx.as_mut() {
+                            // Iter-1 review P18: deref through the
+                            // borrow guard once instead of cloning the
+                            // Arc and then deep-cloning the inner
+                            // AppConfig. Net: one deep clone instead
+                            // of one Arc-clone + one deep clone.
+                            self.config = (**rx.borrow_and_update()).clone();
+                            info!(
+                                operation = "config_reload_applied",
+                                subsystem = "chirpstack_poller",
+                                polling_frequency_s = self.config.chirpstack.polling_frequency,
+                                "Poller picked up reloaded config"
+                            );
+                        }
+                    }
+                    // Else the sender was dropped — fall through and
+                    // keep polling with the existing config; the next
+                    // iteration's `changed_future` will be `pending`.
                 }
                 _ = tokio::time::sleep(wait_time) => {}
             }
@@ -3495,5 +3590,72 @@ mod tests {
         // pin for the single-fire-per-cycle contract.
 
         drop(listener);
+    }
+
+    /// Story 9-7 Task 3 — pins the receiver-wiring contract on the
+    /// poller. Iter-1 review P10: previous name
+    /// `poller_picks_up_new_retry_at_next_cycle` lied about exercising
+    /// the run loop; this test only verifies that the receiver
+    /// `ChirpstackPoller::new_with_reload` stashes observes a fresh
+    /// publish via `borrow_and_update()`. Driving the actual outer
+    /// `tokio::select!` arm requires a stub gRPC server — deferred
+    /// alongside Story 4-4's identical pattern (see deferred-work.md
+    /// "End-to-end `poll_metrics` integration test for the recovery
+    /// wire-in"). Honest test name + docstring.
+    #[tokio::test]
+    async fn poller_config_rx_observes_new_publish() {
+        let mut config = get_test_config();
+        config.chirpstack.retry = 30;
+        let initial = Arc::new(config.clone());
+        let (tx, rx) = tokio::sync::watch::channel(initial.clone());
+
+        let backend = Arc::new(InMemoryBackend::new());
+        let cancel_token = CancellationToken::new();
+        let restore_barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let poller = ChirpstackPoller::new_with_reload(
+            &config,
+            backend,
+            cancel_token,
+            restore_barrier,
+            Some(rx),
+        )
+        .await
+        .expect("poller construction must succeed");
+
+        // Sanity: the poller stashed the receiver and the receiver's
+        // current view matches the initial publish.
+        assert!(
+            poller.config_rx.is_some(),
+            "config_rx must be populated when constructed via new_with_reload"
+        );
+        let mut rx_clone = poller
+            .config_rx
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            rx_clone.borrow_and_update().chirpstack.retry,
+            30,
+            "initial published value must be visible to the receiver"
+        );
+
+        // Publish a new config; receiver must see the change at the
+        // next `borrow_and_update`.
+        let mut new_config = config.clone();
+        new_config.chirpstack.retry = 5;
+        tx.send(Arc::new(new_config))
+            .expect("watch send must succeed (receiver still alive)");
+
+        // `changed()` resolves once the sender publishes a new value.
+        rx_clone
+            .changed()
+            .await
+            .expect("changed() must resolve cleanly after a fresh send");
+        assert_eq!(
+            rx_clone.borrow_and_update().chirpstack.retry,
+            5,
+            "after send, receiver must observe the new retry value"
+        );
     }
 }

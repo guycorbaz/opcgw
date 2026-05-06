@@ -1288,12 +1288,139 @@ not-yet-polled metric appears with `value: null` + `timestamp: null`
 
 ---
 
+## Configuration hot-reload
+
+Story 9-7 adds operator-driven configuration hot-reload via SIGHUP.
+Sending `SIGHUP` to the gateway PID re-reads `config/config.toml`
+through the same figment chain used at startup (TOML +
+`OPCGW_*` env-var overlay), validates the candidate, classifies
+which knobs changed, atomically swaps the live `Arc<AppConfig>`
+into a `tokio::sync::watch` channel, and notifies the in-process
+subscribers (poller, web `AppState`, OPC UA listener stub for
+Story 9-8) to pick up the new values at their next safe checkpoint.
+
+### SIGHUP trigger surface
+
+```sh
+# Send SIGHUP to the running gateway. The PID is whatever the init
+# system (systemd / Docker / supervisor) tracks for the opcgw
+# process. systemd users: wire `ExecReload=` to this kill recipe.
+kill -HUP "$(pgrep opcgw)"
+```
+
+There is **no** `POST /api/config/reload` endpoint in v1 — SIGHUP-only
+minimises CSRF / auth-surface area until Stories 9-4 / 9-5 / 9-6
+land web-based CRUD endpoints (which will trigger reloads
+programmatically by calling the same routine). There is also **no**
+filesystem watch (`notify` crate) — editor-save races and
+dependency-surface expansion ruled it out.
+
+### Knob taxonomy
+
+The reload routine classifies every knob into one of three buckets
+(see `src/config_reload.rs::classify_diff` for the canonical list):
+
+**Hot-reload-safe** — applied without restart. Changes here are
+picked up by subscribers at their next safe checkpoint:
+
+- `chirpstack.polling_frequency` — next poll cycle
+- `chirpstack.retry`, `chirpstack.delay` — next entry to the Story
+  4-4 recovery loop (read-at-entry semantics; in-flight recovery
+  unaffected)
+- `chirpstack.list_page_size` — next pagination call
+- `[opcua].stale_threshold_seconds` — next web-dashboard request
+  (**v1 limitation**: the OPC UA path captures the threshold into
+  per-variable read-callback closures at startup, so this knob
+  affects only the web dashboard's "Good → Uncertain" boundary
+  in v1; OPC UA reads continue using the startup value)
+
+**Restart-required** — reloads that mutate any of these are
+**rejected** with `event="config_reload_failed" reason="restart_required"`
+and a `changed_knob` field naming the offending field. Operators
+restart the gateway after applying the change:
+
+- `chirpstack.server_address`, `chirpstack.api_token`, `chirpstack.tenant_id`
+  — gRPC channel + interceptor are bound at startup
+- `[opcua].host_ip_address`, `[opcua].host_port` — bound socket
+- `[opcua].application_name`, `[opcua].application_uri`,
+  `[opcua].product_uri` — embedded in OPC UA endpoint discovery
+  responses cached by clients
+- `[opcua].pki_dir`, `[opcua].certificate_path`,
+  `[opcua].private_key_path` — server identity
+- `[opcua].max_connections`, `[opcua].max_subscriptions_per_session`,
+  `[opcua].max_monitored_items_per_sub`, `[opcua].max_message_size`,
+  `[opcua].max_chunk_count` — fed into `async-opcua` `ServerBuilder`
+  at startup
+- `[opcua].user_name`, `[opcua].user_password` — **v1 limitation**:
+  rotating credentials at runtime would require modifying the
+  `WebAuthState` and `OpcgwAuthManager` digests captured at startup
+  by the auth middleware. The auth-middleware refactor is deferred
+  to a future story; v1 classifies credential changes as
+  restart-required so a hot-reload that bumps the password is
+  rejected loudly rather than silently ignored
+- `web.port`, `web.bind_address`, `web.enabled` — bound socket
+- `web.auth_realm` — captured into `WebAuthState.realm` at startup
+- `storage.database_path`, `storage.retention_days` — DB connection
+  pool init; retention is read at startup by the pruner
+
+**Address-space-mutating (Story 9-8 territory)** — adding /
+removing applications, devices, or metrics from `application_list`.
+Story 9-7 logs an info-level `topology_change_detected` event with
+`added_devices` / `removed_devices` / `modified_devices` field
+counts and updates the web dashboard, but does NOT call
+`address_space.write().add_variables(...)` or `delete(...)`.
+**Until Story 9-8 lands, an operator who hot-reloads a topology
+change sees the dashboard update but the OPC UA address space
+stays frozen at startup state.** This intentional limitation is
+the v1 scope split per `epics.md:916-931`.
+
+### Audit events
+
+Three new structured events are emitted by the SIGHUP listener:
+
+- `event="config_reload_attempted"` (info) — every SIGHUP. Carries
+  `trigger="sighup"`. The next line is either `succeeded` or
+  `failed`.
+- `event="config_reload_succeeded"` (info) — validate + classify +
+  swap completed. Carries `trigger`, `changed_section_count`,
+  `includes_topology_change`, `duration_ms`. `changed_section_count
+  = 0` means the candidate equalled the live config (no swap).
+- `event="config_reload_failed"` (warn / audit) — reload was
+  rejected. Carries `trigger`, `reason ∈ {validation, io,
+  restart_required}`, `changed_knob` (only for
+  `reason="restart_required"`), and a sanitised `error` field.
+  Per NFR7, the `error` field never includes secrets — the
+  `ReloadError::Display` impl is curated to surface only the
+  validation diagnostic, file path, or knob name.
+
+The classifier rejects on the **first** restart-required violation
+it finds (so the operator gets a single actionable line rather
+than a wall of "this also changed" noise). Iterate by fixing each
+flagged knob and re-issuing SIGHUP until the reload succeeds.
+
+### Limitations (Story 9-8 dependency + v1 scope)
+
+- **OPC UA address-space mutation is stubbed.** Story 9-7 logs the
+  topology diff; Story 9-8 implements the apply.
+- **Credential rotation requires restart in v1** (see
+  "Restart-required" above).
+- **`[opcua].stale_threshold_seconds` hot-reload affects only the
+  web dashboard** in v1. The OPC UA path's per-variable
+  read-callback closures capture the threshold at startup.
+- **No HTTP trigger.** SIGHUP-only; web-driven reload arrives with
+  Stories 9-4 / 9-5 / 9-6.
+- **No filesystem watch.** Editor-save races + `notify`-crate
+  dependency-surface expansion ruled it out.
+
+---
+
 ## References
 
 - Story 7-1 spec: `_bmad-output/implementation-artifacts/7-1-credential-management-via-environment-variables.md`
 - Story 7-2 spec: `_bmad-output/implementation-artifacts/7-2-opc-ua-security-endpoints-and-authentication.md`
 - Story 7-3 spec: `_bmad-output/implementation-artifacts/7-3-connection-limiting.md`
 - Story 9-1 spec: `_bmad-output/implementation-artifacts/9-1-axum-web-server-and-basic-authentication.md`
+- Story 9-7 spec: `_bmad-output/implementation-artifacts/9-7-configuration-hot-reload.md`
 - PRD requirements: FR42 (env-var injection), NFR7 (no secrets in logs),
   NFR8 (no real credentials in default config), NFR24 (env override for
   all secrets), FR19 (multi-policy OPC UA endpoints), FR20 (OPC UA user

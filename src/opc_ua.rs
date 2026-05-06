@@ -742,6 +742,12 @@ impl OpcUa {
     ///     eprintln!("Server failed: {}", e);
     /// }
     /// ```
+    /// Story 9-7 retains this monolithic entry point for legacy lib
+    /// callers (Story 9-0 spike tests, library users) that don't need
+    /// the build/run-handles seam. `src/main.rs` uses [`build`] +
+    /// [`run_handles`] directly so the OPC UA config-listener task
+    /// can spawn between them.
+    #[allow(dead_code)]
     pub async fn run(self) -> Result<(), OpcGwError> {
         let handles = self.build().await?;
         Self::run_handles(handles).await

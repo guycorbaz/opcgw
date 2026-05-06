@@ -53,7 +53,7 @@ fn default_string_max_length() -> usize {
 }
 
 /// Definition of a single parameter in a command schema
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ParameterDef {
     /// Parameter name
     pub name: String,
@@ -67,7 +67,7 @@ pub struct ParameterDef {
 }
 
 /// Command schema definition for a single command
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct CommandSchema {
     /// Command name (e.g., "set_temperature", "toggle_relay")
     pub command_name: String,
