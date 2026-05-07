@@ -161,6 +161,18 @@ pub fn build_http_client(request_timeout: std::time::Duration) -> reqwest::Clien
         .expect("build_http_client: reqwest::Client::builder failed")
 }
 
+/// Story 9-4 helper — build an `Arc<ConfigReloadHandle>` for tests
+/// that need to construct an `AppState` with the post-9-4 fields.
+/// Stores the initial config + the canonical TOML path so reload
+/// calls re-read from disk consistently.
+pub fn make_test_reload_handle(
+    initial: std::sync::Arc<opcgw::config::AppConfig>,
+    config_path: std::path::PathBuf,
+) -> std::sync::Arc<opcgw::config_reload::ConfigReloadHandle> {
+    let (handle, _rx) = opcgw::config_reload::ConfigReloadHandle::new(initial, config_path);
+    std::sync::Arc::new(handle)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -84,6 +84,9 @@ fn build_test_app_state(snapshot: DashboardConfigSnapshot) -> Arc<AppState> {
         .update_gateway_status(Some(chrono::Utc::now()), 3, true)
         .expect("seed gateway_status");
     let backend: Arc<dyn StorageBackend> = Arc::new(backend);
+    let (config_reload, config_writer, dir) =
+        opcgw::web::test_support::make_test_reload_handle_and_writer();
+    std::mem::forget(dir);
     Arc::new(AppState {
         auth,
         backend,
@@ -94,6 +97,8 @@ fn build_test_app_state(snapshot: DashboardConfigSnapshot) -> Arc<AppState> {
         start_time: std::time::Instant::now(),
         // Story 9-3: tests use the production default (120 s).
         stale_threshold_secs: std::sync::atomic::AtomicU64::new(120),
+        config_reload,
+        config_writer,
     })
 }
 

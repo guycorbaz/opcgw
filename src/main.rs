@@ -897,12 +897,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                  clamping to default so the web dashboard's 'uncertain' band stays meaningful"
             );
         }
+        // Story 9-4: ConfigWriter for CRUD-driven TOML round-trip
+        // mutations. Constructed with the same canonical config_path
+        // that ConfigReloadHandle was built with so the write path
+        // and the reload path operate on the same file.
+        let config_writer =
+            web::config_writer::ConfigWriter::new(std::path::PathBuf::from(&config_path));
+
         let app_state = std::sync::Arc::new(web::AppState {
             auth: auth_state,
             backend: web_backend,
             dashboard_snapshot: std::sync::RwLock::new(dashboard_snapshot),
             start_time: std::time::Instant::now(),
             stale_threshold_secs: std::sync::atomic::AtomicU64::new(stale_threshold_secs),
+            // Story 9-4: thread the existing reload_handle (already
+            // an Arc<ConfigReloadHandle> retained by the SIGHUP
+            // listener) into AppState so CRUD handlers can call
+            // config_reload.reload() after writing the TOML.
+            config_reload: reload_handle.clone(),
+            config_writer,
         });
 
         // Bind synchronously; fail-fast on bind failure.

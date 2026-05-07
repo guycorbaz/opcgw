@@ -33,6 +33,19 @@
 
 pub mod api;
 pub mod auth;
+pub mod config_writer;
+pub mod csrf;
+
+// Iter-1 review P30: `test_support` ships in release binaries
+// because integration tests in `tests/` cannot see `#[cfg(test)]`
+// items (they link against the production lib build). Gating on a
+// feature flag would require every integration test to enable it
+// per-target, which Cargo cannot express cleanly without a
+// circular self-dev-dep. The module is marked `#![allow(dead_code)]`
+// and is never reachable from non-test consumers; the production
+// binary's size cost is negligible (~150 LOC of TOML fixture
+// strings).
+pub mod test_support;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -42,10 +55,14 @@ use std::time::{Duration, Instant};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
+// Story 9-4: `post`, `put`, `delete` are used as `MethodRouter`
+// builders chained after `get(...)` via `.post()/.put()/.delete()`
+// in `build_router`; no separate import is needed.
 use axum::Router;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::{info, warn};
 
 use crate::config::AppConfig;
@@ -223,6 +240,20 @@ pub struct AppState {
     /// Uncertain" boundary in v1. Documented in
     /// `docs/security.md § Configuration hot-reload`.
     pub stale_threshold_secs: std::sync::atomic::AtomicU64,
+    /// Story 9-4: handle to the configuration reload routine. CRUD
+    /// handlers call `config_reload.reload().await` after writing
+    /// the TOML to trigger validate-then-swap of the live
+    /// `Arc<AppConfig>` and the dashboard snapshot. Threaded into
+    /// `AppState` from `main.rs::main` (the same `Arc<...>` already
+    /// retained by the SIGHUP listener task is reused here — no
+    /// new construction).
+    pub config_reload: Arc<crate::config_reload::ConfigReloadHandle>,
+    /// Story 9-4: TOML round-trip helper for CRUD-driven config
+    /// mutations. `figment` (`src/config.rs`) is the read side;
+    /// this is the write side. Held lock serialises concurrent
+    /// CRUD requests across the entire write+reload critical
+    /// section.
+    pub config_writer: Arc<crate::web::config_writer::ConfigWriter>,
 }
 
 /// Story 9-7 Task 4 — extracted from the inline clamp at
@@ -332,14 +363,61 @@ const GRACEFUL_SHUTDOWN_BUDGET_SECS: u64 = 5;
 ///   § Deployment requirements`.
 pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
     let auth_state = app_state.auth.clone();
+    // Story 9-4: build the CSRF state from the live config's
+    // `[web].allowed_origins` (or the default
+    // `http://<bind_address>:<port>`). The state is captured at
+    // router-build time; hot-reload of `[web].allowed_origins` is
+    // restart-required (caught by `config_reload::classify_diff`).
+    let csrf_state = {
+        let live = app_state.config_reload.subscribe();
+        let cfg = (*live.borrow()).clone();
+        csrf::CsrfState::new(cfg.web.resolved_allowed_origins())
+    };
+
     Router::new()
         .route("/api/health", get(api_health))
         .route("/api/status", get(api::api_status))
         .route("/api/devices", get(api::api_devices))
+        // Story 9-4 CRUD routes (FR34).
+        .route(
+            "/api/applications",
+            get(api::list_applications).post(api::create_application),
+        )
+        .route(
+            "/api/applications/{application_id}",
+            get(api::get_application)
+                .put(api::update_application)
+                .delete(api::delete_application),
+        )
         .fallback_service(ServeDir::new(static_dir))
+        // Layer ordering invariant (load-bearing): axum 0.8 stacks
+        // .layer(...) calls in REVERSE declaration order. For runtime
+        // ordering "auth runs first → CSRF runs second → handler runs
+        // third → security headers added on response", the layers
+        // must be declared in the inverse order. The CSRF layer is
+        // declared FIRST (innermost in the stack); the auth layer
+        // SECOND; the security-header layers are LAST (outermost) so
+        // they run on every response after handler completion.
+        .layer(axum::middleware::from_fn_with_state(
+            csrf_state,
+            csrf::csrf_middleware,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             basic_auth_middleware,
+        ))
+        // Iter-1 review P9: clickjacking defence. `X-Frame-Options:
+        // DENY` blocks framing entirely (legacy header for IE/old
+        // Safari). `Content-Security-Policy: frame-ancestors 'none'`
+        // is the modern equivalent (also accepted by current Chrome,
+        // Firefox, Edge). Both ship — defence-in-depth.
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::X_FRAME_OPTIONS,
+            axum::http::HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::HeaderName::from_static("content-security-policy"),
+            axum::http::HeaderValue::from_static("frame-ancestors 'none'"),
         ))
         .with_state(app_state)
 }
@@ -502,7 +580,7 @@ mod tests {
     /// Mirrors the explicit-field pattern in
     /// `src/web/auth.rs::tests::web_auth_test_config` because `Global`,
     /// `ChirpstackPollerConfig`, and `OpcUaConfig` do not derive Default.
-    fn snapshot_test_config(applications: Vec<ChirpStackApplications>) -> AppConfig {
+    pub(crate) fn snapshot_test_config(applications: Vec<ChirpStackApplications>) -> AppConfig {
         AppConfig {
             global: Global {
                 debug: true,
@@ -661,9 +739,15 @@ mod tests {
             "opcgw-test".to_string(),
         ));
         let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
-        let snapshot = Arc::new(DashboardConfigSnapshot::from_config(&snapshot_test_config(
-            vec![],
-        )));
+        let cfg = snapshot_test_config(vec![]);
+        let snapshot = Arc::new(DashboardConfigSnapshot::from_config(&cfg));
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let toml_path = tmp.path().join("config.toml");
+        std::fs::write(&toml_path, "[global]\ndebug = true\n").expect("write toml");
+        let (handle, _rx) = crate::config_reload::ConfigReloadHandle::new(
+            Arc::new(cfg),
+            toml_path.clone(),
+        );
         let app_state = Arc::new(AppState {
             auth,
             backend,
@@ -672,6 +756,8 @@ mod tests {
             stale_threshold_secs: std::sync::atomic::AtomicU64::new(
                 api::DEFAULT_STALE_THRESHOLD_SECS,
             ),
+            config_reload: Arc::new(handle),
+            config_writer: crate::web::config_writer::ConfigWriter::new(toml_path),
         });
         let dir = PathBuf::from("static");
         let _router: Router = build_router(app_state, dir);

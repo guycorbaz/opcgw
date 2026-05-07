@@ -4,8 +4,69 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>opcgw — Applications</title>
+<link rel="stylesheet" href="/dashboard.css">
+<style>
+  /* Story 9-4 minimal-footprint overrides on top of dashboard.css. */
+  .crud-form { display: grid; gap: 0.5rem; max-width: 400px; margin: 1rem 0; }
+  .crud-form label { font-weight: bold; }
+  .crud-form input { padding: 0.4rem; font-size: 1rem; }
+  .crud-form button { padding: 0.5rem; cursor: pointer; }
+  table.applications { width: 100%; border-collapse: collapse; }
+  table.applications th, table.applications td {
+    padding: 0.5rem; border-bottom: 1px solid #ccc; text-align: left;
+  }
+  .actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+  .btn-edit, .btn-delete { padding: 0.3rem 0.6rem; cursor: pointer; }
+  .btn-delete { color: #fff; background: #c0392b; border: none; }
+  .btn-edit { background: #2980b9; color: #fff; border: none; }
+  .error-banner { color: #c0392b; padding: 0.5rem; }
+  @media (max-width: 600px) {
+    table.applications, table.applications thead, table.applications tbody,
+    table.applications tr, table.applications th, table.applications td {
+      display: block;
+    }
+    table.applications tr { margin-bottom: 0.8rem; border: 1px solid #ddd; padding: 0.4rem; }
+    .actions { flex-direction: column; }
+  }
+</style>
 </head>
 <body>
-<p>Story 9-4 will fill this in (application CRUD).</p>
+<header>
+  <h1>opcgw — Applications</h1>
+  <nav><a href="/index.html">Dashboard</a> | <a href="/metrics.html">Metrics</a></nav>
+</header>
+
+<main>
+  <section>
+    <h2>Create application</h2>
+    <form id="create-form" class="crud-form" action="/api/applications" method="POST">
+      <label for="new-application-id">Application ID</label>
+      <input id="new-application-id" name="application_id" type="text" required>
+      <label for="new-application-name">Application Name</label>
+      <input id="new-application-name" name="application_name" type="text" required>
+      <button type="submit">Create</button>
+    </form>
+    <div id="create-error" class="error-banner" hidden></div>
+  </section>
+
+  <section>
+    <h2>Applications</h2>
+    <div id="list-error" class="error-banner" hidden></div>
+    <table class="applications" id="applications-table">
+      <thead>
+        <tr>
+          <th>Application ID</th>
+          <th>Application Name</th>
+          <th>Devices</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="applications-tbody">
+      </tbody>
+    </table>
+  </section>
+</main>
+
+<script src="/applications.js"></script>
 </body>
 </html>

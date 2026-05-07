@@ -45,8 +45,13 @@ uuid = { version = "1.10.0", features = ["v4", "serde"] }
 
 # Story 9-1: embedded Axum web server for FR50 / NFR11 / NFR12 / FR41.
 axum = "0.8"
-tower-http = { version = "0.6", features = ["fs"] }
+tower-http = { version = "0.6", features = ["fs", "set-header"] }
 base64 = "0.22"
+toml_edit = "0.25.11"
+# Story 9-4: `ConfigWriter` uses `NamedTempFile::persist` for atomic
+# `tempfile + rename` writes of `config/config.toml`. Already a
+# dev-dep below; promoted here for the production code path.
+tempfile = "3"
 
 [dev-dependencies]
 # `no-env-filter` so tests in this crate's integration suite can capture
@@ -70,7 +75,7 @@ serial_test = "3"
 async-opcua = { version = "0.17.1", features = ["client"] }
 # Story 9-1 integration tests: HTTP client for the embedded web server.
 # Dev-only — no inbound HTTP client in a release build.
-reqwest = { version = "0.12", default-features = false, features = ["http2"] }
+reqwest = { version = "0.12", default-features = false, features = ["http2", "json"] }
 # Story 9-1 unit tests: tower::ServiceExt::oneshot for in-process Axum
 # middleware testing without binding a TCP listener.
 tower = { version = "0.5", features = ["util"] }

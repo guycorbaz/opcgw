@@ -411,6 +411,14 @@ pub(crate) fn classify_diff(
             knob: "web.auth_realm".to_string(),
         });
     }
+    // Story 9-4: `web.allowed_origins` is captured into `CsrfState`
+    // at router-build time. Same v1 limitation as `auth_realm` —
+    // restart-required until the live-borrow refactor (#113) lands.
+    if old.web.allowed_origins != new.web.allowed_origins {
+        return Err(ReloadError::RestartRequired {
+            knob: "web.allowed_origins".to_string(),
+        });
+    }
 
     // ---------- restart-required: storage ----------
     if old.storage.database_path != new.storage.database_path {
@@ -661,6 +669,7 @@ fn web_equal(a: &crate::config::WebConfig, b: &crate::config::WebConfig) -> bool
         bind_address: _,
         enabled: _,
         auth_realm: _,
+        allowed_origins: _,
     } = a;
     let _ = b;
     true

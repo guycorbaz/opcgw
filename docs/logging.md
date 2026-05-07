@@ -185,6 +185,10 @@ index of the event names introduced so far.
 | `config_reload_attempted` | `info` (diag) | 9-7 | `security.md` § Configuration hot-reload |
 | `config_reload_succeeded` | `info` (diag) | 9-7 | `security.md` § Configuration hot-reload |
 | `config_reload_failed` | `warn` (audit) | 9-7 | `security.md` § Configuration hot-reload |
+| `application_created` | `info` (audit) | 9-4 | `security.md` § Configuration mutations |
+| `application_updated` | `info` (audit) | 9-4 | `security.md` § Configuration mutations |
+| `application_deleted` | `info` (audit) | 9-4 | `security.md` § Configuration mutations |
+| `application_crud_rejected` | `warn` (audit) | 9-4 | `security.md` § Configuration mutations |
 
 Pinning rules (apply to every entry above):
 

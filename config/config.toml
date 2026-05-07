@@ -165,12 +165,18 @@ stale_threshold_seconds = 120
 #   Override via OPCGW_WEB__AUTH_REALM.
 # enabled — master switch. Default false. Override via
 #   OPCGW_WEB__ENABLED=true.
+# allowed_origins — Story 9-4 CSRF allow-list for state-changing
+#   routes (POST/PUT/DELETE on /api/applications/*). Each entry must
+#   parse as scheme://host[:port] (no path/query/fragment).
+#   When omitted, defaults to vec!["http://<bind_address>:<port>"].
+#   Hot-reload of this knob is restart-required (GH #113).
 #
 #[web]
 #enabled = false
 #port = 8080
 #bind_address = "0.0.0.0"
 #auth_realm = "opcgw"
+#allowed_origins = ["http://gateway.local:8080"]
 
 
 ###########################################################

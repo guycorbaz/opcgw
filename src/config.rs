@@ -385,6 +385,80 @@ pub struct WebConfig {
     /// `OPCGW_WEB__ENABLED`.
     #[serde(default)]
     pub enabled: Option<bool>,
+
+    /// Story 9-4 (FR40 CSRF): allow-list of `scheme://host[:port]`
+    /// strings that the CSRF middleware accepts on the `Origin` /
+    /// `Referer` header for state-changing routes (POST/PUT/DELETE).
+    /// Each entry must parse as `scheme://host[:port]` with no
+    /// path/query/fragment. When `None`, the resolved list defaults
+    /// to `vec![format!("http://{}:{}", bind_address, port)]` at
+    /// startup. **Hot-reload of this knob is restart-required in
+    /// v1** (the CSRF state is captured at router-build time; same
+    /// blocker as GH #113 live-borrow refactor).
+    #[serde(default)]
+    pub allowed_origins: Option<Vec<String>>,
+}
+
+impl WebConfig {
+    /// Resolve the configured `allowed_origins` or fall back to the
+    /// gateway's own bind address. Story 9-4 CSRF middleware uses
+    /// the result to populate `CsrfState`.
+    ///
+    /// **Iter-2 review P36 + Iter-3 review HR2-1:** IPv6 literal bind
+    /// addresses (containing `:`) are bracketed per RFC 3986 §3.2.2 so
+    /// the resulting URL can be parsed unambiguously. `bind = "::1"`
+    /// becomes `http://[::1]:8080`.
+    ///
+    /// **Iter-3 HR2-1 — invariant relied on:** `WebConfig::validate`
+    /// already rejects `bind_address` values that don't parse as a
+    /// pure `IpAddr` (no brackets, no port suffix, no hostname). The
+    /// only reachable inputs here are dot-decimal IPv4 (zero colons,
+    /// e.g. `127.0.0.1`, `0.0.0.0`) and bare IPv6 (≥ 2 colons,
+    /// e.g. `::1`, `2001:db8::1`, `fe80::1`). Bracketed forms like
+    /// `[::1]` and host:port forms like `host:8080` cannot appear
+    /// here. The earlier defensive `starts_with('[')` branch was
+    /// dead and could produce a double-port URL like
+    /// `http://[::1]:8080:8080` if an operator bypassed validate.
+    /// Removed in iter-3.
+    pub fn resolved_allowed_origins(&self) -> Vec<String> {
+        if let Some(list) = &self.allowed_origins {
+            if !list.is_empty() {
+                return list.clone();
+            }
+        }
+        let port = self.port.unwrap_or(crate::utils::WEB_DEFAULT_PORT);
+        let bind = self
+            .bind_address
+            .clone()
+            .unwrap_or_else(|| crate::utils::WEB_DEFAULT_BIND_ADDRESS.to_string());
+        // Iter-3 HR2-1 (defence-in-depth): if validate has been
+        // bypassed and `bind` somehow contains brackets or a `:port`
+        // suffix, refuse to construct a default — return empty list
+        // so CSRF rejects every state-changing request and the
+        // operator notices the misconfiguration.
+        if bind.contains('[') || bind.contains(']') {
+            // Validate should have rejected; defence-in-depth: empty
+            // allow-list = CSRF rejects all state-changing methods.
+            return vec![];
+        }
+        let colon_count = bind.matches(':').count();
+        let bind_for_url = if colon_count >= 2 {
+            // IPv6 literal (multiple colons; bracketing is safe even
+            // if validate-bypass somehow injected a port — would
+            // produce `[host:port]:port` which is still malformed
+            // but explicitly rejected by RFC 3986 parsers, so a
+            // browser cannot match it; CSRF blocks the request).
+            format!("[{bind}]")
+        } else if colon_count == 1 {
+            // host:port — would only reach here on validate bypass.
+            // Refuse to construct a default; let CSRF reject.
+            return vec![];
+        } else {
+            // IPv4 / hostname — append port normally.
+            bind.clone()
+        };
+        vec![format!("http://{bind_for_url}:{port}")]
+    }
 }
 
 impl std::fmt::Debug for WebConfig {
@@ -394,6 +468,7 @@ impl std::fmt::Debug for WebConfig {
             .field("bind_address", &self.bind_address)
             .field("auth_realm", &self.auth_realm)
             .field("enabled", &self.enabled)
+            .field("allowed_origins", &self.allowed_origins)
             .finish()
     }
 }
@@ -478,8 +553,12 @@ pub struct ChirpStackApplications {
     /// List of devices within this application to monitor.
     ///
     /// Contains configuration for each device including which metrics
-    /// to collect and how to expose them via OPC UA.
-    #[serde(rename = "device")]
+    /// to collect and how to expose them via OPC UA. Story 9-4
+    /// adds `#[serde(default)]` so a `[[application]]` block without
+    /// a `[[application.device]]` sub-table deserialises to an
+    /// empty `Vec` (matching the post-9-4 `AppConfig::validate`
+    /// behaviour: empty device_list is a warn, not an error).
+    #[serde(rename = "device", default)]
     pub device_list: Vec<ChirpstackDevice>,
 }
 
@@ -507,7 +586,11 @@ pub struct ChirpstackDevice {
     ///
     /// Specifies which ChirpStack metrics to monitor and how to
     /// expose them in the OPC UA server.
-    #[serde(rename = "read_metric")]
+    /// Story 9-4: `#[serde(default)]` allows a `[[application.device]]`
+    /// block without a `[[application.device.read_metric]]` sub-table
+    /// to deserialise to an empty `Vec` (matching the post-9-4
+    /// validate behaviour: empty `read_metric_list` is a warn).
+    #[serde(rename = "read_metric", default)]
     pub read_metric_list: Vec<ReadMetric>,
     /// List of commands that can be send to this device.
     #[serde(rename = "command")]
@@ -1258,6 +1341,67 @@ impl AppConfig {
             }
         }
 
+        // Story 9-4 AC#5: validate `[web].allowed_origins`. Each entry
+        // must parse as `scheme://host[:port]` with no path/query/fragment.
+        // Empty list is rejected — operator must use `None` (omit the key)
+        // to mean "default to bind address".
+        if let Some(list) = self.web.allowed_origins.as_ref() {
+            if list.is_empty() {
+                errors.push(
+                    "web.allowed_origins: empty list is invalid; omit the key \
+                     entirely to default to http://<bind_address>:<port>"
+                        .to_string(),
+                );
+            } else {
+                for (idx, origin) in list.iter().enumerate() {
+                    let trimmed = origin.trim();
+                    if trimmed.is_empty() {
+                        errors.push(format!(
+                            "web.allowed_origins[{}]: must not be empty",
+                            idx
+                        ));
+                        continue;
+                    }
+                    let scheme_end = match trimmed.find("://") {
+                        Some(i) => i,
+                        None => {
+                            errors.push(format!(
+                                "web.allowed_origins[{}]: '{}' missing scheme://; \
+                                 expected http://host:port or https://host:port",
+                                idx, origin
+                            ));
+                            continue;
+                        }
+                    };
+                    let scheme = &trimmed[..scheme_end];
+                    if scheme != "http" && scheme != "https" {
+                        errors.push(format!(
+                            "web.allowed_origins[{}]: scheme '{}' must be http or https",
+                            idx, scheme
+                        ));
+                    }
+                    let after_scheme = &trimmed[scheme_end + 3..];
+                    if after_scheme.is_empty() {
+                        errors.push(format!(
+                            "web.allowed_origins[{}]: missing host after scheme",
+                            idx
+                        ));
+                        continue;
+                    }
+                    if after_scheme.contains('/')
+                        || after_scheme.contains('?')
+                        || after_scheme.contains('#')
+                    {
+                        errors.push(format!(
+                            "web.allowed_origins[{}]: '{}' must not contain a path, \
+                             query, or fragment — only scheme://host[:port]",
+                            idx, origin
+                        ));
+                    }
+                }
+            }
+        }
+
         // Story 8-3 AC#3: storage.retention_days FR22 floor + storage-cost cap.
         //
         // Review patch P21: this validation tightens the existing field
@@ -1376,6 +1520,9 @@ impl AppConfig {
             errors.push("application_list: at least one application must be configured".to_string());
         } else {
             let mut seen_device_ids = std::collections::HashSet::new();
+            // Story 9-4 AC#3: cross-application application_id uniqueness.
+            // The pattern mirrors `seen_device_ids` below.
+            let mut seen_application_ids = std::collections::HashSet::new();
 
             for (app_idx, app) in self.application_list.iter().enumerate() {
                 let app_context = format!("application[{}]", app_idx);
@@ -1386,13 +1533,30 @@ impl AppConfig {
 
                 if app.application_id.is_empty() {
                     errors.push(format!("{}.application_id: must not be empty", app_context));
+                } else if seen_application_ids.contains(&app.application_id) {
+                    errors.push(format!(
+                        "{}.application_id: '{}' is duplicated across application_list",
+                        app_context, app.application_id
+                    ));
+                } else {
+                    seen_application_ids.insert(app.application_id.clone());
                 }
 
+                // Story 9-4 AC#3 (empty-device tolerance): demote
+                // empty device_list from hard error to warn-level
+                // log so POST /api/applications can create an
+                // application that the operator subsequently fills
+                // in via Story 9-5 endpoints. Existing operator
+                // configs with at least one device per app see no
+                // behavioural change (the warn never fires).
                 if app.device_list.is_empty() {
-                    errors.push(format!(
-                        "{}.device_list: at least one device must be configured",
-                        app_context
-                    ));
+                    tracing::warn!(
+                        operation = "application_validation_warning",
+                        application_id = %app.application_id,
+                        application_name = %app.application_name,
+                        "application has zero devices — operator must add at least \
+                         one via Story 9-5 endpoints (or TOML edit) to begin polling"
+                    );
                 } else {
                     for (dev_idx, device) in app.device_list.iter().enumerate() {
                         let dev_context = format!("{}.device[{}]", app_context, dev_idx);
@@ -1415,11 +1579,19 @@ impl AppConfig {
                             errors.push(format!("{}.device_name: must not be empty", dev_context));
                         }
 
+                        // Story 9-4 AC#3: demote empty
+                        // read_metric_list from hard error to
+                        // warn-level log. Same rationale as the
+                        // empty device_list demotion above.
                         if device.read_metric_list.is_empty() {
-                            errors.push(format!(
-                                "{}.read_metric_list: at least one metric must be configured",
-                                dev_context
-                            ));
+                            tracing::warn!(
+                                operation = "device_validation_warning",
+                                device_id = %device.device_id,
+                                device_name = %device.device_name,
+                                "device has zero metrics — operator must add at least \
+                                 one via Story 9-5 endpoints (or TOML edit) to begin \
+                                 polling this device"
+                            );
                         }
                     }
                 }
@@ -2048,20 +2220,63 @@ mod tests {
         assert!(error_msg.contains("must not be 0"));
     }
 
-    /// Tests that empty device list in application produces clear error.
-    ///
-    /// Verifies that validation detects applications with no devices
-    /// and returns an appropriate error message.
+    /// Story 9-4 AC#3: empty `device_list` per application is no
+    /// longer a hard error — it is a warn-level log emission so
+    /// that POST /api/applications can create an application that
+    /// the operator subsequently fills in via Story 9-5 endpoints.
+    /// Verifies the post-9-4 behaviour: validation succeeds.
     #[test]
-    fn test_validation_empty_device_list() {
+    fn test_validation_empty_device_list_now_warns() {
         let mut config = get_config();
         config.application_list[0].device_list.clear();
 
+        // Post-Story-9-4: validate succeeds (warn-only). The warn
+        // log emission is exercised at the integration-test level
+        // via tracing-test in tests/web_application_crud.rs.
         let result = config.validate();
-        assert!(result.is_err());
-        let error_msg = result.unwrap_err().to_string();
-        assert!(error_msg.contains("device_list"));
-        assert!(error_msg.contains("at least one device"));
+        assert!(
+            result.is_ok(),
+            "post-9-4 empty device_list should be a warn, not an error; got: {:?}",
+            result.err()
+        );
+    }
+
+    /// Story 9-4 AC#3: cross-application `application_id`
+    /// uniqueness enforcement. POST with a duplicate ID must be
+    /// rejected (was previously accepted silently — only
+    /// `device_id` was uniqueness-checked).
+    #[test]
+    fn test_validation_duplicate_application_id() {
+        let mut config = get_config();
+        if config.application_list.len() > 1 {
+            config.application_list[1].application_id =
+                config.application_list[0].application_id.clone();
+
+            let result = config.validate();
+            assert!(result.is_err(), "duplicate application_id must fail");
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("duplicated"), "unexpected: {err}");
+            assert!(err.contains("application_id"), "unexpected: {err}");
+        }
+    }
+
+    /// Story 9-4 AC#3: empty `read_metric_list` per device is no
+    /// longer a hard error — same warn-demotion rationale as
+    /// `test_validation_empty_device_list_now_warns`.
+    #[test]
+    fn test_validation_empty_read_metric_list_now_warns() {
+        let mut config = get_config();
+        if !config.application_list[0].device_list.is_empty() {
+            config.application_list[0].device_list[0]
+                .read_metric_list
+                .clear();
+            let result = config.validate();
+            assert!(
+                result.is_ok(),
+                "post-9-4 empty read_metric_list should be a warn, not an error; got: {:?}",
+                result.err()
+            );
+        }
     }
 
     /// Tests that invalid URL format in server address produces error.

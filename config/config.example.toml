@@ -208,6 +208,10 @@ enabled = true
 port = 8080
 bind_address = "0.0.0.0"
 auth_realm = "opcgw-example"
+# Story 9-4 CSRF allow-list. Defaults to ["http://<bind_address>:<port>"]
+# if omitted. Override when the operator's browser hits the gateway via
+# a hostname or proxy.
+#allowed_origins = ["http://gateway.local:8080"]
 
 
 ###########################################################

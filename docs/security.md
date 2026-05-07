@@ -1414,6 +1414,259 @@ flagged knob and re-issuing SIGHUP until the reload succeeds.
 
 ---
 
+## Configuration mutations
+
+Story 9-4 ships the first **state-changing** routes on the embedded
+web server: a CRUD surface for `[[application]]` blocks. This
+section documents the trust model, the CSRF defence, the TOML
+round-trip discipline, and v1 limitations.
+
+### CRUD endpoint surface
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/applications` | List configured applications + per-application device counts. |
+| `GET` | `/api/applications/:application_id` | Single application detail. 404 on miss. |
+| `POST` | `/api/applications` | Create a new (initially empty) application. |
+| `PUT` | `/api/applications/:application_id` | Rename an existing application (`application_id` is immutable). |
+| `DELETE` | `/api/applications/:application_id` | Remove an application. Rejected with 409 if it still has devices, or if it is the only configured application. |
+
+All five routes inherit Basic auth via the Story 9-1
+layer-after-route invariant. State-changing methods (POST/PUT/DELETE)
+additionally pass through the Story 9-4 CSRF middleware.
+
+### CSRF defence (v1)
+
+Story 9-1 deferred CSRF to "Stories 9-4/9-5/9-6 mutating routes".
+Story 9-4 ships the canonical defence — a hybrid of two checks
+hardened by the Story 9-4 review:
+
+1. **Origin same-origin enforcement.** Every POST/PUT/DELETE/PATCH
+   request MUST carry an `Origin` header whose `scheme://host[:port]`
+   matches one of the configured `[web].allowed_origins` entries.
+   The `Referer` header is **NOT** consulted (Story 9-4 review iter-1
+   D2-P): per OWASP, Referer is forgeable from non-browser callers
+   and unreliable on HTTPS→HTTP downgrade, so trusting it as a
+   fallback widens the threat model. Strict-Referrer-Policy clients
+   that suppress `Origin` are explicitly rejected; operators who hit
+   that case should configure their browser to send `Origin` on
+   same-origin XHR/fetch.
+2. **JSON-only `Content-Type`.** The body content type must be
+   exactly `application/json` (with optional RFC 7231 `;` parameter
+   suffix). The `application/json `-followed-by-space-and-garbage
+   non-standard form is rejected (iter-1 review P12). This rejects
+   `<form>` POST CSRF.
+
+Both checks are applied **after** Basic auth and **before** the
+handler. Failures emit `event="application_crud_rejected"
+reason="csrf"` warn logs.
+
+Method handling uses a **positive allow-list** (iter-1 review P13):
+only GET, HEAD, and OPTIONS bypass CSRF. CONNECT, TRACE, PATCH, and
+any custom method are treated as state-changing and CSRF-checked.
+
+Default-port equivalence: `http://gateway.local:80` and
+`http://gateway.local` compare equal; same for `https`/`:443` (iter-1
+review P10). Browsers omit the default port on standard scheme/port
+pairs, so the allow-list normalisation must follow.
+
+Multi-`Origin` header bypass attempts are rejected (iter-1 review
+P11): a request with more than one `Origin` header is treated as
+malformed and refused.
+
+#### TLS prerequisite (operator action)
+
+The CSRF Origin defence presumes the `Origin` header reaches the
+gateway un-tampered. On **plain HTTP over a hostile LAN** (DNS
+spoofing, captive-portal MITM, ARP poisoning), an attacker can
+falsify the `Origin` header. **Operators deploying opcgw on a
+non-trusted network MUST front it with a TLS-terminating reverse
+proxy** (nginx, Caddy, Traefik); the reverse proxy must enforce TLS
+client→proxy AND must NOT rewrite the `Origin` header before
+forwarding. Story 9-1's TLS-via-reverse-proxy stance (issue #104)
+remains the canonical recipe.
+
+#### `[web].allowed_origins` knob
+
+Default (when the key is omitted) is
+`vec!["http://<bind_address>:<port>"]`. Operators whose browser
+hits the gateway via a different URL (hostname, VPN tunnel,
+reverse proxy) must extend the list explicitly. Each entry must
+parse as `scheme://host[:port]` with no path/query/fragment.
+**Hot-reload of this knob is restart-required in v1** (the CSRF
+state is captured at router-build time; the live-borrow refactor
+is tracked in GH #113).
+
+### TOML round-trip via `toml_edit`
+
+CRUD writes go through `src/web/config_writer.rs::ConfigWriter`
+which uses `toml_edit::DocumentMut` to preserve operator-edited
+comments, key order, and whitespace on round-trip. The figment
+chain (`src/config.rs`) remains the read side; `toml_edit` is the
+write side.
+
+Writes are **atomic** via `tempfile::NamedTempFile::new_in(parent)`
++ `persist(target)` (POSIX-atomic rename on the same filesystem).
+
+### Lock acquire-order invariant
+
+CRUD handlers MUST hold `ConfigWriter::lock()` across the entire
+`write + reload + (rollback)` sequence so concurrent CRUD requests
+cannot lose updates. Story 9-7's reload mutex is independent and
+acquired **after** the write_lock — no deadlock risk.
+
+#### SIGHUP-vs-CRUD-snapshot race (operator action — Story 9-4 review iter-1 D4-P)
+
+`ConfigWriter::lock()` only serialises CRUD-vs-CRUD requests. A
+SIGHUP-triggered reload runs on the SIGHUP listener task (Story 9-7)
+and does NOT contend on `ConfigWriter::write_lock`. Sequence at
+risk:
+
+1. CRUD handler acquires `lock()`.
+2. **Operator sends SIGHUP** → reload reads disk + swaps watch
+   channel.
+3. CRUD handler reads `original_bytes` for rollback snapshot —
+   captures **post-SIGHUP** bytes.
+4. CRUD handler writes its delta.
+5. CRUD handler calls `reload()` again; if it fails, rollback
+   restores step-3 bytes (NOT pre-SIGHUP).
+
+Pre-SIGHUP TOML state is lost on rollback in this window. **Operator
+mitigation:** do not SIGHUP while a CRUD request is in flight; the
+window is small (sub-millisecond on a healthy gateway) but
+operationally distinguishable. A future hardening story will gate
+SIGHUP on the `ConfigWriter::lock()` mutex; tracked alongside
+issue #113.
+
+### Rollback discipline on reload failure
+
+When `ConfigReloadHandle::reload()` returns `Err(_)` after a
+successful TOML write, the handler rolls back the on-disk TOML to
+the pre-write bytes (held in memory) via `ConfigWriter::rollback`.
+The HTTP response maps:
+
+- `ReloadError::Validation(_)` → **422 Unprocessable Entity** (with
+  the validation message).
+- `ReloadError::Io(_)` / `RestartRequired` → **500 Internal Server
+  Error** (operator log carries the detailed error).
+
+If the rollback **itself** fails, the gateway logs an
+`event="application_crud_rejected" reason="rollback_failed"` warn
+event and **poisons the `ConfigWriter`** (Story 9-4 review iter-1
+D3-P). All subsequent CRUD requests short-circuit with HTTP 503 +
+`event="application_crud_rejected" reason="poisoned"` warn until the
+gateway is restarted; operators MUST manually restore the TOML from
+a backup before restart, otherwise the next startup will fail
+validation. The poisoning is process-local, so a fresh `cargo run`
+or container restart clears it.
+
+Story 9-4 review iter-1 P4: the atomic-write also `fsync`s the
+tempfile data BEFORE persist + `fsync`s the parent directory AFTER
+persist, so a power loss during the write cannot leave the file
+zero-length or the rename lost. POSIX-atomic rename + fsync(file) +
+fsync(parent_dir) covers the durability gap that `tempfile::persist`
+alone leaves.
+
+Story 9-4 review iter-1 D1-P: when the post-write `reload()`
+returns `RestartRequired { knob }`, the handler checks whether the
+offending knob is in the just-written CRUD delta. If NOT (i.e., the
+operator made an unrelated manual edit to the TOML between gateway
+start and the CRUD POST), the handler returns 409 + `reason=
+"ambient_drift"` and DOES NOT roll back — the operator's manual
+edit is preserved. If the offending knob IS in our delta (defence-
+in-depth; should not happen for application_list mutations), the
+standard 500 + rollback path applies.
+
+### Audit events
+
+Four new event names land with Story 9-4:
+
+- `event="application_created"` (info) — POST succeeded.
+- `event="application_updated"` (info) — PUT succeeded.
+- `event="application_deleted"` (info) — DELETE succeeded.
+- `event="application_crud_rejected"` (warn / audit) — request
+  rejected at one of: handler-level validation, CSRF check,
+  conflict (delete pre-conditions), reload failure, or rollback
+  failure. Carries `reason ∈ {validation, csrf, conflict,
+  reload_failed, io, immutable_field, rollback_failed}`.
+
+The grep contract `git grep -hoE 'event = "application_[a-z_]+"' src/`
+must return exactly 4 lines.
+
+### `application_id` semantics (case-sensitivity)
+
+**`application_id` matching is case-sensitive throughout the
+gateway** (Story 9-4 review iter-2 P37 — documented design call).
+`App-1` and `app-1` are distinct identifiers in:
+
+- The pre-write CRUD duplicate check (`src/web/api.rs::create_application`).
+- `AppConfig::validate`'s cross-application uniqueness HashSet.
+- The poller's per-application bookkeeping.
+- The OPC UA address-space NodeId generation.
+
+This means an operator can create both `App-1` and `app-1` and the
+gateway will treat them as separate applications. If a future
+deployment needs case-insensitive matching, all four sites above
+must change in lockstep + a TOML migration must merge any colliding
+identifiers. Tracked as a possible future hardening if operators
+report case-collision confusion.
+
+### `validate()` amendments (additive)
+
+Story 9-4 makes three additive changes to `AppConfig::validate`
+(`src/config.rs:1374-1426`):
+
+1. **Cross-application `application_id` uniqueness** is now
+   enforced.
+2. **Empty `device_list` per application is now a warn**, not a
+   hard error.
+3. **Empty `read_metric_list` per device is now a warn**, not a
+   hard error.
+
+The two warn-demotions allow POST `/api/applications` to create an
+application that the operator subsequently fills in via Story 9-5
+endpoints. Existing operator configs with at least one device per
+app see no behavioural change.
+
+### Env-var-overrides-disk-edit gotcha
+
+If an operator has set `OPCGW_APPLICATION__N__APPLICATION_NAME="X"`
+as an environment variable, a CRUD edit to that same field via
+`PUT /api/applications/...` writes the new value to `config.toml`
+on disk — but the post-write reload re-runs the figment chain
+(TOML + env-var overlay), and the env-var value silently
+**overrides** the disk edit. **Operator action:** unset
+`OPCGW_APPLICATION__*` env vars before using the web UI to edit
+those fields.
+
+### v1 limitations
+
+- **No SQLite-side persistence.** TOML is the single source of
+  truth.
+- **No cookie-based CSRF token.** Origin/Referer + Content-Type
+  defence is sufficient for the LAN single-operator threat model.
+- **No cascade-delete.** Operators must remove devices via Story
+  9-5 endpoints before deleting the parent application.
+- **OPC UA address-space mutation stubbed.** Inherited from
+  Story 9-7 — without Story 9-8, a CRUD edit updates the
+  dashboard but the OPC UA address space stays at startup state.
+- **Best-effort rollback.** Manual operator action required if
+  the rollback write itself fails.
+- **No ChirpStack-side existence check.** v1 trusts the
+  operator-supplied `application_id`.
+
+### Anti-patterns
+
+- **Do NOT roll a custom CSRF token implementation.** When
+  stronger CSRF is needed, the canonical upgrade is a
+  double-submit pattern signed with the existing per-process
+  `hmac_key` (Story 9-1 / 7-2 reuse).
+- **Do NOT switch the write side to `toml::to_string`.** It loses
+  comments + key order on round-trip.
+- **Do NOT bypass the `ConfigWriter::lock()` discipline.**
+
+---
+
 ## References
 
 - Story 7-1 spec: `_bmad-output/implementation-artifacts/7-1-credential-management-via-environment-variables.md`
