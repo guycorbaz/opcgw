@@ -1593,6 +1593,49 @@ impl AppConfig {
                                  polling this device"
                             );
                         }
+
+                        // Story 9-5 AC#3: per-device metric_name +
+                        // chirpstack_metric_name uniqueness. The
+                        // post-#99 OPC UA NodeId construction
+                        // `format!("{}/{}", device_id, metric_name)`
+                        // (see src/opc_ua.rs:978) collides if two
+                        // metrics within ONE device share a
+                        // metric_name; the silent last-wins overwrite
+                        // class re-emerges. Same root cause for
+                        // duplicate chirpstack_metric_name on the
+                        // (device_id, chirpstack_metric_name)
+                        // reverse-lookup map at src/opc_ua.rs:1032.
+                        // Modelled on the existing seen_device_ids
+                        // HashSet pattern above.
+                        let mut seen_metric_names = std::collections::HashSet::new();
+                        let mut seen_chirpstack_metric_names = std::collections::HashSet::new();
+                        for (m_idx, metric) in device.read_metric_list.iter().enumerate() {
+                            let metric_context =
+                                format!("{}.read_metric[{}]", dev_context, m_idx);
+
+                            if seen_metric_names.contains(&metric.metric_name) {
+                                errors.push(format!(
+                                    "{}.metric_name: '{}' is duplicated within \
+                                     device.read_metric_list",
+                                    metric_context, metric.metric_name
+                                ));
+                            } else {
+                                seen_metric_names.insert(metric.metric_name.clone());
+                            }
+
+                            if seen_chirpstack_metric_names
+                                .contains(&metric.chirpstack_metric_name)
+                            {
+                                errors.push(format!(
+                                    "{}.chirpstack_metric_name: '{}' is duplicated within \
+                                     device.read_metric_list",
+                                    metric_context, metric.chirpstack_metric_name
+                                ));
+                            } else {
+                                seen_chirpstack_metric_names
+                                    .insert(metric.chirpstack_metric_name.clone());
+                            }
+                        }
                     }
                 }
             }
@@ -2257,6 +2300,141 @@ mod tests {
             let err = result.unwrap_err().to_string();
             assert!(err.contains("duplicated"), "unexpected: {err}");
             assert!(err.contains("application_id"), "unexpected: {err}");
+        }
+    }
+
+    /// Story 9-5 AC#3: per-device `metric_name` uniqueness within a
+    /// single device's `read_metric_list`. Pre-9-5 the validator
+    /// accepted duplicate names silently; the post-#99 OPC UA NodeId
+    /// construction `format!("{}/{}", device_id, metric_name)` then
+    /// silently overwrote via `HashMap::insert` last-wins,
+    /// re-introducing the same root-cause class as #99 itself but
+    /// scoped within a device.
+    #[test]
+    fn test_validation_duplicate_metric_name_within_device() {
+        // Iter-1 review L10 (Auditor A7): replace the previous
+        // `if !is_empty() { ... }` guard (which silently no-op'd
+        // when `get_config()` ever changed shape) with hard
+        // assertions on fixture preconditions, then unconditionally
+        // run the duplicate-metric_name assertions. This way, a
+        // future fixture refactor that drops the seeded device or
+        // its metric list FAILS this test rather than vacuously
+        // passing.
+        let mut config = get_config();
+        assert!(
+            !config.application_list[0].device_list.is_empty(),
+            "test fixture precondition: application[0] must have at least one device"
+        );
+        assert!(
+            !config.application_list[0].device_list[0]
+                .read_metric_list
+                .is_empty(),
+            "test fixture precondition: device[0] must have at least one metric"
+        );
+        // Inject a duplicate by cloning the first metric and
+        // re-pushing it (same metric_name, distinct
+        // chirpstack_metric_name to isolate the failure mode).
+        let mut dup = config.application_list[0].device_list[0].read_metric_list[0].clone();
+        dup.chirpstack_metric_name = format!("{}_DUP", dup.chirpstack_metric_name);
+        config.application_list[0].device_list[0]
+            .read_metric_list
+            .push(dup);
+
+        let result = config.validate();
+        assert!(
+            result.is_err(),
+            "duplicate metric_name within device must fail"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("duplicated"), "unexpected: {err}");
+        assert!(err.contains("metric_name"), "unexpected: {err}");
+    }
+
+    /// Story 9-5 AC#3: per-device `chirpstack_metric_name` uniqueness
+    /// within a single device's `read_metric_list`. Same root-cause
+    /// class as `test_validation_duplicate_metric_name_within_device`
+    /// — the (device_id, chirpstack_metric_name) reverse-lookup map
+    /// at `src/opc_ua.rs:1032` collides on duplicates.
+    #[test]
+    fn test_validation_duplicate_chirpstack_metric_name_within_device() {
+        // Iter-1 review L10 (Auditor A7): hard assertion on fixture
+        // shape — see sibling `test_validation_duplicate_metric_name_within_device`.
+        let mut config = get_config();
+        assert!(
+            !config.application_list[0].device_list.is_empty(),
+            "test fixture precondition: application[0] must have at least one device"
+        );
+        assert!(
+            !config.application_list[0].device_list[0]
+                .read_metric_list
+                .is_empty(),
+            "test fixture precondition: device[0] must have at least one metric"
+        );
+        let mut dup = config.application_list[0].device_list[0].read_metric_list[0].clone();
+        // Distinct metric_name to isolate the
+        // chirpstack_metric_name failure mode.
+        dup.metric_name = format!("{}_DUP", dup.metric_name);
+        config.application_list[0].device_list[0]
+            .read_metric_list
+            .push(dup);
+
+        let result = config.validate();
+        assert!(
+            result.is_err(),
+            "duplicate chirpstack_metric_name within device must fail"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("duplicated"), "unexpected: {err}");
+        assert!(err.contains("chirpstack_metric_name"), "unexpected: {err}");
+    }
+
+    /// Story 9-5 AC#3 + Issue #99 interaction: cross-device same
+    /// `metric_name` MUST be allowed (this is exactly the scenario
+    /// commit 9f823cc fixed at the OPC UA NodeId level — two devices
+    /// can both have a "Moisture" metric since the post-#99 NodeId
+    /// includes the device_id prefix). Defensive regression test
+    /// against accidentally tightening the per-device check into a
+    /// cross-device check.
+    #[test]
+    fn test_validation_same_metric_name_across_devices_is_allowed() {
+        let mut config = get_config();
+        // Need at least 2 devices total across the application_list.
+        let mut device_indices: Vec<(usize, usize)> = Vec::new();
+        for (a_idx, app) in config.application_list.iter().enumerate() {
+            for (d_idx, _) in app.device_list.iter().enumerate() {
+                device_indices.push((a_idx, d_idx));
+            }
+        }
+        if device_indices.len() >= 2 {
+            let (a1, d1) = device_indices[0];
+            let (a2, d2) = device_indices[1];
+            // Force both devices to have a metric named "Moisture"
+            // (issue #99's canonical example) but with distinct
+            // chirpstack_metric_name values to avoid the storage
+            // layer's own keying conflict.
+            if !config.application_list[a1].device_list[d1]
+                .read_metric_list
+                .is_empty()
+                && !config.application_list[a2].device_list[d2]
+                    .read_metric_list
+                    .is_empty()
+            {
+                config.application_list[a1].device_list[d1].read_metric_list[0].metric_name =
+                    "Moisture".to_string();
+                config.application_list[a1].device_list[d1].read_metric_list[0]
+                    .chirpstack_metric_name = "moisture_a".to_string();
+                config.application_list[a2].device_list[d2].read_metric_list[0].metric_name =
+                    "Moisture".to_string();
+                config.application_list[a2].device_list[d2].read_metric_list[0]
+                    .chirpstack_metric_name = "moisture_b".to_string();
+
+                let result = config.validate();
+                assert!(
+                    result.is_ok(),
+                    "cross-device same metric_name MUST be allowed (post-#99 fix); got: {:?}",
+                    result.err()
+                );
+            }
         }
     }
 

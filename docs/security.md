@@ -1457,6 +1457,17 @@ hardened by the Story 9-4 review:
    non-standard form is rejected (iter-1 review P12). This rejects
    `<form>` POST CSRF.
 
+   **Body-less requests still require `Content-Type: application/json`**
+   — DELETE without a body is the common case, and uniform CT gating
+   is intentional defence-in-depth (an attacker mounting a CSRF DELETE
+   via `<form method="post">` would forge a `Content-Type` of
+   `application/x-www-form-urlencoded` or `multipart/form-data`, never
+   `application/json`). Clients MUST send `Content-Type: application/json`
+   on every state-changing method, including DELETE with no body.
+   Behavior pinned by `tests/web_device_crud.rs::delete_device_without_content_type_returns_415`
+   (Story 9-5 iter-1 review D2). A relaxation must update both the
+   middleware and that pinning test in lockstep.
+
 Both checks are applied **after** Basic auth and **before** the
 handler. Failures emit `event="application_crud_rejected"
 reason="csrf"` warn logs.
@@ -1664,6 +1675,109 @@ those fields.
 - **Do NOT switch the write side to `toml::to_string`.** It loses
   comments + key order on round-trip.
 - **Do NOT bypass the `ConfigWriter::lock()` discipline.**
+- **Do NOT use the same `metric_name` (or `chirpstack_metric_name`)
+  twice within one device's `read_metric_list`.** The post-#99
+  NodeId construction (`format!("{}/{}", device_id, metric_name)`)
+  collapses duplicates onto the same address-space slot via
+  last-wins semantics — same root-cause class as issue #99 itself.
+  Story 9-5 hardens `AppConfig::validate` to reject these
+  duplicates at config-load + post-write reload time. The CRUD
+  layer also rejects duplicate `metric_name` / `chirpstack_metric
+  _name` shapes pre-write where it can.
+- **Do NOT serialise a `ChirpstackDevice` back via `toml::Value`
+  on PUT.** It silently strips the `[[application.device.command]]`
+  sub-table since `UpdateDeviceRequest` doesn't carry commands.
+  Story 9-5's PUT mutation operates on `toml_edit::DocumentMut` at
+  the table level — replacing only `device_name` and the
+  `read_metric` sub-array — so the command sub-table is preserved
+  byte-for-byte.
+
+### Device + metric mapping CRUD (Story 9-5)
+
+Story 9-5 lands the second mutating CRUD surface — devices and
+their metric mappings, nested under the existing application
+surface.
+
+**Endpoint surface:**
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/applications/:application_id/devices` | List devices under an application + per-device metric counts. |
+| `GET` | `/api/applications/:application_id/devices/:device_id` | Single device detail (full metric mapping list). |
+| `POST` | `/api/applications/:application_id/devices` | Create a new device with its initial metric mappings. |
+| `PUT` | `/api/applications/:application_id/devices/:device_id` | Replace `device_name` and the full `read_metric_list` (`device_id` is immutable). |
+| `DELETE` | `/api/applications/:application_id/devices/:device_id` | Remove a device. v1 leaves orphaned `metric_values` / `metric_history` rows in storage; the pruning task eventually removes them via the retention window. |
+
+All five routes inherit Basic auth + the Story 9-4 CSRF defence
+(via path-aware audit dispatch — see below). PUT-replaces semantics
+mean the operator must ship the full intended `read_metric_list`
+(possibly empty) on every PUT; granular per-metric routes are
+deferred to a future story.
+
+**Path-aware CSRF audit dispatch:** the CSRF middleware emits
+`event="device_crud_rejected" reason="csrf"` for rejections under
+`/api/applications/:application_id/devices*` and
+`event="application_crud_rejected" reason="csrf"` for the
+`/api/applications*` surface. The defence layer itself (Origin
+allow-list + JSON-only Content-Type) is byte-for-byte unchanged
+from Story 9-4.
+
+**`AppConfig::validate` amendments:** Story 9-5 extends the
+validator with two additive rules (modelled on the existing
+`seen_device_ids` HashSet pattern at `src/config.rs:1568`):
+
+1. **Per-device `metric_name` uniqueness** — two metrics with the
+   same `metric_name` inside ONE device's `read_metric_list` are
+   rejected. Without this, the post-#99 NodeId construction would
+   collapse them onto the same OPC UA address-space slot via
+   last-wins semantics.
+2. **Per-device `chirpstack_metric_name` uniqueness** — same
+   collision class on the reverse-lookup map keyed by
+   `(device_id, chirpstack_metric_name)` at
+   `src/opc_ua.rs:1032`.
+
+Cross-device `metric_name` collisions are **allowed** — the
+post-#99 NodeId fix at commit `9f823cc` makes this a valid
+scenario (two devices `dev-A` and `dev-B` can both expose
+`metric_name = "Moisture"` with distinct address-space NodeIds
+`dev-A/Moisture` and `dev-B/Moisture`).
+
+**Audit events:** four new event names, parallel to Story 9-4's
+shape:
+
+- `event="device_created"` (info) — POST succeeded.
+- `event="device_updated"` (info) — PUT succeeded.
+- `event="device_deleted"` (info) — DELETE succeeded.
+- `event="device_crud_rejected"` (warn / audit) — request rejected.
+  Reason set extends Story 9-4's with `application_not_found`
+  (POST/PUT/DELETE under a non-existent application_id) and
+  `device_not_found` (PUT/DELETE on a non-existent device_id).
+
+The grep contract `git grep -hoE 'event = "device_[a-z_]+"' src/`
+must return exactly 4 lines.
+
+**v1 limitations specific to Story 9-5:**
+
+- **No granular per-metric routes.** v1 ships PUT-replaces-device
+  with the full metric list. Editing one metric on a 50-metric
+  device requires sending the full list back.
+- **`device_id` (DevEUI) is immutable.** Renaming would orphan
+  every storage row keyed on `device_id` (`metric_values`,
+  `metric_history`, `command_queue`, `gateway_status`) — same
+  Epic-A-scale change as `application_id` rename. Operator
+  workaround: DELETE then POST.
+- **No cascade-delete of `metric_values` / `metric_history` on
+  DELETE.** v1 leaves orphaned rows in storage. The pruning task
+  (Story 2-5a) eventually removes them via the retention window
+  (default `[storage].history_retention_days = 7`).
+- **OPC UA address-space mutation deferred to Story 9-8.**
+  Inherited from Story 9-7 + Story 9-4. The dashboard reflects
+  newly created devices immediately; SCADA clients connected via
+  OPC UA must reconnect to see the new variables.
+- **No ChirpStack-side existence check on `device_id`.** v1
+  trusts the operator-supplied DevEUI; the next poll cycle
+  surfaces a "device list lookup failed" log if the DevEUI is
+  invalid.
 
 ---
 

@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>opcgw — Devices configuration</title>
+<link rel="stylesheet" href="/dashboard.css">
+<style>
+  /* Story 9-5 minimal-footprint overrides on top of dashboard.css. */
+  .crud-form { display: grid; gap: 0.5rem; max-width: 600px; margin: 1rem 0; }
+  .crud-form label { font-weight: bold; }
+  .crud-form input, .crud-form select { padding: 0.4rem; font-size: 1rem; }
+  .crud-form button { padding: 0.5rem; cursor: pointer; }
+  .application-section { border: 1px solid #ccc; padding: 0.8rem; margin: 1rem 0; }
+  .application-section h2 { margin-top: 0; }
+  table.devices { width: 100%; border-collapse: collapse; margin-bottom: 0.8rem; }
+  table.devices th, table.devices td {
+    padding: 0.5rem; border-bottom: 1px solid #ccc; text-align: left;
+  }
+  .actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+  .btn-edit, .btn-delete { padding: 0.3rem 0.6rem; cursor: pointer; }
+  .btn-delete { color: #fff; background: #c0392b; border: none; }
+  .btn-edit { background: #2980b9; color: #fff; border: none; }
+  .btn-add-metric { background: #27ae60; color: #fff; border: none; padding: 0.3rem 0.6rem; cursor: pointer; }
+  .btn-remove-metric { background: #c0392b; color: #fff; border: none; padding: 0.2rem 0.5rem; cursor: pointer; }
+  .metric-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr auto;
+    gap: 0.4rem;
+    align-items: end;
+    margin-bottom: 0.4rem;
+  }
+  .metric-row input, .metric-row select { padding: 0.3rem; font-size: 0.9rem; }
+  .metric-row label { font-size: 0.8rem; font-weight: normal; }
+  .modal {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.5); display: none; z-index: 100;
+    overflow-y: auto;
+  }
+  .modal[open] { display: flex; }
+  .modal-content {
+    background: #fff; padding: 1rem; margin: auto;
+    max-width: 700px; width: 90%; max-height: 90vh; overflow-y: auto;
+  }
+  .error-banner { color: #c0392b; padding: 0.5rem; }
+  @media (max-width: 600px) {
+    table.devices, table.devices thead, table.devices tbody,
+    table.devices tr, table.devices th, table.devices td {
+      display: block;
+    }
+    table.devices tr { margin-bottom: 0.8rem; border: 1px solid #ddd; padding: 0.4rem; }
+    .actions { flex-direction: column; }
+    .metric-row { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>opcgw &mdash; Devices configuration</h1>
+  <nav><a href="/index.html">Dashboard</a> | <a href="/applications.html">Applications</a> | <a href="/metrics.html">Live Metrics</a></nav>
+</header>
+
+<main>
+  <div id="list-error" class="error-banner" hidden></div>
+  <div id="applications-container">
+    <p class="loading">Loading applications&hellip;</p>
+  </div>
+</main>
+
+<!-- Edit-device modal (populated dynamically). -->
+<dialog id="edit-modal" class="modal">
+  <div class="modal-content">
+    <h2 id="edit-modal-title">Edit device</h2>
+    <form id="edit-form" class="crud-form">
+      <input type="hidden" id="edit-application-id">
+      <input type="hidden" id="edit-device-id">
+      <label for="edit-device-name">Device name</label>
+      <input id="edit-device-name" name="device_name" type="text" required>
+      <h3>Metric mappings</h3>
+      <div id="edit-metrics-container"></div>
+      <button type="button" id="edit-add-metric" class="btn-add-metric">+ Add metric</button>
+      <div id="edit-error" class="error-banner" hidden></div>
+      <div class="actions">
+        <button type="submit">Save changes</button>
+        <button type="button" id="edit-cancel">Cancel</button>
+      </div>
+    </form>
+  </div>
+</dialog>
+
+<script src="/devices-config.js"></script>
+</body>
+</html>

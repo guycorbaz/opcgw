@@ -169,6 +169,61 @@ fn is_state_changing(method: &Method) -> bool {
     !matches!(method, &Method::GET | &Method::HEAD | &Method::OPTIONS)
 }
 
+/// Story 9-5 AC#5/AC#8: dispatch the CSRF rejection audit-event
+/// name by URL path so each resource gets its own grep contract.
+///
+/// - `/api/applications/:application_id/devices/.../commands*` → `"command"` (Story 9-6 future)
+/// - `/api/applications/:application_id/devices*`              → `"device"`
+/// - `/api/applications/...`                                   → `"application"` (Story 9-4)
+/// - anything else                                             → `"unknown"` (catch-all; should not fire on
+///   any wired mutating route today)
+///
+/// The longer-prefix branches are matched first so a future Story 9-6
+/// commands surface lifts cleanly into the dispatch.
+pub(crate) fn csrf_event_resource_for_path(path: &str) -> &'static str {
+    // Match the bare LIST/CREATE surface FIRST so POST /api/applications
+    // (no application_id) emits `event="application_crud_rejected"` on
+    // CSRF rejection — preserving Story 9-4's grep contract at the
+    // runtime level (the helper's unit test originally returned
+    // "unknown" here; iter-1 of Story 9-5 widened it to "application"
+    // after the integration-test layer surfaced the gap).
+    if path == "/api/applications" || path == "/api/applications/" {
+        return "application";
+    }
+    const APPS_PREFIX: &str = "/api/applications/";
+    if let Some(after_apps) = path.strip_prefix(APPS_PREFIX) {
+        // `after_apps` is `<application_id>` or `<application_id>/...`
+        // Strip the application_id segment to inspect what follows.
+        if let Some((_app_id, rest)) = after_apps.split_once('/') {
+            // `rest` now starts after the application_id segment.
+            // Patterns to recognise:
+            //   "devices"                                  → device
+            //   "devices/<device_id>"                      → device
+            //   "devices/<device_id>/commands"             → command
+            //   "devices/<device_id>/commands/<command_id>" → command
+            if let Some(after_devices) = rest.strip_prefix("devices") {
+                // Boundary check: must be exactly "devices" or
+                // "devices/..." (NOT a prefix-collision like
+                // "devicesXYZ" — though no such route would be wired).
+                if after_devices.is_empty() || after_devices.starts_with('/') {
+                    // Story 9-6 future: detect commands sub-resource.
+                    let after_devices_slash = after_devices.strip_prefix('/').unwrap_or("");
+                    if let Some((_dev_id, rest2)) = after_devices_slash.split_once('/') {
+                        if rest2 == "commands" || rest2.starts_with("commands/") {
+                            return "command";
+                        }
+                    }
+                    return "device";
+                }
+            }
+            // Anything else under /api/applications/<id>/... is
+            // application-level (no other sub-resources today).
+        }
+        return "application";
+    }
+    "unknown"
+}
+
 fn reject(status: StatusCode, message: &str, hint: Option<&str>) -> Response {
     (
         status,
@@ -197,6 +252,8 @@ pub async fn csrf_middleware(
     // never reach the audit log. `req.uri().path()` returns just the
     // path; do NOT switch to `req.uri().to_string()` here.
     let path = req.uri().path().to_string();
+    // Story 9-5 AC#5/AC#8: per-resource event-name dispatch.
+    let resource = csrf_event_resource_for_path(&path);
     let headers = req.headers();
 
     // Origin / Referer check.
@@ -206,15 +263,47 @@ pub async fn csrf_middleware(
         Some(o) => state.allowed_origins.iter().any(|allowed| allowed == o),
     };
     if !origin_ok {
-        warn!(
-            event = "application_crud_rejected",
-            reason = "csrf",
-            path = %path,
-            method = %method,
-            source_ip = %addr.ip(),
-            origin = origin.as_deref().unwrap_or("<absent>"),
-            "CSRF rejected: missing or cross-origin Origin"
-        );
+        // Story 9-5 AC#8: literal event-name strings per match arm
+        // so `git grep -hoE 'event = "<resource>_[a-z_]+"' src/`
+        // returns each name exactly. Dynamic-string dispatch would
+        // break the grep contract.
+        //
+        // The "command" arm intentionally falls through to the
+        // generic catch-all in Story 9-5 — Story 9-6 will replace
+        // the catch-all with a literal `command_crud_rejected` warn
+        // when commands CRUD lands. Adding the literal here today
+        // would constitute Story 9-5 scope creep.
+        let origin_str = origin.as_deref().unwrap_or("<absent>");
+        match resource {
+            "device" => warn!(
+                event = "device_crud_rejected",
+                reason = "csrf",
+                path = %path,
+                method = %method,
+                source_ip = %addr.ip(),
+                origin = origin_str,
+                "CSRF rejected: missing or cross-origin Origin"
+            ),
+            "application" => warn!(
+                event = "application_crud_rejected",
+                reason = "csrf",
+                path = %path,
+                method = %method,
+                source_ip = %addr.ip(),
+                origin = origin_str,
+                "CSRF rejected: missing or cross-origin Origin"
+            ),
+            _ => warn!(
+                event = "crud_rejected",
+                reason = "csrf",
+                resource = resource,
+                path = %path,
+                method = %method,
+                source_ip = %addr.ip(),
+                origin = origin_str,
+                "CSRF rejected: missing or cross-origin Origin"
+            ),
+        }
         return reject(
             StatusCode::FORBIDDEN,
             "CSRF check failed: Origin header missing, null, or not in allow-list",
@@ -226,14 +315,33 @@ pub async fn csrf_middleware(
 
     // JSON-only Content-Type check.
     if !content_type_is_json(headers) {
-        warn!(
-            event = "application_crud_rejected",
-            reason = "csrf",
-            path = %path,
-            method = %method,
-            source_ip = %addr.ip(),
-            "CSRF rejected: Content-Type is not application/json"
-        );
+        match resource {
+            "device" => warn!(
+                event = "device_crud_rejected",
+                reason = "csrf",
+                path = %path,
+                method = %method,
+                source_ip = %addr.ip(),
+                "CSRF rejected: Content-Type is not application/json"
+            ),
+            "application" => warn!(
+                event = "application_crud_rejected",
+                reason = "csrf",
+                path = %path,
+                method = %method,
+                source_ip = %addr.ip(),
+                "CSRF rejected: Content-Type is not application/json"
+            ),
+            _ => warn!(
+                event = "crud_rejected",
+                reason = "csrf",
+                resource = resource,
+                path = %path,
+                method = %method,
+                source_ip = %addr.ip(),
+                "CSRF rejected: Content-Type is not application/json"
+            ),
+        }
         return reject(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "CSRF check failed: Content-Type must be application/json",
@@ -482,5 +590,99 @@ mod tests {
         assert!(is_state_changing(&Method::PATCH));
         assert!(is_state_changing(&Method::CONNECT));
         assert!(is_state_changing(&Method::TRACE));
+    }
+
+    /// Story 9-5 AC#5/AC#8: path-aware CSRF event-name dispatch maps
+    /// the URL path → resource string used by `csrf_middleware` to
+    /// pick the per-resource literal `event = "<resource>_crud_rejected"`.
+    /// Order-of-precedence matters: longer prefixes (commands inside
+    /// devices) match first so Story 9-6 lifts cleanly.
+    #[test]
+    fn csrf_event_resource_for_path_maps_correctly() {
+        // Application-level surface (Story 9-4 + Story 9-5 widening).
+        // Bare /api/applications and /api/applications/ are the
+        // LIST/CREATE surface: POST /api/applications without an
+        // application_id IS application-level. Mapping to "application"
+        // keeps the runtime-emitted CSRF audit-event name aligned with
+        // the source-grep contract `event="application_crud_rejected"`.
+        assert_eq!(
+            csrf_event_resource_for_path("/api/applications"),
+            "application"
+        );
+        assert_eq!(
+            csrf_event_resource_for_path("/api/applications/"),
+            "application"
+        );
+        assert_eq!(
+            csrf_event_resource_for_path("/api/applications/foo"),
+            "application"
+        );
+        assert_eq!(
+            csrf_event_resource_for_path("/api/applications/foo/"),
+            "application"
+        );
+
+        // Device surface (Story 9-5).
+        assert_eq!(
+            csrf_event_resource_for_path("/api/applications/foo/devices"),
+            "device"
+        );
+        assert_eq!(
+            csrf_event_resource_for_path("/api/applications/foo/devices/bar"),
+            "device"
+        );
+        assert_eq!(
+            csrf_event_resource_for_path("/api/applications/foo/devices/bar/"),
+            "device"
+        );
+
+        // Command surface (Story 9-6 future).
+        assert_eq!(
+            csrf_event_resource_for_path("/api/applications/foo/devices/bar/commands"),
+            "command"
+        );
+        assert_eq!(
+            csrf_event_resource_for_path("/api/applications/foo/devices/bar/commands/1"),
+            "command"
+        );
+
+        // Other / non-applications routes.
+        assert_eq!(csrf_event_resource_for_path("/api/health"), "unknown");
+        assert_eq!(csrf_event_resource_for_path("/api/devices"), "unknown");
+        assert_eq!(csrf_event_resource_for_path("/dashboard.html"), "unknown");
+        assert_eq!(csrf_event_resource_for_path("/"), "unknown");
+
+        // Prefix-collision defence: no false-positive on
+        // `/api/applications/foo/devicesXYZ` (no boundary slash).
+        assert_eq!(
+            csrf_event_resource_for_path("/api/applications/foo/devicesXYZ"),
+            "application"
+        );
+
+        // Iter-1 review L9 (Blind B25 + Edge E14): empty-segment
+        // edges. Empty application_id segment (`/api/applications//devices`)
+        // routes through the helper as device because split_once('/')
+        // yields ("", "devices") — the helper does not validate the
+        // application_id segment, that's the path-validator's job at
+        // the handler layer. Pin this behaviour so a future tightening
+        // (e.g., reject empty segment with "unknown") is intentional.
+        assert_eq!(
+            csrf_event_resource_for_path("/api/applications//devices"),
+            "device"
+        );
+        // Empty device_id segment under /commands: split_once('/')
+        // of "/commands" yields ("", "commands") so the helper still
+        // recognises the command sub-resource. Real routing would
+        // 404 such a path, but the audit-event tier categorises it
+        // as command (consistent with non-empty segments).
+        assert_eq!(
+            csrf_event_resource_for_path("/api/applications/foo/devices//commands"),
+            "command"
+        );
+        // Trailing slash on commands route still maps to command.
+        assert_eq!(
+            csrf_event_resource_for_path("/api/applications/foo/devices/bar/commands/"),
+            "command"
+        );
     }
 }

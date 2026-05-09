@@ -500,16 +500,39 @@ fn is_valid_app_id_char(c: char) -> bool {
 fn validate_path_application_id(
     application_id: &str,
     addr: &SocketAddr,
+    resource: &'static str,
 ) -> Result<(), Response> {
+    // Iter-1 review HIGH H1 (auditor A2): dispatch event-name literal
+    // by `resource` so when called from a device handler the warn
+    // emits `event="device_crud_rejected"` (NOT `application_*`).
     if application_id.is_empty() || application_id.len() > APP_FIELD_MAX_LEN {
-        warn!(
-            event = "application_crud_rejected",
-            reason = "validation",
-            field = "application_id",
-            source_ip = %addr.ip(),
-            length = application_id.len(),
-            "path-supplied application_id length out of range [1, 256]"
-        );
+        match resource {
+            "device" => warn!(
+                event = "device_crud_rejected",
+                reason = "validation",
+                field = "application_id",
+                source_ip = %addr.ip(),
+                length = application_id.len(),
+                "path-supplied application_id length out of range [1, 256]"
+            ),
+            "application" => warn!(
+                event = "application_crud_rejected",
+                reason = "validation",
+                field = "application_id",
+                source_ip = %addr.ip(),
+                length = application_id.len(),
+                "path-supplied application_id length out of range [1, 256]"
+            ),
+            _ => warn!(
+                event = "crud_rejected",
+                reason = "validation",
+                resource = resource,
+                field = "application_id",
+                source_ip = %addr.ip(),
+                length = application_id.len(),
+                "path-supplied application_id length out of range [1, 256]"
+            ),
+        }
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::with_hint(
@@ -526,18 +549,89 @@ fn validate_path_application_id(
         // Iter-2 P25: log the OFFENDING char as `?bad` (Debug-format)
         // so CRLF and other control chars are escaped as `'\n'`,
         // `'\r'`, `'\u{1b}'` — never interpolated raw.
-        warn!(
-            event = "application_crud_rejected",
-            reason = "validation",
-            field = "application_id",
-            source_ip = %addr.ip(),
-            bad_char = ?bad,
-            "path-supplied application_id contains invalid character"
-        );
+        match resource {
+            "device" => warn!(
+                event = "device_crud_rejected",
+                reason = "validation",
+                field = "application_id",
+                source_ip = %addr.ip(),
+                bad_char = ?bad,
+                "path-supplied application_id contains invalid character"
+            ),
+            "application" => warn!(
+                event = "application_crud_rejected",
+                reason = "validation",
+                field = "application_id",
+                source_ip = %addr.ip(),
+                bad_char = ?bad,
+                "path-supplied application_id contains invalid character"
+            ),
+            _ => warn!(
+                event = "crud_rejected",
+                reason = "validation",
+                resource = resource,
+                field = "application_id",
+                source_ip = %addr.ip(),
+                bad_char = ?bad,
+                "path-supplied application_id contains invalid character"
+            ),
+        }
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::with_hint(
                 "application_id in URL path contains invalid character",
+                "use ASCII alphanumerics, '-', '_', '.'",
+            )),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+/// Story 9-5 AC#3 + AC#5/AC#8: parallel to
+/// [`validate_path_application_id`] for the new `:device_id` URL
+/// segment. Same char-class + length bounds; emits
+/// `event="device_crud_rejected" reason="validation"` (NOT
+/// `application_crud_rejected`) to preserve the path-aware audit
+/// dispatch from Story 9-5. Call at the head of EVERY handler that
+/// takes a `Path(... device_id ...)` parameter, BEFORE any code that
+/// interpolates the value into a tracing field.
+#[allow(clippy::result_large_err)]
+fn validate_path_device_id(device_id: &str, addr: &SocketAddr) -> Result<(), Response> {
+    if device_id.is_empty() || device_id.len() > APP_FIELD_MAX_LEN {
+        warn!(
+            event = "device_crud_rejected",
+            reason = "validation",
+            field = "device_id",
+            source_ip = %addr.ip(),
+            length = device_id.len(),
+            "path-supplied device_id length out of range [1, 256]"
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                format!(
+                    "device_id in URL path must be 1..={} characters",
+                    APP_FIELD_MAX_LEN
+                ),
+                "use ASCII alphanumerics, '-', '_', '.'",
+            )),
+        )
+            .into_response());
+    }
+    if let Some(bad) = device_id.chars().find(|&c| !is_valid_app_id_char(c)) {
+        warn!(
+            event = "device_crud_rejected",
+            reason = "validation",
+            field = "device_id",
+            source_ip = %addr.ip(),
+            bad_char = ?bad,
+            "path-supplied device_id contains invalid character"
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                "device_id in URL path contains invalid character",
                 "use ASCII alphanumerics, '-', '_', '.'",
             )),
         )
@@ -591,7 +685,7 @@ pub async fn get_application(
 ) -> Result<Json<ApplicationResponse>, Response> {
     // Iter-2 review P25: validate path-supplied id BEFORE any
     // logging or interpolation.
-    validate_path_application_id(&application_id, &addr)?;
+    validate_path_application_id(&application_id, &addr, "application")?;
     let snapshot = state
         .dashboard_snapshot
         .read()
@@ -636,14 +730,14 @@ pub async fn create_application(
     let original_bytes = state
         .config_writer
         .read_raw()
-        .map_err(|e| io_error_response(&e, "create_application", &addr))?;
+        .map_err(|e| io_error_response(&e, "create_application", &addr, "application"))?;
     // Iter-2 review P30: parse the SAME bytes we snapshotted for
     // rollback. Eliminates the TOCTOU window between read_raw and
     // a subsequent load_document call.
     let mut doc = state
         .config_writer
         .parse_document_from_bytes(&original_bytes)
-        .map_err(|e| io_error_response(&e, "create_application", &addr))?;
+        .map_err(|e| io_error_response(&e, "create_application", &addr, "application"))?;
 
     // Iter-1 review P2 + Iter-2 review P35 (load-bearing):
     // duplicate-id check INSIDE the write_lock-held critical section,
@@ -752,8 +846,8 @@ pub async fn create_application(
         // a known-good file. If rollback itself fails, the
         // ConfigWriter is poisoned (D3-P / iter-2 P27) and
         // subsequent CRUD short-circuits with 503.
-        handle_rollback(&state, &original_bytes, "create_application", &addr, "write_atomically_err");
-        return Err(io_error_response(&e, "create_application", &addr));
+        handle_rollback(&state, &original_bytes, "create_application", &addr, "write_atomically_err", "application");
+        return Err(io_error_response(&e, "create_application", &addr, "application"));
     }
 
     match state.config_reload.reload().await {
@@ -779,22 +873,18 @@ pub async fn create_application(
         }
         Err(ReloadError::RestartRequired { knob }) => {
             // Iter-1 review D1-P: drift-aware handling.
-            let (should_rollback, response) = handle_restart_required(
-                &knob,
+            let (should_rollback, response) = handle_restart_required(&knob,
                 &original_bytes,
-                &doc,
-                "create_application",
-                &addr,
-            );
+                &doc, "create_application", &addr, "application");
             if should_rollback {
-                handle_rollback(&state, &original_bytes, "create_application", &addr, &knob);
+                handle_rollback(&state, &original_bytes, "create_application", &addr, &knob, "application");
             }
             Err(response)
         }
         Err(e) => {
             let reason = e.reason().to_string();
-            handle_rollback(&state, &original_bytes, "create_application", &addr, &reason);
-            Err(reload_error_response(e, "create_application", &addr))
+            handle_rollback(&state, &original_bytes, "create_application", &addr, &reason, "application");
+            Err(reload_error_response(e, "create_application", &addr, "application"))
         }
     }
 }
@@ -815,7 +905,7 @@ pub async fn update_application(
 ) -> Result<Json<ApplicationResponse>, Response> {
     // Iter-2 review P25: validate path-supplied id BEFORE any
     // logging or interpolation.
-    validate_path_application_id(&application_id, &addr)?;
+    validate_path_application_id(&application_id, &addr, "application")?;
 
     // Iter-2 review P29: manual deserialisation of the JSON body so
     // we can distinguish `application_id` (immutable_field audit)
@@ -939,12 +1029,12 @@ pub async fn update_application(
     let original_bytes = state
         .config_writer
         .read_raw()
-        .map_err(|e| io_error_response(&e, "update_application", &addr))?;
+        .map_err(|e| io_error_response(&e, "update_application", &addr, "application"))?;
     // Iter-2 review P30: parse the SAME bytes we snapshotted.
     let mut doc = state
         .config_writer
         .parse_document_from_bytes(&original_bytes)
-        .map_err(|e| io_error_response(&e, "update_application", &addr))?;
+        .map_err(|e| io_error_response(&e, "update_application", &addr, "application"))?;
 
     let array = match doc
         .get_mut("application")
@@ -1044,8 +1134,8 @@ pub async fn update_application(
         // Iter-3 review EH3-H1: rollback to recover from post-persist
         // failures (e.g., dir-fsync IO error AFTER the rename
         // committed). Same shape as create_application.
-        handle_rollback(&state, &original_bytes, "update_application", &addr, "write_atomically_err");
-        return Err(io_error_response(&e, "update_application", &addr));
+        handle_rollback(&state, &original_bytes, "update_application", &addr, "write_atomically_err", "application");
+        return Err(io_error_response(&e, "update_application", &addr, "application"));
     }
 
     match state.config_reload.reload().await {
@@ -1073,22 +1163,18 @@ pub async fn update_application(
             }))
         }
         Err(ReloadError::RestartRequired { knob }) => {
-            let (should_rollback, response) = handle_restart_required(
-                &knob,
+            let (should_rollback, response) = handle_restart_required(&knob,
                 &original_bytes,
-                &doc,
-                "update_application",
-                &addr,
-            );
+                &doc, "update_application", &addr, "application");
             if should_rollback {
-                handle_rollback(&state, &original_bytes, "update_application", &addr, &knob);
+                handle_rollback(&state, &original_bytes, "update_application", &addr, &knob, "application");
             }
             Err(response)
         }
         Err(e) => {
             let reason = e.reason().to_string();
-            handle_rollback(&state, &original_bytes, "update_application", &addr, &reason);
-            Err(reload_error_response(e, "update_application", &addr))
+            handle_rollback(&state, &original_bytes, "update_application", &addr, &reason, "application");
+            Err(reload_error_response(e, "update_application", &addr, "application"))
         }
     }
 }
@@ -1107,7 +1193,7 @@ pub async fn delete_application(
 ) -> Result<StatusCode, Response> {
     // Iter-2 review P25: validate path-supplied id BEFORE any
     // logging or interpolation.
-    validate_path_application_id(&application_id, &addr)?;
+    validate_path_application_id(&application_id, &addr, "application")?;
     // Pre-checks against live config.
     let (target_device_count, total_apps): (usize, usize) = {
         let live = state.config_reload.subscribe();
@@ -1164,12 +1250,12 @@ pub async fn delete_application(
     let original_bytes = state
         .config_writer
         .read_raw()
-        .map_err(|e| io_error_response(&e, "delete_application", &addr))?;
+        .map_err(|e| io_error_response(&e, "delete_application", &addr, "application"))?;
     // Iter-2 review P30: parse the SAME bytes we snapshotted.
     let mut doc = state
         .config_writer
         .parse_document_from_bytes(&original_bytes)
-        .map_err(|e| io_error_response(&e, "delete_application", &addr))?;
+        .map_err(|e| io_error_response(&e, "delete_application", &addr, "application"))?;
 
     let array = match doc
         .get_mut("application")
@@ -1254,8 +1340,8 @@ pub async fn delete_application(
     let candidate_bytes = doc.to_string().into_bytes();
     if let Err(e) = state.config_writer.write_atomically(&candidate_bytes) {
         // Iter-3 review EH3-H1: rollback on post-persist failure.
-        handle_rollback(&state, &original_bytes, "delete_application", &addr, "write_atomically_err");
-        return Err(io_error_response(&e, "delete_application", &addr));
+        handle_rollback(&state, &original_bytes, "delete_application", &addr, "write_atomically_err", "application");
+        return Err(io_error_response(&e, "delete_application", &addr, "application"));
     }
 
     match state.config_reload.reload().await {
@@ -1269,24 +1355,1260 @@ pub async fn delete_application(
             Ok(StatusCode::NO_CONTENT)
         }
         Err(ReloadError::RestartRequired { knob }) => {
-            let (should_rollback, response) = handle_restart_required(
-                &knob,
+            let (should_rollback, response) = handle_restart_required(&knob,
                 &original_bytes,
-                &doc,
-                "delete_application",
-                &addr,
-            );
+                &doc, "delete_application", &addr, "application");
             if should_rollback {
-                handle_rollback(&state, &original_bytes, "delete_application", &addr, &knob);
+                handle_rollback(&state, &original_bytes, "delete_application", &addr, &knob, "application");
             }
             Err(response)
         }
         Err(e) => {
             let reason = e.reason().to_string();
-            handle_rollback(&state, &original_bytes, "delete_application", &addr, &reason);
-            Err(reload_error_response(e, "delete_application", &addr))
+            handle_rollback(&state, &original_bytes, "delete_application", &addr, &reason, "application");
+            Err(reload_error_response(e, "delete_application", &addr, "application"))
         }
     }
+}
+
+// ----------------------------------------------------------------------
+// Story 9-5: Device + metric mapping CRUD endpoints (FR35, FR40, FR41,
+// AC#1-#13).
+//
+// Five routes nested under the existing application surface, all behind
+// Basic auth (Story 9-1 layer-after-route invariant) and the path-aware
+// CSRF middleware (Story 9-5 Task 2 — `event="device_crud_rejected"`
+// dispatched by URL path). Read paths consume the auto-refreshed
+// `dashboard_snapshot` (Story 9-2/9-3/9-7) for the SUMMARY view; the
+// per-device DETAIL view reads the live `Arc<AppConfig>` via
+// `state.config_reload.subscribe().borrow()` because the snapshot's
+// `MetricSpec` does NOT carry `chirpstack_metric_name` / `metric_unit`
+// (Story 9-3 design — see `Existing Infrastructure` table in 9-5 spec).
+// Write paths take the `ConfigWriter::lock()` across the entire
+// `write+reload+(rollback)` critical section (Story 9-4 lost-update
+// fix). PUT-replace-device mutates ONLY the `device_name` field +
+// `read_metric` sub-array; any existing `[[application.device.command]]`
+// sub-table is preserved byte-for-byte (Story 9-6 territory).
+// ----------------------------------------------------------------------
+
+/// `POST /api/applications/:application_id/devices` request body.
+///
+/// `read_metric_list` defaults to empty so an operator can POST a
+/// device skeleton + add metrics later via PUT-replace. The post-9-4
+/// warn-demotion of empty `read_metric_list` (`src/config.rs:1586-1595`)
+/// makes this a non-error.
+///
+/// **`serde(deny_unknown_fields)`** so unknown body fields are rejected
+/// by serde with 422. POST has no immutable-field rejection (every
+/// field is accepting at create time), so the manual-walk pattern from
+/// `update_application` is unnecessary here.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateDeviceRequest {
+    pub device_id: String,
+    pub device_name: String,
+    #[serde(default)]
+    pub read_metric_list: Vec<MetricMappingRequest>,
+}
+
+/// `PUT /api/applications/:application_id/devices/:device_id` request body.
+///
+/// **NO `serde(deny_unknown_fields)`** because Story 9-5 handles
+/// `device_id` immutable-field rejection manually (Story 9-4 iter-2
+/// P29 pattern: deserialise to `serde_json::Value`, walk-and-reject).
+/// `read_metric_list` is required (PUT-replaces semantics — caller
+/// must ship the full intended list, even if empty).
+///
+/// Note: the handler does NOT use this struct as the JSON extractor
+/// target. It deserialises to `serde_json::Value` and walks the
+/// object explicitly to distinguish `device_id` (immutable_field
+/// audit) from other unknown fields (unknown_field audit). Kept
+/// here for documentation of the v1 contract.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct UpdateDeviceRequest {
+    pub device_name: String,
+    pub read_metric_list: Vec<MetricMappingRequest>,
+    /// Story 9-4 P5/P29 pattern: `device_id` is rejected by the
+    /// handler with `reason="immutable_field"`; any OTHER unknown
+    /// field is rejected with `reason="unknown_field"`.
+    #[serde(default)]
+    pub device_id: Option<String>,
+}
+
+/// One inline metric-mapping entry inside a `CreateDeviceRequest` /
+/// `UpdateDeviceRequest`.
+///
+/// `metric_type` is a string at the wire level; the handler validates
+/// against the `OpcMetricTypeConfig` enum vocabulary (`Float | Int |
+/// Bool | String`). `metric_unit` is optional free-text.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricMappingRequest {
+    pub metric_name: String,
+    pub chirpstack_metric_name: String,
+    pub metric_type: String,
+    #[serde(default)]
+    pub metric_unit: Option<String>,
+}
+
+/// `GET /api/applications/:application_id/devices` response body —
+/// summary view (no per-metric detail; counts only).
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct DeviceListResponse {
+    pub application_id: String,
+    pub devices: Vec<DeviceListEntry>,
+}
+
+/// One row in [`DeviceListResponse::devices`].
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct DeviceListEntry {
+    pub device_id: String,
+    pub device_name: String,
+    pub metric_count: usize,
+}
+
+/// `GET|POST|PUT /api/applications/:application_id/devices[/:device_id]`
+/// detail-view response body. Carries the FULL metric mapping list.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct DeviceResponse {
+    pub device_id: String,
+    pub device_name: String,
+    pub read_metric_list: Vec<MetricMappingResponse>,
+}
+
+/// One row in [`DeviceResponse::read_metric_list`]. `metric_type` is
+/// the `OpcMetricTypeConfig::Display` string projected via
+/// [`config_type_to_display`].
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct MetricMappingResponse {
+    pub metric_name: String,
+    pub chirpstack_metric_name: String,
+    pub metric_type: String,
+    pub metric_unit: Option<String>,
+}
+
+/// `GET /api/applications/:application_id/devices` — list devices
+/// under a single application via the auto-refreshed dashboard
+/// snapshot. Summary view; full metric list available via the
+/// per-device GET.
+///
+/// 404 (no audit event) when `:application_id` does not match —
+/// `_crud_rejected` is reserved for state-changing rejections per
+/// Story 9-4 audit-event semantic (carry-forward to 9-5 AC#6).
+pub async fn list_devices(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Path(application_id): Path<String>,
+) -> Result<Json<DeviceListResponse>, Response> {
+    validate_path_application_id(&application_id, &addr, "device")?;
+
+    let snapshot = state
+        .dashboard_snapshot
+        .read()
+        .unwrap_or_else(|e| {
+            warn!(
+                operation = "rwlock_poison_recovered",
+                site = "list_devices",
+                "dashboard_snapshot RwLock was poisoned; recovering inner value"
+            );
+            e.into_inner()
+        })
+        .clone();
+    let app = snapshot
+        .applications
+        .iter()
+        .find(|a| a.application_id == application_id)
+        .ok_or_else(application_not_found_response)?;
+
+    let devices = app
+        .devices
+        .iter()
+        .map(|d| DeviceListEntry {
+            device_id: d.device_id.clone(),
+            device_name: d.device_name.clone(),
+            metric_count: d.metrics.len(),
+        })
+        .collect();
+
+    Ok(Json(DeviceListResponse {
+        application_id: application_id.clone(),
+        devices,
+    }))
+}
+
+/// `GET /api/applications/:application_id/devices/:device_id` —
+/// per-device DETAIL view. Reads the live `Arc<AppConfig>` (NOT the
+/// dashboard snapshot) because the snapshot's `MetricSpec` does not
+/// carry `chirpstack_metric_name` / `metric_unit` — see Story 9-5
+/// `Existing Infrastructure` table for rationale.
+///
+/// `subscribe().borrow()` is cheap (clones an Arc); we drop the
+/// borrow guard before any `.await` because the guard is `!Send`.
+pub async fn get_device(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Path((application_id, device_id)): Path<(String, String)>,
+) -> Result<Json<DeviceResponse>, Response> {
+    validate_path_application_id(&application_id, &addr, "device")?;
+    validate_path_device_id(&device_id, &addr)?;
+
+    // Live config — borrow + clone Arc + drop guard immediately.
+    let cfg = {
+        let live = state.config_reload.subscribe();
+        let snap = (*live.borrow()).clone();
+        snap
+    };
+
+    let app = cfg
+        .application_list
+        .iter()
+        .find(|a| a.application_id == application_id)
+        .ok_or_else(application_not_found_response)?;
+    let dev = app
+        .device_list
+        .iter()
+        .find(|d| d.device_id == device_id)
+        .ok_or_else(device_not_found_response)?;
+
+    let read_metric_list = dev
+        .read_metric_list
+        .iter()
+        .map(|m| MetricMappingResponse {
+            metric_name: m.metric_name.clone(),
+            chirpstack_metric_name: m.chirpstack_metric_name.clone(),
+            metric_type: config_type_to_display(&m.metric_type).to_string(),
+            metric_unit: m.metric_unit.clone(),
+        })
+        .collect();
+
+    Ok(Json(DeviceResponse {
+        device_id: dev.device_id.clone(),
+        device_name: dev.device_name.clone(),
+        read_metric_list,
+    }))
+}
+
+/// `POST /api/applications/:application_id/devices` — create a new
+/// device under the named application. Holds the ConfigWriter lock
+/// across write + reload + rollback per the Story 9-4 lost-update
+/// race fix.
+///
+/// Pre-flight rejects: malformed sibling `[[application.device]]`
+/// blocks (409), duplicate `device_id` within the application (409 —
+/// validate also catches cross-application duplicates at reload time
+/// → 422), and parent-application-not-found (404).
+pub async fn create_device(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Path(application_id): Path<String>,
+    Json(body): Json<CreateDeviceRequest>,
+) -> Result<(StatusCode, [(axum::http::HeaderName, String); 1], Json<DeviceResponse>), Response> {
+    validate_path_application_id(&application_id, &addr, "device")?;
+
+    // Body field validation BEFORE touching the disk.
+    validate_device_field("device_id", &body.device_id, &addr)?;
+    validate_device_field("device_name", &body.device_name, &addr)?;
+    for (idx, m) in body.read_metric_list.iter().enumerate() {
+        validate_metric_mapping_fields(idx, m, &addr)?;
+    }
+
+    let _guard = state.config_writer.lock().await;
+
+    let original_bytes = state
+        .config_writer
+        .read_raw()
+        .map_err(|e| io_error_response(&e, "create_device", &addr, "device"))?;
+    let mut doc = state
+        .config_writer
+        .parse_document_from_bytes(&original_bytes)
+        .map_err(|e| io_error_response(&e, "create_device", &addr, "device"))?;
+
+    // Locate the parent application's `[[application]]` table.
+    let app_idx = match find_application_index(&doc, &application_id, &addr, "device") {
+        Ok(Some(idx)) => idx,
+        Ok(None) => {
+            // Parent application not found → 404 + audit event
+            // (Story 9-5 AC#6 — `device_crud_rejected reason=
+            // application_not_found`).
+            warn!(
+                event = "device_crud_rejected",
+                reason = "application_not_found",
+                application_id = %application_id,
+                source_ip = %addr.ip(),
+                "create_device: parent application not found"
+            );
+            return Err(application_not_found_response());
+        }
+        Err(resp) => return Err(resp),
+    };
+
+    // Pre-flight + duplicate-id check on the existing `device`
+    // sub-array under this application.
+    let device_array_existing = doc
+        .get("application")
+        .and_then(|v| v.as_array_of_tables())
+        .and_then(|arr| arr.get(app_idx))
+        .and_then(|tbl| tbl.get("device"))
+        .and_then(|v| v.as_array_of_tables());
+    if let Some(arr) = device_array_existing {
+        for (idx, tbl) in arr.iter().enumerate() {
+            let id_value = tbl.get("device_id");
+            let existing_id = match id_value.and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => {
+                    warn!(
+                        event = "device_crud_rejected",
+                        reason = "conflict",
+                        application_id = %application_id,
+                        source_ip = %addr.ip(),
+                        malformed_block_index = idx,
+                        id_value_present = id_value.is_some(),
+                        "create_device: existing [[application.device]] block at index {idx} has missing or non-string device_id; manual cleanup required"
+                    );
+                    return Err((
+                        StatusCode::CONFLICT,
+                        Json(ErrorResponse::with_hint(
+                            format!(
+                                "config TOML contains a malformed [[application.device]] block at index {idx} (missing or non-string device_id); manual cleanup required"
+                            ),
+                            "edit config/config.toml to fix the malformed block before retrying",
+                        )),
+                    )
+                        .into_response());
+                }
+            };
+            if existing_id == body.device_id {
+                warn!(
+                    event = "device_crud_rejected",
+                    reason = "conflict",
+                    application_id = %application_id,
+                    device_id = %body.device_id,
+                    source_ip = %addr.ip(),
+                    "create_device: duplicate device_id within application rejected before write"
+                );
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse::with_hint(
+                        format!(
+                            "device_id '{}' already exists under application '{}'",
+                            body.device_id, application_id
+                        ),
+                        "PUT to rename or DELETE the existing device before recreating",
+                    )),
+                )
+                    .into_response());
+            }
+        }
+    }
+
+    // Mutate: append a new [[application.device]] table under the
+    // matching parent application.
+    {
+        let app_array = doc
+            .get_mut("application")
+            .and_then(|v| v.as_array_of_tables_mut());
+        let app_array = match app_array {
+            Some(a) => a,
+            None => return Err(internal_error_response()),
+        };
+        let app_table = match app_array.get_mut(app_idx) {
+            Some(t) => t,
+            None => return Err(internal_error_response()),
+        };
+        let device_array = app_table
+            .entry("device")
+            .or_insert_with(|| toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()))
+            .as_array_of_tables_mut();
+        let device_array = match device_array {
+            Some(a) => a,
+            None => {
+                warn!(
+                    event = "device_crud_rejected",
+                    reason = "io",
+                    application_id = %application_id,
+                    source_ip = %addr.ip(),
+                    "create_device: existing TOML 'device' key is not an array of tables"
+                );
+                return Err(internal_error_response());
+            }
+        };
+
+        let new_table = build_device_table(&body.device_id, &body.device_name, &body.read_metric_list);
+        device_array.push(new_table);
+    }
+
+    let candidate_bytes = doc.to_string().into_bytes();
+    if let Err(e) = state.config_writer.write_atomically(&candidate_bytes) {
+        handle_rollback(&state, &original_bytes, "create_device", &addr, "write_atomically_err", "device");
+        return Err(io_error_response(&e, "create_device", &addr, "device"));
+    }
+
+    match state.config_reload.reload().await {
+        Ok(_) => {
+            info!(
+                event = "device_created",
+                application_id = %application_id,
+                device_id = %body.device_id,
+                device_name = %body.device_name,
+                metric_count = body.read_metric_list.len(),
+                source_ip = %addr.ip(),
+                "Device created via web UI"
+            );
+            let location = format!(
+                "/api/applications/{}/devices/{}",
+                application_id, body.device_id
+            );
+            let read_metric_list = body
+                .read_metric_list
+                .into_iter()
+                .map(|m| MetricMappingResponse {
+                    metric_name: m.metric_name,
+                    chirpstack_metric_name: m.chirpstack_metric_name,
+                    metric_type: m.metric_type,
+                    metric_unit: m.metric_unit,
+                })
+                .collect();
+            let response_body = DeviceResponse {
+                device_id: body.device_id,
+                device_name: body.device_name,
+                read_metric_list,
+            };
+            Ok((
+                StatusCode::CREATED,
+                [(axum::http::header::LOCATION, location)],
+                Json(response_body),
+            ))
+        }
+        Err(ReloadError::RestartRequired { knob }) => {
+            let (should_rollback, response) = handle_restart_required(&knob,
+                &original_bytes,
+                &doc, "create_device", &addr, "device");
+            if should_rollback {
+                handle_rollback(&state, &original_bytes, "create_device", &addr, &knob, "device");
+            }
+            Err(response)
+        }
+        Err(e) => {
+            let reason = e.reason().to_string();
+            handle_rollback(&state, &original_bytes, "create_device", &addr, &reason, "device");
+            Err(reload_error_response(e, "create_device", &addr, "device"))
+        }
+    }
+}
+
+/// `PUT /api/applications/:application_id/devices/:device_id` —
+/// replace the named device's `device_name` and `read_metric_list`.
+/// `device_id` is immutable.
+///
+/// **Iter-3 P41 pattern:** the body is deserialised to
+/// `serde_json::Value` so we can distinguish `device_id`
+/// (immutable_field audit) from other unknown fields (unknown_field
+/// audit).
+///
+/// **Task 6 anti-pattern guard:** the TOML mutation MUST preserve any
+/// existing `[[application.device.command]]` sub-table byte-for-byte.
+/// We mutate the device table in place — replacing only `device_name`
+/// and the `read_metric` array — rather than serialising a
+/// `ChirpstackDevice` back via `toml::Value` (which would silently
+/// strip the command sub-table since `UpdateDeviceRequest` doesn't
+/// carry commands).
+pub async fn update_device(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Path((application_id, device_id)): Path<(String, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<DeviceResponse>, Response> {
+    validate_path_application_id(&application_id, &addr, "device")?;
+    validate_path_device_id(&device_id, &addr)?;
+
+    let obj = body.as_object().ok_or_else(|| {
+        warn!(
+            event = "device_crud_rejected",
+            reason = "validation",
+            application_id = %application_id,
+            device_id = %device_id,
+            source_ip = %addr.ip(),
+            "PUT body must be a JSON object"
+        );
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                "PUT body must be a JSON object",
+                "send `{\"device_name\": \"...\", \"read_metric_list\": [...]}`",
+            )),
+        )
+            .into_response()
+    })?;
+
+    let mut new_name: Option<String> = None;
+    let mut new_metric_list: Option<Vec<MetricMappingRequest>> = None;
+    for (k, v) in obj {
+        match k.as_str() {
+            "device_name" => {
+                let s = v.as_str().ok_or_else(|| {
+                    warn!(
+                        event = "device_crud_rejected",
+                        reason = "validation",
+                        application_id = %application_id,
+                        device_id = %device_id,
+                        source_ip = %addr.ip(),
+                        "PUT body field 'device_name' must be a string"
+                    );
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse::from_error(
+                            "device_name must be a string",
+                        )),
+                    )
+                        .into_response()
+                })?;
+                new_name = Some(s.to_string());
+            }
+            "read_metric_list" => {
+                let parsed: Vec<MetricMappingRequest> =
+                    serde_json::from_value(v.clone()).map_err(|e| {
+                        warn!(
+                            event = "device_crud_rejected",
+                            reason = "validation",
+                            application_id = %application_id,
+                            device_id = %device_id,
+                            source_ip = %addr.ip(),
+                            error = %e,
+                            "PUT body field 'read_metric_list' failed to deserialise as Vec<MetricMappingRequest>"
+                        );
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorResponse::with_hint(
+                                "read_metric_list must be an array of {metric_name, chirpstack_metric_name, metric_type, metric_unit} objects",
+                                "metric_type must be one of: Float, Int, Bool, String",
+                            )),
+                        )
+                            .into_response()
+                    })?;
+                new_metric_list = Some(parsed);
+            }
+            "device_id" => {
+                warn!(
+                    event = "device_crud_rejected",
+                    reason = "immutable_field",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    source_ip = %addr.ip(),
+                    "PUT body carried 'device_id' field; rejected (path is authoritative)"
+                );
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::with_hint(
+                        "device_id is immutable; delete and recreate to change",
+                        "remove the device_id field from the PUT body — the URL path is authoritative",
+                    )),
+                )
+                    .into_response());
+            }
+            other => {
+                warn!(
+                    event = "device_crud_rejected",
+                    reason = "unknown_field",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    source_ip = %addr.ip(),
+                    field = %other,
+                    "PUT body carried unknown field; rejected"
+                );
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::with_hint(
+                        format!("PUT body contains unknown field '{other}'"),
+                        "PUT accepts only `device_name` and `read_metric_list`",
+                    )),
+                )
+                    .into_response());
+            }
+        }
+    }
+
+    let device_name = new_name.ok_or_else(|| {
+        warn!(
+            event = "device_crud_rejected",
+            reason = "validation",
+            application_id = %application_id,
+            device_id = %device_id,
+            source_ip = %addr.ip(),
+            "PUT body missing required field 'device_name'"
+        );
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                "PUT body missing required field 'device_name'",
+                "send `{\"device_name\": \"...\", \"read_metric_list\": [...]}`",
+            )),
+        )
+            .into_response()
+    })?;
+    let read_metric_list = new_metric_list.ok_or_else(|| {
+        warn!(
+            event = "device_crud_rejected",
+            reason = "validation",
+            application_id = %application_id,
+            device_id = %device_id,
+            source_ip = %addr.ip(),
+            "PUT body missing required field 'read_metric_list'"
+        );
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                "PUT body missing required field 'read_metric_list'",
+                "send an array (possibly empty) of metric-mapping objects",
+            )),
+        )
+            .into_response()
+    })?;
+
+    validate_device_field("device_name", &device_name, &addr)?;
+    for (idx, m) in read_metric_list.iter().enumerate() {
+        validate_metric_mapping_fields(idx, m, &addr)?;
+    }
+
+    // Pre-check via live config — application + device must exist
+    // BEFORE we acquire the writer lock.
+    {
+        let live = state.config_reload.subscribe();
+        let cfg = (*live.borrow()).clone();
+        let app = cfg
+            .application_list
+            .iter()
+            .find(|a| a.application_id == application_id);
+        let app = match app {
+            Some(a) => a,
+            None => {
+                warn!(
+                    event = "device_crud_rejected",
+                    reason = "application_not_found",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    source_ip = %addr.ip(),
+                    "update_device: parent application not found"
+                );
+                return Err(application_not_found_response());
+            }
+        };
+        if !app.device_list.iter().any(|d| d.device_id == device_id) {
+            warn!(
+                event = "device_crud_rejected",
+                reason = "device_not_found",
+                application_id = %application_id,
+                device_id = %device_id,
+                source_ip = %addr.ip(),
+                "update_device: device not found under application"
+            );
+            return Err(device_not_found_response());
+        }
+    }
+
+    let _guard = state.config_writer.lock().await;
+    let original_bytes = state
+        .config_writer
+        .read_raw()
+        .map_err(|e| io_error_response(&e, "update_device", &addr, "device"))?;
+    let mut doc = state
+        .config_writer
+        .parse_document_from_bytes(&original_bytes)
+        .map_err(|e| io_error_response(&e, "update_device", &addr, "device"))?;
+
+    // Locate parent application table.
+    let app_idx = match find_application_index(&doc, &application_id, &addr, "device") {
+        Ok(Some(idx)) => idx,
+        Ok(None) => {
+            warn!(
+                event = "device_crud_rejected",
+                reason = "application_not_found",
+                application_id = %application_id,
+                device_id = %device_id,
+                source_ip = %addr.ip(),
+                "update_device: parent application not found (race vs pre-check)"
+            );
+            return Err(application_not_found_response());
+        }
+        Err(resp) => return Err(resp),
+    };
+
+    // Mutate the matching device table in place.
+    {
+        let app_array = doc
+            .get_mut("application")
+            .and_then(|v| v.as_array_of_tables_mut());
+        let app_array = match app_array {
+            Some(a) => a,
+            None => return Err(internal_error_response()),
+        };
+        let app_table = match app_array.get_mut(app_idx) {
+            Some(t) => t,
+            None => return Err(internal_error_response()),
+        };
+        let device_array = app_table
+            .get_mut("device")
+            .and_then(|v| v.as_array_of_tables_mut());
+        let device_array = match device_array {
+            Some(a) => a,
+            None => {
+                warn!(
+                    event = "device_crud_rejected",
+                    reason = "device_not_found",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    source_ip = %addr.ip(),
+                    "update_device: parent application has no `[[application.device]]` blocks (race vs pre-check)"
+                );
+                return Err(device_not_found_response());
+            }
+        };
+
+        // Pre-flight: malformed-block rejection before mutation.
+        for (idx, tbl) in device_array.iter().enumerate() {
+            if tbl.get("device_id").and_then(|v| v.as_str()).is_none() {
+                warn!(
+                    event = "device_crud_rejected",
+                    reason = "conflict",
+                    application_id = %application_id,
+                    source_ip = %addr.ip(),
+                    malformed_block_index = idx,
+                    "update_device: existing [[application.device]] block at index {idx} has missing or non-string device_id; manual cleanup required"
+                );
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse::with_hint(
+                        format!(
+                            "config TOML contains a malformed [[application.device]] block at index {idx} (missing or non-string device_id); manual cleanup required"
+                        ),
+                        "edit config/config.toml to fix the malformed block before retrying",
+                    )),
+                )
+                    .into_response());
+            }
+        }
+
+        // Duplicate device_id detection.
+        let match_count = device_array
+            .iter()
+            .filter(|tbl| {
+                tbl.get("device_id").and_then(|v| v.as_str()) == Some(device_id.as_str())
+            })
+            .count();
+        if match_count > 1 {
+            warn!(
+                event = "device_crud_rejected",
+                reason = "conflict",
+                application_id = %application_id,
+                device_id = %device_id,
+                source_ip = %addr.ip(),
+                duplicate_count = match_count,
+                "update_device: duplicate device_id in TOML; manual cleanup required"
+            );
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse::with_hint(
+                    format!(
+                        "config TOML contains {} entries with device_id '{}' under application '{}'; manual cleanup required",
+                        match_count, device_id, application_id
+                    ),
+                    "edit config/config.toml to remove the duplicate [[application.device]] block before retrying",
+                )),
+            )
+                .into_response());
+        }
+
+        let mut found = false;
+        for tbl in device_array.iter_mut() {
+            let id_in_toml = tbl
+                .get("device_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if id_in_toml == device_id {
+                // In-place mutate device_name. Removing + re-inserting
+                // would lose any decor (comments) on the key; `insert`
+                // updates the existing key in place when present.
+                tbl.insert("device_name", toml_edit::value(device_name.clone()));
+                // Replace the read_metric sub-array. Remove first so
+                // the new array picks up fresh decor; the [[application
+                // .device.command]] sibling sub-table is left untouched
+                // (Task 6 anti-pattern guard).
+                tbl.remove("read_metric");
+                if !read_metric_list.is_empty() {
+                    let new_metrics = build_read_metric_array(&read_metric_list);
+                    tbl.insert(
+                        "read_metric",
+                        toml_edit::Item::ArrayOfTables(new_metrics),
+                    );
+                }
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            warn!(
+                event = "device_crud_rejected",
+                reason = "device_not_found",
+                application_id = %application_id,
+                device_id = %device_id,
+                source_ip = %addr.ip(),
+                "update_device: device not found in TOML at mutate time (race vs pre-check)"
+            );
+            return Err(device_not_found_response());
+        }
+    }
+
+    let candidate_bytes = doc.to_string().into_bytes();
+    if let Err(e) = state.config_writer.write_atomically(&candidate_bytes) {
+        handle_rollback(&state, &original_bytes, "update_device", &addr, "write_atomically_err", "device");
+        return Err(io_error_response(&e, "update_device", &addr, "device"));
+    }
+
+    match state.config_reload.reload().await {
+        Ok(_) => {
+            info!(
+                event = "device_updated",
+                application_id = %application_id,
+                device_id = %device_id,
+                device_name = %device_name,
+                metric_count = read_metric_list.len(),
+                source_ip = %addr.ip(),
+                "Device updated via web UI"
+            );
+            let read_metric_list_resp = read_metric_list
+                .into_iter()
+                .map(|m| MetricMappingResponse {
+                    metric_name: m.metric_name,
+                    chirpstack_metric_name: m.chirpstack_metric_name,
+                    metric_type: m.metric_type,
+                    metric_unit: m.metric_unit,
+                })
+                .collect();
+            Ok(Json(DeviceResponse {
+                device_id,
+                device_name,
+                read_metric_list: read_metric_list_resp,
+            }))
+        }
+        Err(ReloadError::RestartRequired { knob }) => {
+            let (should_rollback, response) = handle_restart_required(&knob,
+                &original_bytes,
+                &doc, "update_device", &addr, "device");
+            if should_rollback {
+                handle_rollback(&state, &original_bytes, "update_device", &addr, &knob, "device");
+            }
+            Err(response)
+        }
+        Err(e) => {
+            let reason = e.reason().to_string();
+            handle_rollback(&state, &original_bytes, "update_device", &addr, &reason, "device");
+            Err(reload_error_response(e, "update_device", &addr, "device"))
+        }
+    }
+}
+
+/// `DELETE /api/applications/:application_id/devices/:device_id` —
+/// remove the named device from the named application. v1 leaves
+/// orphaned `metric_values` / `metric_history` rows for the deleted
+/// `device_id` in storage; the pruning task (Story 2-5a) eventually
+/// removes them via the retention window. Documented in
+/// `docs/security.md § Configuration mutations § v1 limitations`.
+///
+/// **No "last device" pre-check.** Empty `device_list` is now a warn
+/// (Story 9-4 demotion); an application with zero devices is a valid
+/// state (the dashboard renders it with a "0 devices configured"
+/// badge).
+pub async fn delete_device(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Path((application_id, device_id)): Path<(String, String)>,
+) -> Result<StatusCode, Response> {
+    validate_path_application_id(&application_id, &addr, "device")?;
+    validate_path_device_id(&device_id, &addr)?;
+
+    // Pre-check via live config — application + device must exist
+    // BEFORE we acquire the writer lock.
+    {
+        let live = state.config_reload.subscribe();
+        let cfg = (*live.borrow()).clone();
+        let app = cfg
+            .application_list
+            .iter()
+            .find(|a| a.application_id == application_id);
+        let app = match app {
+            Some(a) => a,
+            None => {
+                warn!(
+                    event = "device_crud_rejected",
+                    reason = "application_not_found",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    source_ip = %addr.ip(),
+                    "delete_device: parent application not found"
+                );
+                return Err(application_not_found_response());
+            }
+        };
+        if !app.device_list.iter().any(|d| d.device_id == device_id) {
+            warn!(
+                event = "device_crud_rejected",
+                reason = "device_not_found",
+                application_id = %application_id,
+                device_id = %device_id,
+                source_ip = %addr.ip(),
+                "delete_device: device not found under application"
+            );
+            return Err(device_not_found_response());
+        }
+    }
+
+    let _guard = state.config_writer.lock().await;
+    let original_bytes = state
+        .config_writer
+        .read_raw()
+        .map_err(|e| io_error_response(&e, "delete_device", &addr, "device"))?;
+    let mut doc = state
+        .config_writer
+        .parse_document_from_bytes(&original_bytes)
+        .map_err(|e| io_error_response(&e, "delete_device", &addr, "device"))?;
+
+    let app_idx = match find_application_index(&doc, &application_id, &addr, "device") {
+        Ok(Some(idx)) => idx,
+        Ok(None) => {
+            warn!(
+                event = "device_crud_rejected",
+                reason = "application_not_found",
+                application_id = %application_id,
+                device_id = %device_id,
+                source_ip = %addr.ip(),
+                "delete_device: parent application not found (race vs pre-check)"
+            );
+            return Err(application_not_found_response());
+        }
+        Err(resp) => return Err(resp),
+    };
+
+    {
+        let app_array = doc
+            .get_mut("application")
+            .and_then(|v| v.as_array_of_tables_mut());
+        let app_array = match app_array {
+            Some(a) => a,
+            None => return Err(internal_error_response()),
+        };
+        let app_table = match app_array.get_mut(app_idx) {
+            Some(t) => t,
+            None => return Err(internal_error_response()),
+        };
+        let device_array = app_table
+            .get_mut("device")
+            .and_then(|v| v.as_array_of_tables_mut());
+        let device_array = match device_array {
+            Some(a) => a,
+            None => {
+                warn!(
+                    event = "device_crud_rejected",
+                    reason = "device_not_found",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    source_ip = %addr.ip(),
+                    "delete_device: parent application has no `[[application.device]]` blocks (race vs pre-check)"
+                );
+                return Err(device_not_found_response());
+            }
+        };
+
+        // Pre-flight: malformed-block rejection.
+        for (idx, tbl) in device_array.iter().enumerate() {
+            if tbl.get("device_id").and_then(|v| v.as_str()).is_none() {
+                warn!(
+                    event = "device_crud_rejected",
+                    reason = "conflict",
+                    application_id = %application_id,
+                    source_ip = %addr.ip(),
+                    malformed_block_index = idx,
+                    "delete_device: existing [[application.device]] block at index {idx} has missing or non-string device_id; manual cleanup required"
+                );
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse::with_hint(
+                        format!(
+                            "config TOML contains a malformed [[application.device]] block at index {idx} (missing or non-string device_id); manual cleanup required"
+                        ),
+                        "edit config/config.toml to fix the malformed block before retrying",
+                    )),
+                )
+                    .into_response());
+            }
+        }
+
+        // Duplicate device_id detection — refuse to mutate if the
+        // TOML has duplicates (manual edit, botched rollback).
+        let match_count = device_array
+            .iter()
+            .filter(|tbl| {
+                tbl.get("device_id").and_then(|v| v.as_str()) == Some(device_id.as_str())
+            })
+            .count();
+        if match_count > 1 {
+            warn!(
+                event = "device_crud_rejected",
+                reason = "conflict",
+                application_id = %application_id,
+                device_id = %device_id,
+                source_ip = %addr.ip(),
+                duplicate_count = match_count,
+                "delete_device: duplicate device_id in TOML; manual cleanup required"
+            );
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse::with_hint(
+                    format!(
+                        "config TOML contains {} entries with device_id '{}' under application '{}'; manual cleanup required",
+                        match_count, device_id, application_id
+                    ),
+                    "edit config/config.toml to remove the duplicate [[application.device]] block before retrying",
+                )),
+            )
+                .into_response());
+        }
+
+        let mut idx_to_remove: Option<usize> = None;
+        for (i, tbl) in device_array.iter().enumerate() {
+            let id_in_toml = tbl
+                .get("device_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if id_in_toml == device_id {
+                idx_to_remove = Some(i);
+                break;
+            }
+        }
+        let Some(idx) = idx_to_remove else {
+            warn!(
+                event = "device_crud_rejected",
+                reason = "device_not_found",
+                application_id = %application_id,
+                device_id = %device_id,
+                source_ip = %addr.ip(),
+                "delete_device: device not found in TOML at mutate time (race vs pre-check)"
+            );
+            return Err(device_not_found_response());
+        };
+        // `array_of_tables.remove(idx)` removes the table along with
+        // its sub-tables (including [[application.device.command]]
+        // and [[application.device.read_metric]]). Operator-visible:
+        // the deleted device is gone in its entirety from the config;
+        // orphaned storage rows persist per the v1 cascade-delete
+        // limitation documented in docs/security.md.
+        device_array.remove(idx);
+    }
+
+    let candidate_bytes = doc.to_string().into_bytes();
+    if let Err(e) = state.config_writer.write_atomically(&candidate_bytes) {
+        handle_rollback(&state, &original_bytes, "delete_device", &addr, "write_atomically_err", "device");
+        return Err(io_error_response(&e, "delete_device", &addr, "device"));
+    }
+
+    match state.config_reload.reload().await {
+        Ok(_) => {
+            info!(
+                event = "device_deleted",
+                application_id = %application_id,
+                device_id = %device_id,
+                source_ip = %addr.ip(),
+                "Device deleted via web UI"
+            );
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Err(ReloadError::RestartRequired { knob }) => {
+            let (should_rollback, response) = handle_restart_required(&knob,
+                &original_bytes,
+                &doc, "delete_device", &addr, "device");
+            if should_rollback {
+                handle_rollback(&state, &original_bytes, "delete_device", &addr, &knob, "device");
+            }
+            Err(response)
+        }
+        Err(e) => {
+            let reason = e.reason().to_string();
+            handle_rollback(&state, &original_bytes, "delete_device", &addr, &reason, "device");
+            Err(reload_error_response(e, "delete_device", &addr, "device"))
+        }
+    }
+}
+
+// ----------------------------------------------------------------------
+// Story 9-5 device CRUD helpers.
+// ----------------------------------------------------------------------
+
+/// Validate every field of a [`MetricMappingRequest`]. Emits
+/// `device_crud_rejected reason=validation` on failure (via
+/// [`validate_device_field`]).
+#[allow(clippy::result_large_err)]
+fn validate_metric_mapping_fields(
+    idx: usize,
+    m: &MetricMappingRequest,
+    addr: &SocketAddr,
+) -> Result<(), Response> {
+    // Iter-3 review (Blind #1): the previous `validate_metric_field_with_idx`
+    // wrapper became a tautological one-line delegate after the iter-2 H1
+    // double-emit fix. Replaced with direct `validate_device_field` calls.
+    // The `idx` parameter is consumed by the control-char branch below
+    // (which carries `metric_index` in its own warn), and by the response
+    // body's `format!("metric_list[{idx}]...")` for operator guidance.
+    // Threading `metric_index` into `validate_device_field`'s warns is
+    // tracked under deferred-work `9-5-iter2-D1`.
+    validate_device_field("metric_name", &m.metric_name, addr)?;
+    validate_device_field("chirpstack_metric_name", &m.chirpstack_metric_name, addr)?;
+    validate_device_field("metric_type", &m.metric_type, addr)?;
+    if let Some(unit) = m.metric_unit.as_deref() {
+        // Iter-1 review L5 (Edge E3): reject control characters in
+        // `metric_unit` — toml_edit emits the value verbatim, so a
+        // raw newline/CR/ANSI escape would corrupt the round-trip
+        // and could pollute logs that interpolate the value.
+        if let Some(bad) = unit.chars().find(|c| c.is_control()) {
+            warn!(
+                event = "device_crud_rejected",
+                reason = "validation",
+                field = "metric_unit",
+                metric_index = idx,
+                source_ip = %addr.ip(),
+                bad_char = ?bad,
+                "metric_unit contains a control character"
+            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_hint(
+                    format!("metric_list[{idx}].metric_unit contains a control character"),
+                    "use printable characters only (e.g. \"°C\", \"%\", \"m³\")",
+                )),
+            )
+                .into_response());
+        }
+        validate_device_field("metric_unit", unit, addr)?;
+    }
+    Ok(())
+}
+
+/// Locate the index of the `[[application]]` table whose
+/// `application_id` matches `application_id`. Returns `Ok(Some(idx))`
+/// on hit, `Ok(None)` if no match. On malformed-block detection
+/// (existing `[[application]]` block with missing or non-string
+/// `application_id`), emits `<resource>_crud_rejected reason=conflict`
+/// and returns `Err(response)`. The `resource` parameter mirrors the
+/// iter-1 H1 dispatch pattern in `handle_rollback` / `io_error_response`
+/// / `validate_path_application_id` so callers from device handlers
+/// emit `device_crud_rejected` and any future Story 9-6 command-handler
+/// reuse can emit `command_crud_rejected` without changing this helper.
+///
+/// Iter-3 review (Blind #3): added `resource` parameter to defuse the
+/// Story 9-6 landmine where this helper would otherwise misroute
+/// command-handler malformed-block warns through the device event-name
+/// literal.
+#[allow(clippy::result_large_err)]
+fn find_application_index(
+    doc: &toml_edit::DocumentMut,
+    application_id: &str,
+    addr: &SocketAddr,
+    resource: &'static str,
+) -> Result<Option<usize>, Response> {
+    let arr = match doc.get("application").and_then(|v| v.as_array_of_tables()) {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+    for (idx, tbl) in arr.iter().enumerate() {
+        let id_value = tbl.get("application_id");
+        match id_value.and_then(|v| v.as_str()) {
+            Some(s) if s == application_id => return Ok(Some(idx)),
+            Some(_) => continue,
+            None => {
+                match resource {
+                    "device" => warn!(
+                        event = "device_crud_rejected",
+                        reason = "conflict",
+                        application_id = %application_id,
+                        source_ip = %addr.ip(),
+                        malformed_block_index = idx,
+                        "handler: existing [[application]] block at index {idx} has missing or non-string application_id; manual cleanup required"
+                    ),
+                    "application" => warn!(
+                        event = "application_crud_rejected",
+                        reason = "conflict",
+                        application_id = %application_id,
+                        source_ip = %addr.ip(),
+                        malformed_block_index = idx,
+                        "handler: existing [[application]] block at index {idx} has missing or non-string application_id; manual cleanup required"
+                    ),
+                    _ => warn!(
+                        event = "crud_rejected",
+                        reason = "conflict",
+                        resource = resource,
+                        application_id = %application_id,
+                        source_ip = %addr.ip(),
+                        malformed_block_index = idx,
+                        "handler: existing [[application]] block at index {idx} has missing or non-string application_id; manual cleanup required"
+                    ),
+                }
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse::with_hint(
+                        format!(
+                            "config TOML contains a malformed [[application]] block at index {idx} (missing or non-string application_id); manual cleanup required"
+                        ),
+                        "edit config/config.toml to fix the malformed block before retrying",
+                    )),
+                )
+                    .into_response());
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Build a fresh `[[application.device]]` table with the given fields
+/// and the `[[application.device.read_metric]]` sub-array. Used by
+/// POST (whole-device construction). PUT cannot use this because PUT
+/// must preserve the existing `[[application.device.command]]`
+/// sub-table in place (Task 6 anti-pattern guard).
+fn build_device_table(
+    device_id: &str,
+    device_name: &str,
+    metric_list: &[MetricMappingRequest],
+) -> toml_edit::Table {
+    let mut tbl = toml_edit::Table::new();
+    tbl.insert("device_id", toml_edit::value(device_id.to_string()));
+    tbl.insert("device_name", toml_edit::value(device_name.to_string()));
+    if !metric_list.is_empty() {
+        let metrics_array = build_read_metric_array(metric_list);
+        tbl.insert(
+            "read_metric",
+            toml_edit::Item::ArrayOfTables(metrics_array),
+        );
+    }
+    tbl
+}
+
+/// Build a fresh `[[application.device.read_metric]]` array of tables
+/// from the request's `metric_list`. Order is preserved (load-bearing
+/// per Story 9-3 iter-1 H1 — TOML-declaration order drives dashboard
+/// rendering order and address-space registration order).
+fn build_read_metric_array(metric_list: &[MetricMappingRequest]) -> toml_edit::ArrayOfTables {
+    let mut arr = toml_edit::ArrayOfTables::new();
+    for m in metric_list {
+        let mut row = toml_edit::Table::new();
+        row.insert("metric_name", toml_edit::value(m.metric_name.clone()));
+        row.insert(
+            "chirpstack_metric_name",
+            toml_edit::value(m.chirpstack_metric_name.clone()),
+        );
+        row.insert("metric_type", toml_edit::value(m.metric_type.clone()));
+        if let Some(unit) = &m.metric_unit {
+            row.insert("metric_unit", toml_edit::value(unit.clone()));
+        }
+        arr.push(row);
+    }
+    arr
 }
 
 // ----------------------------------------------------------------------
@@ -1382,6 +2704,131 @@ fn validate_application_field(
     Ok(())
 }
 
+/// Story 9-5 AC#3: per-device + per-metric body-field validator.
+/// Parallel to `validate_application_field` but emits
+/// `event="device_crud_rejected"` (NOT `application_crud_rejected`)
+/// per AC#5/AC#8 path-aware dispatch.
+///
+/// Field-name dispatch:
+/// - `device_id` / `metric_name` / `chirpstack_metric_name`: char-class restricted (`is_valid_app_id_char`), max length [`APP_FIELD_MAX_LEN`].
+/// - `device_name`: looser (`is_valid_app_name_char` — allows spaces / parentheses), max length [`APP_FIELD_MAX_LEN`].
+/// - `metric_unit`: any string, max length [`METRIC_UNIT_MAX_LEN`] (= 64). Empty allowed when caller passes a zero-length string explicitly; `None` skips validation entirely (the caller controls when to invoke this).
+/// - `metric_type`: must equal one of `"Float" | "Int" | "Bool" | "String"` (case-sensitive — matches the `OpcMetricTypeConfig` enum's `Deserialize` derive behaviour).
+///
+/// All other field names get the conservative char-class treatment.
+#[allow(clippy::result_large_err)]
+fn validate_device_field(field: &str, value: &str, addr: &SocketAddr) -> Result<(), Response> {
+    // metric_type uses an enum-vocabulary check, not length / char-class.
+    if field == "metric_type" {
+        if !matches!(value, "Float" | "Int" | "Bool" | "String") {
+            warn!(
+                event = "device_crud_rejected",
+                reason = "validation",
+                field = %field,
+                source_ip = %addr.ip(),
+                value = %value,
+                "device CRUD field validation failed: metric_type not in {{Float,Int,Bool,String}}"
+            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_hint(
+                    "metric_type must be one of: Float, Int, Bool, String",
+                    "case-sensitive; matches OpcMetricTypeConfig enum",
+                )),
+            )
+                .into_response());
+        }
+        return Ok(());
+    }
+
+    // metric_unit has its own length budget; empty allowed.
+    let max_len = if field == "metric_unit" {
+        METRIC_UNIT_MAX_LEN
+    } else {
+        APP_FIELD_MAX_LEN
+    };
+
+    // metric_unit allows empty (the caller passes "" explicitly when
+    // they want to clear it); other fields reject empty/whitespace-only.
+    if field != "metric_unit" && value.trim().is_empty() {
+        warn!(
+            event = "device_crud_rejected",
+            reason = "validation",
+            field = %field,
+            source_ip = %addr.ip(),
+            "device CRUD field validation failed: empty or whitespace-only"
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                format!("{field} must not be empty or whitespace-only"),
+                "provide a non-empty value with at least one non-whitespace character",
+            )),
+        )
+            .into_response());
+    }
+
+    if value.len() > max_len {
+        warn!(
+            event = "device_crud_rejected",
+            reason = "validation",
+            field = %field,
+            source_ip = %addr.ip(),
+            length = value.len(),
+            "device CRUD field validation failed: too long"
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                format!("{field} length {} exceeds maximum of {}", value.len(), max_len),
+                format!("shorten {field} to <= {max_len} characters"),
+            )),
+        )
+            .into_response());
+    }
+
+    // metric_unit accepts any character (operator-friendly free text:
+    // °C, %, V, m³, etc.).
+    if field == "metric_unit" {
+        return Ok(());
+    }
+
+    let allowed: fn(char) -> bool = match field {
+        "device_name" => is_valid_app_name_char,
+        // device_id / metric_name / chirpstack_metric_name: strict
+        _ => is_valid_app_id_char,
+    };
+    if let Some(bad) = value.chars().find(|&c| !allowed(c)) {
+        warn!(
+            event = "device_crud_rejected",
+            reason = "validation",
+            field = %field,
+            source_ip = %addr.ip(),
+            bad_char = ?bad,
+            "device CRUD field validation failed: invalid character"
+        );
+        let hint = if field == "device_name" {
+            "use ASCII alphanumerics, '-', '_', '.', spaces, or parentheses"
+        } else {
+            "use ASCII alphanumerics, '-', '_', '.'"
+        };
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                format!("{field} contains invalid character {:?}", bad),
+                hint,
+            )),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+/// Story 9-5 AC#3: max length for `metric_unit` body field.
+/// Operator-friendly short suffixes only (°C, %, V, m³, etc.).
+/// Distinct from [`APP_FIELD_MAX_LEN`] which covers ID-shaped fields.
+const METRIC_UNIT_MAX_LEN: usize = 64;
+
 /// Iter-1 review (refactor): centralise the rollback + audit-event
 /// pattern shared by all three CRUD handlers. Logs `rollback_failed`
 /// at warn level if `rollback()` itself returns `Err(_)`. The
@@ -1393,17 +2840,43 @@ fn handle_rollback(
     site: &'static str,
     addr: &SocketAddr,
     cause: &str,
+    resource: &'static str,
 ) {
+    // Iter-1 review HIGH H1: dispatch event-name literal by `resource`
+    // so device-CRUD failures emit `event="device_crud_rejected"` and
+    // application-CRUD failures emit `event="application_crud_rejected"`.
+    // Match arms preserve the AC#8 source-grep contract (unique names).
     if let Err(rb) = state.config_writer.rollback(original_bytes) {
-        warn!(
-            event = "application_crud_rejected",
-            reason = "rollback_failed",
-            site = %site,
-            source_ip = %addr.ip(),
-            rollback_error = %rb,
-            reload_cause = %cause,
-            "rollback FAILED — config TOML on disk is now in an inconsistent state; ConfigWriter is poisoned"
-        );
+        match resource {
+            "device" => warn!(
+                event = "device_crud_rejected",
+                reason = "rollback_failed",
+                site = %site,
+                source_ip = %addr.ip(),
+                rollback_error = %rb,
+                reload_cause = %cause,
+                "rollback FAILED — config TOML on disk is now in an inconsistent state; ConfigWriter is poisoned"
+            ),
+            "application" => warn!(
+                event = "application_crud_rejected",
+                reason = "rollback_failed",
+                site = %site,
+                source_ip = %addr.ip(),
+                rollback_error = %rb,
+                reload_cause = %cause,
+                "rollback FAILED — config TOML on disk is now in an inconsistent state; ConfigWriter is poisoned"
+            ),
+            _ => warn!(
+                event = "crud_rejected",
+                reason = "rollback_failed",
+                resource = resource,
+                site = %site,
+                source_ip = %addr.ip(),
+                rollback_error = %rb,
+                reload_cause = %cause,
+                "rollback FAILED — config TOML on disk is now in an inconsistent state; ConfigWriter is poisoned"
+            ),
+        }
     }
 }
 
@@ -1411,6 +2884,19 @@ fn application_not_found_response() -> Response {
     (
         StatusCode::NOT_FOUND,
         Json(ErrorResponse::from_error("application not found")),
+    )
+        .into_response()
+}
+
+/// Story 9-5 AC#6: parallel to `application_not_found_response` for
+/// the new `:device_id` URL segment. Returns 404 with the same body
+/// shape; the audit-event emission is the caller's responsibility
+/// (the `_crud_rejected` warn fires only on mutating-method paths,
+/// not on GET 404s — Story 9-5 audit-event semantic).
+fn device_not_found_response() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse::from_error("device not found")),
     )
         .into_response()
 }
@@ -1427,21 +2913,45 @@ fn io_error_response(
     e: &crate::utils::OpcGwError,
     site: &'static str,
     addr: &SocketAddr,
+    resource: &'static str,
 ) -> Response {
     // Iter-1 review D3-P: distinguish "transient IO" (500) from
     // "writer poisoned, gateway in inconsistent state" (503). The
     // poisoned-error wording carries the literal "poisoned" token
     // emitted by `ConfigWriter::poisoned_err`.
+    //
+    // Iter-1 review HIGH H1: dispatch event-name literal by `resource`
+    // so device-CRUD IO/poisoned failures emit `device_crud_rejected`
+    // and application-CRUD failures emit `application_crud_rejected`.
     let display = e.to_string();
     if display.contains("config writer poisoned") {
-        warn!(
-            event = "application_crud_rejected",
-            reason = "poisoned",
-            site = %site,
-            source_ip = %addr.ip(),
-            error = %e,
-            "CRUD rejected: ConfigWriter is poisoned (prior rollback failed); restart required"
-        );
+        match resource {
+            "device" => warn!(
+                event = "device_crud_rejected",
+                reason = "poisoned",
+                site = %site,
+                source_ip = %addr.ip(),
+                error = %e,
+                "CRUD rejected: ConfigWriter is poisoned (prior rollback failed); restart required"
+            ),
+            "application" => warn!(
+                event = "application_crud_rejected",
+                reason = "poisoned",
+                site = %site,
+                source_ip = %addr.ip(),
+                error = %e,
+                "CRUD rejected: ConfigWriter is poisoned (prior rollback failed); restart required"
+            ),
+            _ => warn!(
+                event = "crud_rejected",
+                reason = "poisoned",
+                resource = resource,
+                site = %site,
+                source_ip = %addr.ip(),
+                error = %e,
+                "CRUD rejected: ConfigWriter is poisoned (prior rollback failed); restart required"
+            ),
+        }
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse::with_hint(
@@ -1451,14 +2961,33 @@ fn io_error_response(
         )
             .into_response();
     }
-    warn!(
-        event = "application_crud_rejected",
-        reason = "io",
-        site = %site,
-        source_ip = %addr.ip(),
-        error = %e,
-        "CRUD IO failure"
-    );
+    match resource {
+        "device" => warn!(
+            event = "device_crud_rejected",
+            reason = "io",
+            site = %site,
+            source_ip = %addr.ip(),
+            error = %e,
+            "CRUD IO failure"
+        ),
+        "application" => warn!(
+            event = "application_crud_rejected",
+            reason = "io",
+            site = %site,
+            source_ip = %addr.ip(),
+            error = %e,
+            "CRUD IO failure"
+        ),
+        _ => warn!(
+            event = "crud_rejected",
+            reason = "io",
+            resource = resource,
+            site = %site,
+            source_ip = %addr.ip(),
+            error = %e,
+            "CRUD IO failure"
+        ),
+    }
     internal_error_response()
 }
 
@@ -1505,6 +3034,7 @@ fn reload_error_response(
     e: ReloadError,
     site: &'static str,
     addr: &SocketAddr,
+    resource: &'static str,
 ) -> Response {
     let reason = e.reason();
     let status = match reason {
@@ -1512,14 +3042,36 @@ fn reload_error_response(
         // RestartRequired and Io both map to 500 per AC#3.
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    warn!(
-        event = "application_crud_rejected",
-        reason = %reason,
-        site = %site,
-        source_ip = %addr.ip(),
-        error = %e,
-        "CRUD reload failure"
-    );
+    // Iter-1 review HIGH H1: dispatch event-name literal by `resource`
+    // so reload-validation/RestartRequired/Io failures from device
+    // handlers emit `device_crud_rejected`, not `application_*`.
+    match resource {
+        "device" => warn!(
+            event = "device_crud_rejected",
+            reason = %reason,
+            site = %site,
+            source_ip = %addr.ip(),
+            error = %e,
+            "CRUD reload failure"
+        ),
+        "application" => warn!(
+            event = "application_crud_rejected",
+            reason = %reason,
+            site = %site,
+            source_ip = %addr.ip(),
+            error = %e,
+            "CRUD reload failure"
+        ),
+        _ => warn!(
+            event = "crud_rejected",
+            reason = %reason,
+            resource = resource,
+            site = %site,
+            source_ip = %addr.ip(),
+            error = %e,
+            "CRUD reload failure"
+        ),
+    }
     let body = match reason {
         "validation" => ErrorResponse::with_hint(
             format!("config validation failed: {e}"),
@@ -1543,18 +3095,40 @@ fn handle_restart_required(
     candidate_doc: &toml_edit::DocumentMut,
     site: &'static str,
     addr: &SocketAddr,
+    resource: &'static str,
 ) -> (bool, Response) {
+    // Iter-1 review HIGH H1: dispatch ambient_drift event-name literal
+    // by `resource`. Delegated rollback path also forwards `resource`.
     match knob_in_delta(knob, original_bytes, candidate_doc) {
         Ok(false) => {
             // Ambient drift — refuse rollback.
-            warn!(
-                event = "application_crud_rejected",
-                reason = "ambient_drift",
-                site = %site,
-                source_ip = %addr.ip(),
-                changed_knob = %knob,
-                "CRUD rejected: TOML has unrelated changes since gateway start; refusing to roll back"
-            );
+            match resource {
+                "device" => warn!(
+                    event = "device_crud_rejected",
+                    reason = "ambient_drift",
+                    site = %site,
+                    source_ip = %addr.ip(),
+                    changed_knob = %knob,
+                    "CRUD rejected: TOML has unrelated changes since gateway start; refusing to roll back"
+                ),
+                "application" => warn!(
+                    event = "application_crud_rejected",
+                    reason = "ambient_drift",
+                    site = %site,
+                    source_ip = %addr.ip(),
+                    changed_knob = %knob,
+                    "CRUD rejected: TOML has unrelated changes since gateway start; refusing to roll back"
+                ),
+                _ => warn!(
+                    event = "crud_rejected",
+                    reason = "ambient_drift",
+                    resource = resource,
+                    site = %site,
+                    source_ip = %addr.ip(),
+                    changed_knob = %knob,
+                    "CRUD rejected: TOML has unrelated changes since gateway start; refusing to roll back"
+                ),
+            }
             (
                 false,
                 (
@@ -1581,6 +3155,7 @@ fn handle_restart_required(
                     },
                     site,
                     addr,
+                    resource,
                 ),
             )
         }
@@ -1599,6 +3174,7 @@ mod tests {
     use chrono::Utc;
     use std::sync::Arc;
     use std::time::Instant;
+    use tracing_test::traced_test;
 
     /// Minimal `AppState` builder for the API tests. Backend is an
     /// `InMemoryBackend` populated as the test demands; snapshot is
@@ -2156,5 +3732,53 @@ mod tests {
         // No row for "absent" — configured Bool surfaces.
         assert_eq!(metrics[1].data_type, "Bool", "configured data_type wins when row is missing");
         assert!(metrics[1].value.is_none());
+    }
+
+    /// Iter-1 review L11 (Auditor A8): Spec Task 3 mandated unit test.
+    /// Defends against the obvious copy-paste regression class where
+    /// `validate_path_device_id` accidentally emits the
+    /// `application_crud_rejected` event instead of the
+    /// `device_crud_rejected` event — exactly the regression that
+    /// surfaced as iter-1 HIGH H1 for the rejection helpers.
+    ///
+    /// Iter-2 review L5: anchor on the QUOTED token `event="device_crud_rejected"`
+    /// (with surrounding tracing-format quotes) so a future field
+    /// like `device_crud_rejected_count=N` cannot match by accident.
+    #[test]
+    #[traced_test]
+    fn validate_path_device_id_with_crlf_emits_device_event() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().expect("parse addr");
+        let result = validate_path_device_id("dev\nid", &addr);
+        assert!(result.is_err(), "CRLF in device_id must be rejected");
+        assert!(
+            logs_contain("event=\"device_crud_rejected\""),
+            "validate_path_device_id must emit event=\"device_crud_rejected\" (quoted) on validation rejection"
+        );
+        assert!(
+            !logs_contain("event=\"application_crud_rejected\""),
+            "validate_path_device_id must NOT emit event=\"application_crud_rejected\" (Story 9-5 path-aware dispatch)"
+        );
+    }
+
+    /// Iter-2 review M5: parallel CRLF unit test for the H1 patch's
+    /// path-aware dispatch in `validate_path_application_id`. When
+    /// the helper is called from a device handler with
+    /// `resource = "device"`, a CRLF-bearing application_id MUST
+    /// emit `device_crud_rejected` (NOT `application_crud_rejected`).
+    /// Defends against the swap-the-resource-literal regression class.
+    #[test]
+    #[traced_test]
+    fn validate_path_application_id_with_crlf_under_device_resource_emits_device_event() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().expect("parse addr");
+        let result = validate_path_application_id("app\nid", &addr, "device");
+        assert!(result.is_err(), "CRLF in application_id must be rejected");
+        assert!(
+            logs_contain("event=\"device_crud_rejected\""),
+            "validate_path_application_id with resource=\"device\" must emit device_crud_rejected"
+        );
+        assert!(
+            !logs_contain("event=\"application_crud_rejected\""),
+            "must NOT emit application_crud_rejected when invoked from a device handler"
+        );
     }
 }

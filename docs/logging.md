@@ -189,6 +189,29 @@ index of the event names introduced so far.
 | `application_updated` | `info` (audit) | 9-4 | `security.md` § Configuration mutations |
 | `application_deleted` | `info` (audit) | 9-4 | `security.md` § Configuration mutations |
 | `application_crud_rejected` | `warn` (audit) | 9-4 | `security.md` § Configuration mutations |
+| `device_created` | `info` (audit) | 9-5 | `security.md` § Configuration mutations |
+| `device_updated` | `info` (audit) | 9-5 | `security.md` § Configuration mutations |
+| `device_deleted` | `info` (audit) | 9-5 | `security.md` § Configuration mutations |
+| `device_crud_rejected` | `warn` (audit) | 9-5 | `security.md` § Configuration mutations |
+
+The CSRF middleware dispatches between `application_crud_rejected` and
+`device_crud_rejected` by URL path prefix (Story 9-5 path-aware
+dispatch — see `src/web/csrf.rs::csrf_event_resource_for_path`):
+requests under `/api/applications/:application_id/devices*` emit the
+`device_*` name; everything else under `/api/applications*` emits the
+`application_*` name. Story 9-6 will add the `command_*` branch.
+
+**Note (iter-2 review M1):** the `_crud_rejected` event family
+fires on **any** path-shape rejection, regardless of HTTP method —
+including GETs whose URL path-segment is malformed (CRLF, oversize,
+invalid char). This is intentional: a rejected request is a rejected
+request. The `_crud_rejected` family represents "request rejected by
+the CRUD-surface validation", NOT "mutation rejected". Operators
+filtering on `_crud_rejected` for security alerts will see a small
+amount of GET-noise from typoed URLs; this is expected. The "GET 404
+does not emit `_crud_rejected`" semantic (documented in
+`src/web/api.rs::device_not_found_response`) applies specifically to
+*resource-not-found* responses, not to *path-shape* rejections.
 
 Pinning rules (apply to every entry above):
 
