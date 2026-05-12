@@ -261,7 +261,7 @@ Endpoints (all behind Basic auth via the existing layer + CSRF middleware via th
 
 - **Given** the existing `event="..."` audit-event convention (Stories 6-1 → 9-7).
 - **When** any CRUD outcome is emitted on the command surface.
-- **Then** the new events match: `command_created` (info), `command_updated` (info), `command_deleted` (info), `command_crud_rejected` (warn). All four carry `source_ip` + `application_id` + `device_id` + `command_id` (rejected events also carry `reason ∈ {validation, csrf, conflict, reload_failed, io, immutable_field, unknown_field, ambient_drift, poisoned, rollback_failed, application_not_found, device_not_found, command_not_found}`). On rejection, the sanitised `error: %e` field is included (NFR7 — no secrets, but `application_id` / `device_id` / `command_id` / `command_name` are NOT secrets and are included for operator-action triage).
+- **Then** the new events match: `command_created` (info), `command_updated` (info), `command_deleted` (info), `command_crud_rejected` (warn). All four carry `source_ip` + `application_id` + `device_id` **(always)** plus `command_id` **(when applicable — populated for success events `command_created/updated/deleted` AND for rejection events that fail AFTER `command_id` is known; ABSENT on early-validation rejections such as malformed-body, missing-body-field, or path-validation failures BEFORE the command_id is parsed)**. Rejected events also carry `reason ∈ {validation, csrf, conflict, reload_failed, io, immutable_field, unknown_field, ambient_drift, poisoned, rollback_failed, application_not_found, device_not_found, command_not_found}`. On rejection, the sanitised `error: %e` field is included (NFR7 — no secrets, but `application_id` / `device_id` / `command_id` / `command_name` are NOT secrets and are included for operator-action triage).
 - **And** zero changes to `src/main.rs::initialise_tracing` (NFR12 startup-warn invariant from `9-1:259`).
 - **And** Story 9-4's `event="application_*"` grep contract continues to return exactly 4 lines (no regression).
 - **And** Story 9-5's `event="device_*"` grep contract continues to return exactly 4 lines (no regression).
@@ -305,8 +305,8 @@ Endpoints (all behind Basic auth via the existing layer + CSRF middleware via th
 - **Verification:**
   - Test: `tests/web_command_crud.rs::post_application_csrf_event_unchanged_under_9_6_changes` (also part of AC#5 — regression-pin for Story 9-4).
   - Test: `tests/web_command_crud.rs::post_device_csrf_event_unchanged_under_9_6_changes` (also part of AC#5 — regression-pin for Story 9-5).
-  - Test: `tests/web_command_crud.rs::validate_path_device_id_under_command_resource_emits_command_event` — unit test (in `src/web/api.rs::tests`) that calls `validate_path_device_id(BAD_DEVICE_ID_WITH_CRLF, addr, "command")` and asserts the captured log emits `event="command_crud_rejected"` (NOT `device_crud_rejected`).
-  - Test: `tests/web_command_crud.rs::validate_path_device_id_under_device_resource_still_emits_device_event` — same helper invoked with `resource="device"` (the Story 9-5 call sites' behaviour); assert `event="device_crud_rejected"`. **Pins the Story 9-5 invariant under the Story 9-6 widening.**
+  - Test: `src/web/api.rs::tests::validate_path_device_id_under_command_resource_emits_command_event` — unit test that calls `validate_path_device_id(BAD_DEVICE_ID_WITH_CRLF, addr, "command")` and asserts the captured log emits `event="command_crud_rejected"` (NOT `device_crud_rejected`).
+  - Test: `src/web/api.rs::tests::validate_path_device_id_under_device_resource_still_emits_device_event` — same helper invoked with `resource="device"` (the Story 9-5 call sites' behaviour); assert `event="device_crud_rejected"`. **Pins the Story 9-5 invariant under the Story 9-6 widening.**
   - `cargo test --test web_application_crud` passes ALL existing tests with zero failures.
   - `cargo test --test web_device_crud` passes ALL existing tests with zero failures.
 
@@ -318,15 +318,15 @@ Endpoints (all behind Basic auth via the existing layer + CSRF middleware via th
 - **And** no secret values (`api_token`, `user_password`, `web` password) are emitted in any of the four new audit events. `application_id` / `device_id` / `command_id` / `command_name` are NOT secrets — they are operator-supplied identifiers.
 - **Verification:**
   - Test: `tests/web_command_crud.rs::command_crud_does_not_log_secrets_success_path` — set `chirpstack.api_token = "SECRET_SENTINEL_TOKEN_DO_NOT_LEAK"` in the test config; POST a new command (success path); grep captured logs for the sentinel; assert zero matches.
-  - Test: `tests/web_command_crud.rs::command_crud_io_failure_does_not_log_secrets` — same sentinel token; POST a command with valid handler-level shape; corrupt the TOML on disk between the write and the reload (chmod-000 the file via `std::os::unix::fs::PermissionsExt`) so reload fails with `ReloadError::Io(_)`; assert `status == 500` (Story 9-5 iter-1 E13 precedent — pin to `INTERNAL_SERVER_ERROR`, not `assert_ne!(CREATED)`); grep the captured logs for the sentinel; assert zero matches. Wrap the chmod-000 in a `scopeguard::defer!` so tempdir cleanup runs even if the assertion panics (Story 9-5 iter-1 L12 / B18 precedent).
+  - Test: `tests/web_command_crud.rs::command_crud_io_failure_does_not_log_secrets` — same sentinel token; POST a command with valid handler-level shape; corrupt the TOML on disk between the write and the reload (chmod-000 the file via `std::os::unix::fs::PermissionsExt`) so reload fails with `ReloadError::Io(_)`; assert `status == 500` (Story 9-5 iter-1 E13 precedent — pin to `INTERNAL_SERVER_ERROR`, not `assert_ne!(CREATED)`); grep the captured logs for the sentinel; assert zero matches. Wrap the chmod-000 in a hand-rolled RAII guard (small Drop-impl struct that restores perms in `drop()`) so tempdir cleanup runs even if the assertion panics (Story 9-5 iter-1 L12 / B18 precedent at `tests/web_device_crud.rs:1578` — "scopeguard-style RAII", no `scopeguard` crate import).
 
 ### AC#13 (test count + clippy + grep contracts)
 
-- `cargo test --lib --bins --tests` reports **at least 1029 passed** (1004 baseline from Story 9-5 + ≥ 25 integration tests in `tests/web_command_crud.rs` + ≥ 2 unit tests in `src/config.rs::tests` (per-device `command_id` uniqueness, per-device `command_name` uniqueness) + 2 unit tests in `src/web/api.rs::tests` (the AC#11 `validate_path_device_id` widening tests)).
+- `cargo test --lib --bins --tests` reports **at least 1056 passed** (1004 baseline from Story 9-5 + 42 integration tests in `tests/web_command_crud.rs` per Task 9 list + the new `delete_last_command_leaves_clean_toml_round_trip` test from Task 6 = ≥ 43 integration tests + 3 unit tests in `src/config.rs::tests` (per-device `command_id` + `command_name` uniqueness + `test_validation_same_command_id_across_devices_is_allowed` cross-device-allowed pin) + 5 unit tests in `src/web/api.rs::tests` (the AC#11 `validate_path_device_id` widening tests + the 3 `validate_path_command_id` parsing tests from Task 3) + 2 unit tests in `src/web/csrf.rs::tests` (the new `csrf_rejects_post_command_emits_command_event` + `csrf_rejects_post_command_form_urlencoded_emits_command_event` from Task 2)). The floor is set as a safety margin; the dev agent should land closer to ≥ 1056 with reasonable test discipline.
 - `cargo clippy --all-targets -- -D warnings` is clean.
 - `cargo test --doc` reports 0 failed (56 ignored — pre-existing #100 baseline, unchanged).
 - New integration test file count grows by 1.
-- No new direct dependencies (Story 9-6 reuses the Story 9-4 `toml_edit` dep + the existing `tempfile` / `reqwest` / `tracing-test` / `scopeguard` dev-deps).
+- No new direct dependencies (Story 9-6 reuses the Story 9-4 `toml_edit` dep + the existing `tempfile` / `reqwest` / `tracing-test` dev-deps). **No `scopeguard` crate**: the chmod-cleanup pattern is hand-rolled RAII inline in tests (per Story 9-5 precedent at `tests/web_device_crud.rs:1578` — comment reads *"use scopeguard-style RAII"*, no crate import).
 - `git grep -hoE 'event = "command_[a-z_]+"' src/ | sort -u` returns exactly 4 lines.
 - `git grep -hoE 'event = "application_[a-z_]+"' src/ | sort -u` returns exactly 4 lines (Story 9-4 invariant).
 - `git grep -hoE 'event = "device_[a-z_]+"' src/ | sort -u` returns exactly 4 lines (Story 9-5 invariant).
@@ -389,7 +389,7 @@ These patches landed in Story 9-5's iter-1/iter-2/iter-3 reviews and Story 9-6 M
 1. **Iter-1 review patch (Story 9-5 + transitively 9-6): duplicate-rejection tests assert pre/post-byte-equality of `config.toml`** [Blind B12 + Edge E9/E10 in Story 9-5]. Every Story 9-6 duplicate-id / duplicate-name 422 test MUST `let pre = std::fs::read(&config_path); … let post = std::fs::read(&config_path); assert_eq!(pre, post);` — silent rollback failure would otherwise pass the assertion.
 2. **Iter-1 review patch (Story 9-5 + transitively 9-6): unique-per-test sentinel for positive-path log assertions** [Auditor A4 + Story 9-4 iter-2 P26 precedent]. Every Story 9-6 positive-path test that asserts `event="command_*"` log emission MUST include a `uuid::Uuid::new_v4().simple()` sentinel in a field (e.g., `command_name = format!("test-cmd-{}", sentinel)`) AND assert that the sentinel appears in the captured logs — defeating parallel-test buffer-bleed.
 3. **Iter-1 review patch (Story 9-5 + transitively 9-6): per-test fixture `_listener_handle` stored on fixture struct + `.await` (or `abort + .await`) on `shutdown()`** [Blind B24 + Story 9-5 iter-2 L4]. Story 9-6's `CommandCrudFixture` MUST follow the same pattern; `JoinError::Panic` MUST re-propagate.
-4. **Iter-1 review patch (Story 9-5 + transitively 9-6): tempdir guard via `scopeguard::defer!` for chmod-based fault-injection tests** [Blind B18]. The `command_crud_io_failure_does_not_log_secrets` test (AC#12) MUST wrap the `chmod 0o000` step in a `defer!` to restore perms even if the assertion panics.
+4. **Iter-1 review patch (Story 9-5 + transitively 9-6): tempdir guard via hand-rolled scopeguard-style RAII for chmod-based fault-injection tests** [Blind B18]. The `command_crud_io_failure_does_not_log_secrets` test (AC#12) MUST wrap the `chmod 0o000` step in a hand-rolled RAII guard (Drop impl on a small struct that restores perms in `drop()`) — see Story 9-5's `tests/web_device_crud.rs:1578` precedent (the comment reads "use scopeguard-style RAII" but the `scopeguard` crate is NOT a dependency; the pattern is implemented inline).
 5. **Iter-2 review patch (Story 9-5 + transitively 9-6): editor modal `loading` flag wrapped in `try/finally`** [M4]. Story 9-6's `static/commands.js` edit-modal MUST follow the same shape: a synchronous DOM-null deref above the inner try block must not leave the modal permanently inert.
 6. **Iter-2 review patch (Story 9-5 + transitively 9-6): `fetchJson` treats `Content-Length: 0` as no-body** [L2]. Story 9-6's `static/commands.js` MUST replicate the helper.
 7. **Iter-2 review patch (Story 9-5 + transitively 9-6): DELETE-without-Content-Type assertion includes audit emission check** [L3]. Story 9-6's `delete_command_without_content_type_returns_415` test MUST assert `event="command_crud_rejected" reason="csrf"` (the existing 9-5 audit-event behaviour now also includes the Story 9-6 `"command"` arm).
@@ -549,7 +549,8 @@ These patches landed in Story 9-5's iter-1/iter-2/iter-3 reviews and Story 9-6 M
   2. Iterate to find the command table's index in the parent device's `command` array.
   3. Call `array_of_tables.remove(idx)` — `toml_edit` correctly removes the table.
   4. **DO NOT touch** the sibling `read_metric` array — preserve byte-for-byte.
-  5. **Decision:** if removing the last command leaves an empty `command` `ArrayOfTables`, leave it in place (`toml_edit` may serialise it as nothing — verify at impl time and choose behaviour for minimal-diff). Don't actively remove the `command` key from the device table unless test results show it produces a cleaner diff.
+  5. **Decision (pinned):** if removing the last command leaves an empty `command` `ArrayOfTables`, **leave it in place** — do NOT actively remove the `command` key from the device table. Rationale: `toml_edit` round-trips an empty `ArrayOfTables` cleanly (serialises as nothing on the wire — verified at impl time) and a subsequent POST re-populates without needing to re-create the array key. This keeps the DELETE path's TOML mutation **minimal-diff** and **symmetric to the POST path** (which uses `or_insert(ArrayOfTables::new())` to handle the `None → Some(empty)` transition).
+  6. **Pinning test (NEW, AC#4):** `tests/web_command_crud.rs::delete_last_command_leaves_clean_toml_round_trip` — seed a device with exactly 1 command; DELETE that command; assert (a) status 204; (b) the post-delete TOML file parses cleanly via `figment::Toml::file(...)` + `AppConfig::deserialize`; (c) the resulting `device.device_command_list` deserialises to `Some(vec![])` OR `None` (accept either — `toml_edit`'s exact serialisation behaviour for empty ArrayOfTables determines which); (d) a subsequent POST of a fresh command on the same device succeeds (201). This test pins the contract regardless of the exact serialisation choice `toml_edit` makes.
 - [ ] Add helper `fn build_command_table(command_id: i32, command_name: &str, command_port: i32, command_confirmed: bool) -> toml_edit::Table` (NEW, parallel to `build_device_table` at `src/web/api.rs:2574`). Inserts the 4 fields in declaration order: `command_id`, `command_name`, `command_confirmed`, `command_port` (matches the source-comment order at `src/config.rs:660-670`).
 - [ ] Add a unit test `mutate_command_preserves_read_metric_subtable` in `src/web/api.rs::tests` (or in a new helper module if PUT-mutation is extracted to a function): seed a `DocumentMut` with a device carrying both a `read_metric` array AND a `command` array; PUT-mutate one command; serialise the doc back to a string; assert the `read_metric` sub-array is byte-equal to the original.
 
@@ -569,10 +570,14 @@ These patches landed in Story 9-5's iter-1/iter-2/iter-3 reviews and Story 9-6 M
 - [ ] **fetchJson helper MUST treat `Content-Length: 0` as no-body** (Story 9-5 iter-2 L2 pattern).
 - [ ] **HTML escape MUST cover backtick** (Story 9-5 iter-1 P25 carry-forward).
 - [ ] **Do NOT** introduce any new framework, build step, or `npm install`.
-- [ ] Update header nav links in:
+- [ ] Update header nav links in **all 5 static pages that currently render a `<nav>` element** (the current nav state is inconsistent across pages — 3 distinct variants verified: `Dashboard | Applications | Live Metrics`, `Dashboard | Applications | Devices configuration | Live Metrics`, `Dashboard | Devices | Live Metrics`). Story 9-6 adds a `Commands` link to each, harmonising at the same time:
+  - `static/index.html` — add a `Commands` link if a `<nav>` exists.
   - `static/applications.html` — add a `Commands` link (one-line edit; AC#10 does not forbid `static/*.html` modifications).
   - `static/devices-config.html` — add a `Commands` link.
   - `static/devices.html` — add a `Commands` link.
+  - `static/metrics.html` — add a `Commands` link.
+- [ ] **`static/commands.html` itself** carries the full nav (`Dashboard | Applications | Devices configuration | Live Metrics | Commands` — current-page item bolded or styled distinct per the convention you find in `devices-config.html`).
+- [ ] Full nav-harmonisation across the entire static surface (making every page's `<nav>` identical) is **NOT** in Story 9-6's scope; only the Commands-link addition is. Spec-level note: Story 9-6 surfaces but does not fully resolve the pre-existing nav drift.
 
 ### Task 9: Integration tests (`tests/web_command_crud.rs`) (AC#1-AC#12)
 
@@ -620,13 +625,13 @@ Required test cases (≥ 25):
 38. `post_command_emits_command_created_event` (AC#7 + AC#8 — uses unique-per-test sentinel per 9-4 iter-2 P26)
 39. `post_command_emits_topology_change_log` (AC#7)
 40. `command_crud_does_not_log_secrets_success_path` (AC#12)
-41. `command_crud_io_failure_does_not_log_secrets` (AC#12 — pin status=500 per 9-5 iter-1 E13; wrap chmod in scopeguard::defer per 9-5 iter-1 L12)
+41. `command_crud_io_failure_does_not_log_secrets` (AC#12 — pin status=500 per 9-5 iter-1 E13; wrap chmod in hand-rolled RAII Drop-impl guard per 9-5 iter-1 L12 — `scopeguard` crate is NOT a dep)
 42. `auth_required_for_post_commands` (AC#10 — POST without `Authorization` header returns 401 + `event="web_auth_failed"` log; also covers GET/PUT/DELETE)
 
 - [ ] Use `tracing-test::traced_test` + `tracing_test::internal::global_buf()` for log assertions (Stories 9-4 / 9-5 pattern).
 - [ ] Use `reqwest` for HTTP requests.
 - [ ] Per Story 9-5 iter-2 L4 / iter-1 B24: fixture struct stores `JoinHandle` + `shutdown()` re-propagates `JoinError::Panic`.
-- [ ] Per Story 9-5 iter-1 L12 / B18: chmod-based fault-injection tests wrap perm changes in `scopeguard::defer!`.
+- [ ] Per Story 9-5 iter-1 L12 / B18: chmod-based fault-injection tests wrap perm changes in a hand-rolled RAII guard (Drop-impl struct that restores perms) — NOT the `scopeguard` crate, which is not a dependency; precedent at `tests/web_device_crud.rs:1578`.
 
 ### Task 10: Documentation sync (AC#12 backfill, AC#13)
 
@@ -643,7 +648,7 @@ Required test cases (≥ 25):
 
 ### Task 11: Final verification (AC#13)
 
-- [ ] `cargo test --lib --bins --tests` reports ≥ 1029 passed / 0 failed.
+- [ ] `cargo test --lib --bins --tests` reports ≥ 1056 passed / 0 failed (per the AC#13 breakdown).
 - [ ] `cargo clippy --all-targets -- -D warnings` clean.
 - [ ] `cargo test --doc` 0 failed (56 ignored baseline unchanged).
 - [ ] `git grep -hoE 'event = "command_[a-z_]+"' src/ | sort -u` returns exactly 4 lines.
@@ -664,7 +669,7 @@ Required test cases (≥ 25):
 - **Do NOT** add CRUD for `[command_validation.device_schemas]`. That's a separate config section keyed by `device_id` under `[command_validation]`, not `[[application.device.command]]`.
 - **Do NOT** modify `src/opc_ua.rs`. Issue #99 is **already fixed**; Story 9-6 only enforces per-device `command_id` uniqueness via `AppConfig::validate` (Task 1). The command NodeId construction at `src/opc_ua.rs:1059` is per-device-scoped — per-device uniqueness is sufficient.
 - **Do NOT** modify `src/web/auth.rs`, `src/opc_ua_auth.rs`, `src/opc_ua_session_monitor.rs`, `src/opc_ua_history.rs`, `src/security.rs`, `src/security_hmac.rs`, `src/main.rs::initialise_tracing`. AC#10 file invariants from Stories 9-1 / 9-2 / 9-3 / 9-4 / 9-5 / 9-7 / 7-2 / 7-3 / 8-3.
-- **Do NOT** introduce new dependencies. Story 9-4 / 9-5's `toml_edit` + the existing `tempfile` / `reqwest` / `tracing-test` / `scopeguard` cover Story 9-6's needs.
+- **Do NOT** introduce new dependencies. Story 9-4 / 9-5's `toml_edit` + the existing `tempfile` / `reqwest` / `tracing-test` dev-deps cover Story 9-6's needs. **Do NOT add `scopeguard`** — the chmod-cleanup pattern is hand-rolled inline RAII (Drop-impl struct) per Story 9-5's precedent at `tests/web_device_crud.rs:1578`.
 - **Do NOT** serialise `DeviceCommandCfg` back to TOML via `toml::Value` (Task 6 anti-pattern — would silently strip the device's `read_metric` sub-table or any other sibling fields).
 - **Do NOT** add `Serialize` to `DeviceCommandCfg`. Use a parallel `CommandResponse` struct in `src/web/api.rs` (Story 9-5's `MetricMappingResponse` pattern).
 - **Do NOT** add cascade-delete of `command_queue` rows on command DELETE. v1 leaves orphaned rows.
@@ -757,7 +762,7 @@ Story 9-6 inherits the following carry-forward issues unchanged (none of them bl
 - `serial_test::serial` discipline NOT required by default unless a flake surfaces (9-4 / 9-7 precedent); Story 9-5 iter-2 L3 added `#[serial(captured_logs)]` to specific tests where parallel log emission would bleed through — Story 9-6 inherits the pattern for similar tests.
 - `tempfile::TempDir` + `NamedTempFile` for per-test config TOML files.
 - `reqwest` for HTTP client.
-- `scopeguard::defer!` for chmod-based fault-injection cleanup (Story 9-5 iter-1 L12 pattern).
+- Hand-rolled RAII guard (Drop-impl struct that restores perms in `drop()`) for chmod-based fault-injection cleanup — see Story 9-5's `tests/web_device_crud.rs:1578` precedent comment "scopeguard-style RAII". **The `scopeguard` crate itself is NOT a dependency** (verified: `grep -n scopeguard Cargo.toml` returns nothing); do not `cargo add` it.
 - **For AC#11 path-aware-CSRF cross-resource regression tests:** run the existing `tests/web_application_crud.rs` and `tests/web_device_crud.rs` test binaries as part of `cargo test`; they MUST pass byte-for-byte.
 
 ### Doctest cleanup
