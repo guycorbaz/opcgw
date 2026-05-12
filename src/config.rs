@@ -1659,6 +1659,21 @@ impl AppConfig {
                                 let command_context =
                                     format!("{}.command[{}]", dev_context, c_idx);
 
+                                // Iter-1 review E-M2: enforce command_id > 0
+                                // at the config layer so hand-edited TOML
+                                // matches the HTTP-layer invariant. A
+                                // command_id <= 0 produces an unreachable
+                                // OPC UA NodeId (the `as u32` cast at
+                                // src/opc_ua.rs:1059 wraps negatives into
+                                // a large u32 the HTTP path can never
+                                // address).
+                                if command.command_id <= 0 {
+                                    errors.push(format!(
+                                        "{}.command_id: {} must be a positive integer (>= 1)",
+                                        command_context, command.command_id
+                                    ));
+                                }
+
                                 if seen_command_ids.contains(&command.command_id) {
                                     errors.push(format!(
                                         "{}.command_id: {} is duplicated within \
@@ -2485,10 +2500,12 @@ mod tests {
     /// Story 9-6 AC#3: per-device `command_id` uniqueness within a
     /// single device's `device_command_list`. Two commands sharing
     /// a `command_id` within ONE device collide on the OPC UA NodeId
-    /// at `src/opc_ua.rs:1059` (`NodeId::new(ns, command.command_id as u32)`),
-    /// silently overwriting via `HashMap::insert` last-wins. Same
-    /// root-cause class as the metric uniqueness checks above, but
-    /// scoped to commands.
+    /// at `src/opc_ua.rs:1059` (`NodeId::new(ns, format!("{}/{}",
+    /// device.device_id, command.command_id))` post-iter-1 D1 fix),
+    /// silently overwriting via `HashMap::insert` last-wins prior to
+    /// the D1 patch. Same root-cause class as the metric uniqueness
+    /// checks above, but scoped to commands. (Iter-3 review E3-1:
+    /// updated comment to reference the post-D1 NodeId form.)
     #[test]
     fn test_validation_duplicate_command_id_within_device() {
         // Hard fixture preconditions (Story 9-5 iter-1 L10 / Auditor
@@ -2561,6 +2578,58 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(err.contains("duplicated"), "unexpected: {err}");
         assert!(err.contains("command_name"), "unexpected: {err}");
+    }
+
+    /// Story 9-6 iter-2 review E2-5 (Edge Case Hunter): unit test for
+    /// the iter-1 E-M2 patch (per-device `command_id > 0` validation).
+    /// Defends against a future refactor that drops the positivity
+    /// check.
+    #[test]
+    fn test_validation_command_id_zero_rejected() {
+        let mut config = get_config();
+        assert!(
+            !config.application_list[0].device_list.is_empty(),
+            "test fixture precondition: application[0] must have at least one device"
+        );
+        config.application_list[0].device_list[0].device_command_list =
+            Some(vec![DeviceCommandCfg {
+                command_id: 0,
+                command_name: "zero_cmd".to_string(),
+                command_confirmed: false,
+                command_port: 10,
+            }]);
+
+        let result = config.validate();
+        assert!(result.is_err(), "command_id = 0 must be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("command_id"), "unexpected: {err}");
+        assert!(
+            err.contains("positive") || err.contains(">="),
+            "error must mention positive-integer requirement: {err}"
+        );
+    }
+
+    /// Story 9-6 iter-2 review E2-5: sibling test for negative
+    /// `command_id`.
+    #[test]
+    fn test_validation_command_id_negative_rejected() {
+        let mut config = get_config();
+        assert!(
+            !config.application_list[0].device_list.is_empty(),
+            "test fixture precondition: application[0] must have at least one device"
+        );
+        config.application_list[0].device_list[0].device_command_list =
+            Some(vec![DeviceCommandCfg {
+                command_id: -5,
+                command_name: "neg_cmd".to_string(),
+                command_confirmed: false,
+                command_port: 10,
+            }]);
+
+        let result = config.validate();
+        assert!(result.is_err(), "command_id = -5 must be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("command_id"), "unexpected: {err}");
     }
 
     /// Story 9-6 AC#3: cross-device same `command_id` MUST be allowed

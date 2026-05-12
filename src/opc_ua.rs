@@ -1056,7 +1056,28 @@ impl OpcUa {
                                 device_name = %device.device_name,
                                 "Adding command to device"
                             );
-                            let command_node = NodeId::new(ns, command.command_id as u32);
+                            // Iter-1 review D1 (Edge Case Hunter E-H1): same
+                            // root-cause class as issue #99 for metrics. The
+                            // previous `NodeId::new(ns, command.command_id as u32)`
+                            // used a numeric identifier in a SINGLE namespace
+                            // shared across all devices — two devices sharing
+                            // command_id collided on the same NodeId and the
+                            // second registration silently overwrote the first
+                            // (HashMap::insert + add_variables last-wins). The
+                            // metric NodeId at `src/opc_ua.rs:976-979` already
+                            // uses `format!("{}/{}", device.device_id,
+                            // read_metric.metric_name)` for the same reason
+                            // (post-#99 fix at commit 9f823cc). Story 9-6
+                            // mirrors that pattern for commands so cross-device
+                            // same-command_id is a valid scenario (which
+                            // `test_validation_same_command_id_across_devices_is_allowed`
+                            // at src/config.rs and
+                            // `post_command_with_same_command_id_on_different_device_succeeds`
+                            // in tests/web_command_crud.rs contract).
+                            let command_node = NodeId::new(
+                                ns,
+                                format!("{}/{}", device.device_id, command.command_id),
+                            );
                             let mut command_variable = Variable::new(
                                 &command_node,
                                 command.command_name.clone(),

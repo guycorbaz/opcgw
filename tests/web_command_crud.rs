@@ -740,6 +740,235 @@ async fn post_command_with_duplicate_command_id_within_device_returns_409() {
     fx.shutdown().await;
 }
 
+/// Iter-1 review Auditor A-M1 + Edge Case Hunter E-M4: a POST with a
+/// duplicate `command_name` within the device must be rejected by
+/// the create_command pre-flight (409 + audit), parallel to the
+/// duplicate-`command_id` 409 path. Without the E-M4 patch, this
+/// would have hit the post-write reload → validate-fail → rollback
+/// path (5xx with poor audit trail).
+#[tokio::test]
+#[serial(captured_logs)]
+async fn post_command_with_duplicate_command_name_within_device_returns_409() {
+    let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
+    let pre = std::fs::read(&fx.config_path).expect("read pre");
+    clear_captured_logs();
+    let client = reqwest::Client::new();
+    // command_name = "reboot" already exists on probe-1 (command_id 1).
+    let payload = r#"{"command_id":42,"command_name":"reboot","command_port":10,"command_confirmed":false}"#;
+    let resp = json_request(
+        &client,
+        reqwest::Method::POST,
+        &fx.url("/api/applications/app-1/devices/probe-1/commands"),
+        Some(&fx.base_url),
+        Some(payload),
+    )
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let post = std::fs::read(&fx.config_path).expect("read post");
+    assert_eq!(pre, post, "TOML must be unchanged after duplicate-name 409");
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let logs = captured_logs();
+    assert!(
+        logs.contains("event=\"command_crud_rejected\""),
+        "duplicate command_name must emit event=\"command_crud_rejected\""
+    );
+    assert!(
+        logs.contains("reason=\"conflict\""),
+        "duplicate command_name must emit reason=\"conflict\""
+    );
+    // Iter-2 review E2-8: pin the conflict was raised on command_name
+    // (not command_id). Without this, if pre-flight reorders OR an
+    // unrelated 409 path fires first, the test would pass vacuously.
+    assert!(
+        logs.contains("command_name"),
+        "duplicate command_name audit log must include command_name field"
+    );
+    fx.shutdown().await;
+}
+
+/// Iter-1 review D2: POST with an unknown body field must be rejected
+/// with 400 + audit event `event="command_crud_rejected"
+/// reason="unknown_field"`. Closes the AC#5/AC#8 gap where the
+/// original `serde(deny_unknown_fields)` shape silently emitted 422
+/// without audit emission.
+#[tokio::test]
+#[serial(captured_logs)]
+async fn post_command_with_unknown_field_returns_400_with_audit() {
+    let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
+    clear_captured_logs();
+    let client = reqwest::Client::new();
+    let payload = r#"{"command_id":50,"command_name":"x","command_port":10,"command_confirmed":false,"extra_field":"should_be_rejected"}"#;
+    let resp = json_request(
+        &client,
+        reqwest::Method::POST,
+        &fx.url("/api/applications/app-1/devices/probe-1/commands"),
+        Some(&fx.base_url),
+        Some(payload),
+    )
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let logs = captured_logs();
+    assert!(
+        logs.contains("event=\"command_crud_rejected\""),
+        "unknown field on POST must emit event=\"command_crud_rejected\""
+    );
+    assert!(
+        logs.contains("reason=\"unknown_field\""),
+        "unknown field on POST must emit reason=\"unknown_field\""
+    );
+    fx.shutdown().await;
+}
+
+/// Iter-1 review B-H3 + E-L7: validate_path_command_id rejects
+/// non-canonical decimal forms (leading '+' or leading '0').
+#[tokio::test]
+#[serial(captured_logs)]
+async fn get_command_with_leading_plus_returns_400() {
+    let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
+    clear_captured_logs();
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(fx.url("/api/applications/app-1/devices/probe-1/commands/+1"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let logs = captured_logs();
+    assert!(logs.contains("event=\"command_crud_rejected\""));
+    fx.shutdown().await;
+}
+
+#[tokio::test]
+#[serial(captured_logs)]
+async fn get_command_with_leading_zero_returns_400() {
+    let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
+    clear_captured_logs();
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(fx.url("/api/applications/app-1/devices/probe-1/commands/01"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let logs = captured_logs();
+    assert!(logs.contains("event=\"command_crud_rejected\""));
+    fx.shutdown().await;
+}
+
+/// Iter-1 review E-M5: validate_command_name rejects leading/
+/// trailing whitespace so the per-device seen_command_names HashSet
+/// at src/config.rs cannot be bypassed by " reboot" vs "reboot".
+///
+/// Iter-2 review B2-M13 + E2-7: test now asserts the audit-event
+/// emission with `clear_captured_logs` so a regression that drops
+/// the warn! in `validate_command_name`'s whitespace branch fails
+/// the test (was only asserting status code before).
+#[tokio::test]
+#[serial(captured_logs)]
+async fn post_command_with_leading_whitespace_name_returns_400() {
+    let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
+    clear_captured_logs();
+    let client = reqwest::Client::new();
+    let payload = r#"{"command_id":99,"command_name":" cmd_with_leading_space","command_port":10,"command_confirmed":false}"#;
+    let resp = json_request(
+        &client,
+        reqwest::Method::POST,
+        &fx.url("/api/applications/app-1/devices/probe-1/commands"),
+        Some(&fx.base_url),
+        Some(payload),
+    )
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let logs = captured_logs();
+    assert!(
+        logs.contains("event=\"command_crud_rejected\""),
+        "leading whitespace must emit event=\"command_crud_rejected\""
+    );
+    fx.shutdown().await;
+}
+
+/// Iter-2 review E2-6: sibling test for TRAILING whitespace.
+/// Without this, a regression flipping `value != value.trim()` to
+/// `!value.starts_with(char::is_whitespace)` would pass — the
+/// trailing-space bypass would go undetected.
+#[tokio::test]
+#[serial(captured_logs)]
+async fn post_command_with_trailing_whitespace_name_returns_400() {
+    let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
+    clear_captured_logs();
+    let client = reqwest::Client::new();
+    let payload = r#"{"command_id":99,"command_name":"cmd_with_trailing_space ","command_port":10,"command_confirmed":false}"#;
+    let resp = json_request(
+        &client,
+        reqwest::Method::POST,
+        &fx.url("/api/applications/app-1/devices/probe-1/commands"),
+        Some(&fx.base_url),
+        Some(payload),
+    )
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let logs = captured_logs();
+    assert!(
+        logs.contains("event=\"command_crud_rejected\""),
+        "trailing whitespace must emit event=\"command_crud_rejected\""
+    );
+    fx.shutdown().await;
+}
+
+/// Iter-2 review H1: when an operator-edited config TOML has
+/// `[application]` (single table) instead of `[[application]]` (
+/// array-of-tables), application CRUD must return 409 with audit
+/// (parallel to the iter-1 B-H6 patch for device + command CRUD).
+/// Without the iter-2 H1 patch, application handlers would return
+/// 404/5xx since they iterate `application` array directly without
+/// going through `find_application_index`.
+///
+/// Note: this test does NOT actually corrupt the TOML at runtime
+/// (figment would refuse to reload it); the spawn_fixture path uses
+/// `[[application]]` correctly. The test verifies the helper at the
+/// unit level via the integration test that probes the well-formed
+/// path — the malformed-shape path is exercised in the unit tests.
+/// Real runtime exposure requires an external editor mid-CRUD,
+/// which is an edge case documented in deferred-work.md.
+#[tokio::test]
+#[serial(captured_logs)]
+async fn post_application_under_well_formed_toml_succeeds_post_iter2_h1() {
+    // Regression guard: iter-2 H1 added check_top_level_application_shape
+    // to the 3 mutating application handlers. Verify the well-formed
+    // path still succeeds (the new shape-check fires only on the
+    // malformed shape).
+    let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
+    let client = reqwest::Client::new();
+    let payload = r#"{"application_id":"new-app-h1","application_name":"H1 Regression Guard"}"#;
+    let resp = json_request(
+        &client,
+        reqwest::Method::POST,
+        &fx.url("/api/applications"),
+        Some(&fx.base_url),
+        Some(payload),
+    )
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    fx.shutdown().await;
+}
+
 #[tokio::test]
 #[serial(captured_logs)]
 async fn put_command_id_in_body_is_rejected() {

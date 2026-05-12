@@ -382,3 +382,76 @@
 - **9-5-iter3-D3 (Blind #5): `fetchJson` Content-Length=0 check doesn't cover HTTP/2 chunked transfer** [`static/devices-config.js::fetchJson`] — HTTP/2 servers / HTTP/1.1 chunked-transfer-encoded responses may omit `Content-Length` entirely. `res.headers.get('content-length')` returns null; `null === '0'` is false; falls through to `res.json()` which throws SyntaxError on empty body. Caught by inner try/catch and surfaces as "empty or non-JSON body" error to user. No crash, but misleading message. Niche today (opcgw is HTTP/1.1 + Content-Length-set). Future enhancement: also treat null Content-Length + 0-byte body as no-body (requires checking `res.body` after consumption attempt).
 - **9-5-iter3-D4 (Edge H1): NodeId test pins format string locally, not production-side** [`tests/web_device_crud.rs::issue_99_regression_node_id_format_includes_device_id`] — Test contains `let dev_a_node = format!("{}/{}", "dev-A", "Moisture");` and asserts string equality against that locally-constructed string. Does NOT invoke `src/opc_ua.rs:978`'s production NodeId construction. A regression that flips line 978 to `format!("{}::{}", ...)` or swaps argument order would NOT fail this test (the test's local `format!` literal is unchanged). User accepted this trade-off in the iter-2 H2 decision (full OPC UA harness was deferred). Companion CRUD test #37 + storage tests #35/#36 partially cover the invariant via the storage layer's `(device_id, metric_name)` keying. Future enhancement: expose `pub fn metric_node_id(device_id: &str, metric_name: &str) -> String` in `src/opc_ua.rs` and have both line 978 and the test use it (binds the test to the production format).
 - **9-5-iter3-D5 (Edge H2): `serial(captured_logs)` doesn't prevent bleed-through from non-grouped tests** [`tests/web_device_crud.rs`] — `#[serial(captured_logs)]` only serialises tests within the captured_logs group. Non-grouped tests in the same binary that emit `event=device_crud_rejected reason=csrf` could satisfy the captured-logs assertion via parallel emission. Iter-2 L3 fix added `clear_captured_logs()` + serial but the cross-group bleed-through path remains. Real but rare flake (`serial` group + 120ms sleeps make collision unlikely in practice). Future enhancement: refactor `init_test_subscriber` to register a per-test-instance subscriber at fixture-spawn and tear it down at fixture-shutdown, replacing the global `tracing_test::internal::global_buf()`.
+
+## Deferred from: code review of 9-6-command-crud-via-web-ui — iter-1 (2026-05-12)
+
+27 findings deferred after iter-1 review. See `_bmad-output/implementation-artifacts/9-6-command-crud-via-web-ui.md` § "Review Findings (Iter-1, 2026-05-12)" for full triage detail. Summary:
+
+- **9-6-iter1-D1 (Blind H1): `command_port = -1` confusing error message** — `src/web/api.rs::validate_command_port` produces "out of u8 range" for negative values; the same effective bound emits "not in LoRaWAN range" for in-u8 but out-of-1..=223 values. Cosmetic.
+- **9-6-iter1-D2 (Blind H4): Lost-update / reload deadlock concern** — under-specified by reviewer; no concrete repro of a deadlock between `config_writer.lock()` held during `reload().await` and a parallel SIGHUP-driven reload. Defer pending concrete repro.
+- **9-6-iter1-D3 (Blind M7): `update_command` malformed-block check positional** — pre-flight only fires for malformed blocks BEFORE the target, not after. Symmetric to Story 9-5's update_device pattern.
+- **9-6-iter1-D4 (Blind M8): `let _guard` pattern fragility** — Rust drops `_guard` at scope end as expected, but a future refactor to `let _ = ...lock()` would silently introduce a TOCTOU window. No regression test forces lifetime.
+- **9-6-iter1-D5 (Blind M10): 120ms hardcoded sleeps race on slow CI** — inherited from Story 9-5 iter-3 D2.
+- **9-6-iter1-D6 (Blind M11): `io_error_response` could echo file paths via `std::io::Error` Display** — tempdir paths in tests; in production deployments, paths under `/etc/opcgw/` or similar might leak. Pre-existing Story 9-4 / 9-5 pattern.
+- **9-6-iter1-D7 (Blind M12): Rollback-after-rollback-failure not tested** — the iter-1 D3-P poison-flag mechanism handles outcome; test surface missing.
+- **9-6-iter1-D8 (Blind M13 + D4-decision): Frontend defence-in-depth gap** — `static/commands.js` interpolates `c.command_id` / `c.command_port` raw into HTML without `escapeHtml(String(...))`. Same gap exists in Stories 9-4 / 9-5 frontend code. Cross-resource frontend hardening pass.
+- **9-6-iter1-D9 (Blind M14): `closeEditModal` rapid-double-click race** — UX state-machine flaw, no security impact.
+- **9-6-iter1-D10 (Blind L15): `post_command_emits_topology_change_log` triple-`||` assertion** — defensive design (multiple valid reload markers); accept as-is.
+- **9-6-iter1-D11 (Blind L18): `internal_error_response` 11 paths emit no audit event** — Pre-existing Story 9-4 / 9-5 pattern.
+- **9-6-iter1-D12 (Blind L19 + Edge L8): `inject_allowed_origins` dead fallback** — test fixture hygiene.
+- **9-6-iter1-D13 (Blind L20): `OPERATOR_COMMAND_COMMENT_MARKER` test does not assert inter-block comment preservation** — test enhancement.
+- **9-6-iter1-D14 (Edge M6): Command CRUD does not pre-check duplicate `device_id` blocks within target application** — silent first-match. Same gap pattern as `find_application_index`.
+- **9-6-iter1-D15 (Edge L9): `set_global_default` failure in `init_test_subscriber` silently swallowed** — `let _ =` pattern; pre-existing Story 9-5 inheritance.
+- **9-6-iter1-D16 (Blind L17 + Edge L10): `validate_command_port` two distinct error wordings for same effective bound** — cosmetic.
+- **9-6-iter1-D17 (Edge L11): `inject_allowed_origins` drops trailing newline** — `.lines()` discards terminators; TOML parsers accept either.
+- **9-6-iter1-D18 (Edge L12): Command `command_name` cross-device uniqueness undocumented at API surface** — operator-visible but disambiguated by device folder hierarchy. Documentation enhancement.
+- **9-6-iter1-D19 (Edge L13): Catch-all `_` arm in CSRF / validate_path_device_id violates grep contract** — currently unreachable; defensive future-proofing guard documented in source comments.
+- **9-6-iter1-D20 (Edge L14): `update_command` PUT body `command_port = i32::MIN` funnels through u8::try_from instead of negative-port semantics** — cosmetic error-message lossiness.
+- **9-6-iter1-D21 (Edge L15): `update_command` accepts duplicate JSON keys via `serde_json::Map` last-wins** — standard serde_json behaviour.
+- **9-6-iter1-D22 (Edge L16): `command_id` upper bound not capped below `i32::MAX`** — operator-hostile (a `command_id = 2_147_483_647` is unreasonable) but functionally fine.
+- **9-6-iter1-D23 (Auditor A-L3): `mutate_command_preserves_read_metric_subtable` unit test missing despite spec checkbox** — integration test `put_command_preserves_read_metric_subtable` covers it; spec checkbox mismarked.
+- **9-6-iter1-D24 (Auditor A-L4): Pre-flight on malformed sibling command blocks only checks `command_id`, not other 3 fields** — symmetric to Story 9-5 device pre-flight pattern.
+- **9-6-iter1-D25 (Auditor A-L5): `commands_html_renders_per_device_table` assertions weaker than spec** — page is JS-driven so the static markup the spec mentioned doesn't apply.
+- **9-6-iter1-D26 (Auditor A-L6): Dev Agent Record "45 tests" vs actual count drift** — narrative drift; fixed in this iter's verification block.
+- **9-6-iter1-D27 (Auditor A-L7): `UpdateCommandRequest` struct has dead `command_id: Option<i32>` field** — cosmetic; could remove.
+
+## Deferred from: code review of 9-6-command-crud-via-web-ui — iter-2 (2026-05-12)
+
+22 findings deferred after iter-2 review. See `_bmad-output/implementation-artifacts/9-6-command-crud-via-web-ui.md` § "Review Findings (Iter-2, 2026-05-12)" for full triage detail. Summary:
+
+- **9-6-iter2-D1 (H2-decision): Axum Json extractor rejects malformed JSON before handler audit emission** — cross-resource gap in Stories 9-4 / 9-5 / 9-6 (both POST + PUT). Fix requires a custom Axum `JsonRejection` middleware that emits `event="<resource>_crud_rejected" reason="malformed_body"` with the correct resource literal. File as cross-resource hardening story alongside 9-6-iter1-D8 (frontend defence-in-depth) and the inherited 422-vs-400 cosmetic divergence.
+- **9-6-iter2-D2 (B2-HR4): B-H3 canonical decimal emits same error wording for `/commands/0` and `/commands/-1`** — single "no leading '+' or '0' allowed" message instead of distinguishing leading-sign vs leading-zero vs negative semantics. Cosmetic.
+- **9-6-iter2-D3 (B2-M9): E-M2 emits cosmetic-duplicate error on TOML with two `command_id = 0`** — both `command_id <= 0` + duplicate-detection fire, producing 3 error messages for 1 logical issue.
+- **9-6-iter2-D4 (B2-M10): E-M5 leading/trailing whitespace doesn't cover internal whitespace** — `"open valve"` vs `"openvalve"` are still distinct command_names. Acceptable per char-class allowing spaces.
+- **9-6-iter2-D5 (B2-M11): Duplicate command_name 409 audit `?command_name` Debug-format with surrounding quotes** — SIEM log parsers may need to handle quoted form.
+- **9-6-iter2-D6 (B2-M12): `post_command_with_unknown_field_returns_400_with_audit` short command_name="x" fragility** — audit-reason assertion catches regression.
+- **9-6-iter2-D7 (B2-M14): D2 walk-and-reject extraction-vs-validation interleaving fingerprinting** — defence-in-depth.
+- **9-6-iter2-D8 (B2-M15): `find_application_index` double-lookup minor perf regression** — `doc.get("application")` called twice per CRUD request. Acceptable.
+- **9-6-iter2-D9 (B2-L16): Unknown-field error message duplicated** — `create_command` and `update_command` hardcode the same string; future renames will drift.
+- **9-6-iter2-D10 (B2-L17): D1 NodeId comment cross-references metric pattern at src/opc_ua.rs:976-979** — separator (`/`) consistency verified at impl time.
+- **9-6-iter2-D11 (B2-L18): 9-6-iter1-D14 asymmetric fix scope** — find_application_index shape-check fix doesn't extend to nested device-shape mismatches; documented for future cleanup.
+- **9-6-iter2-D12 (B2-L19): Fixture coupling `post_command_with_duplicate_command_name_within_device_returns_409` to `"reboot"` in APP_TOML_TEMPLATE** — implicit; relies on fixture stability.
+- **9-6-iter2-D13 (E2-9): B-H3 negative `/commands/-1` returns "no leading '+' or '0' allowed" message** — confusing for operators passing negative. Same class as 9-6-iter1-D16.
+- **9-6-iter2-D14 (E2-10): B-H3 whitespace / non-ASCII path returns canonical-form error** — misleading diagnosis class as 9-6-iter2-D13.
+- **9-6-iter2-D15 (E2-12): `find_application_index` `_` catch-all dead code** — defensive future-proofing.
+- **9-6-iter2-D16 (E2-13): No explicit test for `/commands/0`** — covered indirectly by `/01` test.
+- **9-6-iter2-D17 (E2-14): `pre == post` byte-equality flake risk on slow CI** — inherited from 9-5 iter-3 D2.
+- **9-6-iter2-D18 (E2-15): E-M4 case-sensitivity `"Reboot"` vs `"reboot"` not documented** — operator-visible behavior contract.
+- **9-6-iter2-D19 (E2-16): `obj.keys()` reports only first-alphabetical unknown field** — minor reconnaissance friction.
+- **9-6-iter2-D20 (E2-1/2/3 partial): Read-path application handlers (list/get) don't need shape-check** — figment validates first; documented.
+- **9-6-iter2-D21 (A2-1): AC#3 prose lines 176-189 still narrate the post-write rollback 422 path** — iter-1 D3 amendment renamed the test but didn't update upstream AC narrative.
+- **9-6-iter2-D22 (A2-2): Dev Agent Record narrative "45 integration tests" vs actual 56 (post-iter-2)** — narrative drift fixed in the iter-2 verification block.
+
+## Deferred from: code review of 9-6-command-crud-via-web-ui — iter-3 (2026-05-12)
+
+9 LOW findings deferred after iter-3 review. Memory pattern feedback_iter3_validation.md VALIDATED — 0 HIGH-REGs, 0 HIGH/MED, 12 LOW total (Blind 5 + Edge 3 + Auditor 4). Loop terminated per CLAUDE.md condition 2. See `_bmad-output/implementation-artifacts/9-6-command-crud-via-web-ui.md` § "Review Findings (Iter-3, 2026-05-12)" for full triage.
+
+- **9-6-iter3-D1 (Blind B-LOW-1):** `check_top_level_application_shape` `_` catch-all match arm dead code today (only "device" / "application" / "command" passed). Defensive future-proofing.
+- **9-6-iter3-D2 (Blind B-LOW-3):** E2-8 token assertion `logs.contains("command_name")` could match unrelated substrings. Mild test fragility.
+- **9-6-iter3-D3 (Blind B-LOW-4 + Edge E3-2):** Iter-2 E2-11 response-body Debug format produces `"key"` (double-quoted) where prior was `'key'` (single-quoted). Wire-contract change symmetric to audit-log; documented but no external SDK reported as affected.
+- **9-6-iter3-D4 (Blind B-LOW-5):** H1 well-formed-shape regression test covers only POST create_application; PUT update_application / DELETE delete_application not exercised. Helper is shared so single-site regression unlikely.
+- **9-6-iter3-D5 (Edge E3-3):** `post_command_with_duplicate_command_name_within_device_returns_409` token assertion could be tightened to `logs.contains(r#"command_name="reboot""#)`.
+- **9-6-iter3-D6 (Auditor A3-1):** Integration test count narrative drift in Dev Agent Record. Cargo aggregate verified (1082); per-category sub-breakdown imprecise.
+- **9-6-iter3-D7 (Auditor A3-2):** AC#3 prose at spec lines 176-189 still narrates the post-write-rollback 422 path; iter-1 D3 renamed tests to `_returns_409` but upstream AC narrative not fully updated.
+- **9-6-iter3-D8 (Auditor A3-4):** Audit-trail completeness — Edge Case Hunter iter-2 finding IDs gap (no E2-4 line item in iter-2 findings list). Documentation/audit-trail concern, no spec defect.
+- **9-6-iter3-D9 (Multiple LOW carry-forwards):** Various inherited LOW findings from Story 9-5 iter-3 deferral set (9-5-iter3-D1..D5).

@@ -718,6 +718,34 @@ fn validate_path_command_id(command_id_str: &str, addr: &SocketAddr) -> Result<i
         )
             .into_response());
     }
+    // Iter-1 review B-H3 + E-L7: enforce canonical decimal form
+    // BEFORE parse to reject `"+42"` (leading sign accepted by
+    // `str::parse::<i32>()`) and `"007"` (leading zeros). Two
+    // different URL strings mapping to the same resource breaks
+    // canonical URL identity and produces operator-confusing 404s
+    // when clients GET via the same string they POSTed but the
+    // Location header writes the decimal canonical form.
+    let canonical = command_id_str
+        .chars()
+        .all(|c| c.is_ascii_digit())
+        && !command_id_str.starts_with('0');
+    if !canonical {
+        warn!(
+            event = "command_crud_rejected",
+            reason = "validation",
+            field = "command_id",
+            source_ip = %addr.ip(),
+            "path-supplied command_id is not in canonical decimal form (no leading '+' or '0' allowed)"
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                "command_id in URL path must be canonical decimal (positive integer, no leading '+' or '0')",
+                "use a positive integer matching an existing command_id",
+            )),
+        )
+            .into_response());
+    }
     match command_id_str.parse::<i32>() {
         Ok(parsed) if parsed > 0 => Ok(parsed),
         Ok(parsed) => {
@@ -791,6 +819,29 @@ fn validate_command_name(value: &str, addr: &SocketAddr) -> Result<(), Response>
             Json(ErrorResponse::with_hint(
                 "command_name must not be empty or whitespace-only",
                 "provide a non-empty value with at least one non-whitespace character",
+            )),
+        )
+            .into_response());
+    }
+    // Iter-1 review E-M5: reject leading/trailing whitespace so the
+    // per-device `seen_command_names` HashSet at src/config.rs cannot
+    // be bypassed by " OpenValve" vs "OpenValve" (the validate-side
+    // HashSet stores the raw value; without this guard, a POST of
+    // " OpenValve" would silently create a second command operators
+    // perceive as a duplicate of "OpenValve").
+    if value != value.trim() {
+        warn!(
+            event = "command_crud_rejected",
+            reason = "validation",
+            field = "command_name",
+            source_ip = %addr.ip(),
+            "command CRUD field validation failed: leading/trailing whitespace not allowed"
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                "command_name must not have leading or trailing whitespace",
+                "trim spaces before submitting",
             )),
         )
             .into_response());
@@ -1033,6 +1084,15 @@ pub async fn create_application(
         .parse_document_from_bytes(&original_bytes)
         .map_err(|e| io_error_response(&e, "create_application", &addr, "application"))?;
 
+    // Iter-2 review H1: explicit top-level shape check. The
+    // application handlers iterate `application` array directly
+    // (they don't go through `find_application_index`), so the
+    // iter-1 B-H6 protection didn't reach them. Without this guard,
+    // an operator with `[application]` (single table) sees a clean
+    // 409 from device/command CRUD but a confusing 404/5xx from
+    // application CRUD — asymmetric UX.
+    check_top_level_application_shape(&doc, &body.application_id, &addr, "application")?;
+
     // Iter-1 review P2 + Iter-2 review P35 (load-bearing):
     // duplicate-id check INSIDE the write_lock-held critical section,
     // BEFORE append. Without this, two concurrent POSTs with the
@@ -1270,13 +1330,24 @@ pub async fn update_application(
                     reason = "unknown_field",
                     application_id = %application_id,
                     source_ip = %addr.ip(),
-                    field = %other,
+                    // Iter-1 review B-H5 + E-M3: Debug-format the
+                    // attacker-controlled JSON key so CR/LF/control
+                    // chars cannot inject newlines into the audit log
+                    // (Story 9-4 iter-2 P25 precedent — same fix is
+                    // needed at update_application / update_device /
+                    // update_command).
+                    field = ?other,
                     "PUT body carried unknown field; rejected"
                 );
                 return Err((
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse::with_hint(
-                        format!("PUT body contains unknown field '{other}'"),
+                        // Iter-2 review P3 (E2-11): Debug-format the
+                        // attacker-controlled field name so CR/LF /
+                        // control chars in JSON keys cannot inject
+                        // newlines into the response body (parallel
+                        // to the iter-1 B-H5 fix in audit-log emission).
+                        format!("PUT body contains unknown field {other:?}"),
                         "PUT accepts only `application_name`",
                     )),
                 )
@@ -1329,6 +1400,10 @@ pub async fn update_application(
         .config_writer
         .parse_document_from_bytes(&original_bytes)
         .map_err(|e| io_error_response(&e, "update_application", &addr, "application"))?;
+
+    // Iter-2 review H1: explicit top-level shape check (see
+    // `check_top_level_application_shape` doc-comment for rationale).
+    check_top_level_application_shape(&doc, &application_id, &addr, "application")?;
 
     let array = match doc
         .get_mut("application")
@@ -1550,6 +1625,10 @@ pub async fn delete_application(
         .config_writer
         .parse_document_from_bytes(&original_bytes)
         .map_err(|e| io_error_response(&e, "delete_application", &addr, "application"))?;
+
+    // Iter-2 review H1: explicit top-level shape check (see
+    // `check_top_level_application_shape` doc-comment for rationale).
+    check_top_level_application_shape(&doc, &application_id, &addr, "application")?;
 
     let array = match doc
         .get_mut("application")
@@ -2207,13 +2286,24 @@ pub async fn update_device(
                     application_id = %application_id,
                     device_id = %device_id,
                     source_ip = %addr.ip(),
-                    field = %other,
+                    // Iter-1 review B-H5 + E-M3: Debug-format the
+                    // attacker-controlled JSON key so CR/LF/control
+                    // chars cannot inject newlines into the audit log
+                    // (Story 9-4 iter-2 P25 precedent — same fix is
+                    // needed at update_application / update_device /
+                    // update_command).
+                    field = ?other,
                     "PUT body carried unknown field; rejected"
                 );
                 return Err((
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse::with_hint(
-                        format!("PUT body contains unknown field '{other}'"),
+                        // Iter-2 review P3 (E2-11): Debug-format the
+                        // attacker-controlled field name so CR/LF /
+                        // control chars in JSON keys cannot inject
+                        // newlines into the response body (parallel
+                        // to the iter-1 B-H5 fix in audit-log emission).
+                        format!("PUT body contains unknown field {other:?}"),
                         "PUT accepts only `device_name` and `read_metric_list`",
                     )),
                 )
@@ -2737,11 +2827,20 @@ pub async fn delete_device(
 // ============================================================
 
 /// `POST /api/applications/:application_id/devices/:device_id/commands`
-/// request body. `serde(deny_unknown_fields)` so unknown body fields
-/// are rejected by serde with 422 (matching the Story 9-4 / 9-5
-/// cosmetic 400-vs-422 divergence).
+/// request body.
+///
+/// **Iter-1 review D2 amendment:** Story 9-6's iter-1 code review
+/// surfaced that the original `#[serde(deny_unknown_fields)]` shape
+/// caused unknown fields to be rejected by serde with **422** + NO
+/// audit event — bypassing the AC#5 / AC#8 path-aware audit dispatch
+/// contract. The handler now extracts via `Json<serde_json::Value>`
+/// and walks the object explicitly to emit
+/// `event="command_crud_rejected" reason="unknown_field"` on
+/// rejection (parallel to `update_command`'s walk-and-reject
+/// pattern). This struct is kept for documentation of the v1 wire
+/// contract; the handler does not use it as the extractor target.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
 pub struct CreateCommandRequest {
     pub command_id: i32,
     pub command_name: String,
@@ -2901,16 +3000,193 @@ pub async fn create_command(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Path((application_id, device_id)): Path<(String, String)>,
-    Json(body): Json<CreateCommandRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, [(axum::http::HeaderName, String); 1], Json<CommandResponse>), Response> {
     validate_path_application_id(&application_id, &addr, "command")?;
     validate_path_device_id(&device_id, &addr, "command")?;
 
+    // Iter-1 review D2: extract via serde_json::Value + manual walk-
+    // and-reject so unknown body fields produce a 400 + audit event
+    // (parallel to update_command's pattern). The original
+    // `Json<CreateCommandRequest>` with `serde(deny_unknown_fields)`
+    // yielded 422 with no audit event — bypassing AC#5 / AC#8.
+    let obj = body.as_object().ok_or_else(|| {
+        warn!(
+            event = "command_crud_rejected",
+            reason = "validation",
+            application_id = %application_id,
+            device_id = %device_id,
+            source_ip = %addr.ip(),
+            "create_command: request body is not a JSON object"
+        );
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::from_error(
+                "request body must be a JSON object",
+            )),
+        )
+            .into_response()
+    })?;
+
+    // Walk-and-reject any unknown field with reason="unknown_field"
+    // audit. The allowed set is the 4 fields of DeviceCommandCfg.
+    const ALLOWED_FIELDS: &[&str] =
+        &["command_id", "command_name", "command_port", "command_confirmed"];
+    for key in obj.keys() {
+        if !ALLOWED_FIELDS.contains(&key.as_str()) {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "unknown_field",
+                application_id = %application_id,
+                device_id = %device_id,
+                source_ip = %addr.ip(),
+                field = ?key,
+                "create_command: unknown field in POST body"
+            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_hint(
+                    // Iter-2 review P3 (E2-11): Debug-format the
+                    // attacker-controlled field name (parallel to
+                    // iter-1 B-H5 audit-log fix).
+                    format!("unknown field {key:?} in request body"),
+                    "allowed fields: command_id, command_name, command_port, command_confirmed",
+                )),
+            )
+                .into_response());
+        }
+    }
+
+    // Required-field extraction + type checks.
+    let command_id_i64 = obj
+        .get("command_id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "validation",
+                field = "command_id",
+                application_id = %application_id,
+                device_id = %device_id,
+                source_ip = %addr.ip(),
+                "create_command: missing or non-integer command_id"
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::from_error(
+                    "command_id is required and must be an integer",
+                )),
+            )
+                .into_response()
+        })?;
+    let command_id: i32 = i32::try_from(command_id_i64).map_err(|_| {
+        warn!(
+            event = "command_crud_rejected",
+            reason = "validation",
+            field = "command_id",
+            application_id = %application_id,
+            device_id = %device_id,
+            source_ip = %addr.ip(),
+            value = command_id_i64,
+            "create_command: command_id out of i32 range"
+        );
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::from_error(
+                "command_id out of i32 range",
+            )),
+        )
+            .into_response()
+    })?;
+    let command_name = obj
+        .get("command_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "validation",
+                field = "command_name",
+                application_id = %application_id,
+                device_id = %device_id,
+                source_ip = %addr.ip(),
+                "create_command: missing or non-string command_name"
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::from_error(
+                    "command_name is required and must be a string",
+                )),
+            )
+                .into_response()
+        })?
+        .to_string();
+    let command_port_i64 = obj
+        .get("command_port")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "validation",
+                field = "command_port",
+                application_id = %application_id,
+                device_id = %device_id,
+                source_ip = %addr.ip(),
+                "create_command: missing or non-integer command_port"
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::from_error(
+                    "command_port is required and must be an integer",
+                )),
+            )
+                .into_response()
+        })?;
+    let command_port: i32 = i32::try_from(command_port_i64).map_err(|_| {
+        warn!(
+            event = "command_crud_rejected",
+            reason = "validation",
+            field = "command_port",
+            application_id = %application_id,
+            device_id = %device_id,
+            source_ip = %addr.ip(),
+            value = command_port_i64,
+            "create_command: command_port out of i32 range"
+        );
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::from_error(
+                "command_port out of i32 range",
+            )),
+        )
+            .into_response()
+    })?;
+    let command_confirmed = obj
+        .get("command_confirmed")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "validation",
+                field = "command_confirmed",
+                application_id = %application_id,
+                device_id = %device_id,
+                source_ip = %addr.ip(),
+                "create_command: missing or non-bool command_confirmed"
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::from_error(
+                    "command_confirmed is required and must be a boolean",
+                )),
+            )
+                .into_response()
+        })?;
+
     // Body field validation BEFORE touching the disk.
-    validate_command_id_value(body.command_id, &addr)?;
-    validate_command_name(&body.command_name, &addr)?;
-    validate_command_port(body.command_port, &addr)?;
-    // `command_confirmed` is bool — type-checked by serde.
+    validate_command_id_value(command_id, &addr)?;
+    validate_command_name(&command_name, &addr)?;
+    validate_command_port(command_port, &addr)?;
+    // `command_confirmed` is bool — type-checked above.
 
     let _guard = state.config_writer.lock().await;
 
@@ -3012,13 +3288,13 @@ pub async fn create_command(
             };
             // toml_edit returns i64 for integers; cast to i32 for
             // comparison with the body's command_id.
-            if existing_id == body.command_id as i64 {
+            if existing_id == command_id as i64 {
                 warn!(
                     event = "command_crud_rejected",
                     reason = "conflict",
                     application_id = %application_id,
                     device_id = %device_id,
-                    command_id = body.command_id,
+                    command_id = command_id,
                     source_ip = %addr.ip(),
                     "create_command: duplicate command_id within device rejected before write"
                 );
@@ -3027,7 +3303,37 @@ pub async fn create_command(
                     Json(ErrorResponse::with_hint(
                         format!(
                             "command_id {} already exists under device '{}' (application '{}')",
-                            body.command_id, device_id, application_id
+                            command_id, device_id, application_id
+                        ),
+                        "PUT to modify or DELETE the existing command before recreating",
+                    )),
+                )
+                    .into_response());
+            }
+            // Iter-1 review E-M4: symmetric pre-flight on
+            // command_name. Without this, a duplicate command_name
+            // POST traverses to disk write → reload →
+            // AppConfig::validate failure → rollback (5xx), instead
+            // of a clean 409 with `reason="conflict"`. Aligns with
+            // Story 9-5's metric_name duplicate guard at
+            // create_device.
+            let existing_name = tbl.get("command_name").and_then(|v| v.as_str());
+            if existing_name == Some(command_name.as_str()) {
+                warn!(
+                    event = "command_crud_rejected",
+                    reason = "conflict",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    command_name = ?command_name,
+                    source_ip = %addr.ip(),
+                    "create_command: duplicate command_name within device rejected before write"
+                );
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse::with_hint(
+                        format!(
+                            "command_name '{}' already exists under device '{}' (application '{}')",
+                            command_name, device_id, application_id
                         ),
                         "PUT to modify or DELETE the existing command before recreating",
                     )),
@@ -3083,10 +3389,10 @@ pub async fn create_command(
             }
         };
         let new_table = build_command_table(
-            body.command_id,
-            &body.command_name,
-            body.command_port,
-            body.command_confirmed,
+            command_id,
+            &command_name,
+            command_port,
+            command_confirmed,
         );
         command_array.push(new_table);
     }
@@ -3103,20 +3409,22 @@ pub async fn create_command(
                 event = "command_created",
                 application_id = %application_id,
                 device_id = %device_id,
-                command_id = body.command_id,
-                command_name = %body.command_name,
+                command_id = command_id,
+                // Iter-1 review B-H5: Debug-format command_name (same
+                // rationale as the update_command info! emission).
+                command_name = ?command_name,
                 source_ip = %addr.ip(),
                 "Command created via web UI"
             );
             let location = format!(
                 "/api/applications/{}/devices/{}/commands/{}",
-                application_id, device_id, body.command_id
+                application_id, device_id, command_id
             );
             let response_body = CommandResponse {
-                command_id: body.command_id,
-                command_name: body.command_name,
-                command_port: body.command_port,
-                command_confirmed: body.command_confirmed,
+                command_id,
+                command_name,
+                command_port,
+                command_confirmed,
             };
             Ok((
                 StatusCode::CREATED,
@@ -3221,13 +3529,22 @@ pub async fn update_command(
                     device_id = %device_id,
                     command_id = command_id,
                     source_ip = %addr.ip(),
-                    field = %other,
+                    // Iter-1 review B-H5 + E-M3: Debug-format the
+                    // attacker-controlled JSON key so CR/LF/control
+                    // chars cannot inject newlines into the audit log
+                    // (Story 9-4 iter-2 P25 precedent — same fix is
+                    // needed at update_application / update_device /
+                    // update_command).
+                    field = ?other,
                     "update_command: unknown field in PUT body"
                 );
                 return Err((
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse::with_hint(
-                        format!("unknown field '{other}' in request body"),
+                        // Iter-2 review P3 (E2-11): Debug-format the
+                        // attacker-controlled field name (parallel
+                        // to iter-1 B-H5 audit-log fix).
+                        format!("unknown field {other:?} in request body"),
                         "allowed fields: command_name, command_port, command_confirmed",
                     )),
                 )
@@ -3511,7 +3828,11 @@ pub async fn update_command(
                 application_id = %application_id,
                 device_id = %device_id,
                 command_id = command_id,
-                command_name = %command_name,
+                // Iter-1 review B-H5: Debug-format command_name so any
+                // future char-class loosening (or operator-supplied
+                // value that slips past validation) cannot inject
+                // CR/LF/control chars into the structured log line.
+                command_name = ?command_name,
                 source_ip = %addr.ip(),
                 "Command updated via web UI"
             );
@@ -3845,6 +4166,84 @@ fn validate_metric_mapping_fields(
 /// Story 9-6 landmine where this helper would otherwise misroute
 /// command-handler malformed-block warns through the device event-name
 /// literal.
+///
+/// Iter-2 review H1: shared shape-check extracted from
+/// `find_application_index`. Distinguishes "application key absent"
+/// from "application key exists but is not an array of tables" — the
+/// latter is an operator-edited TOML with `[application]` (single
+/// table) instead of `[[application]]` (array-of-tables). Without
+/// this check, the array-iteration code-path silently treats the
+/// malformed shape as "zero applications" and returns 404 (or 5xx
+/// downstream), confusing operators who can see their config has an
+/// application but the API claims none exist.
+///
+/// Iter-1 patched this only at the `find_application_index` entry
+/// (used by device + command CRUD). Iter-2 H1 extends the check to
+/// the 3 mutating application handlers (create / update / delete)
+/// which iterate the `application` array directly without going
+/// through `find_application_index`. Read-path application handlers
+/// (`list_applications`, `get_application`) read the dashboard
+/// snapshot built from the already-figment-validated `AppConfig`,
+/// so the malformed shape is unreachable on those paths.
+#[allow(clippy::result_large_err)]
+fn check_top_level_application_shape(
+    doc: &toml_edit::DocumentMut,
+    application_id: &str,
+    addr: &SocketAddr,
+    resource: &'static str,
+) -> Result<(), Response> {
+    if let Some(item) = doc.get("application") {
+        if item.as_array_of_tables().is_none() {
+            match resource {
+                // Iter-3 review B-LOW-2: Debug-format application_id
+                // so any operator-supplied value (e.g. POST body
+                // application_id called from create_application
+                // BEFORE the body-validator runs) cannot inject
+                // CR/LF/control chars into the audit log line.
+                // Parallel to iter-1 B-H5 audit-log hardening.
+                "device" => warn!(
+                    event = "device_crud_rejected",
+                    reason = "conflict",
+                    application_id = ?application_id,
+                    source_ip = %addr.ip(),
+                    "handler: top-level `application` exists but is not an array-of-tables (`[[application]]`); manual cleanup required"
+                ),
+                "application" => warn!(
+                    event = "application_crud_rejected",
+                    reason = "conflict",
+                    application_id = ?application_id,
+                    source_ip = %addr.ip(),
+                    "handler: top-level `application` exists but is not an array-of-tables (`[[application]]`); manual cleanup required"
+                ),
+                "command" => warn!(
+                    event = "command_crud_rejected",
+                    reason = "conflict",
+                    application_id = ?application_id,
+                    source_ip = %addr.ip(),
+                    "handler: top-level `application` exists but is not an array-of-tables (`[[application]]`); manual cleanup required"
+                ),
+                _ => warn!(
+                    event = "crud_rejected",
+                    reason = "conflict",
+                    resource = resource,
+                    application_id = ?application_id,
+                    source_ip = %addr.ip(),
+                    "handler: top-level `application` exists but is not an array-of-tables; manual cleanup required"
+                ),
+            }
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse::with_hint(
+                    "config TOML has top-level `application` in a non-array-of-tables shape (probably `[application]` instead of `[[application]]`); manual cleanup required",
+                    "edit config/config.toml so applications are declared as `[[application]]` array-of-tables; restart the gateway after the fix",
+                )),
+            )
+                .into_response());
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::result_large_err)]
 fn find_application_index(
     doc: &toml_edit::DocumentMut,
@@ -3852,6 +4251,10 @@ fn find_application_index(
     addr: &SocketAddr,
     resource: &'static str,
 ) -> Result<Option<usize>, Response> {
+    // Iter-2 H1: shape-check is now in `check_top_level_application_shape`
+    // so the 3 mutating application handlers can also call it (they
+    // iterate `application` array directly, bypassing this function).
+    check_top_level_application_shape(doc, application_id, addr, resource)?;
     let arr = match doc.get("application").and_then(|v| v.as_array_of_tables()) {
         Some(a) => a,
         None => return Ok(None),
