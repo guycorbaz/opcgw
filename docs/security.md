@@ -1779,6 +1779,116 @@ must return exactly 4 lines.
   surfaces a "device list lookup failed" log if the DevEUI is
   invalid.
 
+### Command CRUD (Story 9-6)
+
+Story 9-6 lands command-CRUD on the `[[application.device.command]]`
+sub-table. Five endpoints under
+`/api/applications/:application_id/devices/:device_id/commands*`:
+
+- `GET    /api/applications/:application_id/devices/:device_id/commands`
+- `GET    /api/applications/:application_id/devices/:device_id/commands/:command_id`
+- `POST   /api/applications/:application_id/devices/:device_id/commands`
+- `PUT    /api/applications/:application_id/devices/:device_id/commands/:command_id`
+- `DELETE /api/applications/:application_id/devices/:device_id/commands/:command_id`
+
+The `:command_id` path segment is an **integer** (`i32` — matches
+`DeviceCommandCfg.command_id`); non-numeric, negative, or zero
+path segments return `400 Bad Request` with
+`event="command_crud_rejected" reason="validation" field="command_id"`.
+
+**CSRF defence:** inherits Story 9-4's Origin + JSON-only
+Content-Type middleware unchanged; Story 9-6 completes the
+path-aware audit dispatch with a literal `command_crud_rejected`
+warn arm at the rejection-emission sites (parallel to the
+`device_crud_rejected` / `application_crud_rejected` arms from
+Stories 9-4 / 9-5).
+
+**Validate-side amendments (additive in `AppConfig::validate`):**
+
+- Per-device `command_id` uniqueness — two commands sharing
+  `command_id` within ONE device collide on the OPC UA NodeId at
+  `src/opc_ua.rs:1059` (`NodeId::new(ns, command.command_id as u32)`),
+  silently overwriting via `HashMap::insert` last-wins. Same root-
+  cause class as the metric-name uniqueness checks added in Story
+  9-5, but per-device-scoped.
+- Per-device `command_name` uniqueness — defends operator-driven
+  addressing in the web UI and any future `command_name`-keyed
+  lookup.
+- Cross-device same `command_id` is **allowed** — the device
+  folder NodeId namespaces the command, so two devices can both
+  have `command_id = 1` without collision.
+
+**Body field validation:**
+
+- `command_id`: positive `i32` (`>= 1`); rejected with 400 if
+  `<= 0` (zero is reserved-as-unset by convention).
+- `command_name`: non-empty trimmed, length `[1, 256]`, char-class
+  via `is_valid_app_name_char` (ASCII alphanumerics, `'-'`, `'_'`,
+  `'.'`, space, parentheses — operator-facing label, not a URL
+  identifier).
+- `command_port`: LoRaWAN application f_port range `1..=223`,
+  validated via `DeviceCommand::validate_f_port` at
+  `src/storage/types.rs:155` (single source of truth — no parallel
+  range check rolled in the handler).
+- `command_confirmed`: bool; type-checked by serde at deserialise
+  time. No further handler-level validation.
+
+**Audit events:** four new event names, parallel to Stories 9-4 /
+9-5:
+
+- `event="command_created"` (info) — POST succeeded.
+- `event="command_updated"` (info) — PUT succeeded.
+- `event="command_deleted"` (info) — DELETE succeeded.
+- `event="command_crud_rejected"` (warn / audit) — request
+  rejected. Reason set extends Stories 9-4 / 9-5 with
+  `command_not_found` (PUT/DELETE/GET on a non-existent
+  `:command_id` under a known device).
+
+The grep contract
+`git grep -hoE 'event = "command_[a-z_]+"' src/` must return
+exactly 4 lines.
+
+**v1 limitations specific to Story 9-6:**
+
+- **No payload-template editing.** `DeviceCommandCfg` has only
+  4 fields (`command_id`, `command_name`, `command_confirmed`,
+  `command_port`); there is no `payload_template` field on the
+  struct today. Adding one would be a schema change touching
+  the OPC UA command-emission path at `src/opc_ua.rs:1856-1928`.
+  Deferred to a future story.
+- **No `[command_validation.device_schemas]` CRUD.** The
+  schema-driven validation surface (Story 3-2 /
+  `src/command_validation.rs`) is a separate config section
+  keyed by `device_id` under `[command_validation]`. Editing
+  schemas would require a parallel CRUD surface; deferred.
+- **`command_id` is immutable.** Renaming would orphan
+  `command_queue` rows keyed by `command_id`. Operator
+  workaround: DELETE then POST.
+- **No cascade-delete of pending `command_queue` rows on
+  command DELETE.** v1 leaves orphaned rows in storage.
+- **OPC UA address-space mutation deferred to Story 9-8.**
+  Inherited from Stories 9-7 / 9-4 / 9-5. The dashboard reflects
+  new commands immediately; SCADA clients connected via OPC UA
+  must reconnect to see the new command nodes.
+
+### Anti-patterns (Story 9-6 extension)
+
+- **Do NOT** add cross-device `command_id` uniqueness — the
+  per-device folder NodeId namespaces the command, so cross-
+  device same-`command_id` is a valid scenario the tests pin.
+- **Do NOT** serialise `DeviceCommandCfg` back to TOML via
+  `toml::Value` — the TOML mutation MUST be done at the table
+  level via `toml_edit::DocumentMut` so that sibling
+  `[[application.device.read_metric]]` sub-tables are preserved
+  byte-for-byte (load-bearing regression guard for Story 9-5).
+- **Do NOT** add `Serialize` to `DeviceCommandCfg` — use a
+  parallel `CommandResponse` struct in `src/web/api.rs` (Story
+  9-5's `MetricMappingResponse` pattern).
+- **Do NOT** add `scopeguard` as a dependency — the chmod-
+  cleanup pattern in fault-injection tests is hand-rolled
+  inline RAII (Drop-impl struct), per Story 9-5's
+  `tests/web_device_crud.rs:1578` precedent.
+
 ---
 
 ## References

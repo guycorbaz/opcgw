@@ -268,11 +268,13 @@ pub async fn csrf_middleware(
         // returns each name exactly. Dynamic-string dispatch would
         // break the grep contract.
         //
-        // The "command" arm intentionally falls through to the
-        // generic catch-all in Story 9-5 — Story 9-6 will replace
-        // the catch-all with a literal `command_crud_rejected` warn
-        // when commands CRUD lands. Adding the literal here today
-        // would constitute Story 9-5 scope creep.
+        // Story 9-6 AC#5/AC#8: literal `"command" =>` arm added per
+        // the explicit Story 9-5 hand-off (the catch-all previously
+        // covered command-resource paths emitting `crud_rejected`
+        // without a resource prefix — invisible to the
+        // `git grep -hoE 'event = "command_[a-z_]+"' src/` contract).
+        // The `_ =>` catch-all remains as a defensive future-proofing
+        // guard for any un-routed resource (currently unreachable).
         let origin_str = origin.as_deref().unwrap_or("<absent>");
         match resource {
             "device" => warn!(
@@ -286,6 +288,15 @@ pub async fn csrf_middleware(
             ),
             "application" => warn!(
                 event = "application_crud_rejected",
+                reason = "csrf",
+                path = %path,
+                method = %method,
+                source_ip = %addr.ip(),
+                origin = origin_str,
+                "CSRF rejected: missing or cross-origin Origin"
+            ),
+            "command" => warn!(
+                event = "command_crud_rejected",
                 reason = "csrf",
                 path = %path,
                 method = %method,
@@ -315,6 +326,8 @@ pub async fn csrf_middleware(
 
     // JSON-only Content-Type check.
     if !content_type_is_json(headers) {
+        // Story 9-6 AC#5/AC#8: literal "command" arm per the same
+        // dispatch pattern as the Origin reject above.
         match resource {
             "device" => warn!(
                 event = "device_crud_rejected",
@@ -326,6 +339,14 @@ pub async fn csrf_middleware(
             ),
             "application" => warn!(
                 event = "application_crud_rejected",
+                reason = "csrf",
+                path = %path,
+                method = %method,
+                source_ip = %addr.ip(),
+                "CSRF rejected: Content-Type is not application/json"
+            ),
+            "command" => warn!(
+                event = "command_crud_rejected",
                 reason = "csrf",
                 path = %path,
                 method = %method,
@@ -456,6 +477,46 @@ mod tests {
         let (status, body) = run_through_layer(vec!["http://127.0.0.1:8080"], req).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, "ok");
+    }
+
+    /// Story 9-6 Task 2: literal-arm completion runtime smoke-test.
+    /// Sends a POST to a command-resource URL through the CSRF
+    /// middleware with no Origin header; asserts the middleware
+    /// returns 403 + the dispatch path doesn't panic. Event-name
+    /// `command_crud_rejected` runtime emission is pinned by the
+    /// integration suite in `tests/web_command_crud.rs` (the unit
+    /// harness in this file doesn't wire tracing-test); this test
+    /// covers the new match arm at the response-level.
+    #[tokio::test]
+    async fn csrf_rejects_post_command_returns_403() {
+        let req = req_with(
+            Method::POST,
+            "/api/applications/foo/devices/bar/commands",
+            &[("content-type", "application/json")],
+            "{}",
+        );
+        let (status, body) = run_through_layer(vec!["http://127.0.0.1:8080"], req).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body.contains("CSRF"));
+    }
+
+    /// Story 9-6 Task 2: same shape as
+    /// `csrf_rejects_post_command_returns_403` for the Content-Type
+    /// reject arm.
+    #[tokio::test]
+    async fn csrf_rejects_post_command_form_urlencoded_returns_415() {
+        let req = req_with(
+            Method::POST,
+            "/api/applications/foo/devices/bar/commands/42",
+            &[
+                ("origin", "http://127.0.0.1:8080"),
+                ("content-type", "application/x-www-form-urlencoded"),
+            ],
+            "x=1",
+        );
+        let (status, body) = run_through_layer(vec!["http://127.0.0.1:8080"], req).await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert!(body.contains("application/json"));
     }
 
     #[tokio::test]

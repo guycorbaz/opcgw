@@ -403,6 +403,20 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
                 .put(api::update_device)
                 .delete(api::delete_device),
         )
+        // Story 9-6 CRUD routes (FR36) — command CRUD nested under
+        // the device surface. The path-aware CSRF middleware
+        // dispatches `event="command_crud_rejected"` on these
+        // routes (Story 9-6 Task 2 literal-arm completion).
+        .route(
+            "/api/applications/{application_id}/devices/{device_id}/commands",
+            get(api::list_commands).post(api::create_command),
+        )
+        .route(
+            "/api/applications/{application_id}/devices/{device_id}/commands/{command_id}",
+            get(api::get_command)
+                .put(api::update_command)
+                .delete(api::delete_command),
+        )
         .fallback_service(ServeDir::new(static_dir))
         // Layer ordering invariant (load-bearing): axum 0.8 stacks
         // .layer(...) calls in REVERSE declaration order. For runtime

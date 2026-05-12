@@ -1636,6 +1636,50 @@ impl AppConfig {
                                     .insert(metric.chirpstack_metric_name.clone());
                             }
                         }
+
+                        // Story 9-6 AC#3: per-device command_id +
+                        // command_name uniqueness. The command NodeId
+                        // construction at src/opc_ua.rs:1059 keys by
+                        // command_id within the device's namespace —
+                        // two commands sharing command_id within ONE
+                        // device collide via HashMap::insert last-wins
+                        // (same root-cause class as issue #99 for
+                        // metric NodeIds, but per-device-scoped).
+                        // command_name uniqueness defends operator-
+                        // driven addressing in the web UI. Cross-device
+                        // same-command_id is allowed (device folder
+                        // NodeId namespaces the command). Modelled on
+                        // the seen_metric_names pattern above.
+                        if let Some(command_list) = &device.device_command_list {
+                            let mut seen_command_ids: std::collections::HashSet<i32> =
+                                std::collections::HashSet::new();
+                            let mut seen_command_names: std::collections::HashSet<String> =
+                                std::collections::HashSet::new();
+                            for (c_idx, command) in command_list.iter().enumerate() {
+                                let command_context =
+                                    format!("{}.command[{}]", dev_context, c_idx);
+
+                                if seen_command_ids.contains(&command.command_id) {
+                                    errors.push(format!(
+                                        "{}.command_id: {} is duplicated within \
+                                         device.device_command_list",
+                                        command_context, command.command_id
+                                    ));
+                                } else {
+                                    seen_command_ids.insert(command.command_id);
+                                }
+
+                                if seen_command_names.contains(&command.command_name) {
+                                    errors.push(format!(
+                                        "{}.command_name: '{}' is duplicated within \
+                                         device.device_command_list",
+                                        command_context, command.command_name
+                                    ));
+                                } else {
+                                    seen_command_names.insert(command.command_name.clone());
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2436,6 +2480,135 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Story 9-6 AC#3: per-device `command_id` uniqueness within a
+    /// single device's `device_command_list`. Two commands sharing
+    /// a `command_id` within ONE device collide on the OPC UA NodeId
+    /// at `src/opc_ua.rs:1059` (`NodeId::new(ns, command.command_id as u32)`),
+    /// silently overwriting via `HashMap::insert` last-wins. Same
+    /// root-cause class as the metric uniqueness checks above, but
+    /// scoped to commands.
+    #[test]
+    fn test_validation_duplicate_command_id_within_device() {
+        // Hard fixture preconditions (Story 9-5 iter-1 L10 / Auditor
+        // A7 pattern): assert fixture shape rather than gating on it,
+        // so a future fixture refactor FAILS this test rather than
+        // vacuously passing.
+        let mut config = get_config();
+        assert!(
+            !config.application_list[0].device_list.is_empty(),
+            "test fixture precondition: application[0] must have at least one device"
+        );
+        // Inject 2 commands with the same command_id (distinct names
+        // to isolate the failure mode).
+        config.application_list[0].device_list[0].device_command_list = Some(vec![
+            DeviceCommandCfg {
+                command_id: 42,
+                command_name: "cmd_one".to_string(),
+                command_confirmed: false,
+                command_port: 10,
+            },
+            DeviceCommandCfg {
+                command_id: 42,
+                command_name: "cmd_two".to_string(),
+                command_confirmed: true,
+                command_port: 20,
+            },
+        ]);
+
+        let result = config.validate();
+        assert!(
+            result.is_err(),
+            "duplicate command_id within device must fail"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("duplicated"), "unexpected: {err}");
+        assert!(err.contains("command_id"), "unexpected: {err}");
+    }
+
+    /// Story 9-6 AC#3: per-device `command_name` uniqueness within
+    /// `device_command_list`. Operator-driven addressing in the web
+    /// UI and any future `command_name`-keyed lookup require unique
+    /// names per device.
+    #[test]
+    fn test_validation_duplicate_command_name_within_device() {
+        let mut config = get_config();
+        assert!(
+            !config.application_list[0].device_list.is_empty(),
+            "test fixture precondition: application[0] must have at least one device"
+        );
+        config.application_list[0].device_list[0].device_command_list = Some(vec![
+            DeviceCommandCfg {
+                command_id: 1,
+                command_name: "OpenValve".to_string(),
+                command_confirmed: false,
+                command_port: 10,
+            },
+            DeviceCommandCfg {
+                command_id: 2,
+                command_name: "OpenValve".to_string(),
+                command_confirmed: true,
+                command_port: 20,
+            },
+        ]);
+
+        let result = config.validate();
+        assert!(
+            result.is_err(),
+            "duplicate command_name within device must fail"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("duplicated"), "unexpected: {err}");
+        assert!(err.contains("command_name"), "unexpected: {err}");
+    }
+
+    /// Story 9-6 AC#3: cross-device same `command_id` MUST be allowed
+    /// — the device folder NodeId namespaces the command, so two
+    /// devices can both have `command_id = 1` without collision.
+    /// Defensive regression against accidentally tightening the
+    /// per-device check into a cross-device check (symmetric to
+    /// Story 9-5's `test_validation_same_metric_name_across_devices_is_allowed`).
+    #[test]
+    fn test_validation_same_command_id_across_devices_is_allowed() {
+        let mut config = get_config();
+        // Need at least 2 devices across the application_list.
+        let mut device_indices: Vec<(usize, usize)> = Vec::new();
+        for (a_idx, app) in config.application_list.iter().enumerate() {
+            for (d_idx, _) in app.device_list.iter().enumerate() {
+                device_indices.push((a_idx, d_idx));
+            }
+        }
+        assert!(
+            device_indices.len() >= 2,
+            "test fixture precondition: at least 2 devices required across applications"
+        );
+        let (a1, d1) = device_indices[0];
+        let (a2, d2) = device_indices[1];
+        // Force both devices to have a command with command_id = 1
+        // (distinct command_name to keep within-device uniqueness OK
+        // — only cross-device equality is under test here).
+        config.application_list[a1].device_list[d1].device_command_list =
+            Some(vec![DeviceCommandCfg {
+                command_id: 1,
+                command_name: "cmd_a".to_string(),
+                command_confirmed: false,
+                command_port: 10,
+            }]);
+        config.application_list[a2].device_list[d2].device_command_list =
+            Some(vec![DeviceCommandCfg {
+                command_id: 1,
+                command_name: "cmd_b".to_string(),
+                command_confirmed: false,
+                command_port: 10,
+            }]);
+
+        let result = config.validate();
+        assert!(
+            result.is_ok(),
+            "cross-device same command_id MUST be allowed; got: {:?}",
+            result.err()
+        );
     }
 
     /// Story 9-4 AC#3: empty `read_metric_list` per device is no

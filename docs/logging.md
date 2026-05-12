@@ -193,13 +193,22 @@ index of the event names introduced so far.
 | `device_updated` | `info` (audit) | 9-5 | `security.md` § Configuration mutations |
 | `device_deleted` | `info` (audit) | 9-5 | `security.md` § Configuration mutations |
 | `device_crud_rejected` | `warn` (audit) | 9-5 | `security.md` § Configuration mutations |
+| `command_created` | `info` (audit) | 9-6 | `security.md` § Configuration mutations |
+| `command_updated` | `info` (audit) | 9-6 | `security.md` § Configuration mutations |
+| `command_deleted` | `info` (audit) | 9-6 | `security.md` § Configuration mutations |
+| `command_crud_rejected` | `warn` (audit) | 9-6 | `security.md` § Configuration mutations |
 
-The CSRF middleware dispatches between `application_crud_rejected` and
-`device_crud_rejected` by URL path prefix (Story 9-5 path-aware
-dispatch — see `src/web/csrf.rs::csrf_event_resource_for_path`):
-requests under `/api/applications/:application_id/devices*` emit the
-`device_*` name; everything else under `/api/applications*` emits the
-`application_*` name. Story 9-6 will add the `command_*` branch.
+The CSRF middleware dispatches between `application_crud_rejected`,
+`device_crud_rejected`, and `command_crud_rejected` by URL path
+prefix (Story 9-5 path-aware dispatch + Story 9-6 literal-arm
+completion — see `src/web/csrf.rs::csrf_event_resource_for_path`):
+requests under `/api/applications/:application_id/devices/:device_id/commands*`
+emit the `command_*` name; requests under
+`/api/applications/:application_id/devices*` emit the `device_*`
+name; everything else under `/api/applications*` emits the
+`application_*` name. The catch-all `_ =>` arm remains as a
+defensive future-proofing guard for any un-routed resource
+(currently unreachable in normal operation).
 
 **Note (iter-2 review M1):** the `_crud_rejected` event family
 fires on **any** path-shape rejection, regardless of HTTP method —

@@ -588,25 +588,52 @@ fn validate_path_application_id(
     Ok(())
 }
 
-/// Story 9-5 AC#3 + AC#5/AC#8: parallel to
-/// [`validate_path_application_id`] for the new `:device_id` URL
-/// segment. Same char-class + length bounds; emits
-/// `event="device_crud_rejected" reason="validation"` (NOT
-/// `application_crud_rejected`) to preserve the path-aware audit
-/// dispatch from Story 9-5. Call at the head of EVERY handler that
-/// takes a `Path(... device_id ...)` parameter, BEFORE any code that
+/// Story 9-5 AC#3 + AC#5/AC#8 + Story 9-6 widening: parallel to
+/// [`validate_path_application_id`] for the `:device_id` URL
+/// segment. Same char-class + length bounds. **Story 9-6 widened
+/// signature**: accepts `resource: &'static str` and dispatches the
+/// audit-event name literal per arm — same pattern as
+/// `validate_path_application_id` and the iter-3 Blind#3 patch for
+/// `find_application_index`. Existing Story 9-5 device-handler call
+/// sites pass `"device"` (byte-for-byte audit-event behaviour
+/// preserved); new Story 9-6 command-handler call sites pass
+/// `"command"`. Call at the head of EVERY handler that takes a
+/// `Path(... device_id ...)` parameter, BEFORE any code that
 /// interpolates the value into a tracing field.
 #[allow(clippy::result_large_err)]
-fn validate_path_device_id(device_id: &str, addr: &SocketAddr) -> Result<(), Response> {
+fn validate_path_device_id(
+    device_id: &str,
+    addr: &SocketAddr,
+    resource: &'static str,
+) -> Result<(), Response> {
     if device_id.is_empty() || device_id.len() > APP_FIELD_MAX_LEN {
-        warn!(
-            event = "device_crud_rejected",
-            reason = "validation",
-            field = "device_id",
-            source_ip = %addr.ip(),
-            length = device_id.len(),
-            "path-supplied device_id length out of range [1, 256]"
-        );
+        match resource {
+            "device" => warn!(
+                event = "device_crud_rejected",
+                reason = "validation",
+                field = "device_id",
+                source_ip = %addr.ip(),
+                length = device_id.len(),
+                "path-supplied device_id length out of range [1, 256]"
+            ),
+            "command" => warn!(
+                event = "command_crud_rejected",
+                reason = "validation",
+                field = "device_id",
+                source_ip = %addr.ip(),
+                length = device_id.len(),
+                "path-supplied device_id length out of range [1, 256]"
+            ),
+            _ => warn!(
+                event = "crud_rejected",
+                reason = "validation",
+                resource = resource,
+                field = "device_id",
+                source_ip = %addr.ip(),
+                length = device_id.len(),
+                "path-supplied device_id length out of range [1, 256]"
+            ),
+        }
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::with_hint(
@@ -620,14 +647,33 @@ fn validate_path_device_id(device_id: &str, addr: &SocketAddr) -> Result<(), Res
             .into_response());
     }
     if let Some(bad) = device_id.chars().find(|&c| !is_valid_app_id_char(c)) {
-        warn!(
-            event = "device_crud_rejected",
-            reason = "validation",
-            field = "device_id",
-            source_ip = %addr.ip(),
-            bad_char = ?bad,
-            "path-supplied device_id contains invalid character"
-        );
+        match resource {
+            "device" => warn!(
+                event = "device_crud_rejected",
+                reason = "validation",
+                field = "device_id",
+                source_ip = %addr.ip(),
+                bad_char = ?bad,
+                "path-supplied device_id contains invalid character"
+            ),
+            "command" => warn!(
+                event = "command_crud_rejected",
+                reason = "validation",
+                field = "device_id",
+                source_ip = %addr.ip(),
+                bad_char = ?bad,
+                "path-supplied device_id contains invalid character"
+            ),
+            _ => warn!(
+                event = "crud_rejected",
+                reason = "validation",
+                resource = resource,
+                field = "device_id",
+                source_ip = %addr.ip(),
+                bad_char = ?bad,
+                "path-supplied device_id contains invalid character"
+            ),
+        }
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::with_hint(
@@ -638,6 +684,254 @@ fn validate_path_device_id(device_id: &str, addr: &SocketAddr) -> Result<(), Res
             .into_response());
     }
     Ok(())
+}
+
+/// Story 9-6 AC#3: parallel to `validate_path_device_id` for the
+/// `:command_id` URL segment. `command_id` is an `i32` (matches
+/// `DeviceCommandCfg.command_id`), so the helper parses the segment
+/// as `i32` and rejects non-numeric / negative / zero with 400 +
+/// `event="command_crud_rejected" reason="validation"
+/// field="command_id"`. Returns the parsed `i32` on success so
+/// handlers can use it directly without re-parsing.
+#[allow(clippy::result_large_err)]
+fn validate_path_command_id(command_id_str: &str, addr: &SocketAddr) -> Result<i32, Response> {
+    // Length sanity check first (defends against absurdly long
+    // numeric strings that would still parse, e.g. "00000000000...1").
+    if command_id_str.is_empty() || command_id_str.len() > APP_FIELD_MAX_LEN {
+        warn!(
+            event = "command_crud_rejected",
+            reason = "validation",
+            field = "command_id",
+            source_ip = %addr.ip(),
+            length = command_id_str.len(),
+            "path-supplied command_id length out of range [1, 256]"
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                format!(
+                    "command_id in URL path must be 1..={} characters",
+                    APP_FIELD_MAX_LEN
+                ),
+                "command_id is a positive integer (i32)",
+            )),
+        )
+            .into_response());
+    }
+    match command_id_str.parse::<i32>() {
+        Ok(parsed) if parsed > 0 => Ok(parsed),
+        Ok(parsed) => {
+            // Parsed cleanly but <= 0 — reject (positive-i32 contract).
+            warn!(
+                event = "command_crud_rejected",
+                reason = "validation",
+                field = "command_id",
+                source_ip = %addr.ip(),
+                value = parsed,
+                "path-supplied command_id must be a positive integer (>= 1)"
+            );
+            Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_hint(
+                    "command_id in URL path must be a positive integer (>= 1)",
+                    "use a positive integer matching an existing command_id",
+                )),
+            )
+                .into_response())
+        }
+        Err(e) => {
+            // Log only the parse-error category, not the raw string
+            // (which could contain CRLF or other audit-log-poisoning
+            // characters — Story 9-4 iter-2 P25 precedent).
+            warn!(
+                event = "command_crud_rejected",
+                reason = "validation",
+                field = "command_id",
+                source_ip = %addr.ip(),
+                parse_error = %e,
+                "path-supplied command_id is not a valid i32"
+            );
+            Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_hint(
+                    "command_id in URL path is not a valid i32 integer",
+                    "use a positive integer matching an existing command_id",
+                )),
+            )
+                .into_response())
+        }
+    }
+}
+
+/// Story 9-6 Task 3: parallel to `validate_application_field` /
+/// `validate_device_field`. Covers the 4 command body fields:
+/// - `command_name`: non-empty trimmed, length [1, 256],
+///   char-class via `is_valid_app_name_char` (operator-facing label,
+///   not a URL identifier — allows spaces + parentheses).
+/// - `command_port`: `i32` parsed by serde; must convert to `u8`
+///   AND pass `DeviceCommand::validate_f_port` (1..=223).
+/// - `command_id`: `i32`; positive (>= 1).
+/// - `command_confirmed`: bool; type-checked by serde — no
+///   handler-level validation needed beyond serde's type-system.
+///
+/// Returns the response on the first failure; on success returns
+/// `Ok(())`.
+#[allow(clippy::result_large_err)]
+fn validate_command_name(value: &str, addr: &SocketAddr) -> Result<(), Response> {
+    if value.trim().is_empty() {
+        warn!(
+            event = "command_crud_rejected",
+            reason = "validation",
+            field = "command_name",
+            source_ip = %addr.ip(),
+            "command CRUD field validation failed: empty or whitespace-only"
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                "command_name must not be empty or whitespace-only",
+                "provide a non-empty value with at least one non-whitespace character",
+            )),
+        )
+            .into_response());
+    }
+    if value.len() > APP_FIELD_MAX_LEN {
+        warn!(
+            event = "command_crud_rejected",
+            reason = "validation",
+            field = "command_name",
+            source_ip = %addr.ip(),
+            length = value.len(),
+            "command CRUD field validation failed: too long"
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                format!(
+                    "command_name length {} exceeds maximum of {}",
+                    value.len(),
+                    APP_FIELD_MAX_LEN
+                ),
+                format!("shorten command_name to <= {APP_FIELD_MAX_LEN} characters"),
+            )),
+        )
+            .into_response());
+    }
+    if let Some(bad) = value.chars().find(|&c| !is_valid_app_name_char(c)) {
+        warn!(
+            event = "command_crud_rejected",
+            reason = "validation",
+            field = "command_name",
+            source_ip = %addr.ip(),
+            bad_char = ?bad,
+            "command CRUD field validation failed: invalid character"
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                format!("command_name contains invalid character {:?}", bad),
+                "use ASCII alphanumerics, '-', '_', '.', spaces, or parentheses",
+            )),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_command_port(value: i32, addr: &SocketAddr) -> Result<(), Response> {
+    // Convert to u8 (rejects negatives and > 255) then defer to the
+    // Story 3-2 / 3-3 helper at `src/storage/types.rs:155` which
+    // enforces the LoRaWAN application f_port range (1..=223). Do
+    // NOT roll a parallel range check — `validate_f_port` is the
+    // single source of truth.
+    let port_u8 = match u8::try_from(value) {
+        Ok(u) => u,
+        Err(_) => {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "validation",
+                field = "command_port",
+                source_ip = %addr.ip(),
+                value = value,
+                "command CRUD field validation failed: command_port out of u8 range"
+            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_hint(
+                    format!(
+                        "command_port {value} is out of valid range; must be 1..=223 \
+                         (LoRaWAN application f_port range)"
+                    ),
+                    "use a value in 1..=223",
+                )),
+            )
+                .into_response());
+        }
+    };
+    if !crate::storage::DeviceCommand::validate_f_port(port_u8) {
+        warn!(
+            event = "command_crud_rejected",
+            reason = "validation",
+            field = "command_port",
+            source_ip = %addr.ip(),
+            value = value,
+            "command CRUD field validation failed: command_port not in LoRaWAN range"
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                format!(
+                    "command_port {value} not in LoRaWAN application f_port range \
+                     1..=223"
+                ),
+                "use a value in 1..=223",
+            )),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_command_id_value(value: i32, addr: &SocketAddr) -> Result<(), Response> {
+    // POST body command_id must be a positive i32 (matches the path
+    // validation in `validate_path_command_id`). PUT body MUST NOT
+    // carry command_id (immutable_field rejection at the handler
+    // level — see Task 4 `update_command`).
+    if value <= 0 {
+        warn!(
+            event = "command_crud_rejected",
+            reason = "validation",
+            field = "command_id",
+            source_ip = %addr.ip(),
+            value = value,
+            "command CRUD field validation failed: command_id must be a positive integer"
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                format!("command_id {value} must be a positive integer (>= 1)"),
+                "use a positive integer for command_id",
+            )),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+/// Story 9-6 AC#6: parallel to `application_not_found_response` /
+/// `device_not_found_response` for the `:command_id` URL segment.
+/// Returns 404 + the same `ErrorResponse` body shape; the audit-
+/// event emission is the caller's responsibility (the
+/// `_crud_rejected` warn fires only on mutating-method paths, not
+/// on GET 404s — Stories 9-4 / 9-5 / 9-6 audit-event semantic).
+fn command_not_found_response() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse::from_error("command not found")),
+    )
+        .into_response()
 }
 
 fn is_valid_app_name_char(c: char) -> bool {
@@ -1551,7 +1845,7 @@ pub async fn get_device(
     Path((application_id, device_id)): Path<(String, String)>,
 ) -> Result<Json<DeviceResponse>, Response> {
     validate_path_application_id(&application_id, &addr, "device")?;
-    validate_path_device_id(&device_id, &addr)?;
+    validate_path_device_id(&device_id, &addr, "device")?;
 
     // Live config — borrow + clone Arc + drop guard immediately.
     let cfg = {
@@ -1820,7 +2114,7 @@ pub async fn update_device(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<DeviceResponse>, Response> {
     validate_path_application_id(&application_id, &addr, "device")?;
-    validate_path_device_id(&device_id, &addr)?;
+    validate_path_device_id(&device_id, &addr, "device")?;
 
     let obj = body.as_object().ok_or_else(|| {
         warn!(
@@ -2224,7 +2518,7 @@ pub async fn delete_device(
     Path((application_id, device_id)): Path<(String, String)>,
 ) -> Result<StatusCode, Response> {
     validate_path_application_id(&application_id, &addr, "device")?;
-    validate_path_device_id(&device_id, &addr)?;
+    validate_path_device_id(&device_id, &addr, "device")?;
 
     // Pre-check via live config — application + device must exist
     // BEFORE we acquire the writer lock.
@@ -2436,6 +2730,1051 @@ pub async fn delete_device(
             Err(reload_error_response(e, "delete_device", &addr, "device"))
         }
     }
+}
+
+// ============================================================
+// Story 9-6: Command CRUD endpoints (FR36).
+// ============================================================
+
+/// `POST /api/applications/:application_id/devices/:device_id/commands`
+/// request body. `serde(deny_unknown_fields)` so unknown body fields
+/// are rejected by serde with 422 (matching the Story 9-4 / 9-5
+/// cosmetic 400-vs-422 divergence).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateCommandRequest {
+    pub command_id: i32,
+    pub command_name: String,
+    pub command_port: i32,
+    pub command_confirmed: bool,
+}
+
+/// `PUT /api/applications/:application_id/devices/:device_id/commands/:command_id`
+/// request body. **NO `serde(deny_unknown_fields)`** because Story
+/// 9-6 handles `command_id` immutable-field rejection manually
+/// (Story 9-4 iter-2 P29 / 9-5 pattern: deserialise to
+/// `serde_json::Value` and walk-and-reject).
+///
+/// Kept here for documentation of the v1 contract; the handler
+/// extracts via `Json<serde_json::Value>` and walks the object.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct UpdateCommandRequest {
+    pub command_name: String,
+    pub command_port: i32,
+    pub command_confirmed: bool,
+    /// Story 9-4 / 9-5 P5/P29 pattern: `command_id` is rejected by
+    /// the handler with `reason="immutable_field"`; any OTHER
+    /// unknown field is rejected with `reason="unknown_field"`.
+    #[serde(default)]
+    pub command_id: Option<i32>,
+}
+
+/// `GET /api/applications/:application_id/devices/:device_id/commands`
+/// response body.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct CommandListResponse {
+    pub application_id: String,
+    pub device_id: String,
+    pub commands: Vec<CommandResponse>,
+}
+
+/// `GET|POST|PUT /api/applications/:application_id/devices/:device_id/commands[/:command_id]`
+/// detail-view response body. Story 9-6 uses the same `CommandResponse`
+/// shape in both the list and per-command paths (commands have only
+/// 4 fields — no per-row vs detail distinction).
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct CommandResponse {
+    pub command_id: i32,
+    pub command_name: String,
+    pub command_port: i32,
+    pub command_confirmed: bool,
+}
+
+/// `GET /api/applications/:application_id/devices/:device_id/commands`
+/// — list commands for a single device via the live `Arc<AppConfig>`.
+/// 404 (no audit event) when `:application_id` or `:device_id` does
+/// not match — `_crud_rejected` is reserved for state-changing
+/// rejections per the Story 9-4 / 9-5 / 9-6 audit-event semantic.
+pub async fn list_commands(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Path((application_id, device_id)): Path<(String, String)>,
+) -> Result<Json<CommandListResponse>, Response> {
+    validate_path_application_id(&application_id, &addr, "command")?;
+    validate_path_device_id(&device_id, &addr, "command")?;
+
+    // Live config — borrow + clone Arc + drop guard immediately
+    // (matches Story 9-5 `get_device` pattern; the intermediate
+    // binding ensures the borrow guard drops before `live`).
+    let cfg = {
+        let live = state.config_reload.subscribe();
+        let snap = (*live.borrow()).clone();
+        snap
+    };
+
+    let app = cfg
+        .application_list
+        .iter()
+        .find(|a| a.application_id == application_id)
+        .ok_or_else(application_not_found_response)?;
+    let dev = app
+        .device_list
+        .iter()
+        .find(|d| d.device_id == device_id)
+        .ok_or_else(device_not_found_response)?;
+
+    let commands = dev
+        .device_command_list
+        .as_ref()
+        .map(|list| {
+            list.iter()
+                .map(|c| CommandResponse {
+                    command_id: c.command_id,
+                    command_name: c.command_name.clone(),
+                    command_port: c.command_port,
+                    command_confirmed: c.command_confirmed,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(Json(CommandListResponse {
+        application_id,
+        device_id,
+        commands,
+    }))
+}
+
+/// `GET /api/applications/:application_id/devices/:device_id/commands/:command_id`
+/// — per-command DETAIL view. Returns 404 + the standard ErrorResponse
+/// body when application, device, or command is not found (GET 404s
+/// do NOT emit `_crud_rejected` warn logs).
+pub async fn get_command(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Path((application_id, device_id, command_id_str)): Path<(String, String, String)>,
+) -> Result<Json<CommandResponse>, Response> {
+    validate_path_application_id(&application_id, &addr, "command")?;
+    validate_path_device_id(&device_id, &addr, "command")?;
+    let command_id = validate_path_command_id(&command_id_str, &addr)?;
+
+    let cfg = {
+        let live = state.config_reload.subscribe();
+        let snap = (*live.borrow()).clone();
+        snap
+    };
+
+    let app = cfg
+        .application_list
+        .iter()
+        .find(|a| a.application_id == application_id)
+        .ok_or_else(application_not_found_response)?;
+    let dev = app
+        .device_list
+        .iter()
+        .find(|d| d.device_id == device_id)
+        .ok_or_else(device_not_found_response)?;
+    let cmd = dev
+        .device_command_list
+        .as_ref()
+        .and_then(|list| list.iter().find(|c| c.command_id == command_id))
+        .ok_or_else(command_not_found_response)?;
+
+    Ok(Json(CommandResponse {
+        command_id: cmd.command_id,
+        command_name: cmd.command_name.clone(),
+        command_port: cmd.command_port,
+        command_confirmed: cmd.command_confirmed,
+    }))
+}
+
+/// `POST /api/applications/:application_id/devices/:device_id/commands`
+/// — create a new command under the named device. Holds the
+/// ConfigWriter lock across write + reload + rollback per the Story
+/// 9-4 lost-update race fix.
+///
+/// Pre-flight rejects: malformed sibling `[[application.device.command]]`
+/// blocks (409), duplicate `command_id` within the device (409),
+/// parent-application-not-found (404), parent-device-not-found (404).
+pub async fn create_command(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Path((application_id, device_id)): Path<(String, String)>,
+    Json(body): Json<CreateCommandRequest>,
+) -> Result<(StatusCode, [(axum::http::HeaderName, String); 1], Json<CommandResponse>), Response> {
+    validate_path_application_id(&application_id, &addr, "command")?;
+    validate_path_device_id(&device_id, &addr, "command")?;
+
+    // Body field validation BEFORE touching the disk.
+    validate_command_id_value(body.command_id, &addr)?;
+    validate_command_name(&body.command_name, &addr)?;
+    validate_command_port(body.command_port, &addr)?;
+    // `command_confirmed` is bool — type-checked by serde.
+
+    let _guard = state.config_writer.lock().await;
+
+    let original_bytes = state
+        .config_writer
+        .read_raw()
+        .map_err(|e| io_error_response(&e, "create_command", &addr, "command"))?;
+    let mut doc = state
+        .config_writer
+        .parse_document_from_bytes(&original_bytes)
+        .map_err(|e| io_error_response(&e, "create_command", &addr, "command"))?;
+
+    // Locate the parent application's `[[application]]` table.
+    let app_idx = match find_application_index(&doc, &application_id, &addr, "command") {
+        Ok(Some(idx)) => idx,
+        Ok(None) => {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "application_not_found",
+                application_id = %application_id,
+                device_id = %device_id,
+                source_ip = %addr.ip(),
+                "create_command: parent application not found"
+            );
+            return Err(application_not_found_response());
+        }
+        Err(resp) => return Err(resp),
+    };
+
+    // Locate the parent device's index within the application's
+    // `device` array. Also pre-flight check sibling command blocks
+    // and duplicate command_id.
+    let dev_idx = {
+        let device_array = doc
+            .get("application")
+            .and_then(|v| v.as_array_of_tables())
+            .and_then(|arr| arr.get(app_idx))
+            .and_then(|tbl| tbl.get("device"))
+            .and_then(|v| v.as_array_of_tables());
+        match device_array {
+            Some(arr) => arr.iter().position(|t| {
+                t.get("device_id").and_then(|v| v.as_str()) == Some(device_id.as_str())
+            }),
+            None => None,
+        }
+    };
+    let dev_idx = match dev_idx {
+        Some(idx) => idx,
+        None => {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "device_not_found",
+                application_id = %application_id,
+                device_id = %device_id,
+                source_ip = %addr.ip(),
+                "create_command: device not found under application"
+            );
+            return Err(device_not_found_response());
+        }
+    };
+
+    // Pre-flight on sibling [[application.device.command]] blocks.
+    let command_array_existing = doc
+        .get("application")
+        .and_then(|v| v.as_array_of_tables())
+        .and_then(|arr| arr.get(app_idx))
+        .and_then(|tbl| tbl.get("device"))
+        .and_then(|v| v.as_array_of_tables())
+        .and_then(|arr| arr.get(dev_idx))
+        .and_then(|tbl| tbl.get("command"))
+        .and_then(|v| v.as_array_of_tables());
+    if let Some(arr) = command_array_existing {
+        for (idx, tbl) in arr.iter().enumerate() {
+            let id_value = tbl.get("command_id");
+            let existing_id = match id_value.and_then(|v| v.as_integer()) {
+                Some(n) => n,
+                None => {
+                    warn!(
+                        event = "command_crud_rejected",
+                        reason = "conflict",
+                        application_id = %application_id,
+                        device_id = %device_id,
+                        source_ip = %addr.ip(),
+                        malformed_block_index = idx,
+                        id_value_present = id_value.is_some(),
+                        "create_command: existing [[application.device.command]] block at index {idx} has missing or non-integer command_id; manual cleanup required"
+                    );
+                    return Err((
+                        StatusCode::CONFLICT,
+                        Json(ErrorResponse::with_hint(
+                            format!(
+                                "config TOML contains a malformed [[application.device.command]] block at index {idx} (missing or non-integer command_id); manual cleanup required"
+                            ),
+                            "edit config/config.toml to fix the malformed block before retrying",
+                        )),
+                    )
+                        .into_response());
+                }
+            };
+            // toml_edit returns i64 for integers; cast to i32 for
+            // comparison with the body's command_id.
+            if existing_id == body.command_id as i64 {
+                warn!(
+                    event = "command_crud_rejected",
+                    reason = "conflict",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    command_id = body.command_id,
+                    source_ip = %addr.ip(),
+                    "create_command: duplicate command_id within device rejected before write"
+                );
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse::with_hint(
+                        format!(
+                            "command_id {} already exists under device '{}' (application '{}')",
+                            body.command_id, device_id, application_id
+                        ),
+                        "PUT to modify or DELETE the existing command before recreating",
+                    )),
+                )
+                    .into_response());
+            }
+        }
+    }
+
+    // Mutate: append a new [[application.device.command]] table
+    // under the matching device. The TOML mutation preserves any
+    // existing [[application.device.read_metric]] sub-table byte-for-
+    // byte (load-bearing regression guard for Story 9-5).
+    {
+        let app_array = doc
+            .get_mut("application")
+            .and_then(|v| v.as_array_of_tables_mut());
+        let app_array = match app_array {
+            Some(a) => a,
+            None => return Err(internal_error_response()),
+        };
+        let app_table = match app_array.get_mut(app_idx) {
+            Some(t) => t,
+            None => return Err(internal_error_response()),
+        };
+        let device_array = app_table
+            .get_mut("device")
+            .and_then(|v| v.as_array_of_tables_mut());
+        let device_array = match device_array {
+            Some(a) => a,
+            None => return Err(internal_error_response()),
+        };
+        let device_table = match device_array.get_mut(dev_idx) {
+            Some(t) => t,
+            None => return Err(internal_error_response()),
+        };
+        let command_array = device_table
+            .entry("command")
+            .or_insert_with(|| toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()))
+            .as_array_of_tables_mut();
+        let command_array = match command_array {
+            Some(a) => a,
+            None => {
+                warn!(
+                    event = "command_crud_rejected",
+                    reason = "io",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    source_ip = %addr.ip(),
+                    "create_command: existing TOML 'command' key is not an array of tables"
+                );
+                return Err(internal_error_response());
+            }
+        };
+        let new_table = build_command_table(
+            body.command_id,
+            &body.command_name,
+            body.command_port,
+            body.command_confirmed,
+        );
+        command_array.push(new_table);
+    }
+
+    let candidate_bytes = doc.to_string().into_bytes();
+    if let Err(e) = state.config_writer.write_atomically(&candidate_bytes) {
+        handle_rollback(&state, &original_bytes, "create_command", &addr, "write_atomically_err", "command");
+        return Err(io_error_response(&e, "create_command", &addr, "command"));
+    }
+
+    match state.config_reload.reload().await {
+        Ok(_) => {
+            info!(
+                event = "command_created",
+                application_id = %application_id,
+                device_id = %device_id,
+                command_id = body.command_id,
+                command_name = %body.command_name,
+                source_ip = %addr.ip(),
+                "Command created via web UI"
+            );
+            let location = format!(
+                "/api/applications/{}/devices/{}/commands/{}",
+                application_id, device_id, body.command_id
+            );
+            let response_body = CommandResponse {
+                command_id: body.command_id,
+                command_name: body.command_name,
+                command_port: body.command_port,
+                command_confirmed: body.command_confirmed,
+            };
+            Ok((
+                StatusCode::CREATED,
+                [(axum::http::header::LOCATION, location)],
+                Json(response_body),
+            ))
+        }
+        Err(ReloadError::RestartRequired { knob }) => {
+            let (should_rollback, response) = handle_restart_required(
+                &knob,
+                &original_bytes,
+                &doc,
+                "create_command",
+                &addr,
+                "command",
+            );
+            if should_rollback {
+                handle_rollback(&state, &original_bytes, "create_command", &addr, &knob, "command");
+            }
+            Err(response)
+        }
+        Err(e) => {
+            let reason = e.reason().to_string();
+            handle_rollback(&state, &original_bytes, "create_command", &addr, &reason, "command");
+            Err(reload_error_response(e, "create_command", &addr, "command"))
+        }
+    }
+}
+
+/// `PUT /api/applications/:application_id/devices/:device_id/commands/:command_id`
+/// — replace `command_name` / `command_port` / `command_confirmed`
+/// for the named command. `command_id` is immutable.
+///
+/// **Iter-3 P41 pattern (Story 9-4 / 9-5 carry-forward):** the body
+/// is deserialised to `serde_json::Value` so we can distinguish
+/// `command_id` (immutable_field audit) from other unknown fields
+/// (unknown_field audit).
+///
+/// **Task 6 anti-pattern guard:** the TOML mutation preserves the
+/// sibling `[[application.device.read_metric]]` sub-table byte-for-
+/// byte. We mutate the command table in place rather than serialising
+/// a `DeviceCommandCfg` back via `toml::Value`.
+pub async fn update_command(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Path((application_id, device_id, command_id_str)): Path<(String, String, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<CommandResponse>, Response> {
+    validate_path_application_id(&application_id, &addr, "command")?;
+    validate_path_device_id(&device_id, &addr, "command")?;
+    let command_id = validate_path_command_id(&command_id_str, &addr)?;
+
+    let obj = body.as_object().ok_or_else(|| {
+        warn!(
+            event = "command_crud_rejected",
+            reason = "validation",
+            application_id = %application_id,
+            device_id = %device_id,
+            command_id = command_id,
+            source_ip = %addr.ip(),
+            "update_command: request body is not a JSON object"
+        );
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::from_error(
+                "request body must be a JSON object",
+            )),
+        )
+            .into_response()
+    })?;
+
+    // Walk-and-reject: detect immutable_field (command_id) and any
+    // other unknown field.
+    const ALLOWED_FIELDS: &[&str] = &["command_name", "command_port", "command_confirmed"];
+    for key in obj.keys() {
+        match key.as_str() {
+            "command_id" => {
+                warn!(
+                    event = "command_crud_rejected",
+                    reason = "immutable_field",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    command_id = command_id,
+                    source_ip = %addr.ip(),
+                    "update_command: command_id is immutable in PUT body"
+                );
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::with_hint(
+                        "command_id is immutable; delete and recreate to change",
+                        "remove command_id from the PUT body; the URL path is authoritative",
+                    )),
+                )
+                    .into_response());
+            }
+            k if ALLOWED_FIELDS.contains(&k) => {}
+            other => {
+                warn!(
+                    event = "command_crud_rejected",
+                    reason = "unknown_field",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    command_id = command_id,
+                    source_ip = %addr.ip(),
+                    field = %other,
+                    "update_command: unknown field in PUT body"
+                );
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::with_hint(
+                        format!("unknown field '{other}' in request body"),
+                        "allowed fields: command_name, command_port, command_confirmed",
+                    )),
+                )
+                    .into_response());
+            }
+        }
+    }
+
+    // Required-field extraction.
+    let command_name = obj
+        .get("command_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "validation",
+                field = "command_name",
+                application_id = %application_id,
+                device_id = %device_id,
+                command_id = command_id,
+                source_ip = %addr.ip(),
+                "update_command: missing or non-string command_name"
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::from_error(
+                    "command_name is required and must be a string",
+                )),
+            )
+                .into_response()
+        })?
+        .to_string();
+    let command_port_i64 = obj
+        .get("command_port")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "validation",
+                field = "command_port",
+                application_id = %application_id,
+                device_id = %device_id,
+                command_id = command_id,
+                source_ip = %addr.ip(),
+                "update_command: missing or non-integer command_port"
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::from_error(
+                    "command_port is required and must be an integer",
+                )),
+            )
+                .into_response()
+        })?;
+    let command_port: i32 = i32::try_from(command_port_i64).map_err(|_| {
+        warn!(
+            event = "command_crud_rejected",
+            reason = "validation",
+            field = "command_port",
+            application_id = %application_id,
+            device_id = %device_id,
+            command_id = command_id,
+            source_ip = %addr.ip(),
+            value = command_port_i64,
+            "update_command: command_port out of i32 range"
+        );
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::from_error(
+                "command_port out of i32 range",
+            )),
+        )
+            .into_response()
+    })?;
+    let command_confirmed = obj
+        .get("command_confirmed")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "validation",
+                field = "command_confirmed",
+                application_id = %application_id,
+                device_id = %device_id,
+                command_id = command_id,
+                source_ip = %addr.ip(),
+                "update_command: missing or non-bool command_confirmed"
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::from_error(
+                    "command_confirmed is required and must be a boolean",
+                )),
+            )
+                .into_response()
+        })?;
+
+    validate_command_name(&command_name, &addr)?;
+    validate_command_port(command_port, &addr)?;
+
+    let _guard = state.config_writer.lock().await;
+
+    let original_bytes = state
+        .config_writer
+        .read_raw()
+        .map_err(|e| io_error_response(&e, "update_command", &addr, "command"))?;
+    let mut doc = state
+        .config_writer
+        .parse_document_from_bytes(&original_bytes)
+        .map_err(|e| io_error_response(&e, "update_command", &addr, "command"))?;
+
+    // Locate the parent application + device.
+    let app_idx = match find_application_index(&doc, &application_id, &addr, "command") {
+        Ok(Some(idx)) => idx,
+        Ok(None) => {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "application_not_found",
+                application_id = %application_id,
+                device_id = %device_id,
+                command_id = command_id,
+                source_ip = %addr.ip(),
+                "update_command: parent application not found"
+            );
+            return Err(application_not_found_response());
+        }
+        Err(resp) => return Err(resp),
+    };
+    let dev_idx = {
+        let device_array = doc
+            .get("application")
+            .and_then(|v| v.as_array_of_tables())
+            .and_then(|arr| arr.get(app_idx))
+            .and_then(|tbl| tbl.get("device"))
+            .and_then(|v| v.as_array_of_tables());
+        match device_array {
+            Some(arr) => arr.iter().position(|t| {
+                t.get("device_id").and_then(|v| v.as_str()) == Some(device_id.as_str())
+            }),
+            None => None,
+        }
+    };
+    let dev_idx = match dev_idx {
+        Some(idx) => idx,
+        None => {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "device_not_found",
+                application_id = %application_id,
+                device_id = %device_id,
+                command_id = command_id,
+                source_ip = %addr.ip(),
+                "update_command: device not found under application"
+            );
+            return Err(device_not_found_response());
+        }
+    };
+
+    // Locate the command table within the device's `command` array,
+    // and mutate it in place. Pre-flight rejects malformed sibling
+    // command blocks (any block with missing/non-integer command_id).
+    let cmd_idx = {
+        let cmd_array = doc
+            .get("application")
+            .and_then(|v| v.as_array_of_tables())
+            .and_then(|arr| arr.get(app_idx))
+            .and_then(|tbl| tbl.get("device"))
+            .and_then(|v| v.as_array_of_tables())
+            .and_then(|arr| arr.get(dev_idx))
+            .and_then(|tbl| tbl.get("command"))
+            .and_then(|v| v.as_array_of_tables());
+        match cmd_array {
+            Some(arr) => {
+                let mut found: Option<usize> = None;
+                for (idx, t) in arr.iter().enumerate() {
+                    let id_value = t.get("command_id");
+                    match id_value.and_then(|v| v.as_integer()) {
+                        Some(n) if n == command_id as i64 => {
+                            found = Some(idx);
+                            break;
+                        }
+                        Some(_) => continue,
+                        None => {
+                            warn!(
+                                event = "command_crud_rejected",
+                                reason = "conflict",
+                                application_id = %application_id,
+                                device_id = %device_id,
+                                source_ip = %addr.ip(),
+                                malformed_block_index = idx,
+                                id_value_present = id_value.is_some(),
+                                "update_command: existing [[application.device.command]] block at index {idx} has missing or non-integer command_id; manual cleanup required"
+                            );
+                            return Err((
+                                StatusCode::CONFLICT,
+                                Json(ErrorResponse::with_hint(
+                                    format!(
+                                        "config TOML contains a malformed [[application.device.command]] block at index {idx} (missing or non-integer command_id); manual cleanup required"
+                                    ),
+                                    "edit config/config.toml to fix the malformed block before retrying",
+                                )),
+                            )
+                                .into_response());
+                        }
+                    }
+                }
+                found
+            }
+            None => None,
+        }
+    };
+    let cmd_idx = match cmd_idx {
+        Some(idx) => idx,
+        None => {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "command_not_found",
+                application_id = %application_id,
+                device_id = %device_id,
+                command_id = command_id,
+                source_ip = %addr.ip(),
+                "update_command: command not found under device"
+            );
+            return Err(command_not_found_response());
+        }
+    };
+
+    // Mutate the command table in place — preserves any sibling
+    // sub-table (none today; defensive forward compatibility).
+    {
+        let app_array = doc
+            .get_mut("application")
+            .and_then(|v| v.as_array_of_tables_mut());
+        let app_array = match app_array {
+            Some(a) => a,
+            None => return Err(internal_error_response()),
+        };
+        let app_table = match app_array.get_mut(app_idx) {
+            Some(t) => t,
+            None => return Err(internal_error_response()),
+        };
+        let device_array = app_table
+            .get_mut("device")
+            .and_then(|v| v.as_array_of_tables_mut());
+        let device_array = match device_array {
+            Some(a) => a,
+            None => return Err(internal_error_response()),
+        };
+        let device_table = match device_array.get_mut(dev_idx) {
+            Some(t) => t,
+            None => return Err(internal_error_response()),
+        };
+        let command_array = device_table
+            .get_mut("command")
+            .and_then(|v| v.as_array_of_tables_mut());
+        let command_array = match command_array {
+            Some(a) => a,
+            None => return Err(internal_error_response()),
+        };
+        let cmd_table = match command_array.get_mut(cmd_idx) {
+            Some(t) => t,
+            None => return Err(internal_error_response()),
+        };
+        cmd_table.insert("command_name", toml_edit::value(command_name.clone()));
+        cmd_table.insert("command_confirmed", toml_edit::value(command_confirmed));
+        cmd_table.insert("command_port", toml_edit::value(command_port as i64));
+        // command_id is left untouched (immutable; also rejected
+        // from the body above).
+    }
+
+    let candidate_bytes = doc.to_string().into_bytes();
+    if let Err(e) = state.config_writer.write_atomically(&candidate_bytes) {
+        handle_rollback(&state, &original_bytes, "update_command", &addr, "write_atomically_err", "command");
+        return Err(io_error_response(&e, "update_command", &addr, "command"));
+    }
+
+    match state.config_reload.reload().await {
+        Ok(_) => {
+            info!(
+                event = "command_updated",
+                application_id = %application_id,
+                device_id = %device_id,
+                command_id = command_id,
+                command_name = %command_name,
+                source_ip = %addr.ip(),
+                "Command updated via web UI"
+            );
+            Ok(Json(CommandResponse {
+                command_id,
+                command_name,
+                command_port,
+                command_confirmed,
+            }))
+        }
+        Err(ReloadError::RestartRequired { knob }) => {
+            let (should_rollback, response) = handle_restart_required(
+                &knob,
+                &original_bytes,
+                &doc,
+                "update_command",
+                &addr,
+                "command",
+            );
+            if should_rollback {
+                handle_rollback(&state, &original_bytes, "update_command", &addr, &knob, "command");
+            }
+            Err(response)
+        }
+        Err(e) => {
+            let reason = e.reason().to_string();
+            handle_rollback(&state, &original_bytes, "update_command", &addr, &reason, "command");
+            Err(reload_error_response(e, "update_command", &addr, "command"))
+        }
+    }
+}
+
+/// `DELETE /api/applications/:application_id/devices/:device_id/commands/:command_id`
+/// — remove the named command from the device's `device_command_list`.
+/// Per Task 6 pinning: removing the last command leaves the
+/// `[[application.device.command]]` array in place (toml_edit
+/// serialises an empty `ArrayOfTables` as nothing on the wire, and
+/// a subsequent POST re-populates without needing to re-create the
+/// array key).
+pub async fn delete_command(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Path((application_id, device_id, command_id_str)): Path<(String, String, String)>,
+) -> Result<StatusCode, Response> {
+    validate_path_application_id(&application_id, &addr, "command")?;
+    validate_path_device_id(&device_id, &addr, "command")?;
+    let command_id = validate_path_command_id(&command_id_str, &addr)?;
+
+    let _guard = state.config_writer.lock().await;
+
+    let original_bytes = state
+        .config_writer
+        .read_raw()
+        .map_err(|e| io_error_response(&e, "delete_command", &addr, "command"))?;
+    let mut doc = state
+        .config_writer
+        .parse_document_from_bytes(&original_bytes)
+        .map_err(|e| io_error_response(&e, "delete_command", &addr, "command"))?;
+
+    let app_idx = match find_application_index(&doc, &application_id, &addr, "command") {
+        Ok(Some(idx)) => idx,
+        Ok(None) => {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "application_not_found",
+                application_id = %application_id,
+                device_id = %device_id,
+                command_id = command_id,
+                source_ip = %addr.ip(),
+                "delete_command: parent application not found"
+            );
+            return Err(application_not_found_response());
+        }
+        Err(resp) => return Err(resp),
+    };
+    let dev_idx = {
+        let device_array = doc
+            .get("application")
+            .and_then(|v| v.as_array_of_tables())
+            .and_then(|arr| arr.get(app_idx))
+            .and_then(|tbl| tbl.get("device"))
+            .and_then(|v| v.as_array_of_tables());
+        match device_array {
+            Some(arr) => arr.iter().position(|t| {
+                t.get("device_id").and_then(|v| v.as_str()) == Some(device_id.as_str())
+            }),
+            None => None,
+        }
+    };
+    let dev_idx = match dev_idx {
+        Some(idx) => idx,
+        None => {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "device_not_found",
+                application_id = %application_id,
+                device_id = %device_id,
+                command_id = command_id,
+                source_ip = %addr.ip(),
+                "delete_command: device not found under application"
+            );
+            return Err(device_not_found_response());
+        }
+    };
+
+    // Find the command's index + pre-flight on sibling blocks.
+    let cmd_idx = {
+        let cmd_array = doc
+            .get("application")
+            .and_then(|v| v.as_array_of_tables())
+            .and_then(|arr| arr.get(app_idx))
+            .and_then(|tbl| tbl.get("device"))
+            .and_then(|v| v.as_array_of_tables())
+            .and_then(|arr| arr.get(dev_idx))
+            .and_then(|tbl| tbl.get("command"))
+            .and_then(|v| v.as_array_of_tables());
+        match cmd_array {
+            Some(arr) => {
+                let mut found: Option<usize> = None;
+                for (idx, t) in arr.iter().enumerate() {
+                    let id_value = t.get("command_id");
+                    match id_value.and_then(|v| v.as_integer()) {
+                        Some(n) if n == command_id as i64 => {
+                            found = Some(idx);
+                            break;
+                        }
+                        Some(_) => continue,
+                        None => {
+                            warn!(
+                                event = "command_crud_rejected",
+                                reason = "conflict",
+                                application_id = %application_id,
+                                device_id = %device_id,
+                                source_ip = %addr.ip(),
+                                malformed_block_index = idx,
+                                id_value_present = id_value.is_some(),
+                                "delete_command: existing [[application.device.command]] block at index {idx} has missing or non-integer command_id; manual cleanup required"
+                            );
+                            return Err((
+                                StatusCode::CONFLICT,
+                                Json(ErrorResponse::with_hint(
+                                    format!(
+                                        "config TOML contains a malformed [[application.device.command]] block at index {idx} (missing or non-integer command_id); manual cleanup required"
+                                    ),
+                                    "edit config/config.toml to fix the malformed block before retrying",
+                                )),
+                            )
+                                .into_response());
+                        }
+                    }
+                }
+                found
+            }
+            None => None,
+        }
+    };
+    let cmd_idx = match cmd_idx {
+        Some(idx) => idx,
+        None => {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "command_not_found",
+                application_id = %application_id,
+                device_id = %device_id,
+                command_id = command_id,
+                source_ip = %addr.ip(),
+                "delete_command: command not found under device"
+            );
+            return Err(command_not_found_response());
+        }
+    };
+
+    // Mutate: remove the command table from the device's command
+    // array. Leave an empty ArrayOfTables in place if this was the
+    // last command (Task 6 pinned decision).
+    {
+        let app_array = doc
+            .get_mut("application")
+            .and_then(|v| v.as_array_of_tables_mut());
+        let app_array = match app_array {
+            Some(a) => a,
+            None => return Err(internal_error_response()),
+        };
+        let app_table = match app_array.get_mut(app_idx) {
+            Some(t) => t,
+            None => return Err(internal_error_response()),
+        };
+        let device_array = app_table
+            .get_mut("device")
+            .and_then(|v| v.as_array_of_tables_mut());
+        let device_array = match device_array {
+            Some(a) => a,
+            None => return Err(internal_error_response()),
+        };
+        let device_table = match device_array.get_mut(dev_idx) {
+            Some(t) => t,
+            None => return Err(internal_error_response()),
+        };
+        let command_array = device_table
+            .get_mut("command")
+            .and_then(|v| v.as_array_of_tables_mut());
+        let command_array = match command_array {
+            Some(a) => a,
+            None => return Err(internal_error_response()),
+        };
+        command_array.remove(cmd_idx);
+    }
+
+    let candidate_bytes = doc.to_string().into_bytes();
+    if let Err(e) = state.config_writer.write_atomically(&candidate_bytes) {
+        handle_rollback(&state, &original_bytes, "delete_command", &addr, "write_atomically_err", "command");
+        return Err(io_error_response(&e, "delete_command", &addr, "command"));
+    }
+
+    match state.config_reload.reload().await {
+        Ok(_) => {
+            info!(
+                event = "command_deleted",
+                application_id = %application_id,
+                device_id = %device_id,
+                command_id = command_id,
+                source_ip = %addr.ip(),
+                "Command deleted via web UI"
+            );
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Err(ReloadError::RestartRequired { knob }) => {
+            let (should_rollback, response) = handle_restart_required(
+                &knob,
+                &original_bytes,
+                &doc,
+                "delete_command",
+                &addr,
+                "command",
+            );
+            if should_rollback {
+                handle_rollback(&state, &original_bytes, "delete_command", &addr, &knob, "command");
+            }
+            Err(response)
+        }
+        Err(e) => {
+            let reason = e.reason().to_string();
+            handle_rollback(&state, &original_bytes, "delete_command", &addr, &reason, "command");
+            Err(reload_error_response(e, "delete_command", &addr, "command"))
+        }
+    }
+}
+
+/// Story 9-6 Task 6: build a fresh `[[application.device.command]]`
+/// table with the 4 fields in declaration order matching
+/// `DeviceCommandCfg` at `src/config.rs:660-670`.
+fn build_command_table(
+    command_id: i32,
+    command_name: &str,
+    command_port: i32,
+    command_confirmed: bool,
+) -> toml_edit::Table {
+    let mut tbl = toml_edit::Table::new();
+    tbl.insert("command_id", toml_edit::value(command_id as i64));
+    tbl.insert("command_name", toml_edit::value(command_name.to_string()));
+    tbl.insert("command_confirmed", toml_edit::value(command_confirmed));
+    tbl.insert("command_port", toml_edit::value(command_port as i64));
+    tbl
 }
 
 // ----------------------------------------------------------------------
@@ -3748,16 +5087,113 @@ mod tests {
     #[traced_test]
     fn validate_path_device_id_with_crlf_emits_device_event() {
         let addr: SocketAddr = "127.0.0.1:0".parse().expect("parse addr");
-        let result = validate_path_device_id("dev\nid", &addr);
+        // Story 9-6 widening: pass `resource = "device"` to preserve
+        // byte-for-byte Story 9-5 audit behaviour at device-handler
+        // call sites.
+        let result = validate_path_device_id("dev\nid", &addr, "device");
         assert!(result.is_err(), "CRLF in device_id must be rejected");
         assert!(
             logs_contain("event=\"device_crud_rejected\""),
-            "validate_path_device_id must emit event=\"device_crud_rejected\" (quoted) on validation rejection"
+            "validate_path_device_id with resource=\"device\" must emit event=\"device_crud_rejected\" (quoted) on validation rejection"
         );
         assert!(
             !logs_contain("event=\"application_crud_rejected\""),
-            "validate_path_device_id must NOT emit event=\"application_crud_rejected\" (Story 9-5 path-aware dispatch)"
+            "validate_path_device_id with resource=\"device\" must NOT emit event=\"application_crud_rejected\" (Story 9-5 path-aware dispatch)"
         );
+    }
+
+    /// Story 9-6 AC#11 (Task 3 widening): when `validate_path_device_id`
+    /// is invoked from a command handler with `resource = "command"`,
+    /// a CRLF-bearing device_id MUST emit `command_crud_rejected`
+    /// (NOT `device_crud_rejected`). Pins the path-aware dispatch
+    /// under the Story 9-6 widening.
+    #[test]
+    #[traced_test]
+    fn validate_path_device_id_under_command_resource_emits_command_event() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().expect("parse addr");
+        let result = validate_path_device_id("dev\nid", &addr, "command");
+        assert!(result.is_err(), "CRLF in device_id must be rejected");
+        assert!(
+            logs_contain("event=\"command_crud_rejected\""),
+            "validate_path_device_id with resource=\"command\" must emit event=\"command_crud_rejected\""
+        );
+        assert!(
+            !logs_contain("event=\"device_crud_rejected\""),
+            "validate_path_device_id with resource=\"command\" must NOT emit event=\"device_crud_rejected\" (Story 9-6 widening contract)"
+        );
+    }
+
+    /// Story 9-6 AC#11: pin the Story 9-5 invariant under the Story
+    /// 9-6 widening. When `resource = "device"` (the existing 9-5
+    /// call-site behaviour), the audit-event name MUST remain
+    /// `device_crud_rejected` — this is a regression guard against
+    /// accidentally swapping the arms.
+    #[test]
+    #[traced_test]
+    fn validate_path_device_id_under_device_resource_still_emits_device_event() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().expect("parse addr");
+        let result = validate_path_device_id("dev\nid", &addr, "device");
+        assert!(result.is_err(), "CRLF in device_id must be rejected");
+        assert!(
+            logs_contain("event=\"device_crud_rejected\""),
+            "Story 9-5 invariant: resource=\"device\" still emits device_crud_rejected"
+        );
+        assert!(
+            !logs_contain("event=\"command_crud_rejected\""),
+            "Story 9-5 invariant: resource=\"device\" must NOT emit command_crud_rejected"
+        );
+    }
+
+    /// Story 9-6 Task 3: `validate_path_command_id` rejects
+    /// non-numeric path segments with 400 + audit event
+    /// `event="command_crud_rejected" reason="validation"
+    /// field="command_id"`.
+    #[test]
+    #[traced_test]
+    fn validate_path_command_id_rejects_non_numeric_path() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().expect("parse addr");
+        let result = validate_path_command_id("not-a-number", &addr);
+        assert!(result.is_err(), "non-numeric command_id must be rejected");
+        assert!(
+            logs_contain("event=\"command_crud_rejected\""),
+            "non-numeric command_id must emit event=\"command_crud_rejected\""
+        );
+    }
+
+    /// Story 9-6 Task 3: positive-i32 contract — negative
+    /// command_id is rejected.
+    #[test]
+    #[traced_test]
+    fn validate_path_command_id_rejects_negative() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().expect("parse addr");
+        let result = validate_path_command_id("-5", &addr);
+        assert!(result.is_err(), "negative command_id must be rejected");
+        assert!(
+            logs_contain("event=\"command_crud_rejected\""),
+            "negative command_id must emit event=\"command_crud_rejected\""
+        );
+    }
+
+    /// Story 9-6 Task 3: positive-i32 contract — zero is rejected
+    /// (`command_id = 0` is reserved-as-unset by convention).
+    #[test]
+    #[traced_test]
+    fn validate_path_command_id_rejects_zero() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().expect("parse addr");
+        let result = validate_path_command_id("0", &addr);
+        assert!(result.is_err(), "zero command_id must be rejected");
+        assert!(
+            logs_contain("event=\"command_crud_rejected\""),
+            "zero command_id must emit event=\"command_crud_rejected\""
+        );
+    }
+
+    /// Story 9-6 Task 3: positive command_id parses cleanly.
+    #[test]
+    fn validate_path_command_id_accepts_positive() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().expect("parse addr");
+        let result = validate_path_command_id("42", &addr);
+        assert_eq!(result.expect("parse"), 42);
     }
 
     /// Iter-2 review M5: parallel CRLF unit test for the H1 patch's
