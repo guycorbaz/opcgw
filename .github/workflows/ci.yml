@@ -101,7 +101,7 @@ jobs:
             hits=$(echo "$prod" \
               | grep -E 'password|secret|api_key|token' \
               | grep -v 'doc\|unwrap\|parse\|REPLACE_ME\|to_string\|leaked\|assert\|///\|"{' \
-              | grep -E '(=\s*['\''"]|:\s*['\''"])')
+              | grep -E '(=\s*['\''"]|:\s*['\''"])' || true)
             if [ -n "$hits" ]; then
               echo "=== $file ==="
               echo "$hits"
