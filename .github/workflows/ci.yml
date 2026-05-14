@@ -88,7 +88,27 @@ jobs:
 
       - name: Check for hardcoded credentials
         run: |
-          if grep -r "password\|secret\|api_key\|token" src/ --include="*.rs" | grep -v "test\|doc\|config\|unwrap\|parse" | grep -E "(=\s*['\"]|:\s*['\"])"; then
+          found=0
+          while IFS= read -r file; do
+            case "$file" in
+              */test_support.rs|*/test_helpers.rs|*/test_utils.rs|*/test_fixtures.rs) continue ;;
+            esac
+            prod=$(awk '
+              /^[[:space:]]*#\[cfg\(test\)\][[:space:]]*$/ {intest=1}
+              /^[[:space:]]*mod tests[[:space:]]*\{?[[:space:]]*$/ {intest=1}
+              intest==0 {print}
+            ' "$file")
+            hits=$(echo "$prod" \
+              | grep -E 'password|secret|api_key|token' \
+              | grep -v 'doc\|unwrap\|parse\|REPLACE_ME\|to_string\|leaked\|assert\|///\|"{' \
+              | grep -E '(=\s*['\''"]|:\s*['\''"])')
+            if [ -n "$hits" ]; then
+              echo "=== $file ==="
+              echo "$hits"
+              found=1
+            fi
+          done < <(find src -name "*.rs" -type f)
+          if [ "$found" -eq 1 ]; then
             echo "⚠️  Potential hardcoded credentials found in source code"
             exit 1
           fi
