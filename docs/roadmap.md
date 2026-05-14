@@ -6,244 +6,152 @@ permalink: /roadmap/
 
 ## opcgw Development Roadmap
 
-**Strategic Goal:** Deliver production-ready v2.0 with feature parity to v1.0 + new capabilities (data persistence, web UI, security hardening).
+**Strategic Goal:** Deliver production-ready v2.0 with feature parity to v1.0 plus new capabilities (data persistence, real-time subscriptions, historical access, web UI, configuration hot-reload).
 
-> **Principle:** Quality over Speed. We're investing time to ensure v2.0 is genuinely better than v1.0, not just different.
+> **Principle:** Quality over Speed. v2.0 must be genuinely better than v1.0 — not just different.
+
+> **Production-deployment blocker:** GitHub issue [#108](https://github.com/guycorbaz/opcgw/issues/108) — the `MetricType` enum is payload-less, so every row in `metric_values` stores the literal data-type string (`"Float"`, `"Int"`, …) instead of the actual measurement. opcgw has never persisted real metric values. Affects four shipped epics (2, 5, 8, 9-3); SCADA clients see literal type-name strings via OPC UA, dashboards show `"Float"` instead of `23.5`, HistoryRead returns type-strings. The fix is **Epic A — Storage Payload Migration**, an Epic-1-scale storage-trait refactor. Until #108 lands, opcgw is suitable for device-presence monitoring only ("is the sensor reporting?") — not for actual measurement collection.
 
 ---
 
 ## Timeline Overview
 
 ```
-Epic 1: Foundation ✅ → Epic 2: Persistence → Epic 3: Commands → Epic 4: Scalability 
-    ↓                        ↓                    ↓                   ↓
-  (Done)              (In Planning)          (Queued)             (Queued)
-                     
-        ↓                    ↓                    ↓
-    Epic 5: Visibility → Epic 6: Security → Epic 8: Web UI → Production v2.0
-    (Queued)          (Queued)            (Queued)          (Q3 2026)
-    
-    
-Post-Launch:
-    ↓
-Epic 7: Real-Time Subscriptions & Historical Data
+Phase A (Crash-free + persistence + commands + scalability + visibility + diagnostics + security)
+  Epic 1 ✅ → Epic 2 ✅ → Epic 3 ✅ → Epic 4 ✅ → Epic 5 ✅ → Epic 6 ✅ → Epic 7 ✅
+
+Phase B (Real-time subscriptions + historical + web UI + hot-reload + dynamic mutation)
+  Epic 8 ✅ → Epic 9 ✅
+
+Next (Production-deployment blocker)
+  Epic A — Storage Payload Migration ⏳ (issue #108)
 ```
 
----
-
-## Current Status: Epic 1 ✅ COMPLETE
-
-**Epic:** Crash-Free Gateway Foundation  
-**Duration:** April 2-19, 2026 (2 weeks)  
-**Status:** ✅ All 5 stories complete
-
-### Completed Stories
-
-1. ✅ **1-1: Update Dependencies and Rust Toolchain**
-   - Rust 1.87.0 → 1.94.0
-   - tonic 0.13 → 0.14 (major), async-opcua 0.16 → 0.17 (major)
-   - 3 breaking changes managed systematically
-
-2. ✅ **1-2: Migrate Logging from log4rs to Tracing**
-   - Replaced log4rs with tracing ecosystem
-   - 136 log calls converted to structured fields
-   - Per-module logging via tracing-appender
-
-3. ✅ **1-3: Comprehensive Error Handling**
-   - 15 production panic sites eliminated
-   - Zero panics in production code paths
-   - Graceful degradation on errors
-
-4. ✅ **1-4: Graceful Shutdown with CancellationToken**
-   - SIGINT and SIGTERM handling (Docker-safe)
-   - Clean shutdown sequence with timeout protection
-   - Tested token propagation across tasks
-
-5. ✅ **1-5: Configuration Validation and Clean Startup**
-   - Comprehensive validation with clear error messages
-   - Field-level error reporting
-   - Environment variable override support
-
-### Key Achievements
-
-- **Test Coverage:** 18/18 tests passing (up from 17)
-- **Code Quality:** Zero clippy warnings
-- **Reliability:** Zero production panics (down from 15)
-- **Team Confidence:** High — no blockers throughout
-- **Quality Planning:** Thorough upfront work enabled smooth execution
+All 9 in-plan epics are complete. **Epic A is the immediate next epic** per the Epic 9 retrospective action item AI6 and is the gating work before production deployment.
 
 ---
 
-## Next Phase: Epics 2-6 (Production Features)
+## Phase A — Production Foundation ✅
 
-### Epic 2: Data Persistence (Next)
+### Epic 1: Crash-Free Gateway Foundation ✅
 
-**Timeline:** ~2-3 weeks (10-12 stories, tighter granularity)  
-**Why It Matters:** Metrics must survive gateway restarts  
-**What It Delivers:**
-- SQLite backend with WAL mode (crash-safe)
-- Last-known metric values persisted and restored
-- Historical data with configurable retention
-- Automatic pruning of old data
+- Dependency refresh + Rust 1.94
+- `log4rs → tracing` migration with structured fields
+- Comprehensive error handling (15 production panic sites eliminated)
+- Graceful shutdown via `CancellationToken` (SIGINT + SIGTERM, Docker-safe)
+- Configuration validation with field-level error reporting
 
-**Key Stories:**
-1. StorageBackend trait + InMemoryBackend
-2. SQLite backend and schema (5 tables)
-3. Metric persistence and batch writes
-4. Metric restore on startup
-5. Historical data pruning + more (broken into smaller pieces)
+### Epic 2: Data Persistence ✅
 
----
+- `StorageBackend` trait + `InMemoryBackend` + `SqliteBackend` (WAL mode, per-task connection pool)
+- Hierarchical schema: applications → devices → metrics
+- Batch writes, append-only history table
+- Metric restore on startup
+- Graceful degradation on storage errors
+- Configurable retention pruning
 
-### Epic 3: Reliable Command Execution (After Epic 2)
+### Epic 3: Reliable Command Execution ✅
 
-**Timeline:** ~1-2 weeks (3 stories)  
-**Why It Matters:** Operators need to send commands to devices (feature parity with v1.0)  
-**What It Delivers:**
-- FIFO command queue in SQLite
+- SQLite-backed FIFO command queue
 - Parameter validation before transmission
-- Command delivery status reporting to OPC UA clients
+- Command-delivery status reporting (`sent` / `confirmed` / `failed` / `timed-out`)
 
-**Key Stories:**
-1. SQLite-backed FIFO command queue
-2. Command parameter validation
-3. Command delivery status reporting
+### Epic 4: Scalable Data Collection ✅
 
----
-
-### Epic 4: Scalable Data Collection (After Epic 3)
-
-**Timeline:** ~2 weeks (4 stories)  
-**Why It Matters:** Handle 100+ devices with all metric types  
-**What It Delivers:**
+- Poller refactored onto `StorageBackend`
 - Support for all ChirpStack metric types (Gauge, Counter, Absolute, Unknown)
-- API pagination for large deployments
-- Auto-recovery from ChirpStack outages (<30 seconds)
-- Poller refactoring to use SQLite backend
+- gRPC pagination for large deployments (100+ devices)
+- Auto-recovery from ChirpStack outages with 30 s SLA (FR6 / FR7 / FR8 / NFR17)
 
-**Key Stories:**
-1. Poller refactoring to SQLite backend
-2. Support all ChirpStack metric types
-3. API pagination for large deployments (100+ devices)
-4. Auto-recovery from ChirpStack outages
+### Epic 5: Operational Visibility ✅
 
----
+- OPC UA server refactored onto SQLite backend
+- Stale-data detection with `Good` / `Uncertain` / `Bad` OPC UA status codes
+- Gateway health metrics under the `Gateway` folder (last poll, error count, ChirpStack availability)
 
-### Epic 5: Operational Visibility (After Epic 4)
+### Epic 6: Production Observability & Diagnostics ✅
 
-**Timeline:** ~1-2 weeks (3 stories)  
-**Why It Matters:** Operators see clear warnings about stale data and gateway health  
-**What It Delivers:**
-- OPC UA server refactoring to SQLite backend
-- Stale data detection (UncertainLastUsableValue status codes)
-- Gateway health metrics visible in OPC UA (last poll, error count, connection state)
+- Structured logging with correlation IDs on every OPC UA read
+- Configurable log verbosity (`OPCGW_LOG_LEVEL`) and directory (`OPCGW_LOG_DIR`)
+- Microsecond UTC timestamps; performance-budget warnings on hot paths
+- ChirpStack and OPC UA diagnostic event taxonomy
+- Symptom cookbook in `docs/logging.md`
 
-**Key Stories:**
-1. OPC UA server refactoring to SQLite backend
-2. Stale data detection and status codes
-3. Gateway health metrics in OPC UA
+### Epic 7: Security Hardening ✅
 
----
-
-### Epic 6: Security Hardening (After Epic 5)
-
-**Timeline:** ~1-2 weeks (3 stories)  
-**Why It Matters:** Production security — no exposed credentials, controlled access  
-**What It Delivers:**
-- Credential management via environment variables
-- Multiple OPC UA security endpoints (None, Basic256 Sign, Basic256 SignAndEncrypt)
-- OPC UA client connection limiting
-
-**Key Stories:**
-1. Credential management via environment variables
-2. OPC UA security endpoints and authentication
-3. Connection limiting
+- Credential management via environment variables (`OPCGW_*`) with `REPLACE_ME_WITH_*` placeholders + startup detection
+- Three OPC UA security endpoints (None / Basic256 Sign / Basic256 SignAndEncrypt) with HMAC-SHA-256 keyed credential digests
+- PKI directory layout enforcement (`0o600` files + `0o700` directories, fail-closed)
+- OPC UA connection limiting (`[opcua].max_connections`, default 10)
+- Sanitised audit events with constant-time comparisons
 
 ---
 
-## Final Phase: Epic 8 (Web UI)
+## Phase B — Real-Time, Historical, and Web UI ✅
 
-### Epic 8: Web Configuration & Hot-Reload (After Epic 6)
+### Epic 8: Real-Time Subscriptions & Historical Data ✅
 
-**Timeline:** ~3 weeks (8 stories)  
-**Why It Matters:** Major break from v1.0 — web UI instead of TOML file editing  
-**What It Delivers:**
-- Embedded Axum web server with basic authentication
-- Status dashboard (gateway health, ChirpStack connection, error counts)
-- Live metric values display
-- CRUD for applications, devices, commands
-- Configuration hot-reload without gateway restart
-- Dynamic OPC UA address space mutation
+**Closed 2026-05-14** (with Story 8-4 descoped on the same day — see Known Failures below).
 
-**Key Stories:**
-1. Axum web server and basic authentication
-2. Gateway status dashboard
-3. Live metric values display
-4. Application CRUD via web UI
-5. Device and metric mapping CRUD
-6. Command CRUD via web UI
-7. Configuration hot-reload
-8. Dynamic OPC UA address space mutation
+- async-opcua subscription support (FR21) — DataChange notifications with `DataChangeFilter`
+- OPC UA `HistoryRead` for raw historical data (FR22) with 7-day retention floor
+- Wrap-don't-subclass pattern around `SimpleNodeManagerImpl` (documented in Story 8-1 spike report)
+- `[storage].retention_days` + `[opcua].max_history_data_results_per_node` config knobs
+- Microsecond-precision UTC timestamps in stored history
+- `AccessLevel::HISTORY_READ` + `historizing = true` on every metric variable
 
----
+### Epic 9: Web Configuration & Hot-Reload ✅
 
-## Post-Launch: Epic 7
+**Closed 2026-05-14** — all 9 stories (9-0 through 9-8) shipped + retrospective complete.
 
-### Epic 7: Real-Time Subscriptions & Historical Data
-
-**Timeline:** 2-3 weeks (4 stories) — after production deployment  
-**What It Delivers:**
-- OPC UA subscription support (real-time push notifications)
-- Historical data queries (7-day retention)
-- Threshold-based alarm conditions
+- Axum 0.8 embedded web server gated by HTTP Basic auth (FR50 / NFR11)
+- Gateway status dashboard with live ChirpStack health, error counts, application/device counts (FR38)
+- Live metric values page with per-row staleness badges (FR37) — *currently shows the #108 data-type-string bug until Epic A lands*
+- CRUD for applications, devices + metric mappings, and commands via the web UI (FR34 / FR35 / FR36 / FR40)
+- CSRF defence (Origin/Referer same-origin + JSON-only Content-Type)
+- TOML round-trip persistence via `toml_edit` with atomic tempfile + rename and lock-held-across-reload
+- Configuration hot-reload triggered by SIGHUP, validate-then-swap discipline, knob taxonomy (hot-reload-safe / restart-required / address-space-mutating) — FR39 / FR40
+- Dynamic OPC UA address-space mutation under live subscriptions (FR24) with the 4-phase mutation envelope from the 9-0 spike (Q2 `BadNodeIdUnknown` transition → delete → add → DisplayName rename)
+- Three new audit-event families: `config_reload_*`, `address_space_mutation_*`, plus per-resource CRUD events (`application_*`, `device_*`, `command_*`)
 
 ---
 
-## Production Readiness Checklist
+## Known Failures
 
-Before v2.0 is deployed to production:
+### Story 8-4: Threshold-Based Alarm Conditions (FR23) — descoped 2026-05-14
 
-- ✅ Epic 1: Crash-free foundation
-- ⏳ Epic 2: Data persistence (no data loss on restart)
-- ⏳ Epic 3: Command execution (feature parity with v1.0)
-- ⏳ Epic 4: Scalable data collection (handles 100+ devices)
-- ⏳ Epic 5: Operational visibility (stale-data detection, health metrics)
-- ⏳ Epic 6: Security hardening (credentials, OPC UA security, connection limits)
-- ⏳ Epic 8: Web UI (configure without TOML editing)
-- ⏳ All tests passing, zero panics
-- ⏳ Security review complete
-- ⏳ Documentation updated
+Story 8-4 was originally scoped inside Epic 8 but **was not implemented**. It was first parked as a Known Failure on 2026-05-01 (Epic 8 retro) and then **explicitly descoped from Epic 8 on 2026-05-14** so Epic 8 could close cleanly.
 
-**Target Deployment:** Q3 2026 (6-9 months from Epic 2 start)
+- **What's missing:** the gateway does NOT propagate `Bad` / `Warning` OPC UA status codes when a metric crosses a configured `low_alarm` / `high_alarm` threshold. SCADA clients see `Good` status for every metric read regardless of threshold proximity.
+- **What still works:** Story 5-2's stale-data status codes (`Uncertain` after 1× poll interval, `Bad` after 3× poll interval) function unchanged. Story 8-2's `DataChangeFilter`-driven subscriptions deliver these status transitions correctly.
+- **Operator workaround:** define alarm thresholds in the SCADA application (FUXA / Ignition) rather than in opcgw. This is the operationally sound choice anyway — alarm-condition state belongs in the SCADA client which has full context of acknowledged / suppressed / shelved state.
+- **Functional block:** revival is gated by issue [#108](https://github.com/guycorbaz/opcgw/issues/108). Threshold alarms need real metric values to alarm on; until Epic A ships, an alarm story has nothing meaningful to compare against.
+- **Future revival:** if surfaced, the work lands under a **new story name** in a future Phase B epic (NOT `8-4`); the original spec was scoped for the wrong epic phase and should be redrafted with the Stories 8-2 / 8-3 lessons baked in (specifically: the `DataChangeFilter` `trigger: StatusValue` path is the correct integration point).
+
+Canonical narrative: `_bmad-output/implementation-artifacts/deferred-work.md` and `_bmad-output/implementation-artifacts/epic-8-retro-2026-05-01.md` § Known Failures + the 2026-05-14 descope addendum.
 
 ---
 
-## Key Principles
+## Next: Epic A — Storage Payload Migration ⏳
 
-### 1. Quality Over Speed
-We're investing time to deliver v2.0 that's genuinely better than v1.0, not just different. A v2.0 that feels worse than v1.0 would undermine adoption.
+**Status:** not yet opened. Identified as the immediate next epic per Epic 9 retrospective action item AI6 (2026-05-14).
 
-### 2. Feature Parity Baseline
-Every feature available in v1.0 should be available in v2.0. This ensures users don't experience regression.
-
-### 3. Tighter Story Granularity
-Epics 2-8 use 10-12 stories instead of 5-6 to provide better visibility and control. Smaller stories = more frequent validation points.
-
-### 4. Thorough Planning
-Replicate Epic 1's approach: PRD validation, architecture design, detailed story dev notes. This enables confident execution.
+- **Why it matters:** Issue [#108](https://github.com/guycorbaz/opcgw/issues/108) is the production-deployment blocker. The `MetricType` enum is payload-less, so the `metric_values.value` column stores the data-type string instead of the measurement. Every shipped feature that reads metric values back (dashboard, OPC UA Read, OPC UA HistoryRead) returns type-strings, not real data.
+- **Shape:** Epic-1-scale storage-trait refactor. `MetricType` carries the value payload; the storage layer round-trips it; readers no longer fall back to the type-name string.
+- **Affects:** Epics 2, 5, 8, and Story 9-3 (surface-correct but data-incorrect until #108 lands).
+- **Gate for:** production deployment of v2.0, and any future revival of Story 8-4's threshold-alarm functionality.
 
 ---
 
 ## How to Track Progress
 
-- **Epic Status:** Check `_bmad-output/implementation-artifacts/sprint-status.yaml`
-- **Story Details:** Read individual story files in `_bmad-output/implementation-artifacts/`
-- **Retrospectives:** Review epic retrospectives for lessons learned
-- **GitHub:** See [opcgw on GitHub](https://github.com/guycorbaz/opcgw) for issue tracking and pull requests
+- **Epic Status (canonical):** [`_bmad-output/implementation-artifacts/sprint-status.yaml`](https://github.com/guycorbaz/opcgw/blob/main/_bmad-output/implementation-artifacts/sprint-status.yaml)
+- **Story Details:** individual story files in [`_bmad-output/implementation-artifacts/`](https://github.com/guycorbaz/opcgw/tree/main/_bmad-output/implementation-artifacts)
+- **Retrospectives:** `epic-N-retro-YYYY-MM-DD.md` under the same folder
+- **GitHub:** [opcgw on GitHub](https://github.com/guycorbaz/opcgw) for issue tracking and pull requests
 
 ---
 
 ## Questions?
 
 See the [Architecture](architecture.html) page for system design details, or the [Quick Start](quickstart.html) guide to get opcgw running today.
-
