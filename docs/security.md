@@ -1363,16 +1363,17 @@ restart the gateway after applying the change:
 - `storage.database_path`, `storage.retention_days` — DB connection
   pool init; retention is read at startup by the pruner
 
-**Address-space-mutating (Story 9-8 territory)** — adding /
-removing applications, devices, or metrics from `application_list`.
-Story 9-7 logs an info-level `topology_change_detected` event with
-`added_devices` / `removed_devices` / `modified_devices` field
-counts and updates the web dashboard, but does NOT call
-`address_space.write().add_variables(...)` or `delete(...)`.
-**Until Story 9-8 lands, an operator who hot-reloads a topology
-change sees the dashboard update but the OPC UA address space
-stays frozen at startup state.** This intentional limitation is
-the v1 scope split per `epics.md:916-931`.
+**Address-space-mutating** — adding / removing applications,
+devices, or metrics from `application_list`. **As of Story 9-8 this
+is end-to-end functional.** The OPC UA listener
+(`src/config_reload.rs::run_opcua_config_listener`) calls
+`apply_diff_to_address_space` on every `config_rx.changed()`
+notification; the runtime mutation envelope (Phase 1 Q2 transition →
+Phase 2 delete → Phase 3 add → Phase 4 rename) updates the running
+server's address space without restarting. See
+**§ Dynamic OPC UA address-space mutation (Story 9-8)** below for
+the full apply seam documentation, audit event shape, and v1
+limitations.
 
 ### Audit events
 
@@ -1398,15 +1399,221 @@ it finds (so the operator gets a single actionable line rather
 than a wall of "this also changed" noise). Iterate by fixing each
 flagged knob and re-issuing SIGHUP until the reload succeeds.
 
-### Limitations (Story 9-8 dependency + v1 scope)
+### Limitations (v1 scope)
 
-- **OPC UA address-space mutation is stubbed.** Story 9-7 logs the
-  topology diff; Story 9-8 implements the apply.
+- **OPC UA address-space mutation is now functional** as of Story
+  9-8 (Story 9-7's "stubbed" note was the v1 limitation that is now
+  closed). See § Dynamic OPC UA address-space mutation (Story 9-8)
+  below.
 - **Credential rotation requires restart in v1** (see
   "Restart-required" above).
 - **`[opcua].stale_threshold_seconds` hot-reload affects only the
   web dashboard** in v1. The OPC UA path's per-variable
-  read-callback closures capture the threshold at startup.
+  read-callback closures capture the threshold at startup AND at
+  Story-9-8-runtime-add time — but a reload that does NOT add or
+  remove metrics leaves existing closures unchanged (issue #113
+  carry-forward).
+
+## Dynamic OPC UA address-space mutation (Story 9-8)
+
+Story 9-8 closes the FR24 requirement (dynamic OPC UA node
+mutation at runtime) by extending Story 9-7's hot-reload seam with
+an apply pass that walks the topology diff and mutates the running
+address space without restarting the gateway.
+
+### Apply seam
+
+The listener at `src/config_reload.rs::run_opcua_config_listener`
+calls `crate::opcua_topology_apply::apply_diff_to_address_space` on
+every `config_rx.changed()` notification. The function walks four
+phases:
+
+1. **Phase 1 — Q2 mitigation** (`set_values(BadNodeIdUnknown)`
+   before delete): for every NodeId about to be deleted, emit a
+   final `DataValue { value: Some(Variant::Empty), status:
+   Some(BadNodeIdUnknown) }` via
+   `manager.set_values(subscriptions, …)`. Subscribed clients
+   observe an explicit transition; without this the silent-stream-
+   on-delete behaviour (per `9-0-spike-report.md:104-127`) leaves
+   orphan subscriptions with no programmatic detection path.
+
+   **Why `Variant::Empty`?** async-opcua's default
+   `MonitoredItemFilter::None` compares only the `value.value`
+   field of incoming DataValues
+   (`monitored_item.rs:514-517`); a `value: None` DataValue does
+   not trigger a DataChange notification if the previous sample
+   was also `None`. `Variant::Empty` is a distinct sentinel that
+   forces the filter to pass + carries the `BadNodeIdUnknown`
+   status to the client. Load-bearing for
+   `tests/opcua_dynamic_address_space_apply.rs::ac2_remove_device_emits_bad_node_id_unknown_before_delete`.
+
+2. **Phase 2 — delete** (single write-lock acquisition): drop the
+   doomed NodeIds (metrics → commands → device folders →
+   application folders), then call
+   `crate::opc_ua_history::remove_read_callback` /
+   `remove_write_callback` (option-b stub — see
+   "Stale read-callback closure leak" below) and update the
+   `node_to_metric` registry.
+
+3. **Phase 3 — add** (single write-lock acquisition): mirror
+   `OpcUa::add_nodes` exactly. Issue #99 NodeId scheme
+   (`format!("{device_id}/{metric_name}")` for metrics,
+   `format!("{device_id}/{command_id}")` for commands), Story 8-3
+   AccessLevel + historizing=true invariants, initial-variant
+   matching. Then register read/write callbacks via
+   `manager.inner().simple().add_read_callback(...)` /
+   `add_write_callback(...)` and insert into `node_to_metric`.
+
+4. **Phase 4 — rename** (DisplayName-only `set_attributes`): a
+   device with the same `device_id` but a different `device_name`
+   produces a DisplayName-only mutation. The NodeId is preserved
+   (which is keyed by `device_id`, not `device_name`); clients
+   holding references do not see their references invalidated.
+
+   **Iter-2 review IP1 (Story 9-8 code review iter-2, 2026-05-14):**
+   Phase 4 is demoted from `Failed`-returning to **warn-and-continue**.
+   When `set_attributes` fails, the apply pass emits a separate
+   `event="address_space_rename_failed"` warn audit event and
+   returns `Applied` — the core address-space state (Phases 1-3) is
+   correctly committed; only the cosmetic DisplayName attribute is
+   stale. Operators retry by editing `device_name` to a NEW value
+   in a future reload (note: per the prev-advancement asymmetry
+   below, reverting to the EXACT original name produces no diff
+   and no Phase 4 retry; pick a different name or toggle through
+   two reloads). Rationale: prior `Failed`-return interacted with
+   the listener's prev-advancement guard to create an
+   unrecoverable replay loop (Phase 4 fails → keep prev → next
+   reload re-tries Phase 2 deletes on already-deleted NodeIds →
+   loop forever).
+
+### Lock-hold envelope
+
+Per Story 9-0 Q3 finding (`9-0-spike-report.md:130-160`): 11-node
+bulk add under a single write-lock acquisition takes 117 µs;
+sampler interval is 100 ms (~850× headroom). At typical opcgw
+deployments (≤ 100 devices × ≤ 20 metrics = 2 000 nodes), the
+whole-diff apply runs in well under one sampler tick. No mutation
+chunking is needed below ~10 000 nodes per diff.
+
+### Audit events
+
+Three structured events are emitted by the listener on every
+apply (iter-2 IP1 added the third):
+
+- `event="address_space_mutation_succeeded"` (info / diag) — Phases
+  1-3 completed successfully, AND Phase 4 either completed
+  successfully or its failure was demoted to warn-and-continue
+  (see `address_space_rename_failed` below). Carries all 9 axis
+  counts (`added_applications`, `removed_applications`,
+  `added_devices`, `removed_devices`, `added_metrics`,
+  `removed_metrics`, `added_commands`, `removed_commands`,
+  `renamed_devices`) + `duration_ms` (wall-clock cost of
+  `apply_diff_to_address_space`). Note: `renamed_devices` here
+  counts **attempted** renames; on Phase 4 failure the count is
+  still 1+ AND `address_space_rename_failed` fires.
+- `event="address_space_mutation_failed"` (warn / audit) — Phase 1
+  / 2 / 3 returned `Err`. Carries `reason ∈ {set_attributes_failed,
+  add_failed, remove_failed}` (Phase 1 → `set_attributes_failed`;
+  Phase 2 → `remove_failed`; Phase 3 → `add_failed`), a sanitised
+  `error: %e` field (per NFR7), `duration_ms`, and the same 9 axis
+  counts. The warn message is **reason-aware** (iter-3 review TP1):
+  Phase 1 failures say `prev not advanced — retry to converge`;
+  Phase 2 / 3 partial failures say `prev advanced — address space
+  may be in partial-apply state; inspect counts + error and
+  reconcile manually if needed` (subsequent reloads will not
+  re-attempt this diff).
+- `event="address_space_rename_failed"` (warn / diag) — Phase 4
+  `set_attributes(AttributeId::DisplayName, …)` returned `Err`
+  (iter-2 IP1). The apply pass DOES NOT return Failed — the core
+  address-space state (Phases 1-3) was successfully committed and
+  is in-sync with new config; only the cosmetic device DisplayName
+  attribute is stale. Carries `renamed_count` (number of
+  attempted renames) + `error: %e`. Operators retry by editing
+  `device_name` to a NEW value in a future reload (see Phase 4
+  description above for the prev-advancement caveat).
+
+The Story 9-7-pinned `event="topology_change_detected"` event
+continues to fire on every reload that includes a topology change,
+preserving the 4-axis field set (`added_devices`,
+`removed_devices`, `modified_devices`, `story_9_8_seam`) for
+backward compatibility with `tests/config_hot_reload.rs::topology_change_logs_seam_for_9_8`.
+
+### No transactional rollback + prev-advancement asymmetry
+
+Per `9-0-spike-report.md:196`: botched runtime mutations produce
+silent subscribers (or BadNodeIdUnknown notifications with Story
+9-8's Q2 mitigation), not crashes. Distributed-rollback
+machinery is unnecessary — partial-apply failures are reported via
+the warn-level audit event.
+
+**Iter-2 review IP1 prev-advancement asymmetry (Story 9-8 code
+review iter-2, 2026-05-14):** the listener's `prev` (the
+last-applied config snapshot used to compute the next diff)
+advances under the following rules:
+
+| Apply outcome | Phases committed | `prev` advances? | Why |
+|---|---|---|---|
+| `Applied` | All (1+2+3+4-attempted) | YES | Standard success path. |
+| `NoChange` | None (empty diff) | YES | No-op. |
+| `Failed { reason = set_attributes_failed }` | None (Phase 1 short-circuits before any mutation) | **NO** — keep prev | Phase 1 failure means nothing was committed; retry with the same prev is correct. |
+| `Failed { reason = remove_failed }` | Phase 2 partial | YES | Phase 2 has committed some deletes; advancing prev avoids the replay loop where the next reload's Phase 2 hits already-deleted NodeIds and loops permanently. |
+| `Failed { reason = add_failed }` | Phase 2 complete + Phase 3 partial | YES | Same logic as `remove_failed` — partial commit, advance prev to break the loop. |
+
+The asymmetric advancement is a deliberate iter-2 design
+(superseded iter-1 P2's simpler "advance only on Applied/NoChange"
+which created the replay loop on Phase 2/3/4 partial failures).
+Operators retry SIGHUP / CRUD to recover from Phase 1 failures;
+Phase 2/3 partial-failure recovery is **manual reconciliation**
+based on the failed-event's per-axis counts + sanitised error
+field. If recovery is impossible, restart the gateway.
+
+### Stale read-callback closure leak (option-b limitation)
+
+async-opcua 0.17.1's `SimpleNodeManagerImpl` exposes
+`add_read_callback` / `add_write_callback` but **NOT** the
+parallel removal API. The callback registry fields are private to
+the upstream crate. When Story 9-8 deletes a variable via
+`address_space.write().delete(...)`, the registered closure
+remains in the registry holding clones of any captured Arcs
+(`Arc<dyn StorageBackend>`, `StatusCache`, `device_id`,
+`chirpstack_metric_name`, threshold) — ~120 bytes per closure.
+
+Story 9-8 ships option (b) per the spec authorisation:
+`opc_ua_history::remove_read_callback` /
+`remove_write_callback` are stub functions that return `false`
+and emit a one-time `event="opcgw_stale_read_callback_leak_observed"`
+/ `…_write_…` info log per server lifetime so operators can see
+the limitation without log flooding. Per
+`9-0-spike-report.md:183`: operationally negligible at expected
+churn rates (~150 leaks / 30 days = ~18 KB). Upstream FR is
+pending — precedent: Story 8-1 issue #94 session-rejected
+callback FR.
+
+### v1 limitations
+
+- **BrowseName is not mutable on existing nodes.** A
+  `device_name` rename materialises as a Phase 4 DisplayName-only
+  `set_attributes` call — the BrowseName stays at the old name.
+  Mutating BrowseName would require a delete+re-add cycle that
+  would invalidate the NodeId for clients holding references.
+- **`application_id` rename = remove + re-add.** The
+  `application_id` is the application folder's NodeId; changing
+  it would invalidate every device under that application for
+  clients holding references. v1 treats it as a remove+re-add
+  (the device folder NodeIds are device-scoped, so the device
+  IDs survive the application_id change; but the application-
+  level subscriptions break).
+- **`stale_threshold_seconds` is captured at add-time.** A
+  reload that ADDS a metric uses the post-reload threshold; a
+  reload that does NOT add/remove metrics leaves existing
+  closures unchanged (including the threshold they captured at
+  startup). Issue #113 (live-borrow refactor) tracks the long-
+  term fix.
+- **Stale read-callback closure leak** (see above).
+- **No transactional rollback** (see above).
+- **Address-space mutation does not affect storage payload
+  semantics** (issue #108 is orthogonal — production blocker for
+  Epic 9 retro).
 - **No HTTP trigger.** SIGHUP-only; web-driven reload arrives with
   Stories 9-4 / 9-5 / 9-6.
 - **No filesystem watch.** Editor-save races + `notify`-crate

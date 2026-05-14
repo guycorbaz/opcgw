@@ -197,6 +197,12 @@ index of the event names introduced so far.
 | `command_updated` | `info` (audit) | 9-6 | `security.md` § Configuration mutations |
 | `command_deleted` | `info` (audit) | 9-6 | `security.md` § Configuration mutations |
 | `command_crud_rejected` | `warn` (audit) | 9-6 | `security.md` § Configuration mutations |
+| `address_space_mutation_succeeded` | `info` (diag) | 9-8 | `security.md` § Dynamic OPC UA address-space mutation |
+| `address_space_mutation_failed` | `warn` (audit) | 9-8 | `security.md` § Dynamic OPC UA address-space mutation |
+| `address_space_rename_failed` | `warn` (diag) | 9-8 (iter-2 IP1) | `security.md` § Dynamic OPC UA address-space mutation — Phase 4 demoted to warn-and-continue; failure-event surfaces silent rename errors without failing the apply |
+| `topology_change_detected` | `info` (diag) | 9-7 (+9-8 fields) | `security.md` § Dynamic OPC UA address-space mutation |
+| `opcgw_stale_read_callback_leak_observed` | `info` (diag, one-shot) | 9-8 | `security.md` § Dynamic OPC UA address-space mutation (Task 6 option-b limitation) |
+| `opcgw_stale_write_callback_leak_observed` | `info` (diag, one-shot) | 9-8 | `security.md` § Dynamic OPC UA address-space mutation (Task 6 option-b limitation) |
 
 The CSRF middleware dispatches between `application_crud_rejected`,
 `device_crud_rejected`, and `command_crud_rejected` by URL path

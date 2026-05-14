@@ -35,7 +35,7 @@ use crate::opc_ua_history::{
 use std::collections::HashMap;
 
 // Constants for staleness detection (Story 5-2)
-const DEFAULT_STALE_THRESHOLD_SECS: u64 = 120;
+pub(crate) const DEFAULT_STALE_THRESHOLD_SECS: u64 = 120;
 const STATUS_CODE_BAD_THRESHOLD_SECS: u64 = 86400; // 24 hours
 
 /// Story 6-3, AC#6: one-shot flag to ensure the `gateway_status_init`
@@ -55,7 +55,7 @@ static GATEWAY_STATUS_INIT_LOGGED: std::sync::atomic::AtomicBool =
 /// access disjoint shards lock-free, so the per-read 100 ms budget is not
 /// threatened by mutex contention. `DashMap::insert` returns the previous
 /// value (`Option<V>`), preserving the prior `Mutex<HashMap>` semantics.
-type StatusCache = Arc<DashMap<(String, String), opcua::types::StatusCode>>;
+pub type StatusCache = Arc<DashMap<(String, String), opcua::types::StatusCode>>;
 
 /// Lifecycle handles produced by [`OpcUa::build`] and consumed by
 /// [`OpcUa::run_handles`] (Story 9-0 AC#5 Shape B).
@@ -108,6 +108,19 @@ pub struct RunHandles {
     /// (Story 9-0 spike target). Story 9-7 / 9-8 will use the same Arc
     /// from production hot-reload code.
     pub manager: Arc<OpcgwHistoryNodeManager>,
+    /// Storage backend Arc. Story 9-8 hot-reload listener clones this
+    /// to capture into newly-added metric read-callback closures
+    /// (mirroring `OpcUa::add_nodes`'s closure-clone pattern).
+    pub storage: Arc<dyn StorageBackend>,
+    /// Story 5-2 transition-logging cache. Story 9-8 hot-reload
+    /// listener clones this for newly-added metric read-callbacks so
+    /// transition logging works for runtime-added metrics.
+    pub last_status: StatusCache,
+    /// Story 8-3 reverse-lookup registry. Story 9-8 hot-reload
+    /// listener mutates this (insert on add, remove on remove) so
+    /// HistoryRead resolves for runtime-added metrics and doesn't
+    /// return stale rows for runtime-removed ones.
+    pub node_to_metric: Arc<OpcuaRwLock<HashMap<NodeId, (String, String)>>>,
     /// Cancellation token threaded through to all spawned tasks. Cloned
     /// from `OpcUa.cancel_token` during `build`. `run_handles` calls
     /// `cancel()` on this after `server.run()` resolves to wind down the
@@ -839,6 +852,9 @@ impl OpcUa {
             server,
             server_handle,
             manager,
+            storage: self.storage,
+            last_status: self.last_status,
+            node_to_metric: self.node_to_metric,
             cancel_token: self.cancel_token,
             gauge_handle,
             state_guard,
@@ -856,6 +872,9 @@ impl OpcUa {
             server,
             server_handle: _server_handle,
             manager: _manager,
+            storage: _storage,
+            last_status: _last_status,
+            node_to_metric: _node_to_metric,
             cancel_token,
             gauge_handle,
             state_guard,
@@ -1292,7 +1311,7 @@ impl OpcUa {
     /// Called as a callback when OPC UA clients read variable nodes. Per-read
     /// latency budget is <110 ms (Story 5-1: <100 ms storage; Story 6-1: <10 ms
     /// logging overhead).
-    fn get_value(
+    pub(crate) fn get_value(
         storage: &Arc<dyn StorageBackend>,
         last_status: &StatusCache,
         device_id: String,
@@ -1871,7 +1890,7 @@ impl OpcUa {
     /// * `opcua::types::StatusCode::BadTypeMismatch` - Data type conversion failed
     /// * `opcua::types::StatusCode::BadOutOfRange` - Command payload bounds check failed
     /// * `opcua::types::StatusCode::BadInternalError` - Storage queue_command() failed
-    fn set_command(
+    pub(crate) fn set_command(
         storage: &Arc<dyn StorageBackend>,
         device_id: &str,
         command: &DeviceCommandCfg,

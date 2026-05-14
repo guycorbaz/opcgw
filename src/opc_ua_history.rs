@@ -55,7 +55,7 @@ use opcua::types::{
     DataValue, DateTime, MonitoringMode, NodeId, ReadRawModifiedDetails, StatusCode,
     TimestampsToReturn, Variant,
 };
-use tracing::{debug, error, trace};
+use tracing::{debug, error, info, trace};
 
 use crate::storage::{HistoricalMetricRow, MetricType, StorageBackend};
 
@@ -484,6 +484,122 @@ pub fn opcgw_history_node_manager(
         node_to_metric,
         max_results_per_node,
     ))
+}
+
+// =====================================================================
+// Story 9-8 Task 6 — remove_read_callback / remove_write_callback
+// =====================================================================
+//
+// async-opcua 0.17.1's `SimpleNodeManagerImpl` exposes
+// `add_read_callback` / `add_write_callback` / `add_method_callback`
+// but **does NOT expose** the parallel removal API. The callback
+// registries are private fields (`read_cbs: RwLock<HashMap<NodeId, ReadCB>>`,
+// etc. — see `~/.cargo/registry/.../async-opcua-server-0.17.1/src/node_manager/memory/simple.rs:118-126`)
+// and there is no public method that drops a registered callback for a
+// given NodeId. The 9-0 spike (`_bmad-output/implementation-artifacts/9-0-spike-report.md:177-189`)
+// documented this as the **stale read-callback closure leak**:
+// deleting a variable via `address_space.write().delete(...)` leaves
+// the closure in the registry holding clones of any captured Arcs
+// (`Arc<dyn StorageBackend>`, `StatusCache`, `device_id`, etc., totalling
+// ~120 bytes per closure). Operationally negligible at expected churn
+// rates (~150 leaks / 30 days = ~18 KB) but strictly a leak.
+//
+// Story 9-8's spec authorised **option (a)** (extend
+// `OpcgwHistoryNodeManager` with a wrap method that mutates the inner
+// `SimpleNodeManagerImpl` registry) as the default and **option (b)**
+// (stub returning `false` + log deferred-leak once + document) as the
+// fallback when async-opcua's API surface makes option (a) impossible.
+// Field-level inspection at impl time confirmed the registries are
+// private with no accessor — option (a) cannot be implemented without
+// forking async-opcua or patching the upstream crate. **Option (b)
+// ships.** See `_bmad-output/implementation-artifacts/deferred-work.md`
+// under "Deferred from: Story 9-8 (2026-05-13)" for the upstream-FR
+// follow-up (precedent: Story 8-1 issue #94 session-rejected callback
+// FR).
+
+use std::sync::OnceLock;
+
+/// Story 9-8 Task 6 (option b) — stub for the absent
+/// `SimpleNodeManagerImpl::remove_read_callback`. Always returns
+/// `false` (no callback was removed; the underlying registry is
+/// unreachable). Emits a single info-level
+/// `opcgw_stale_read_callback_leak_observed` log per server lifetime
+/// so operators can see the limitation without log flooding.
+///
+/// `manager` parameter is unused today (the wrap target is private)
+/// but accepted so the public signature is stable when option (a)
+/// becomes possible (e.g. async-opcua exposes a removal API
+/// upstream).
+///
+/// # Paired-modify path (clarification — iter-1 review P7, Blind B-H2 doc aspect)
+///
+/// When Story 9-8's apply pass materialises a modified metric as a
+/// paired (remove, add) on the SAME NodeId:
+///
+///  1. Phase 2 calls `address_space.write().delete(node_id, true)` →
+///     the variable is removed from the address space.
+///  2. Phase 2 then calls `remove_read_callback(manager, node_id)`
+///     (this stub) → returns false; the closure stays in
+///     `SimpleNodeManagerImpl::read_cbs` registry holding stale
+///     Arcs (the v1 leak).
+///  3. Phase 3 calls `address_space.write().add_variables(...)` →
+///     the variable is re-added under the SAME NodeId.
+///  4. Phase 3 calls `manager.inner().simple().add_read_callback(node_id, new_closure)`.
+///
+/// `SimpleNodeManagerImpl::add_read_callback` internally does
+/// `cbs.insert(id, Arc::new(cb))` (verified at
+/// `~/.cargo/registry/.../async-opcua-server-0.17.1/src/node_manager/memory/simple.rs:420-422`)
+/// where `cbs: RwLock<HashMap<NodeId, ReadCB>>`. `HashMap::insert`
+/// **OVERWRITES** on duplicate key, returning the prior value (which
+/// the call discards). So the new closure correctly REPLACES the
+/// stale one for paired-modify scenarios — only pure-remove (no
+/// matching add in the same diff) leaks.
+///
+/// **Summary**: pure-remove leaks; paired-modify replaces. The
+/// `false` return value is technically correct for both cases
+/// (this stub never removes anything; in the paired-modify case the
+/// subsequent `add_read_callback` does the replacement).
+///
+/// See `_bmad-output/implementation-artifacts/deferred-work.md`
+/// section `## Deferred from: code review of 9-8-dynamic-opc-ua-address-space-mutation — iter-1 (2026-05-13)`
+/// entry `9-8-iter1-D7` for the upstream FR follow-up plan.
+pub fn remove_read_callback(
+    _manager: &OpcgwHistoryNodeManager,
+    node_id: &NodeId,
+) -> bool {
+    static WARNED: OnceLock<()> = OnceLock::new();
+    let first_time = WARNED.set(()).is_ok();
+    if first_time {
+        info!(
+            event = "opcgw_stale_read_callback_leak_observed",
+            sample_node_id = %node_id,
+            limitation = "async-opcua 0.17.1 does not expose SimpleNodeManagerImpl::remove_read_callback",
+            mitigation = "deferred-work.md `## Deferred from: code review of 9-8-dynamic-opc-ua-address-space-mutation — iter-1 (2026-05-13)` entry 9-8-iter1-D7; upstream FR pending",
+            "Address-space delete leaves the read-callback closure registered (Story 9-8 v1 limitation, pure-remove only — paired-modify is OK)"
+        );
+    }
+    false
+}
+
+/// Story 9-8 Task 6 (option b) — stub for the absent
+/// `SimpleNodeManagerImpl::remove_write_callback`. Parallel to
+/// [`remove_read_callback`]; always returns `false`.
+pub fn remove_write_callback(
+    _manager: &OpcgwHistoryNodeManager,
+    node_id: &NodeId,
+) -> bool {
+    static WARNED: OnceLock<()> = OnceLock::new();
+    let first_time = WARNED.set(()).is_ok();
+    if first_time {
+        info!(
+            event = "opcgw_stale_write_callback_leak_observed",
+            sample_node_id = %node_id,
+            limitation = "async-opcua 0.17.1 does not expose SimpleNodeManagerImpl::remove_write_callback",
+            mitigation = "deferred-work.md `## Deferred from: code review of 9-8-dynamic-opc-ua-address-space-mutation — iter-1 (2026-05-13)` entry 9-8-iter1-D7; upstream FR pending",
+            "Address-space delete leaves the write-callback closure registered (Story 9-8 v1 limitation, pure-remove only — paired-modify is OK)"
+        );
+    }
+    false
 }
 
 #[cfg(test)]

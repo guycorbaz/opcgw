@@ -29,6 +29,7 @@ mod opc_ua;
 mod opc_ua_auth;
 mod opc_ua_history;
 mod opc_ua_session_monitor;
+mod opcua_topology_apply;
 mod security;
 mod security_hmac;
 mod storage;
@@ -700,12 +701,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let opcua_listener_handle = {
+        // Story 9-8: clone handles for the runtime address-space
+        // mutation apply path. All Arc-backed; clone is cheap.
         let manager = run_handles.manager.clone();
+        let subscriptions = run_handles.server_handle.subscriptions().clone();
+        let storage_for_listener = run_handles.storage.clone();
+        let last_status_for_listener = run_handles.last_status.clone();
+        let node_to_metric_for_listener = run_handles.node_to_metric.clone();
+        let ns = run_handles
+            .server_handle
+            .get_namespace_index(crate::utils::OPCUA_NAMESPACE_URI)
+            .ok_or_else(|| {
+                error!("Failed to get OPC UA namespace index for hot-reload listener");
+                crate::utils::OpcGwError::OpcUa(
+                    "Failed to get OPC UA namespace for listener".to_string(),
+                )
+            })?;
         let rx = reload_handle.subscribe();
         let cancel = cancel_token.clone();
         let initial = application_config.clone();
         tokio::spawn(async move {
-            crate::config_reload::run_opcua_config_listener(manager, initial, rx, cancel).await;
+            crate::config_reload::run_opcua_config_listener(
+                manager,
+                subscriptions,
+                storage_for_listener,
+                last_status_for_listener,
+                node_to_metric_for_listener,
+                ns,
+                initial,
+                rx,
+                cancel,
+            )
+            .await;
         })
     };
 

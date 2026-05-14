@@ -13,6 +13,7 @@ pub mod opc_ua;
 pub mod opc_ua_auth;
 pub mod opc_ua_history;
 pub mod opc_ua_session_monitor;
+pub mod opcua_topology_apply;
 pub mod security;
 pub mod security_hmac;
 pub mod storage;

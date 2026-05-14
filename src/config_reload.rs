@@ -1112,27 +1112,49 @@ pub async fn run_web_config_listener(
     }
 }
 
-/// Story 9-7 Task 5 — OPC UA subsystem hot-reload listener (Story 9-8 stub).
+/// Story 9-7 Task 5 + **Story 9-8 Tasks 2-5** — OPC UA subsystem
+/// hot-reload listener with end-to-end address-space mutation apply.
 ///
-/// On every `config_rx.changed()` notification, computes the topology
-/// diff between the previous config and the new config and emits a
-/// `topology_change_detected` info event with `added_devices`,
-/// `removed_devices`, `modified_devices` field counts.
+/// On every `config_rx.changed()` notification:
 ///
-/// **Story 9-7 ships the seam — Story 9-8 implements the apply.** The
-/// 9-7 listener does NOT call `address_space.write().add_variables(...)`
-/// or `delete(...)` — that is intentionally deferred to 9-8 per
-/// `epics.md:916-931`. Until 9-8 lands, an operator who hot-reloads a
-/// topology change sees the dashboard update but the OPC UA address
-/// space stays frozen at startup state. Documented in
-/// `docs/security.md § Configuration hot-reload`.
+///  1. **Topology diff log** (Story 9-7 backward compat): emits
+///     `event="topology_change_detected"` info-level event with the
+///     four 9-7-pinned axis counts (`added_devices`, `removed_devices`,
+///     `modified_devices`, `story_9_8_seam`) so the existing
+///     `tests/config_hot_reload.rs::topology_change_logs_seam_for_9_8`
+///     integration test continues to pass byte-for-byte.
+///  2. **Apply pass** (Story 9-8): calls
+///     [`crate::opcua_topology_apply::apply_diff_to_address_space`]
+///     which walks the 7-axis `AddressSpaceDiff` (added/removed
+///     applications/devices/metrics/commands + renamed_devices) and
+///     applies the four-phase mutation envelope (Q2 set_values
+///     mitigation → delete → add → DisplayName rename).
+///  3. **Apply outcome log** (Story 9-8): emits
+///     `event="address_space_mutation_succeeded"` info on success
+///     (with all 9 axis counts + `duration_ms`) or
+///     `event="address_space_mutation_failed"` warn on failure (with
+///     `reason` + sanitised `error: %e` field).
 ///
-/// The `_manager` parameter exists so 9-8 can pick up this signature
-/// without churn; v1 ignores it.
+/// Story 9-7's documented v1 limitation ("dashboard updates but OPC UA
+/// stays frozen") is closed by this implementation — topology
+/// hot-reload is now end-to-end functional and FR24 is satisfied.
 ///
 /// Loops until `cancel_token` is fired or the watch sender is dropped.
+///
+/// **Issue #110 carry-forward**: the listener cooperates with
+/// `cancel_token.cancel()` explicitly — no RAII drop reliance.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_opcua_config_listener(
-    _manager: Arc<crate::opc_ua_history::OpcgwHistoryNodeManager>,
+    manager: Arc<crate::opc_ua_history::OpcgwHistoryNodeManager>,
+    subscriptions: Arc<opcua::server::SubscriptionCache>,
+    storage: Arc<dyn crate::storage::StorageBackend>,
+    last_status: crate::opc_ua::StatusCache,
+    node_to_metric: Arc<
+        opcua::sync::RwLock<
+            std::collections::HashMap<opcua::types::NodeId, (String, String)>,
+        >,
+    >,
+    ns: u16,
     initial: Arc<AppConfig>,
     mut config_rx: watch::Receiver<Arc<AppConfig>>,
     cancel_token: CancellationToken,
@@ -1165,13 +1187,152 @@ pub async fn run_opcua_config_listener(
                 }
                 let new_config = config_rx.borrow_and_update().clone();
 
-                // Compute and log the topology diff. Iter-1 review
-                // P23: extracted into `log_topology_diff` so the
-                // integration test for AC#4 can drive the log
-                // emission without standing up a full
-                // `OpcgwHistoryNodeManager`.
+                // Step 1 — emit the Story-9-7-pinned diff log for
+                // backward compat with the integration test
+                // `topology_change_logs_seam_for_9_8`.
                 log_topology_diff(&prev, &new_config);
-                prev = new_config;
+
+                // Step 2 — Story 9-8 apply pass. Reads the new config's
+                // staleness threshold so runtime-added closures
+                // capture the live value at add time (note: existing
+                // closures from earlier adds keep their captured
+                // threshold — issue #113 carry-forward).
+                let stale_threshold = new_config
+                    .opcua
+                    .stale_threshold_seconds
+                    .unwrap_or(crate::opc_ua::DEFAULT_STALE_THRESHOLD_SECS);
+                let outcome = crate::opcua_topology_apply::apply_diff_to_address_space(
+                    &prev,
+                    &new_config,
+                    &manager,
+                    &subscriptions,
+                    &storage,
+                    &last_status,
+                    &node_to_metric,
+                    ns,
+                    stale_threshold,
+                );
+
+                // Step 3 — apply outcome audit event + prev advancement.
+                //
+                // Iter-2 review IP1 (Edge E-H1-iter2 + Blind B-H1-iter2
+                // converged HIGH-REG): the iter-1 P2 "keep prev on any
+                // Failed" guard combined with iter-1 P1's
+                // None-as-failure capture created an unrecoverable
+                // replay loop: Phase 2/3 partial-fail → P2 keeps
+                // prev → next reload re-computes same diff → Phase 2
+                // hits already-deleted NodeIds → P1 routes to
+                // Failed{REMOVE_FAILED} → loop forever.
+                //
+                // Refined iter-2 semantics — advance `prev` UNLESS
+                // the failure reason is SET_ATTRIBUTES_FAILED (the
+                // ONLY reason now emitted from Phase 1, since
+                // iter-2 IP1 demoted Phase 4's rename-failure to
+                // warn-and-continue). Phase 1 failure means nothing
+                // was committed to the address space; retry with
+                // the same prev is correct. All other Failed paths
+                // (REMOVE_FAILED from Phase 2, ADD_FAILED from
+                // Phase 3) imply partial commit — advance prev to
+                // avoid the retry loop; the operator-visible
+                // Failed event tells them what to investigate.
+                let mutation_succeeded = match &outcome {
+                    crate::opcua_topology_apply::AddressSpaceMutationOutcome::NoChange
+                    | crate::opcua_topology_apply::AddressSpaceMutationOutcome::Applied {
+                        ..
+                    } => true,
+                    // Phase 1 failure: nothing committed → keep
+                    // prev so retry has a chance.
+                    crate::opcua_topology_apply::AddressSpaceMutationOutcome::Failed {
+                        reason,
+                        ..
+                    } if *reason
+                        == crate::opcua_topology_apply::failure_reason::SET_ATTRIBUTES_FAILED =>
+                    {
+                        false
+                    }
+                    // Phase 2/3 partial-failure: some mutations
+                    // committed → advance prev to avoid replay loop
+                    // (per iter-2 IP1).
+                    crate::opcua_topology_apply::AddressSpaceMutationOutcome::Failed {
+                        ..
+                    } => true,
+                };
+                match outcome {
+                    crate::opcua_topology_apply::AddressSpaceMutationOutcome::NoChange => {
+                        // Diff was empty — already logged via
+                        // log_topology_diff (which returns false and
+                        // emits nothing on no-changes); nothing more
+                        // to emit here.
+                    }
+                    crate::opcua_topology_apply::AddressSpaceMutationOutcome::Applied {
+                        counts,
+                        duration_ms,
+                    } => {
+                        info!(
+                            event = "address_space_mutation_succeeded",
+                            added_applications = counts.added_applications,
+                            removed_applications = counts.removed_applications,
+                            added_devices = counts.added_devices,
+                            removed_devices = counts.removed_devices,
+                            added_metrics = counts.added_metrics,
+                            removed_metrics = counts.removed_metrics,
+                            added_commands = counts.added_commands,
+                            removed_commands = counts.removed_commands,
+                            renamed_devices = counts.renamed_devices,
+                            duration_ms,
+                            "OPC UA address space mutated per topology diff"
+                        );
+                    }
+                    crate::opcua_topology_apply::AddressSpaceMutationOutcome::Failed {
+                        counts,
+                        duration_ms,
+                        reason,
+                        error,
+                    } => {
+                        // Iter-3 review TP1 (Edge E-H1-iter3): make the
+                        // warn message reason-aware. After iter-2 IP1
+                        // refined the prev-advancement guard, only
+                        // Phase 1 (SET_ATTRIBUTES_FAILED) failures
+                        // keep prev unchanged; Phase 2/3 partial
+                        // failures advance prev to avoid the replay
+                        // loop. The prior message text said "prev not
+                        // advanced; retry to converge" for ALL Failed
+                        // outcomes, which mis-directed operators
+                        // following a Phase 2/3 partial failure (where
+                        // prev IS advanced and retry would see an
+                        // empty diff).
+                        let retry_hint = if reason
+                            == crate::opcua_topology_apply::failure_reason::SET_ATTRIBUTES_FAILED
+                        {
+                            "prev not advanced — retry SIGHUP / CRUD reload to converge \
+                             (Phase 1 failure means no mutations were committed)"
+                        } else {
+                            "prev advanced — address space may be in partial-apply state; \
+                             inspect counts + error and reconcile manually if needed \
+                             (subsequent reloads will not re-attempt this diff)"
+                        };
+                        warn!(
+                            event = "address_space_mutation_failed",
+                            reason,
+                            error,
+                            duration_ms,
+                            added_applications = counts.added_applications,
+                            removed_applications = counts.removed_applications,
+                            added_devices = counts.added_devices,
+                            removed_devices = counts.removed_devices,
+                            added_metrics = counts.added_metrics,
+                            removed_metrics = counts.removed_metrics,
+                            added_commands = counts.added_commands,
+                            removed_commands = counts.removed_commands,
+                            renamed_devices = counts.renamed_devices,
+                            "OPC UA address-space mutation failed: {retry_hint}"
+                        );
+                    }
+                }
+
+                if mutation_succeeded {
+                    prev = new_config;
+                }
             }
         }
     }
