@@ -374,7 +374,7 @@ fn build_data_values(rows: &[HistoricalMetricRow]) -> Vec<DataValue> {
         let variant = match row.data_type {
             // Review patch P10: align with the live read path
             // (`OpcUa::convert_metric_to_variant`) which emits
-            // `Variant::Float` (f32) for `MetricType::Float`. The variable's
+            // `Variant::Float` (f32) for `MetricType::Float(0.0)`. The variable's
             // declared DataType (set in `OpcUa::add_nodes` from
             // `OpcMetricTypeConfig::Float`) is also Float (f32) — using
             // Variant::Double here would mean the historized DataType
@@ -382,7 +382,11 @@ fn build_data_values(rows: &[HistoricalMetricRow]) -> Vec<DataValue> {
             // Parse as f64 first to detect non-finite values, then narrow to
             // f32 with a finite-after-narrowing check (an f64 in (f32::MAX,
             // f64::MAX) overflows to f32::INFINITY, which we skip).
-            MetricType::Float => match row.value.parse::<f64>() {
+            // TODO(A-5): pattern-match the typed payload directly instead of
+            // re-parsing row.value. A-1 keeps the existing parse-from-string
+            // logic working by adding (_) discards to the discriminant arms;
+            // A-5 owns the actual payload-aware refactor.
+            MetricType::Float(_) => match row.value.parse::<f64>() {
                 Ok(f) if f.is_finite() => {
                     let narrowed = f as f32;
                     if narrowed.is_finite() {
@@ -397,21 +401,21 @@ fn build_data_values(rows: &[HistoricalMetricRow]) -> Vec<DataValue> {
                     continue;
                 }
             },
-            MetricType::Int => match row.value.parse::<i64>() {
+            MetricType::Int(_) => match row.value.parse::<i64>() {
                 Ok(i) => Variant::Int64(i),
                 Err(_) => {
                     trace!(value = %row.value, "history: skipping unparseable Int row");
                     continue;
                 }
             },
-            MetricType::Bool => match bool::from_str(&row.value) {
+            MetricType::Bool(_) => match bool::from_str(&row.value) {
                 Ok(b) => Variant::Boolean(b),
                 Err(_) => {
                     trace!(value = %row.value, "history: skipping unparseable Bool row");
                     continue;
                 }
             },
-            MetricType::String => Variant::String(row.value.clone().into()),
+            MetricType::String(_) => Variant::String(row.value.clone().into()),
         };
         let dt = DateTime::from(chrono::DateTime::<Utc>::from(row.timestamp));
         out.push(DataValue {
@@ -616,7 +620,7 @@ mod tests {
     fn test_build_data_values_float_round_trip() {
         let rows = vec![HistoricalMetricRow {
             value: "20.5".to_string(),
-            data_type: MetricType::Float,
+            data_type: MetricType::Float(0.0),
             timestamp: std::time::SystemTime::UNIX_EPOCH
                 + std::time::Duration::from_secs(1_700_000_000),
         }];
@@ -634,12 +638,12 @@ mod tests {
         let rows = vec![
             HistoricalMetricRow {
                 value: "true".to_string(),
-                data_type: MetricType::Bool,
+                data_type: MetricType::Bool(false),
                 timestamp: std::time::SystemTime::UNIX_EPOCH,
             },
             HistoricalMetricRow {
                 value: "false".to_string(),
-                data_type: MetricType::Bool,
+                data_type: MetricType::Bool(false),
                 timestamp: std::time::SystemTime::UNIX_EPOCH,
             },
         ];
@@ -656,17 +660,17 @@ mod tests {
         let rows = vec![
             HistoricalMetricRow {
                 value: "true".to_string(),
-                data_type: MetricType::Bool,
+                data_type: MetricType::Bool(false),
                 timestamp: std::time::SystemTime::UNIX_EPOCH,
             },
             HistoricalMetricRow {
                 value: "garbage".to_string(),
-                data_type: MetricType::Bool,
+                data_type: MetricType::Bool(false),
                 timestamp: std::time::SystemTime::UNIX_EPOCH,
             },
             HistoricalMetricRow {
                 value: "false".to_string(),
-                data_type: MetricType::Bool,
+                data_type: MetricType::Bool(false),
                 timestamp: std::time::SystemTime::UNIX_EPOCH,
             },
         ];

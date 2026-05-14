@@ -94,7 +94,7 @@ impl StorageBackend for InMemoryBackend {
         let metrics = self.metrics.lock().map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
         Ok(metrics
             .get(device_id)
-            .and_then(|device_metrics| device_metrics.get(metric_name).copied()))
+            .and_then(|device_metrics| device_metrics.get(metric_name).cloned()))
     }
 
     fn get_metric_value(&self, device_id: &str, metric_name: &str) -> Result<Option<MetricValue>, OpcGwError> {
@@ -161,7 +161,7 @@ impl StorageBackend for InMemoryBackend {
         metrics
             .entry(device_id.to_string())
             .or_insert_with(HashMap::new)
-            .insert(metric_name.to_string(), *value);
+            .insert(metric_name.to_string(), value.clone());
         drop(metrics);
 
         // Note: InMemoryBackend stores MetricType enum, actual values stored via batch_write_metrics
@@ -179,11 +179,11 @@ impl StorageBackend for InMemoryBackend {
         let mut value_map = self.metric_values.lock().map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
 
         for metric in metrics {
-            // Store type
+            // Store type — clone because MetricType is no longer Copy post-A-1.
             type_map
                 .entry(metric.device_id.clone())
                 .or_insert_with(HashMap::new)
-                .insert(metric.metric_name.clone(), metric.data_type);
+                .insert(metric.metric_name.clone(), metric.data_type.clone());
 
             // Store value with metadata
             let metric_value = MetricValue {
@@ -213,7 +213,7 @@ impl StorageBackend for InMemoryBackend {
                     metric_name: metric_name.clone(),
                     value: metric_type.to_string(),
                     timestamp: Utc::now(),
-                    data_type: *metric_type,
+                    data_type: metric_type.clone(),
                 });
             }
         }

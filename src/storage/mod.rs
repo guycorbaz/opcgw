@@ -995,20 +995,22 @@ impl Storage {
                 let mut device_metrics = HashMap::new();
                 for metric in device.read_metric_list.iter() {
                     // Initialize metric with type-appropriate default value
+                    // A-1: payload-bearing default values. Real measurements
+                    // replace these on the first poll cycle UPSERT (A-3).
                     let metric_type = match metric.metric_type {
-                        OpcMetricTypeConfig::Bool => MetricType::Bool,
-                        OpcMetricTypeConfig::Int => MetricType::Int,
-                        OpcMetricTypeConfig::Float => MetricType::Float,
-                        OpcMetricTypeConfig::String => MetricType::String,
+                        OpcMetricTypeConfig::Bool => MetricType::Bool(false),
+                        OpcMetricTypeConfig::Int => MetricType::Int(0),
+                        OpcMetricTypeConfig::Float => MetricType::Float(0.0),
+                        OpcMetricTypeConfig::String => MetricType::String(String::new()),
                     };
                     let default_value = MetricValueInternal {
                         device_id: device.device_id.clone(),
                         metric_name: metric.chirpstack_metric_name.clone(),
-                        value: match metric_type {
-                            MetricType::Bool => "false".to_string(),
-                            MetricType::Int => "0".to_string(),
-                            MetricType::Float => "0.0".to_string(),
-                            MetricType::String => String::new(),
+                        value: match &metric_type {
+                            MetricType::Bool(_) => "false".to_string(),
+                            MetricType::Int(_) => "0".to_string(),
+                            MetricType::Float(_) => "0.0".to_string(),
+                            MetricType::String(_) => String::new(),
                         },
                         timestamp: chrono::Utc::now(),
                         data_type: metric_type,
@@ -1699,7 +1701,7 @@ mod tests {
             metric_name: no_metric.clone(),
             value: "10.0".to_string(),
             timestamp: Utc::now(),
-            data_type: MetricType::Float,
+            data_type: MetricType::Float(0.0),
         };
 
         // This should NOT panic — graceful handling of missing device
@@ -1739,7 +1741,7 @@ mod tests {
             metric_name: metric.clone(),
             value: "10.0".to_string(),
             timestamp: Utc::now(),
-            data_type: MetricType::Float,
+            data_type: MetricType::Float(0.0),
         };
 
         // Test setting and getting metric value
@@ -1750,7 +1752,7 @@ mod tests {
         assert_eq!(retrieved_val.device_id, device_id);
         assert_eq!(retrieved_val.metric_name, metric);
         assert_eq!(retrieved_val.value, "10.0");
-        assert_eq!(retrieved_val.data_type, MetricType::Float);
+        assert_eq!(retrieved_val.data_type, MetricType::Float(0.0));
 
         // Test error cases
         assert_eq!(storage.get_metric_value(&no_device_id, &metric), None);

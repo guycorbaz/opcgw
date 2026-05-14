@@ -85,7 +85,7 @@ fn bench_history_read_7_day_full_retention() {
                 device_id: BENCH_DEVICE_ID.to_string(),
                 metric_name: BENCH_METRIC_NAME.to_string(),
                 value: format!("{}.{}", i % 100, i % 10),
-                data_type: MetricType::Float,
+                data_type: MetricType::Float(0.0),
                 timestamp: base + Duration::from_secs(i as u64),
             })
             .collect();

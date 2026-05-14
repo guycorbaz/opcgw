@@ -1239,13 +1239,13 @@ mod tests {
             let now = std::time::SystemTime::now();
 
             // Insert metrics of different types
-            backend.upsert_metric_value("device_1", "temperature", &MetricType::Float, now)
+            backend.upsert_metric_value("device_1", "temperature", &MetricType::Float(0.0), now)
                 .expect("Should upsert float");
-            backend.upsert_metric_value("device_1", "humidity", &MetricType::Int, now)
+            backend.upsert_metric_value("device_1", "humidity", &MetricType::Int(0), now)
                 .expect("Should upsert int");
-            backend.upsert_metric_value("device_2", "active", &MetricType::Bool, now)
+            backend.upsert_metric_value("device_2", "active", &MetricType::Bool(false), now)
                 .expect("Should upsert bool");
-            backend.upsert_metric_value("device_2", "status", &MetricType::String, now)
+            backend.upsert_metric_value("device_2", "status", &MetricType::String(String::new()), now)
                 .expect("Should upsert string");
         }
 
@@ -1263,10 +1263,10 @@ mod tests {
 
                 // Verify data types are correct
                 match metric.metric_name.as_str() {
-                    "temperature" => assert_eq!(metric.data_type, MetricType::Float),
-                    "humidity" => assert_eq!(metric.data_type, MetricType::Int),
-                    "active" => assert_eq!(metric.data_type, MetricType::Bool),
-                    "status" => assert_eq!(metric.data_type, MetricType::String),
+                    "temperature" => assert_eq!(metric.data_type, MetricType::Float(0.0)),
+                    "humidity" => assert_eq!(metric.data_type, MetricType::Int(0)),
+                    "active" => assert_eq!(metric.data_type, MetricType::Bool(false)),
+                    "status" => assert_eq!(metric.data_type, MetricType::String(String::new())),
                     _ => panic!("Unexpected metric name: {}", metric.metric_name),
                 }
             }

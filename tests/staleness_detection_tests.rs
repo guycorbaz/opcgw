@@ -25,7 +25,7 @@ mod tests {
             metric_name: "test_metric".to_string(),
             value: value_str.to_string(),
             timestamp: metric_time,
-            data_type: MetricType::Float,
+            data_type: MetricType::Float(0.0),
         }
     }
 
@@ -98,7 +98,7 @@ mod tests {
             metric_name: "test_metric".to_string(),
             value: "23.5".to_string(),
             timestamp: old_time,
-            data_type: MetricType::Float,
+            data_type: MetricType::Float(0.0),
         };
 
         let now = Utc::now();
@@ -121,7 +121,7 @@ mod tests {
             metric_name: "test_metric".to_string(),
             value: "23.5".to_string(),
             timestamp: old_time,
-            data_type: MetricType::Float,
+            data_type: MetricType::Float(0.0),
         };
 
         let now = Utc::now();
@@ -195,7 +195,7 @@ mod tests {
             metric_name: "test_metric".to_string(),
             value: "23.5".to_string(),
             timestamp: future_time,
-            data_type: MetricType::Float,
+            data_type: MetricType::Float(0.0),
         };
 
         let now = Utc::now();

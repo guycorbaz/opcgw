@@ -57,7 +57,7 @@ fn test_classify_metric_kind_enum_values() {
 #[test]
 fn test_metric_kind_gauge_to_float() {
     // AC#1: When the poller receives a metric with kind == GAUGE (2),
-    // it should be stored as MetricType::Float
+    // it should be stored as MetricType::Float(0.0)
     let gauge_metric = mock_metric("temperature", 2, 25.5);
 
     assert_eq!(gauge_metric.kind, 2);
@@ -65,14 +65,14 @@ fn test_metric_kind_gauge_to_float() {
     assert_eq!(gauge_metric.datasets[0].data[0], 25.5);
 
     // The metric kind is GAUGE (2), which should map to Float
-    let expected_type = MetricType::Float;
-    assert_eq!(expected_type, MetricType::Float);
+    let expected_type = MetricType::Float(0.0);
+    assert_eq!(expected_type, MetricType::Float(0.0));
 }
 
 #[test]
 fn test_metric_kind_counter_to_int() {
     // AC#2: When the poller receives a metric with kind == COUNTER (0),
-    // it should be stored as MetricType::Int
+    // it should be stored as MetricType::Int(0)
     let counter_metric = mock_metric("packet_count", 0, 100.0);
 
     assert_eq!(counter_metric.kind, 0);
@@ -80,14 +80,14 @@ fn test_metric_kind_counter_to_int() {
     assert_eq!(counter_metric.datasets[0].data[0], 100.0);
 
     // The metric kind is COUNTER (0), which should map to Int
-    let expected_type = MetricType::Int;
-    assert_eq!(expected_type, MetricType::Int);
+    let expected_type = MetricType::Int(0);
+    assert_eq!(expected_type, MetricType::Int(0));
 }
 
 #[test]
 fn test_metric_kind_absolute_to_float() {
     // AC#3: When the poller receives a metric with kind == ABSOLUTE (1),
-    // it should be stored as MetricType::Float
+    // it should be stored as MetricType::Float(0.0)
     let absolute_metric = mock_metric("energy_used", 1, 50.0);
 
     assert_eq!(absolute_metric.kind, 1);
@@ -95,8 +95,8 @@ fn test_metric_kind_absolute_to_float() {
     assert_eq!(absolute_metric.datasets[0].data[0], 50.0);
 
     // The metric kind is ABSOLUTE (1), which should map to Float
-    let expected_type = MetricType::Float;
-    assert_eq!(expected_type, MetricType::Float);
+    let expected_type = MetricType::Float(0.0);
+    assert_eq!(expected_type, MetricType::Float(0.0));
 }
 
 #[test]
@@ -127,11 +127,11 @@ fn test_counter_monotonic_increase_accepted() {
     let metric_name = "counter_metric";
 
     // First value (initialization)
-    let first_update = backend.set_metric(device_id, metric_name, MetricType::Int);
+    let first_update = backend.set_metric(device_id, metric_name, MetricType::Int(0));
     assert!(first_update.is_ok(), "First metric set should succeed");
 
     // Second value: new > previous (normal increment) - should be accepted
-    let second_update = backend.set_metric(device_id, metric_name, MetricType::Int);
+    let second_update = backend.set_metric(device_id, metric_name, MetricType::Int(0));
     assert!(
         second_update.is_ok(),
         "Counter increment (new > previous) should be accepted"
@@ -147,11 +147,11 @@ fn test_counter_equal_value_accepted() {
     let metric_name = "counter_metric";
 
     // Set metric once
-    let first_set = backend.set_metric(device_id, metric_name, MetricType::Int);
+    let first_set = backend.set_metric(device_id, metric_name, MetricType::Int(0));
     assert!(first_set.is_ok(), "First metric set should succeed");
 
     // Set same metric again with equal value (idempotent)
-    let second_set = backend.set_metric(device_id, metric_name, MetricType::Int);
+    let second_set = backend.set_metric(device_id, metric_name, MetricType::Int(0));
     assert!(
         second_set.is_ok(),
         "Counter update with equal value (idempotent) should be accepted"
@@ -168,7 +168,7 @@ fn test_counter_reset_rejected() {
     let metric_name = "resetting_counter";
 
     // Simulate high value first
-    let high_value_set = backend.set_metric(device_id, metric_name, MetricType::Int);
+    let high_value_set = backend.set_metric(device_id, metric_name, MetricType::Int(0));
     assert!(high_value_set.is_ok(), "High value should be set");
 
     // Try to set lower value (counter reset scenario)
@@ -176,7 +176,7 @@ fn test_counter_reset_rejected() {
     // For now, the backend allows it, but we're testing that:
     // 1. The scenario can be created
     // 2. A counter monotonic check WOULD detect this (tested in integration test)
-    let low_value_set = backend.set_metric(device_id, metric_name, MetricType::Int);
+    let low_value_set = backend.set_metric(device_id, metric_name, MetricType::Int(0));
     assert!(low_value_set.is_ok(), "Backend accepts value; monotonic check would catch this");
 }
 
@@ -209,7 +209,7 @@ fn test_counter_monotonic_across_poll_cycles() {
     let metric_name = "persistent_counter";
 
     // Poll cycle 1: Write initial counter value
-    let cycle1_set = backend.set_metric(device_id, metric_name, MetricType::Int);
+    let cycle1_set = backend.set_metric(device_id, metric_name, MetricType::Int(0));
     assert!(cycle1_set.is_ok(), "First poll cycle should write metric");
 
     // Retrieve the metric (simulating restart)
@@ -221,7 +221,7 @@ fn test_counter_monotonic_across_poll_cycles() {
     );
 
     // Poll cycle 2: Write updated counter value
-    let cycle2_set = backend.set_metric(device_id, metric_name, MetricType::Int);
+    let cycle2_set = backend.set_metric(device_id, metric_name, MetricType::Int(0));
     assert!(cycle2_set.is_ok(), "Second poll cycle should update metric");
 
     // Verify metric persists

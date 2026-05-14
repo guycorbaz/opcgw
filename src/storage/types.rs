@@ -17,25 +17,47 @@ use chrono::{DateTime, Utc};
 use std::fmt;
 use serde::{Deserialize, Serialize};
 
-/// Metric data types supported by the gateway.
+/// Metric data types supported by the gateway, carrying the actual measurement
+/// payload (Story A-1, Epic A — Storage Payload Migration).
 ///
-/// Represents different types of values that can be stored and exposed via OPC UA.
-/// This enum is Copy and implements Display for easy serialization/logging.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// Represents both the discriminant (Float / Int / Bool / String) and the value
+/// itself. The storage trait round-trips the full enum end-to-end from poller
+/// write to OPC UA / web UI read.
+///
+/// **Display** preserves the discriminant-only name rendering ("Float", "Int",
+/// …) so existing log volumes and the SQLite `data_type` discriminant-column
+/// write path are unaffected. Use `{:?}` (Debug) format if you need value+type
+/// rendering in test failure messages.
+///
+/// **Note on `Copy`:** prior to A-1 this enum was `Copy`; the `String(String)`
+/// variant owns heap data and is incompatible with `Copy`. Call sites that
+/// relied on implicit copies must use `.clone()` (when multiple consumers
+/// need ownership) or borrow `&MetricType` (when read-only access suffices).
+/// See the spec file for the call-site audit notes.
+///
+/// **Note on `FromStr`:** retained for backward compatibility with config
+/// parsing (`metric_type = "Float"` in TOML). Parses the type-name only and
+/// produces a zero-valued payload (`MetricType::Float(0.0)`, `Int(0)`,
+/// `Bool(false)`, `String(String::new())`). The zero payload is intentional —
+/// the actual value comes from a separate source (ChirpStack metric ingest).
+/// Callers that need to construct a `MetricType` from a string MUST pair
+/// `FromStr` with a subsequent value-bearing constructor or pattern-match
+/// replace; do NOT treat the `FromStr` output as a final value.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum MetricType {
-    Float,
-    Int,
-    Bool,
-    String,
+    Float(f64),
+    Int(i64),
+    Bool(bool),
+    String(String),
 }
 
 impl fmt::Display for MetricType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MetricType::Float => write!(f, "Float"),
-            MetricType::Int => write!(f, "Int"),
-            MetricType::Bool => write!(f, "Bool"),
-            MetricType::String => write!(f, "String"),
+            MetricType::Float(_) => write!(f, "Float"),
+            MetricType::Int(_) => write!(f, "Int"),
+            MetricType::Bool(_) => write!(f, "Bool"),
+            MetricType::String(_) => write!(f, "String"),
         }
     }
 }
@@ -45,10 +67,10 @@ impl std::str::FromStr for MetricType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "float" => Ok(MetricType::Float),
-            "int" => Ok(MetricType::Int),
-            "bool" => Ok(MetricType::Bool),
-            "string" => Ok(MetricType::String),
+            "float" => Ok(MetricType::Float(0.0)),
+            "int" => Ok(MetricType::Int(0)),
+            "bool" => Ok(MetricType::Bool(false)),
+            "string" => Ok(MetricType::String(String::new())),
             _ => Err(format!("Unknown metric type: {}", s)),
         }
     }
@@ -57,18 +79,28 @@ impl std::str::FromStr for MetricType {
 /// A metric value with all metadata needed for storage and retrieval.
 ///
 /// Stores a single device metric with its type information and timestamp.
-/// The value is stored as text and parsed based on the data_type field.
+///
+/// **Story A-1 / Epic A note:** Post-A-1, `data_type: MetricType` carries the
+/// real measurement payload (`Float(f64)` / `Int(i64)` / `Bool(bool)` /
+/// `String(String)`). The legacy `value: String` field below is currently
+/// dual-storage with the payload — kept temporarily to allow the existing
+/// parse-from-string reads in `src/opc_ua_history.rs` and `src/opc_ua.rs` to
+/// continue working until those read paths are rewritten to pattern-match the
+/// typed payload. **TODO(A-5):** remove `value: String` once `OpcUa::get_value`
+/// and `OpcgwHistoryNodeManagerImpl::history_read_raw_modified` consume the
+/// typed payload directly.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MetricValue {
     /// Device identifier
     pub device_id: String,
     /// Metric name
     pub metric_name: String,
-    /// Value stored as text (parse based on data_type)
+    /// Value stored as text (legacy; parse based on data_type).
+    /// TODO(A-5): remove once typed-payload reads land.
     pub value: String,
     /// Timestamp of when the metric was collected
     pub timestamp: DateTime<Utc>,
-    /// Data type of the metric
+    /// Data type of the metric, carrying the typed payload (post-A-1).
     pub data_type: MetricType,
 }
 
@@ -248,19 +280,40 @@ mod tests {
 
     #[test]
     fn test_metric_type_display() {
-        assert_eq!(MetricType::Float.to_string(), "Float");
-        assert_eq!(MetricType::Int.to_string(), "Int");
-        assert_eq!(MetricType::Bool.to_string(), "Bool");
-        assert_eq!(MetricType::String.to_string(), "String");
+        // Display preserves the discriminant-only rendering post-A-1 — the
+        // payload is intentionally NOT included in `{}` format.
+        assert_eq!(MetricType::Float(1.5).to_string(), "Float");
+        assert_eq!(MetricType::Int(42).to_string(), "Int");
+        assert_eq!(MetricType::Bool(true).to_string(), "Bool");
+        assert_eq!(MetricType::String("hi".into()).to_string(), "String");
     }
 
     #[test]
     fn test_metric_type_from_str() {
-        assert_eq!("float".parse::<MetricType>().unwrap(), MetricType::Float);
-        assert_eq!("int".parse::<MetricType>().unwrap(), MetricType::Int);
-        assert_eq!("bool".parse::<MetricType>().unwrap(), MetricType::Bool);
-        assert_eq!("string".parse::<MetricType>().unwrap(), MetricType::String);
+        // FromStr produces zero-valued payloads per the A-1 contract; callers
+        // pair this with a separate value source (ChirpStack ingest).
+        assert_eq!("float".parse::<MetricType>().unwrap(), MetricType::Float(0.0));
+        assert_eq!("int".parse::<MetricType>().unwrap(), MetricType::Int(0));
+        assert_eq!("bool".parse::<MetricType>().unwrap(), MetricType::Bool(false));
+        assert_eq!(
+            "string".parse::<MetricType>().unwrap(),
+            MetricType::String(String::new())
+        );
         assert!("invalid".parse::<MetricType>().is_err());
+    }
+
+    #[test]
+    fn test_metric_type_payload_roundtrip() {
+        // A-1 AC#6 (in-memory shape): every variant round-trips its payload
+        // through Clone + PartialEq without lossy conversion.
+        let float = MetricType::Float(23.5);
+        let int = MetricType::Int(42);
+        let bool_ = MetricType::Bool(true);
+        let string = MetricType::String("OK".to_string());
+        assert_eq!(float.clone(), MetricType::Float(23.5));
+        assert_eq!(int.clone(), MetricType::Int(42));
+        assert_eq!(bool_.clone(), MetricType::Bool(true));
+        assert_eq!(string.clone(), MetricType::String("OK".to_string()));
     }
 
     #[test]
@@ -318,13 +371,13 @@ mod tests {
             metric_name: "temperature".to_string(),
             value: "23.5".to_string(),
             timestamp: now,
-            data_type: MetricType::Float,
+            data_type: MetricType::Float(23.5),
         };
 
         assert_eq!(metric.device_id, "device_123");
         assert_eq!(metric.metric_name, "temperature");
         assert_eq!(metric.value, "23.5");
-        assert_eq!(metric.data_type, MetricType::Float);
+        assert_eq!(metric.data_type, MetricType::Float(23.5));
     }
 
     #[test]

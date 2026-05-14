@@ -73,9 +73,9 @@ fn create_rows_with_timestamps(
         let timestamp = start_time + ChronoDuration::seconds(i as i64 * interval_secs as i64);
         let device_id = format!("device_{}", i % 10); // Distribute across 10 devices
         let metric_name = format!("metric_{}", i % 5); // 5 different metrics
-        let metric_value = MetricType::Float;
+        let metric_value = MetricType::Float(0.0);
 
-        backend.set_metric(&device_id, &metric_name, metric_value)?;
+        backend.set_metric(&device_id, &metric_name, metric_value.clone())?;
         backend.append_metric_history(
             &device_id,
             &metric_name,
@@ -128,8 +128,8 @@ async fn test_concurrent_polling_and_pruning() {
                 for i in 0..1000 {
                     let device_id = format!("device_{}", cycle * 1000 + i);
                     let metric_name = "temp";
-                    let metric_value = MetricType::Float;
-                    let _ = write_backend.set_metric(&device_id, metric_name, metric_value);
+                    let metric_value = MetricType::Float(0.0);
+                    let _ = write_backend.set_metric(&device_id, metric_name, metric_value.clone());
                     let _ = write_backend.append_metric_history(
                         &device_id,
                         metric_name,
@@ -346,10 +346,10 @@ async fn test_retention_boundary_precision() {
 
     let setup_backend = Arc::clone(&backend);
     task::spawn_blocking(move || {
-        let metric = MetricType::Float;
+        let metric = MetricType::Float(0.0);
 
         // Row exactly at cutoff (should NOT be deleted per AC#4)
-        let _ = setup_backend.set_metric("device_cutoff", "metric", metric);
+        let _ = setup_backend.set_metric("device_cutoff", "metric", metric.clone());
         let _ = setup_backend.append_metric_history(
             "device_cutoff",
             "metric",
@@ -358,7 +358,7 @@ async fn test_retention_boundary_precision() {
         );
 
         // Row before cutoff (should be deleted)
-        let _ = setup_backend.set_metric("device_before", "metric", metric);
+        let _ = setup_backend.set_metric("device_before", "metric", metric.clone());
         let _ = setup_backend.append_metric_history(
             "device_before",
             "metric",
@@ -367,7 +367,7 @@ async fn test_retention_boundary_precision() {
         );
 
         // Row after cutoff (should NOT be deleted)
-        let _ = setup_backend.set_metric("device_after", "metric", metric);
+        let _ = setup_backend.set_metric("device_after", "metric", metric.clone());
         let _ = setup_backend.append_metric_history(
             "device_after",
             "metric",
@@ -622,14 +622,14 @@ async fn test_pruning_30_day_simulation() {
         let current_time = sim_time;
 
         task::spawn_blocking(move || {
-            let metric = MetricType::Float;
+            let metric = MetricType::Float(0.0);
             // 360 metrics per hour (1 every 10 simulated seconds)
             for i in 0..360 {
                 let timestamp = current_time + ChronoDuration::seconds(i * 10);
                 let device_id = format!("device_{}", i % 100);
                 let metric_name = "load_avg";
 
-                let _ = write_backend.set_metric(&device_id, metric_name, metric);
+                let _ = write_backend.set_metric(&device_id, metric_name, metric.clone());
                 let _ = write_backend.append_metric_history(
                     &device_id,
                     metric_name,

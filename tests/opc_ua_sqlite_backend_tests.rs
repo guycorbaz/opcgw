@@ -91,10 +91,10 @@ mod tests {
         // 4. String → OPC UA String (Variant::String)
 
         // Validated through code review of convert_metric_to_variant():
-        // - MetricType::Bool parses to Variant::Boolean
-        // - MetricType::Int parses as i64 and converts to Int32 (or Int64 if overflow)
-        // - MetricType::Float parses to f64 and converts to Variant::Double
-        // - MetricType::String directly converts to Variant::String
+        // - MetricType::Bool(false) parses to Variant::Boolean
+        // - MetricType::Int(0) parses as i64 and converts to Int32 (or Int64 if overflow)
+        // - MetricType::Float(0.0) parses to f64 and converts to Variant::Double
+        // - MetricType::String(String::new()) directly converts to Variant::String
 
         assert!(true, "AC#5 satisfied: Type conversion handles all metric types");
     }

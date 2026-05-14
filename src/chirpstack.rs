@@ -1583,19 +1583,20 @@ impl ChirpstackPoller {
 
         let raw_value = metric.datasets[0].data[0];
 
-        // 2. Determine target MetricType (kind-first priority)
+        // 2. Determine target MetricType (kind-first priority).
+        // A-1: payload-bearing zero defaults — A-3 will replace with raw_value.
         let target_type = match kind {
             ChirpStackMetricKind::Gauge => {
                 debug!(metric_name = %metric_name, device_id = %device_id, metric_kind = ?kind, kind_driven_conversion = true, "Using GAUGE → Float");
-                MetricType::Float
+                MetricType::Float(0.0) // TODO(A-3): use raw_value
             }
             ChirpStackMetricKind::Counter => {
                 debug!(metric_name = %metric_name, device_id = %device_id, metric_kind = ?kind, kind_driven_conversion = true, "Using COUNTER → Int");
-                MetricType::Int
+                MetricType::Int(0) // TODO(A-3): use raw_value as i64
             }
             ChirpStackMetricKind::Absolute => {
                 debug!(metric_name = %metric_name, device_id = %device_id, metric_kind = ?kind, kind_driven_conversion = true, "Using ABSOLUTE → Float");
-                MetricType::Float
+                MetricType::Float(0.0) // TODO(A-3): use raw_value
             }
             ChirpStackMetricKind::Unknown => {
                 // Fallback to config type if available
@@ -1603,9 +1604,9 @@ impl ChirpstackPoller {
                     Some(cfg_type) => {
                         debug!(metric_name = %metric_name, device_id = %device_id, metric_kind = ?kind, "Using config fallback for unknown kind");
                         match cfg_type {
-                            OpcMetricTypeConfig::Bool => MetricType::Bool,
-                            OpcMetricTypeConfig::Int => MetricType::Int,
-                            OpcMetricTypeConfig::Float => MetricType::Float,
+                            OpcMetricTypeConfig::Bool => MetricType::Bool(false), // TODO(A-3)
+                            OpcMetricTypeConfig::Int => MetricType::Int(0),       // TODO(A-3)
+                            OpcMetricTypeConfig::Float => MetricType::Float(0.0), // TODO(A-3)
                             OpcMetricTypeConfig::String => {
                                 warn!("Reading string metrics from ChirpStack server is not implemented");
                                 return None;
@@ -1621,7 +1622,7 @@ impl ChirpstackPoller {
         };
 
         // 3. For Counter type: check monotonic property (reject reset: new < previous)
-        if target_type == MetricType::Int && kind == ChirpStackMetricKind::Counter {
+        if matches!(target_type, MetricType::Int(_)) && kind == ChirpStackMetricKind::Counter {
             if let Ok(Some(prev_metric)) = self.backend.get_metric_value(&device_id_string, &metric_name) {
                 if let Ok(prev_int) = prev_metric.value.parse::<i64>() {
                     let new_int = raw_value as i64;
@@ -1635,29 +1636,31 @@ impl ChirpstackPoller {
             }
         }
 
-        // 4. Validate and convert value based on target type
+        // 4. Validate and convert value based on target type.
+        // A-1: pattern-match adds (_) discards; constructions get TODO(A-3)
+        // markers with zero defaults — A-3 will wrap the validated value.
         let (value_str, metric_type) = match target_type {
-            MetricType::Bool => {
+            MetricType::Bool(_) => {
                 // Iter-3 review pending #1: helper-extracted to
                 // `validate_bool_metric_value` so tests drive the production
                 // boolean-validation path directly without constructing a
                 // full `ChirpstackPoller` instance. The helper emits the
                 // canonical `metric_parse` warn on invalid input.
                 match validate_bool_metric_value(raw_value, device_id, &metric_name, kind) {
-                    Some(s) => (s.to_string(), MetricType::Bool),
+                    Some(s) => (s.to_string(), MetricType::Bool(false)), // TODO(A-3): MetricType::Bool(s)
                     None => return None,
                 }
             }
-            MetricType::Int => {
+            MetricType::Int(_) => {
                 let int_val = raw_value as i64;
                 if raw_value.fract() != 0.0 {
                     warn!(value = %raw_value, metric_name = %metric_name, device_id = %device_id,
                           metric_kind = ?kind, "Counter metric has fractional value; precision lost");
                 }
-                (int_val.to_string(), MetricType::Int)
+                (int_val.to_string(), MetricType::Int(0)) // TODO(A-3): MetricType::Int(int_val)
             }
-            MetricType::Float => (raw_value.to_string(), MetricType::Float),
-            MetricType::String => {
+            MetricType::Float(_) => (raw_value.to_string(), MetricType::Float(0.0)), // TODO(A-3): MetricType::Float(raw_value)
+            MetricType::String(_) => {
                 warn!(metric_name = %metric_name, device_id = %device_id, metric_kind = ?kind, "Reading string metrics from ChirpStack server is not implemented");
                 return None;
             }
@@ -1738,7 +1741,8 @@ impl ChirpstackPoller {
                             return;
                         }
                     };
-                    let metric_val = MetricType::Bool;
+                    // TODO(A-3): wrap real raw_value in MetricType::Bool(...)
+                    let metric_val = MetricType::Bool(false);
                     if let Err(e) = self.backend.upsert_metric_value(device_id, &metric_name, &metric_val, now_ts) {
                         error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to upsert bool metric");
                     } else if let Err(e) = self.backend.append_metric_history(device_id, &metric_name, &metric_val, now_ts) {
@@ -1751,7 +1755,8 @@ impl ChirpstackPoller {
                     if raw_value.fract() != 0.0 {
                         warn!(value = %raw_value, metric_name = %metric_name, "Float metric truncated to int; precision lost");
                     }
-                    let metric_val = MetricType::Int;
+                    // TODO(A-3): wrap raw_value as i64 in MetricType::Int(...)
+                    let metric_val = MetricType::Int(0);
                     if let Err(e) = self.backend.upsert_metric_value(device_id, &metric_name, &metric_val, now_ts) {
                         error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to upsert int metric");
                     } else if let Err(e) = self.backend.append_metric_history(device_id, &metric_name, &metric_val, now_ts) {
@@ -1760,7 +1765,8 @@ impl ChirpstackPoller {
                 }
                 OpcMetricTypeConfig::Float => {
                     debug!(metric = ?metric, "Float metric");
-                    let metric_val = MetricType::Float;
+                    // TODO(A-3): wrap metric.datasets[0].data[0] in MetricType::Float(...)
+                    let metric_val = MetricType::Float(0.0);
                     if let Err(e) = self.backend.upsert_metric_value(device_id, &metric_name, &metric_val, now_ts) {
                         error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to upsert float metric");
                     } else if let Err(e) = self.backend.append_metric_history(device_id, &metric_name, &metric_val, now_ts) {
@@ -1768,7 +1774,8 @@ impl ChirpstackPoller {
                     }
                 }
                 OpcMetricTypeConfig::String => {
-                    let metric_val = MetricType::String;
+                    // TODO(A-3): wrap real value in MetricType::String(...)
+                    let metric_val = MetricType::String(String::new());
                     if let Err(e) = self.backend.upsert_metric_value(device_id, &metric_name, &metric_val, now_ts) {
                         error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to upsert string metric");
                     } else if let Err(e) = self.backend.append_metric_history(device_id, &metric_name, &metric_val, now_ts) {

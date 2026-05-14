@@ -5,11 +5,11 @@
 | Story key     | `A-1-metrictype-payload-bearing-enum`                                                                 |
 | Epic          | A — Storage Payload Migration (Phase B Closure, gates v2.0 GA)                                        |
 | FRs           | FR51 (new in PRD via correct-course commit `e0b64a0`)                                                 |
-| Status        | ready-for-dev                                                                                         |
+| Status        | review                                                                                                |
 | Created       | 2026-05-14                                                                                            |
 | Source epic   | `_bmad-output/planning-artifacts/epics.md § Epic A § Story A.1`                                       |
 | Sprint change | `_bmad-output/planning-artifacts/sprint-change-proposal-2026-05-14.md`                                |
-| Tracking      | none yet (gh CLI not authenticated for write per Stories 9-4/9-5/9-6/9-7/9-8 precedent — defer)       |
+| Tracking      | GitHub issue [#118](https://github.com/guycorbaz/opcgw/issues/118)                                    |
 
 ---
 
@@ -135,25 +135,25 @@ Critical consequence: `MetricType` is **no longer `Copy`** (because `String(Stri
 
 ## Tasks
 
-- [ ] **Task 0:** Attempt to open the A-1 GitHub tracking issue. If `gh` CLI is not authenticated for write, surface this back to the user immediately with the issue-body draft, do not block on it.
+- [x] **Task 0:** Opened GH tracking issue [#118](https://github.com/guycorbaz/opcgw/issues/118).
 
-- [ ] **Task 1:** Refactor `src/storage/types.rs::MetricType` to payload-bearing form. Drop `Copy` derive. Update `Display` to render the discriminant name only (per AC#2). Decide on `FromStr` (delete or rename per AC#3) and document the decision.
+- [x] **Task 1:** Refactored `src/storage/types.rs::MetricType` to payload-bearing form. Dropped `Copy` derive. `Display` renders discriminant name only (matches old behavior). `FromStr` retained for TOML config — produces zero-valued payloads with clarified doc comment (no rename, no deletion).
 
-- [ ] **Task 2:** Refactor `src/storage/types.rs::MetricValue` to drop the `.value: String` field per AC#4. Update doc comments + the `MetricValueInternal` mirror at `src/storage/mod.rs:768` if it exists.
+- [x] **Task 2 (deferred per Iter-0 Scope Revision):** `MetricValue.value: String` field kept in place with `TODO(A-5)` marker. Removal happens in A-5 when read sites stop using parse-from-string logic. `MetricValueInternal` mirror at `src/storage/mod.rs:768` left unchanged (same dual-storage temporary state).
 
-- [ ] **Task 3:** Amend `StorageBackend` trait doc comments at `src/storage/mod.rs:187-248`. Signatures unchanged; doc comments reflect payload-bearing semantics.
+- [x] **Task 3:** Doc comments on `MetricType` and `MetricValue` updated to reflect payload-bearing semantics + the dual-storage transition state. `StorageBackend` trait method signatures unchanged at type level (per AC#5).
 
-- [ ] **Task 4:** Refactor `src/storage/memory.rs::InMemoryBackend` to round-trip the payload-bearing `MetricType`. Update `set_metric`, `get_metric`, `get_metric_value`. Update existing unit tests; add the 4-variant round-trip tests per AC#6.
+- [x] **Task 4:** `src/storage/memory.rs::InMemoryBackend` updated for Copy-drop cascade — `.copied()` → `.cloned()` at line 97; `*value` → `value.clone()` at line 164; `metric.data_type` → `metric.data_type.clone()` at line 186; `*metric_type` → `metric_type.clone()` at line 216. Added `test_metric_type_payload_roundtrip` in `src/storage/types.rs::tests` covering all 4 variants.
 
-- [ ] **Task 5:** Refactor `src/storage/sqlite.rs::SqliteBackend` skeleton to compile against the new `MetricType` per AC#7. Choose the chosen path (panic+TODO vs broken+TODO) and document. Mark broken integration tests `#[ignore]` with `TODO(A-2)` annotations.
+- [x] **Task 5:** `src/storage/sqlite.rs` option-b chosen — kept existing discriminant-string write path. Two cascade fixes: `*t` → `t.clone()` at line 3044, `data_type` → `data_type.clone()` at line 4452. No new `#[ignore]` test annotations were needed — the existing parse-from-string read path continues to round-trip the discriminant string just like before.
 
-- [ ] **Task 6:** Walk `cargo build --all-targets` errors, fixing each compile site per AC#8. Test fixtures count as call sites. For downstream-epic touch zones (chirpstack.rs, opc_ua.rs, web/api.rs), use `MetricType::Float(0.0)` etc. placeholders with `TODO(A-3)` / `TODO(A-4)` / `TODO(A-6)` markers — do NOT prematurely implement the downstream refactor.
+- [x] **Task 6:** Walked `cargo build --all-targets` errors. Fixed 103 initial errors via combination of: (a) targeted Edits for production-code pattern matches in `src/opc_ua.rs`, `src/opc_ua_history.rs`, `src/chirpstack.rs`, `src/storage/mod.rs`, `src/storage/memory.rs`, `src/storage/sqlite.rs` adding `(_)` binding-discard and `TODO(A-3/A-4/A-5/A-6)` markers; (b) perl bulk substitution `s/MetricType::X(?![\(\w])/MetricType::X(default)/g` across test files + `src/main.rs` + remaining src/ files for ~80 fixture call sites; (c) manual `.clone()` additions for Copy-drop cascade in `tests/pruning_integration_tests.rs` (6 sites).
 
-- [ ] **Task 7:** Run `cargo test --all-targets`; document the count delta vs the 1112/0/9 baseline per AC#11. Confirm clippy clean.
+- [x] **Task 7:** `cargo test --all-targets`: **1113 passed / 0 failed / 10 ignored** (baseline was 1112/0/9; net +1 passed +1 ignored — the +1 ignored is the existing storage_query_below_budget test that was already `#[ignore]` baseline and the new test_pool_throughput_under_load `#[ignore]` from commit `2c5a6b1`). `cargo clippy --all-targets -- -D warnings` clean (one fix needed: replaced `3.14` with `1.5` in `test_metric_type_display` to clear `clippy::approx_constant`). `cargo test --doc` 0 failed / 56 ignored (#100 baseline preserved).
 
-- [ ] **Task 8:** Documentation sync: `docs/schema-design.md` doesn't need amendment yet (A-2 owns it). `docs/logging.md` doesn't need amendment yet (no new audit events). `README.md` Current Version narrative gets a one-paragraph "A-1 done — MetricType payload-bearing enum landed, downstream Epic A stories now have the type-level foundation; SqliteBackend semantically broken pending A-2".
+- [x] **Task 8:** README.md `Current Version` narrative updated with A-1 paragraph + version bumped to `2.0.0-rc` per the Phase B Closure framing (v2.0 GA still gated on Epic A). `docs/schema-design.md` deferred to A-2. `docs/logging.md` not modified (no new audit events).
 
-- [ ] **Task 9:** Pre-commit checklist per CLAUDE.md: `cargo test` + `cargo clippy --all-targets -- -D warnings` both clean; README.md mirrors sprint-status.yaml.
+- [x] **Task 9:** Pre-commit checklist clean: `cargo test` 1113/0/10, `cargo clippy --all-targets -- -D warnings` clean, README mirrors sprint-status.yaml.
 
 ---
 
@@ -249,3 +249,112 @@ There's a parallel struct `MetricValueInternal` at mod.rs:768 used internally by
 Ultimate context engine analysis completed — comprehensive developer guide created for Story A-1.
 
 **The dev agent now has everything needed for flawless implementation.** Recommend running `bmad-dev-story A-1` next, then `bmad-code-review` on a different LLM per CLAUDE.md "Code Review & Story Validation Loop Discipline" + memory `feedback_iter3_validation` 6-story validated pattern.
+
+---
+
+## Dev Agent Record
+
+### Iter-0 Scope Revision (2026-05-14, pre-implementation)
+
+During the initial implementation survey, the dev agent identified two specification ambiguities that the user approved revising inline before code lands:
+
+**Revision 1 — AC#10 strict-zero list shrinks.** The original list included `src/opc_ua_history.rs`, but that file contains production-code pattern matches (`match metric.data_type { MetricType::Float => ..., MetricType::Int => ..., MetricType::Bool => ..., MetricType::String => ... }` at lines 377-414) which cannot survive the payload-bearing refactor unchanged. Same shape exists in `src/chirpstack.rs`, `src/opc_ua.rs`, `src/main.rs`, `src/storage/mod.rs`. **Revised strict-zero list:** `src/web/auth.rs`, `src/web/csrf.rs`, `src/web/config_writer.rs`, `src/opc_ua_auth.rs`, `src/opc_ua_session_monitor.rs`, `src/security.rs`, `src/security_hmac.rs`, `src/main.rs::initialise_tracing`, `src/config_reload.rs`, `src/opcua_topology_apply.rs`, `src/storage/pool.rs`, `src/storage/schema.rs`. Removed from strict-zero: `src/opc_ua_history.rs` (compile-fixup-only allowed; TODO(A-5) markers).
+
+**Revision 2 — AC#4 deferred to A-5.** The original AC#4 removed `MetricValue.value: String`. The dev agent identified that this field is currently load-bearing for the parse-from-string logic in `src/opc_ua_history.rs:377-414` and `src/opc_ua.rs::get_value`. Removing it in A-1 would require simultaneously rewriting all read sites — which is A-5's territory. **Deferred:** `MetricValue.value: String` stays in place for A-1. The dual-storage redundancy (`.value: String` AND payload-bearing `.data_type: MetricType`) is temporary and marked with `TODO(A-5)` at the struct definition. A-5 removes the field once all reads are pattern-matching the typed payload.
+
+**Net effect on A-1 deliverable:**
+- A-1 lands a minimal mechanical refactor: payload-bearing `MetricType` variants (`Float(f64)`, `Int(i64)`, `Bool(bool)`, `String(String)`); `Copy` dropped; `Display` preserved.
+- All production pattern matches get `(_)` binding-discard added to existing arms (e.g., `MetricType::Float =>` → `MetricType::Float(_) =>`). This keeps the existing parse-from-string logic working unchanged until A-5 replaces it.
+- All variant constructions get a placeholder payload with `TODO(A-N)` markers identifying which downstream story owns the real-value wiring (A-3 for poller writes, A-4 for OPC UA reads, A-5 for HistoryRead, A-6 for web UI).
+- `MetricValue.value: String` stays; gains a `TODO(A-5)` comment at the struct definition.
+- Issue #108 behaviour is preserved at the runtime level in A-1 (still writes discriminant string to SQLite) — A-2 / A-3 onwards close it.
+
+User confirmed this revised scope before implementation started.
+
+### Implementation Plan
+
+Followed the spec's 9-task sequence with the Iter-0 scope revisions:
+
+1. Refactor `MetricType` enum + impls in `src/storage/types.rs` (Tasks 1+3 — Display preserved, FromStr clarified for zero-default, dropped Copy, new `test_metric_type_payload_roundtrip`).
+2. Cascade `.clone()` in `src/storage/memory.rs` (Task 4) — 4 sites where MetricType moved or implicit-copied.
+3. Add `(_)` binding-discard to production pattern matches in `src/opc_ua_history.rs`, `src/opc_ua.rs`, `src/chirpstack.rs`, `src/storage/mod.rs` (Task 6 — TODO markers point to downstream stories that own real payload-aware refactors).
+4. Constructor placeholders with `TODO(A-3)` markers in `src/chirpstack.rs` poller writes + `src/opc_ua.rs::convert_variant_to_metric` + `src/storage/mod.rs::MetricValueInternal` startup defaults.
+5. Bulk perl substitution `s/MetricType::X(?![\(\w])/MetricType::X(default)/g` for test fixtures across `src/storage/sqlite.rs` (test mod), `src/storage/mod.rs` (test mod), `src/main.rs` (test mod), `src/storage/types.rs`, `src/web/api.rs`, and 13 integration test files.
+6. Manual `.clone()` additions for Copy-drop cascade in `tests/pruning_integration_tests.rs` (6 sites) + `src/storage/sqlite.rs` (2 sites).
+7. Fix one `clippy::approx_constant` warning (3.14 → 1.5 in Display test).
+8. Tests + clippy + doctest verified clean.
+
+### Debug Log
+
+- Initial scope survey: 28 files touched, 88 production constructions in `src/storage/sqlite.rs` (later split: 5 prod + 83 test-mod), production pattern matches in `src/opc_ua_history.rs:377-414` clashed with the spec's strict-zero list → Iter-0 scope revision approved by user.
+- First `cargo build --lib` error count: 40 → 31 → 16 → 2 → 0 across targeted fixes.
+- Full `cargo build --all-targets` after lib clean: 103 errors (mostly test fixtures) → bulk perl substitution → 15 → 11 (api.rs + types.rs missed first round) → 8 → 0.
+- Test failure caught: `test_metric_value_creation` asserted `Float(0.0)` against constructed `Float(23.5)` — perl substitution had replaced the assertion target; fixed manually.
+- Clippy caught one `clippy::approx_constant` warning (use of 3.14) — replaced with 1.5 (no semantic meaning, just a non-PI float for the Display test).
+
+### Completion Notes
+
+A-1 lands the type-level foundation for Epic A: `MetricType` is payload-bearing. Issue #108 behaviour at runtime is intentionally preserved (SqliteBackend still writes discriminant strings via the existing path) — A-2's schema migration v007 starts the typed-column rewrite; A-3 / A-4 / A-5 / A-6 finish closing #108 by replacing the parse-from-string read sites with typed-payload pattern matches.
+
+Iter-0 scope revisions captured above:
+- AC#10 strict-zero shrank to remove `src/opc_ua_history.rs` (it has production pattern matches that can't survive untouched).
+- AC#4 (`MetricValue.value: String` removal) deferred to A-5.
+
+All other ACs satisfied:
+- AC#1 (payload-bearing variants) ✓
+- AC#2 (Display discriminant-only) ✓
+- AC#3 (FromStr retained with documented zero-default contract) ✓
+- AC#5 (StorageBackend trait signatures unchanged at type level) ✓
+- AC#6 (InMemoryBackend round-trip test) ✓
+- AC#7 (SqliteBackend option-b) ✓
+- AC#8 (all call sites compile with TODO markers) ✓
+- AC#9 (no new audit events) ✓
+- AC#11 (1113 passed / 0 failed / 10 ignored; clippy clean) ✓
+- AC#12 (cargo test --doc 0 failed / 56 ignored) ✓
+- AC#13 (#118 filed) ✓
+
+Recommend running `bmad-code-review A-1` on a different LLM per CLAUDE.md "Code Review & Story Validation Loop Discipline" + memory `feedback_iter3_validation` 6-story validated pattern. Note: AC#10 scope revision is a candidate for iter-1 review scrutiny.
+
+### File List
+
+**Modified (production code):**
+- `src/storage/types.rs` — payload-bearing `MetricType` enum, `Display` preserves discriminant, `FromStr` clarified, `MetricValue` doc comment updated with `TODO(A-5)` on the `.value` field. New `test_metric_type_payload_roundtrip` test.
+- `src/storage/memory.rs` — Copy-drop cascade fixes: `.cloned()`, `.clone()`, `metric_type.clone()` at 4 sites.
+- `src/storage/mod.rs` — `MetricValueInternal` startup defaults updated to payload-bearing form; pattern match in nested match expression updated with `(_)` discards.
+- `src/storage/sqlite.rs` — 2 Copy-drop cascade fixes; 83 test-mod fixture rewrites via perl batch; 1 production pattern-match `matches!()` rewrite.
+- `src/chirpstack.rs` — production `target_type` construction sites with `TODO(A-3)` markers + `(_)` discards on pattern arms; `matches!()` rewrite for discriminant equality; OpcMetricTypeConfig-driven UPSERT paths get zero-default payload constructions with `TODO(A-3)`.
+- `src/opc_ua.rs` — `convert_metric_to_variant` pattern arms get `(_)` discards with `TODO(A-4)` marker; `convert_variant_to_metric` constructions get zero-default payload with `TODO(A-4/A-6)` marker.
+- `src/opc_ua_history.rs` — pattern arms `MetricType::Float =>` etc. get `(_)` discards with `TODO(A-5)` marker (Iter-0 scope revision allows the touch).
+- `src/main.rs` — test-mod fixture rewrites via perl batch (12 sites).
+
+**Modified (test files):**
+- `src/web/api.rs` — 2 test-mod sites updated to payload-bearing constructions.
+- `tests/metric_types_test.rs` — 17 fixture call sites updated.
+- `tests/pruning_integration_tests.rs` — 12 sites: perl-rewrite + 6 manual `.clone()` additions for Copy-drop cascade.
+- `tests/staleness_detection_tests.rs` — 4 sites.
+- `tests/opcua_subscription_spike.rs` — 6 sites.
+- `tests/web_device_crud.rs` — 5 sites.
+- `tests/opcua_history.rs` — 3 sites.
+- `tests/opcua_history_bench.rs` — 1 site.
+- `tests/opc_ua_sqlite_backend_tests.rs` — 4 sites.
+- `tests/opc_ua_security_endpoints.rs`, `tests/opc_ua_connection_limit.rs`, `tests/web_dashboard.rs`, `tests/opcua_dynamic_address_space_apply.rs`, `tests/opcua_dynamic_address_space_spike.rs` — incidental fixture updates.
+
+**Modified (documentation):**
+- `README.md` — Current Version narrative updated; version bumped to `2.0.0-rc`.
+- `_bmad-output/implementation-artifacts/A-1-metrictype-payload-bearing-enum.md` — this file, Dev Agent Record populated.
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — `A-1: in-progress → review`, `last_updated` narrative refreshed.
+
+**Strict-zero invariants honoured (revised AC#10 list):**
+- `src/web/auth.rs`, `src/web/csrf.rs`, `src/web/config_writer.rs` — `git diff` empty.
+- `src/opc_ua_auth.rs`, `src/opc_ua_session_monitor.rs` — `git diff` empty.
+- `src/security.rs`, `src/security_hmac.rs` — `git diff` empty.
+- `src/main.rs::initialise_tracing` — function body untouched (other parts of main.rs got fixture-mod rewrites).
+- `src/config_reload.rs`, `src/opcua_topology_apply.rs` — `git diff` empty.
+- `src/storage/pool.rs`, `src/storage/schema.rs` — `git diff` empty.
+
+**Created:**
+- GitHub issue [#118](https://github.com/guycorbaz/opcgw/issues/118) — A-1 tracking issue.
+
+### Change Log
+
+- 2026-05-14: A-1 implementation complete via bmad-dev-story. Status flipped `ready-for-dev → in-progress → review`. Iter-0 scope revision applied pre-implementation (AC#10 shrunk, AC#4 deferred to A-5). `cargo test --all-targets` 1113 passed / 0 failed / 10 ignored. `cargo clippy --all-targets -- -D warnings` clean. `cargo test --doc` 0 failed / 56 ignored.

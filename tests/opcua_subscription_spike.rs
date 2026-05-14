@@ -1028,7 +1028,7 @@ async fn test_subscription_datavalue_payload_carries_seeded_value() {
             device_id: SPIKE_DEVICE_ID.to_string(),
             metric_name: SPIKE_METRIC_NAME.to_string(),
             value: "42.5".to_string(),
-            data_type: MetricType::Float,
+            data_type: MetricType::Float(0.0),
             timestamp: std::time::SystemTime::now(),
         }])
         .expect("batch_write_metrics seed");
@@ -1202,7 +1202,7 @@ async fn test_subscription_survives_sibling_session_disconnect() {
             device_id: SPIKE_DEVICE_ID.to_string(),
             metric_name: SPIKE_METRIC_NAME.to_string(),
             value: "1.0".to_string(),
-            data_type: MetricType::Float,
+            data_type: MetricType::Float(0.0),
             timestamp: std::time::SystemTime::now(),
         }])
         .expect("initial seed");
@@ -1298,7 +1298,7 @@ async fn test_subscription_survives_sibling_session_disconnect() {
             device_id: SPIKE_DEVICE_ID.to_string(),
             metric_name: SPIKE_METRIC_NAME.to_string(),
             value: "2.0".to_string(), // different from the seed
-            data_type: MetricType::Float,
+            data_type: MetricType::Float(0.0),
             timestamp: std::time::SystemTime::now(),
         }])
         .expect("post-disconnect seed change");
@@ -1729,7 +1729,7 @@ async fn test_subscription_survives_chirpstack_outage_with_stale_status() {
             device_id: SPIKE_DEVICE_ID.to_string(),
             metric_name: SPIKE_METRIC_NAME.to_string(),
             value: "42.0".to_string(),
-            data_type: MetricType::Float,
+            data_type: MetricType::Float(0.0),
             timestamp: std::time::SystemTime::now(),
         }])
         .expect("seed initial fresh value");
@@ -1883,7 +1883,7 @@ async fn test_subscription_survives_chirpstack_outage_with_stale_status() {
             device_id: SPIKE_DEVICE_ID.to_string(),
             metric_name: SPIKE_METRIC_NAME.to_string(),
             value: "84.0".to_string(),
-            data_type: MetricType::Float,
+            data_type: MetricType::Float(0.0),
             timestamp: std::time::SystemTime::now(),
         }])
         .expect("recovery write");
@@ -1975,7 +1975,7 @@ async fn test_subscription_unfiltered_dedupes_status_only_transitions() {
             device_id: SPIKE_DEVICE_ID.to_string(),
             metric_name: SPIKE_METRIC_NAME.to_string(),
             value: "42.0".to_string(),
-            data_type: MetricType::Float,
+            data_type: MetricType::Float(0.0),
             timestamp: std::time::SystemTime::now(),
         }])
         .expect("seed initial fresh value");

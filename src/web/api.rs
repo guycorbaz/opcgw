@@ -5330,7 +5330,7 @@ mod tests {
         // 23.5, type Float — matches what the snapshot configures.
         let now = std::time::SystemTime::now();
         backend
-            .upsert_metric_value("d1", "temperature", &crate::storage::MetricType::Float, now)
+            .upsert_metric_value("d1", "temperature", &crate::storage::MetricType::Float(0.0), now)
             .expect("seed metric");
 
         let app = crate::web::ApplicationSummary {
@@ -5444,7 +5444,7 @@ mod tests {
             .upsert_metric_value(
                 "d1",
                 "drifted",
-                &crate::storage::MetricType::Float,
+                &crate::storage::MetricType::Float(0.0),
                 now,
             )
             .expect("seed Float row for an Int-configured metric");

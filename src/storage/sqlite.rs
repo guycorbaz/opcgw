@@ -1441,7 +1441,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
             // Partial-success: skip rows whose Float values are NaN/Infinity
             // (OPC UA Variant::Float requires finite f32). Other types pass
             // through unparsed — the OPC UA layer parses on demand.
-            if data_type == crate::storage::MetricType::Float {
+            if matches!(data_type, crate::storage::MetricType::Float(_)) {
                 match value.parse::<f64>() {
                     Ok(f) if !f.is_finite() => {
                         trace!(
@@ -2235,13 +2235,13 @@ mod tests {
         let backend = SqliteBackend::new(&path).expect("Should create backend");
         let device_id = "device_123";
         let metric_name = "temperature";
-        let value = MetricType::Float;
+        let value = MetricType::Float(0.0);
 
         backend.set_metric(device_id, metric_name, value).expect("Should store metric");
         let retrieved = backend
             .get_metric(device_id, metric_name)
             .expect("Should retrieve metric");
-        assert_eq!(retrieved, Some(MetricType::Float), "Should retrieve same metric type");
+        assert_eq!(retrieved, Some(MetricType::Float(0.0)), "Should retrieve same metric type");
         let _ = fs::remove_file(&path);
     }
 
@@ -2313,9 +2313,9 @@ mod tests {
                 for iteration in 0..10 {
                     let metric_name = format!("metric_{}", thread_id);
                     let value = if iteration % 2 == 0 {
-                        MetricType::Float
+                        MetricType::Float(0.0)
                     } else {
-                        MetricType::Int
+                        MetricType::Int(0)
                     };
                     backend.set_metric("device_1", &metric_name, value)
                         .expect("Should store metric concurrently");
@@ -2348,7 +2348,7 @@ mod tests {
 
         let device_id = "device_test";
         let metric_name = "temperature";
-        let value = MetricType::Float;
+        let value = MetricType::Float(0.0);
         let t1 = std::time::SystemTime::now();
 
         // First insert
@@ -2398,9 +2398,9 @@ mod tests {
                 let device_id = format!("device_{}", device_num);
                 let metric_name = format!("metric_{}", metric_num);
                 let value = if metric_num % 2 == 0 {
-                    MetricType::Float
+                    MetricType::Float(0.0)
                 } else {
-                    MetricType::Int
+                    MetricType::Int(0)
                 };
 
                 backend.upsert_metric_value(&device_id, &metric_name, &value, now)
@@ -2429,10 +2429,10 @@ mod tests {
         let now = std::time::SystemTime::now();
 
         let test_cases = vec![
-            ("device_a", "metric_float", MetricType::Float),
-            ("device_a", "metric_int", MetricType::Int),
-            ("device_a", "metric_bool", MetricType::Bool),
-            ("device_a", "metric_string", MetricType::String),
+            ("device_a", "metric_float", MetricType::Float(0.0)),
+            ("device_a", "metric_int", MetricType::Int(0)),
+            ("device_a", "metric_bool", MetricType::Bool(false)),
+            ("device_a", "metric_string", MetricType::String(String::new())),
         ];
 
         // Insert different metric types
@@ -2468,9 +2468,9 @@ mod tests {
         let batch: Vec<crate::storage::BatchMetricWrite> = (0..10)
             .map(|i| {
                 let (value, data_type) = if i % 2 == 0 {
-                    (format!("{}.5", i), MetricType::Float)
+                    (format!("{}.5", i), MetricType::Float(0.0))
                 } else {
-                    (format!("{}", i), MetricType::Int)
+                    (format!("{}", i), MetricType::Int(0))
                 };
                 crate::storage::BatchMetricWrite {
                     device_id: "device_batch_test".to_string(),
@@ -2508,7 +2508,7 @@ mod tests {
                 device_id: "device_atomic_test".to_string(),
                 metric_name: format!("metric_{}", i),
                 value: format!("{}.5", i),
-                data_type: MetricType::Float,
+                data_type: MetricType::Float(0.0),
                 timestamp: now,
             })
             .collect();
@@ -2550,11 +2550,11 @@ mod tests {
         for device_num in 0..100 {
             for type_num in 0..4 {
                 let (value, data_type) = match type_num {
-                    0 => (format!("{}.5", device_num), MetricType::Float),
-                    1 => (format!("{}", device_num), MetricType::Int),
-                    2 => ("1".to_string(), MetricType::Bool),
-                    3 => (format!("text_{}", device_num), MetricType::String),
-                    _ => (format!("{}.5", device_num), MetricType::Float),
+                    0 => (format!("{}.5", device_num), MetricType::Float(0.0)),
+                    1 => (format!("{}", device_num), MetricType::Int(0)),
+                    2 => ("1".to_string(), MetricType::Bool(false)),
+                    3 => (format!("text_{}", device_num), MetricType::String(String::new())),
+                    _ => (format!("{}.5", device_num), MetricType::Float(0.0)),
                 };
                 batch.push(crate::storage::BatchMetricWrite {
                     device_id: format!("device_{}", device_num),
@@ -2609,7 +2609,7 @@ mod tests {
         let now = std::time::SystemTime::now();
 
         // Write initial metric to database
-        backend.upsert_metric_value("device_fail_test", "metric_initial", &MetricType::Float, now)
+        backend.upsert_metric_value("device_fail_test", "metric_initial", &MetricType::Float(0.0), now)
             .expect("Should write initial metric");
 
         // Verify initial state
@@ -2629,7 +2629,7 @@ mod tests {
                 device_id: "device_batch_rollback".to_string(),
                 metric_name: format!("metric_{}", i),
                 value: format!("{}.5", i),
-                data_type: MetricType::Float,
+                data_type: MetricType::Float(0.0),
                 timestamp: now,
             })
             .collect();
@@ -2683,7 +2683,7 @@ mod tests {
         // Pre-write metric_0 so the reader has at least one row to find,
         // independent of writer/reader thread scheduling.
         backend
-            .upsert_metric_value("device_w", "metric_0", &MetricType::Float, now)
+            .upsert_metric_value("device_w", "metric_0", &MetricType::Float(0.0), now)
             .expect("Pre-write: should upsert metric_0");
 
         // Writer thread — concurrent writes for indices 1..50
@@ -2691,7 +2691,7 @@ mod tests {
         let writer = thread::spawn(move || {
             for i in 1..50 {
                 let metric_name = format!("metric_{}", i);
-                let value = if i % 2 == 0 { MetricType::Float } else { MetricType::Int };
+                let value = if i % 2 == 0 { MetricType::Float(0.0) } else { MetricType::Int(0) };
                 backend_w.upsert_metric_value("device_w", &metric_name, &value, now)
                     .expect("Writer: should upsert");
             }
@@ -2726,7 +2726,7 @@ mod tests {
 
         let device_id = "device_test";
         let metric_name = "temperature";
-        let value = MetricType::Float;
+        let value = MetricType::Float(0.0);
         let t1 = std::time::SystemTime::now();
 
         // First append
@@ -2791,7 +2791,7 @@ mod tests {
             for metric_num in 0..10 {
                 let device_id = format!("device_{}", device_num);
                 let metric_name = format!("metric_{}", metric_num);
-                let value = if metric_num % 2 == 0 { MetricType::Float } else { MetricType::Int };
+                let value = if metric_num % 2 == 0 { MetricType::Float(0.0) } else { MetricType::Int(0) };
 
                 backend.append_metric_history(&device_id, &metric_name, &value, now)
                     .expect("Should append metric");
@@ -2831,7 +2831,7 @@ mod tests {
             base_time + std::time::Duration::from_secs(5)];
 
         for (idx, ts) in timestamps.iter().enumerate() {
-            let value = if idx % 2 == 0 { MetricType::Float } else { MetricType::Int };
+            let value = if idx % 2 == 0 { MetricType::Float(0.0) } else { MetricType::Int(0) };
             backend.append_metric_history(device_id, metric_name, &value, *ts)
                 .expect("Should append metric");
         }
@@ -2868,10 +2868,10 @@ mod tests {
 
         let device_id = "device_types";
         let types_to_test = vec![
-            ("temp_float", MetricType::Float),
-            ("count_int", MetricType::Int),
-            ("active_bool", MetricType::Bool),
-            ("label_str", MetricType::String),
+            ("temp_float", MetricType::Float(0.0)),
+            ("count_int", MetricType::Int(0)),
+            ("active_bool", MetricType::Bool(false)),
+            ("label_str", MetricType::String(String::new())),
         ];
 
         // Append metrics with different types
@@ -2917,7 +2917,7 @@ mod tests {
         let appender = thread::spawn(move || {
             for i in 0..30 {
                 let metric_name = format!("metric_{}", i);
-                let value = if i % 2 == 0 { MetricType::Float } else { MetricType::Int };
+                let value = if i % 2 == 0 { MetricType::Float(0.0) } else { MetricType::Int(0) };
                 backend_a.append_metric_history("device_append", &metric_name, &value, now)
                     .expect("Appender: should append");
             }
@@ -2975,14 +2975,14 @@ mod tests {
         let backend = SqliteBackend::new(&path).expect("Should create backend");
         let now = std::time::SystemTime::now();
 
-        backend.upsert_metric_value("device_1", "temperature", &MetricType::Float, now)
+        backend.upsert_metric_value("device_1", "temperature", &MetricType::Float(0.0), now)
             .expect("Should upsert");
 
         let metrics = backend.load_all_metrics().expect("Should load all metrics");
         assert_eq!(metrics.len(), 1, "Should have exactly 1 metric");
         assert_eq!(metrics[0].device_id, "device_1");
         assert_eq!(metrics[0].metric_name, "temperature");
-        assert_eq!(metrics[0].data_type, MetricType::Float);
+        assert_eq!(metrics[0].data_type, MetricType::Float(0.0));
 
         let _ = fs::remove_file(&path);
     }
@@ -2994,13 +2994,13 @@ mod tests {
         let now = std::time::SystemTime::now();
 
         // Insert metrics for multiple devices
-        backend.upsert_metric_value("device_a", "metric_1", &MetricType::Float, now)
+        backend.upsert_metric_value("device_a", "metric_1", &MetricType::Float(0.0), now)
             .expect("Should upsert");
-        backend.upsert_metric_value("device_a", "metric_2", &MetricType::Int, now)
+        backend.upsert_metric_value("device_a", "metric_2", &MetricType::Int(0), now)
             .expect("Should upsert");
-        backend.upsert_metric_value("device_b", "metric_1", &MetricType::Bool, now)
+        backend.upsert_metric_value("device_b", "metric_1", &MetricType::Bool(false), now)
             .expect("Should upsert");
-        backend.upsert_metric_value("device_b", "metric_3", &MetricType::String, now)
+        backend.upsert_metric_value("device_b", "metric_3", &MetricType::String(String::new()), now)
             .expect("Should upsert");
 
         let metrics = backend.load_all_metrics().expect("Should load all metrics");
@@ -3022,10 +3022,10 @@ mod tests {
         let now = std::time::SystemTime::now();
 
         let test_cases = vec![
-            ("device", "float_metric", MetricType::Float),
-            ("device", "int_metric", MetricType::Int),
-            ("device", "bool_metric", MetricType::Bool),
-            ("device", "string_metric", MetricType::String),
+            ("device", "float_metric", MetricType::Float(0.0)),
+            ("device", "int_metric", MetricType::Int(0)),
+            ("device", "bool_metric", MetricType::Bool(false)),
+            ("device", "string_metric", MetricType::String(String::new())),
         ];
 
         for (device_id, metric_name, metric_type) in &test_cases {
@@ -3041,7 +3041,7 @@ mod tests {
             let expected_type = test_cases
                 .iter()
                 .find(|(_, name, _)| name == &metric.metric_name)
-                .map(|(_, _, t)| *t)
+                .map(|(_, _, t)| t.clone())
                 .expect("Should find metric in test cases");
             assert_eq!(metric.data_type, expected_type, "Type mismatch for {}", metric.metric_name);
         }
@@ -3060,10 +3060,10 @@ mod tests {
             let device_id = format!("device_{}", i / 10);
             let metric_name = format!("metric_{}", i);
             let metric_type = match i % 4 {
-                0 => MetricType::Float,
-                1 => MetricType::Int,
-                2 => MetricType::Bool,
-                _ => MetricType::String,
+                0 => MetricType::Float(0.0),
+                1 => MetricType::Int(0),
+                2 => MetricType::Bool(false),
+                _ => MetricType::String(String::new()),
             };
             backend.upsert_metric_value(&device_id, &metric_name, &metric_type, now)
                 .expect("Should upsert");
@@ -3094,7 +3094,7 @@ mod tests {
         for i in 0..100 {
             let device_id = format!("device_{}", i / 10);
             let metric_name = format!("metric_{}", i);
-            backend.upsert_metric_value(&device_id, &metric_name, &MetricType::Float, now)
+            backend.upsert_metric_value(&device_id, &metric_name, &MetricType::Float(0.0), now)
                 .expect("Should upsert");
         }
 
@@ -3123,7 +3123,7 @@ mod tests {
             backend.append_metric_history(
                 "device_1",
                 &format!("metric_{}", days_ago),
-                &MetricType::Float,
+                &MetricType::Float(0.0),
                 timestamp,
             ).expect("Should append");
         }
@@ -3169,7 +3169,7 @@ mod tests {
             backend.append_metric_history(
                 "device_1",
                 &format!("metric_{}", days_ago),
-                &MetricType::Float,
+                &MetricType::Float(0.0),
                 timestamp,
             ).expect("Should append");
         }
@@ -3215,7 +3215,7 @@ mod tests {
                 backend.append_metric_history(
                     &format!("device_{}", device_num),
                     &format!("metric_{}", days_ago),
-                    &MetricType::Float,
+                    &MetricType::Float(0.0),
                     timestamp,
                 ).expect("Should append");
             }
@@ -3263,21 +3263,21 @@ mod tests {
         backend.append_metric_history(
             "device_1",
             "old_metric",
-            &MetricType::Int,
+            &MetricType::Int(0),
             timestamp_old,
         ).expect("Should append");
 
         backend.append_metric_history(
             "device_1",
             "new_float",
-            &MetricType::Float,
+            &MetricType::Float(0.0),
             timestamp_new,
         ).expect("Should append");
 
         backend.append_metric_history(
             "device_1",
             "new_bool",
-            &MetricType::Bool,
+            &MetricType::Bool(false),
             timestamp_new,
         ).expect("Should append");
 
@@ -3323,7 +3323,7 @@ mod tests {
             backend.upsert_metric_value(
                 &format!("device_{}", i),
                 "temperature",
-                &MetricType::Float,
+                &MetricType::Float(0.0),
                 now,
             ).expect("Should upsert");
         }
@@ -3347,9 +3347,9 @@ mod tests {
         let now = SystemTime::now();
 
         // Insert valid metrics
-        backend.upsert_metric_value("device_1", "metric_1", &MetricType::Float, now)
+        backend.upsert_metric_value("device_1", "metric_1", &MetricType::Float(0.0), now)
             .expect("Should upsert");
-        backend.upsert_metric_value("device_2", "metric_2", &MetricType::Int, now)
+        backend.upsert_metric_value("device_2", "metric_2", &MetricType::Int(0), now)
             .expect("Should upsert");
 
         // Insert metrics with invalid data_type directly into database
@@ -3391,7 +3391,7 @@ mod tests {
         let now = SystemTime::now();
 
         // Insert a valid metric
-        backend.upsert_metric_value("device_1", "metric_1", &MetricType::Float, now)
+        backend.upsert_metric_value("device_1", "metric_1", &MetricType::Float(0.0), now)
             .expect("Should upsert");
 
         // Insert a metric with invalid timestamp
@@ -3436,13 +3436,13 @@ mod tests {
         let now = SystemTime::now();
 
         // Insert metrics with all valid types
-        backend.upsert_metric_value("device_1", "float_metric", &MetricType::Float, now)
+        backend.upsert_metric_value("device_1", "float_metric", &MetricType::Float(0.0), now)
             .expect("Should insert float");
-        backend.upsert_metric_value("device_2", "int_metric", &MetricType::Int, now)
+        backend.upsert_metric_value("device_2", "int_metric", &MetricType::Int(0), now)
             .expect("Should insert int");
-        backend.upsert_metric_value("device_3", "bool_metric", &MetricType::Bool, now)
+        backend.upsert_metric_value("device_3", "bool_metric", &MetricType::Bool(false), now)
             .expect("Should insert bool");
-        backend.upsert_metric_value("device_4", "string_metric", &MetricType::String, now)
+        backend.upsert_metric_value("device_4", "string_metric", &MetricType::String(String::new()), now)
             .expect("Should insert string");
 
         // Load all metrics - should succeed for all types
@@ -3470,7 +3470,7 @@ mod tests {
                 backend.upsert_metric_value(
                     &format!("device_{}", device_id),
                     &format!("metric_{}", metric_id),
-                    &MetricType::Float,
+                    &MetricType::Float(0.0),
                     now,
                 ).expect("Should insert");
             }
@@ -3501,7 +3501,7 @@ mod tests {
             backend.upsert_metric_value(
                 &format!("device_{}", (i % 20) + 1),
                 &format!("metric_{}", i),
-                &MetricType::Float,
+                &MetricType::Float(0.0),
                 now,
             ).expect("Should upsert");
         }
@@ -3533,7 +3533,7 @@ mod tests {
             backend.upsert_metric_value(
                 &format!("device_{}", (i % 10) + 1),
                 &format!("metric_{}", i),
-                &MetricType::Float,
+                &MetricType::Float(0.0),
                 now,
             ).expect("Should upsert");
         }
@@ -3592,10 +3592,10 @@ mod tests {
         // Insert 100 metrics with mixed types
         for i in 1..=100 {
             let metric_type = match i % 4 {
-                0 => MetricType::Float,
-                1 => MetricType::Int,
-                2 => MetricType::Bool,
-                _ => MetricType::String,
+                0 => MetricType::Float(0.0),
+                1 => MetricType::Int(0),
+                2 => MetricType::Bool(false),
+                _ => MetricType::String(String::new()),
             };
             backend.upsert_metric_value(
                 &format!("device_{}", (i % 10) + 1),
@@ -3637,7 +3637,7 @@ mod tests {
             backend.upsert_metric_value(
                 &format!("device_{}", device_num),
                 &format!("metric_{}", i),
-                &MetricType::Float,
+                &MetricType::Float(0.0),
                 now,
             ).expect("Should upsert");
         }
@@ -3665,9 +3665,9 @@ mod tests {
         let recent_ts = now - chrono::Duration::days(10);
 
         // Insert old and recent metrics
-        backend.append_metric_history("device_1", "temperature", &MetricType::Float, old_ts.into())
+        backend.append_metric_history("device_1", "temperature", &MetricType::Float(0.0), old_ts.into())
             .expect("Should append old metric");
-        backend.append_metric_history("device_1", "temperature", &MetricType::Float, recent_ts.into())
+        backend.append_metric_history("device_1", "temperature", &MetricType::Float(0.0), recent_ts.into())
             .expect("Should append recent metric");
 
         // Prune with 90-day retention (should delete old but not recent)
@@ -3714,7 +3714,7 @@ mod tests {
             backend.append_metric_history(
                 &format!("device_{}", i),
                 "temperature",
-                &MetricType::Float,
+                &MetricType::Float(0.0),
                 old_ts.into()
             ).expect("Should append");
         }
@@ -3756,9 +3756,9 @@ mod tests {
         let recent_ts = now - chrono::Duration::days(2);
 
         // Insert old and recent metrics
-        backend.append_metric_history("device_1", "temperature", &MetricType::Float, old_ts.into())
+        backend.append_metric_history("device_1", "temperature", &MetricType::Float(0.0), old_ts.into())
             .expect("Should append");
-        backend.append_metric_history("device_1", "humidity", &MetricType::Float, recent_ts.into())
+        backend.append_metric_history("device_1", "humidity", &MetricType::Float(0.0), recent_ts.into())
             .expect("Should append");
 
         // Set retention to 3 days
@@ -4449,7 +4449,7 @@ mod tests {
                     device_id: device_id.to_string(),
                     metric_name: metric_name.to_string(),
                     value,
-                    data_type,
+                    data_type: data_type.clone(),
                     timestamp: ts,
                 }])
                 .expect("seed batch_write_metrics");
@@ -4477,7 +4477,7 @@ mod tests {
         let path = temp_backend_path();
         let backend = SqliteBackend::new(&path).expect("create backend");
         let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        seed_history_rows(&backend, "dev1", "moisture", t0, 1, MetricType::String);
+        seed_history_rows(&backend, "dev1", "moisture", t0, 1, MetricType::String(String::new()));
 
         let result = backend
             .query_metric_history(
@@ -4500,7 +4500,7 @@ mod tests {
         let backend = SqliteBackend::new(&path).expect("create backend");
         let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         // Seed exactly at `start`.
-        seed_history_rows(&backend, "dev1", "m", t0, 1, MetricType::String);
+        seed_history_rows(&backend, "dev1", "m", t0, 1, MetricType::String(String::new()));
 
         // start == seed_ts; row should be returned (start is inclusive).
         let result = backend
@@ -4517,7 +4517,7 @@ mod tests {
         let backend = SqliteBackend::new(&path).expect("create backend");
         let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         // Seed exactly at `end`.
-        seed_history_rows(&backend, "dev1", "m", t0, 1, MetricType::String);
+        seed_history_rows(&backend, "dev1", "m", t0, 1, MetricType::String(String::new()));
 
         // end == seed_ts; row should NOT be returned (end is exclusive).
         let result = backend
@@ -4539,7 +4539,7 @@ mod tests {
         let path = temp_backend_path();
         let backend = SqliteBackend::new(&path).expect("create backend");
         let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        seed_history_rows(&backend, "dev1", "m", t0, 100, MetricType::String);
+        seed_history_rows(&backend, "dev1", "m", t0, 100, MetricType::String(String::new()));
 
         // max_results = 10
         let result = backend
@@ -4572,7 +4572,7 @@ mod tests {
                     device_id: "dev1".to_string(),
                     metric_name: "m".to_string(),
                     value: format!("v{i}"),
-                    data_type: MetricType::String,
+                    data_type: MetricType::String(String::new()),
                     timestamp: ts,
                 }])
                 .expect("seed");
@@ -4604,7 +4604,7 @@ mod tests {
                 device_id: "dev1".to_string(),
                 metric_name: "m".to_string(),
                 value: "NaN".to_string(),
-                data_type: MetricType::Float,
+                data_type: MetricType::Float(0.0),
                 timestamp: t0,
             }])
             .expect("seed NaN");
@@ -4635,8 +4635,8 @@ mod tests {
         let path = temp_backend_path();
         let backend = SqliteBackend::new(&path).expect("create backend");
         let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        seed_history_rows(&backend, "dev1", "m", t0, 3, MetricType::String);
-        seed_history_rows(&backend, "dev2", "m", t0, 3, MetricType::String);
+        seed_history_rows(&backend, "dev1", "m", t0, 3, MetricType::String(String::new()));
+        seed_history_rows(&backend, "dev2", "m", t0, 3, MetricType::String(String::new()));
 
         let result = backend
             .query_metric_history("dev1", "m", t0, t0 + Duration::from_secs(60), 100)
@@ -4651,8 +4651,8 @@ mod tests {
         let path = temp_backend_path();
         let backend = SqliteBackend::new(&path).expect("create backend");
         let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        seed_history_rows(&backend, "dev1", "moisture", t0, 3, MetricType::String);
-        seed_history_rows(&backend, "dev1", "temperature", t0, 3, MetricType::String);
+        seed_history_rows(&backend, "dev1", "moisture", t0, 3, MetricType::String(String::new()));
+        seed_history_rows(&backend, "dev1", "temperature", t0, 3, MetricType::String(String::new()));
 
         let result = backend
             .query_metric_history("dev1", "moisture", t0, t0 + Duration::from_secs(60), 100)

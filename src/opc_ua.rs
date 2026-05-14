@@ -1822,8 +1822,10 @@ impl OpcUa {
         // NOTE: The metric.timestamp field is available but not currently used in the OPC UA Variant.
         // Future enhancement: embed timestamp in OPC UA node's SourceTimestamp attribute for better
         // temporal accuracy in OPC UA clients.
+        // TODO(A-4): pattern-match the typed payload directly. A-1 keeps the
+        // existing parse-from-string logic and adds (_) discards.
         match metric.data_type {
-            crate::storage::MetricType::Int => {
+            crate::storage::MetricType::Int(_) => {
                 match metric.value.parse::<i64>() {
                     Ok(value) => {
                         match i32::try_from(value) {
@@ -1840,7 +1842,7 @@ impl OpcUa {
                     }
                 }
             }
-            crate::storage::MetricType::Float => {
+            crate::storage::MetricType::Float(_) => {
                 match metric.value.parse::<f64>() {
                     Ok(value) => {
                         if !value.is_finite() {
@@ -1856,8 +1858,8 @@ impl OpcUa {
                     }
                 }
             }
-            crate::storage::MetricType::String => Variant::String(metric.value.into()),
-            crate::storage::MetricType::Bool => {
+            crate::storage::MetricType::String(_) => Variant::String(metric.value.into()),
+            crate::storage::MetricType::Bool(_) => {
                 let lower_val = metric.value.to_lowercase();
                 let bool_value = match lower_val.as_str() {
                     "true" => true,
@@ -2000,19 +2002,23 @@ impl OpcUa {
     /// * `Err(String)` - Error message if the variant type is not supported
     ///
     /// # Supported Conversions
-    /// * `Int32/Int64` -> `MetricType::Int`
-    /// * `Float/Double` -> `MetricType::Float`
-    /// * `String` -> `MetricType::String`
-    /// * `Boolean` -> `MetricType::Bool`
+    /// * `Int32/Int64` -> `MetricType::Int(0)`
+    /// * `Float/Double` -> `MetricType::Float(0.0)`
+    /// * `String` -> `MetricType::String(String::new())`
+    /// * `Boolean` -> `MetricType::Bool(false)`
     fn convert_variant_to_metric(variant: &Variant) -> Result<(String, crate::storage::MetricType), String> {
         trace!("Convert variant to metric");
+        // TODO(A-4/A-6): plumb the real payload into MetricType variants instead
+        // of constructing with zero defaults. A-1 keeps the existing string-encoded
+        // value alongside payload-bearing MetricType (with zero payload) until the
+        // downstream stories wire the typed path end-to-end.
         match variant {
-            Variant::Int32(value) => Ok((value.to_string(), crate::storage::MetricType::Int)),
-            Variant::Int64(value) => Ok((value.to_string(), crate::storage::MetricType::Int)),
-            Variant::Float(value) => Ok((value.to_string(), crate::storage::MetricType::Float)),
-            Variant::Double(value) => Ok((value.to_string(), crate::storage::MetricType::Float)),
-            Variant::String(value) => Ok((value.to_string(), crate::storage::MetricType::String)),
-            Variant::Boolean(value) => Ok((value.to_string(), crate::storage::MetricType::Bool)),
+            Variant::Int32(value) => Ok((value.to_string(), crate::storage::MetricType::Int(0))),
+            Variant::Int64(value) => Ok((value.to_string(), crate::storage::MetricType::Int(0))),
+            Variant::Float(value) => Ok((value.to_string(), crate::storage::MetricType::Float(0.0))),
+            Variant::Double(value) => Ok((value.to_string(), crate::storage::MetricType::Float(0.0))),
+            Variant::String(value) => Ok((value.to_string(), crate::storage::MetricType::String(String::new()))),
+            Variant::Boolean(value) => Ok((value.to_string(), crate::storage::MetricType::Bool(false))),
             _ => Err(format!("Unsupported variant type {:?}", variant)),
         }
     }
@@ -2048,7 +2054,7 @@ mod tests {
                 device_id: device_id.clone(),
                 metric_name: metric_name.clone(),
                 value: "21.5".to_string(),
-                data_type: MetricType::Float,
+                data_type: MetricType::Float(0.0),
                 timestamp: SystemTime::now(),
             }])
             .expect("seed fresh");
@@ -2069,7 +2075,7 @@ mod tests {
                 device_id: device_id.clone(),
                 metric_name: metric_name.clone(),
                 value: "21.5".to_string(),
-                data_type: MetricType::Float,
+                data_type: MetricType::Float(0.0),
                 timestamp: old,
             }])
             .expect("seed stale");
@@ -2219,7 +2225,7 @@ mod tests {
                 device_id: device_id.clone(),
                 metric_name: metric_name.clone(),
                 value: "21.5".to_string(),
-                data_type: MetricType::Float,
+                data_type: MetricType::Float(0.0),
                 timestamp: near,
             }])
             .expect("seed near-boundary metric");
@@ -2305,7 +2311,7 @@ mod tests {
                 device_id: "dev-e2e".to_string(),
                 metric_name: "pressure".to_string(),
                 value: "1013.25".to_string(),
-                data_type: MetricType::Float,
+                data_type: MetricType::Float(0.0),
                 timestamp: SystemTime::now(),
             }])
             .expect("seed metric");
@@ -2379,7 +2385,7 @@ mod tests {
                 device_id: "dev-corr".to_string(),
                 metric_name: "humidity".to_string(),
                 value: "55.0".to_string(),
-                data_type: MetricType::Float,
+                data_type: MetricType::Float(0.0),
                 timestamp: SystemTime::now(),
             }])
             .expect("seed");
@@ -2431,7 +2437,7 @@ mod tests {
                 device_id: "dev-fields".to_string(),
                 metric_name: "pressure".to_string(),
                 value: "1013.25".to_string(),
-                data_type: MetricType::Float,
+                data_type: MetricType::Float(0.0),
                 timestamp: SystemTime::now(),
             }])
             .expect("seed");
@@ -2477,7 +2483,7 @@ mod tests {
                 device_id: "dev-sec".to_string(),
                 metric_name: "secret_marker".to_string(),
                 value: "TESTSECRET-DO-NOT-LOG".to_string(),
-                data_type: MetricType::String,
+                data_type: MetricType::String(String::new()),
                 timestamp: SystemTime::now(),
             }])
             .expect("seed");
@@ -2534,7 +2540,7 @@ mod tests {
                 device_id: DEVICE_ID.to_string(),
                 metric_name: METRIC_NAME.to_string(),
                 value: "42.0".to_string(),
-                data_type: MetricType::Float,
+                data_type: MetricType::Float(0.0),
                 timestamp: SystemTime::now(),
             }])
             .expect("seed");
