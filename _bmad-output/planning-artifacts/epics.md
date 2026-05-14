@@ -763,6 +763,134 @@ So that FUXA can alert me when soil moisture drops too low or temperature rises 
 
 ---
 
+## Epic A: Storage Payload Migration (Phase B Closure)
+
+**Numbering offset:** this epic uses the literal name `Epic A` in `sprint-status.yaml`, not a numeric index, to flag its corrective nature (it closes a gap discovered after Phase B's stories shipped, rather than introducing new capability). Stories created via `bmad-create-story` use sprint-status keys `A-1` through `A-7`.
+
+**Why it exists:** Issue [#108](https://github.com/guycorbaz/opcgw/issues/108) surfaced during Story 9-3 code review (2026-05-03). The `MetricType` enum shipped in Epic 1 of this file (sprint-status Epic 2, Data Persistence) is payload-less; every row in `metric_values.value` stores the data-type discriminant string (`"Float"`, `"Int"`, `"Bool"`, `"String"`) instead of the real measurement. Four shipped epics — Epic 1 (persistence), Epic 3 (sprint-status 5, OPC UA visibility), Epic 7 (sprint-status 8, real-time + historical), and Story 7.3 (sprint-status Story 9-3, live metrics dashboard) — are surface-correct but data-incorrect. opcgw has never persisted real metric values. The Epic 9 retrospective (2026-05-14) action item AI6 identifies Epic A as the immediate next epic and the production-deployment blocker for v2.0 GA.
+
+**FRs covered:** FR51 (new — see PRD § Data Persistence).
+
+**Sequencing:** Immediate next epic. Gates the v2.0 GA release. All shipped Phase A + Phase B functionality continues to work structurally — only the value-payload contract is changed. Story 8-4 (sprint-status 8-4, threshold-based alarms, descoped 2026-05-14 from Epic 7 of this file / Epic 8 of sprint-status) revival depends on Epic A landing.
+
+### Story A.1: MetricType Payload-Bearing Enum + StorageBackend Trait Amendment
+
+As a **gateway internal**,
+I want `MetricType` to carry the actual measurement payload (`Float(f64)`, `Int(i64)`, `Bool(bool)`, `String(String)`),
+So that the storage trait round-trips the real value end-to-end instead of flattening to the discriminant string.
+
+**Acceptance Criteria:**
+
+**Given** the storage trait `StorageBackend::set_metric_value(&MetricValue)` accepts a `MetricValue` carrying the new payload-bearing `MetricType`,
+**When** a poller writes a Float metric with value `23.5`,
+**Then** the round-trip through `get_metric_value(...)` returns `MetricType::Float(23.5)` (not `MetricType::Float` with no payload).
+**And** all four variants are covered by unit tests in `src/storage/in_memory.rs::tests` + `src/storage/sqlite.rs::tests`.
+**And** the `OpcGwError::Storage` variant covers any payload-conversion error path.
+
+### Story A.2: SQLite Schema Migration v007 (Typed Value Columns)
+
+As a **deployed opcgw gateway**,
+I want the SQLite schema upgraded to store metric values in typed columns (`value_real REAL NULL`, `value_int INTEGER NULL`, `value_bool INTEGER NULL`, `value_text TEXT NULL`) keyed by `value_type`,
+So that the value payload survives the persistence layer with type fidelity.
+
+**Acceptance Criteria:**
+
+**Given** an existing v006 database with pre-Epic-A rows (`value TEXT` holding the discriminant string),
+**When** the gateway starts against the database,
+**Then** migration v007 adds the four typed columns + a `value_type` discriminant column without dropping rows.
+**And** pre-Epic-A rows have `value_type = 'legacy'` and NULL typed columns; the OPC UA reader returns `BadDataUnavailable` for these until the next poll cycle UPSERTs a real payload.
+**And** the `metric_history` table receives the same column additions for the HistoryRead path.
+**And** rollback path: dropping the database file before upgrading is a documented operator option for instances with no production-value history.
+
+### Story A.3: Poller Value-Payload Write Pipeline
+
+As a **gateway poller**,
+I want `ChirpstackPoller` to wrap real measurement values into the payload-bearing `MetricType` variants at the point of reception,
+So that the value persisted by `SqliteBackend::set_metric_value` carries the real measurement.
+
+**Acceptance Criteria:**
+
+**Given** a ChirpStack metric arrives with a Float value `23.5`,
+**When** the poller constructs the `MetricValue`,
+**Then** the resulting `MetricType::Float(23.5)` is persisted (not `MetricType::Float`).
+**And** all four ChirpStack metric types (Gauge, Counter, Absolute, Unknown) map to the correct `MetricType` variant.
+**And** parse failures emit `event = "metric_parse"` at `warn` level with structured `device_id`, `metric_name`, `raw_value`, `expected_type` (Story 6-3 pattern carry-forward).
+**And** existing Story 4-4 outage-recovery semantics are unchanged.
+
+### Story A.4: OPC UA Read Value-Payload Pipeline
+
+As a **SCADA client connected to opcgw**,
+I want `OpcUa::get_value` to return the actual measurement payload in the OPC UA `Variant`,
+So that `Read` operations return `Variant::Double(23.5)` / `Variant::Int64(42)` / `Variant::Boolean(true)` / `Variant::String("OK")` instead of the discriminant string.
+
+**Acceptance Criteria:**
+
+**Given** a Float metric persisted with value `23.5`,
+**When** an OPC UA `Read` fires on that metric variable,
+**Then** the returned `DataValue` carries `Variant::Double(23.5)` with `StatusCode::Good`.
+**And** Story 5-2 stale-data status codes continue to apply when the metric is stale (precedence rule preserved).
+**And** Story 9-7 hot-reload of `stale_threshold_seconds` continues to work (post-#113 closure-capture limitation preserved).
+**And** all four payload variants are covered by integration tests.
+**And** strict-zero file invariants: `src/web/auth.rs`, `src/security*.rs`, `src/opc_ua_auth.rs`, `src/opc_ua_session_monitor.rs`, `src/main.rs::initialise_tracing` untouched.
+
+### Story A.5: OPC UA HistoryRead Value-Payload Pipeline
+
+As a **SCADA client connected to opcgw**,
+I want `OpcgwHistoryNodeManagerImpl::history_read_raw_modified` to return historical rows with real measurement payloads in each `DataValue`,
+So that `HistoryRead` returns the value-over-time series instead of a wall of discriminant strings.
+
+**Acceptance Criteria:**
+
+**Given** a Float metric with 7 days of historical rows in `metric_history`,
+**When** an OPC UA `HistoryRead` fires for the 7-day range,
+**Then** each returned `DataValue` carries the corresponding `Variant::Double` payload with the original `recorded_at` timestamp (microsecond precision preserved from Story 8-3).
+**And** pre-Epic-A rows (`value_type = 'legacy'`) appear with `StatusCode::BadDataUnavailable` and NULL `Variant`, matching the migration-strategy contract.
+**And** the partial-success behaviour (Story 8-3) is preserved — a bad row in the middle of the range does not abort the read.
+
+### Story A.6: Web UI Live-Metrics Value Display
+
+As an **operator browsing the web dashboard**,
+I want `/api/metrics` to return JSON with real measurement values and `static/metrics.js` to render them with the configured `metric_unit`,
+So that the live dashboard shows `23.5 °C` instead of `"Float"`.
+
+**Acceptance Criteria:**
+
+**Given** a Float metric `Moisture` with value `34.2` and `metric_unit = "%"`,
+**When** the operator loads `/metrics.html`,
+**Then** the row renders `34.2 %` with the staleness badge inherited from Story 9-3.
+**And** the JSON payload from `/api/metrics` round-trips the typed value (e.g., `{"value": 34.2, "type": "Float", "unit": "%"}`).
+**And** Story 9-3's per-row staleness badges continue to display correctly.
+**And** the existing Story 9-4/9-5/9-6 CRUD pages do not break (regression suite passes).
+
+### Story A.7: Migration Runbook + Version-Gated Migration Script
+
+As an **operator upgrading an existing opcgw deployment from v2.0-rc to v2.0 GA**,
+I want a documented migration path that either preserves my legacy database or cleanly drops it,
+So that the upgrade does not require manual schema surgery.
+
+**Acceptance Criteria:**
+
+**Given** an existing v006 database from a v2.0-rc deployment,
+**When** the operator follows `docs/deployment-guide.md § "Epic A migration"`,
+**Then** the runbook documents: (a) automatic in-place schema bump preserving legacy rows as `value_type = 'legacy'` with NULL typed columns (default path), (b) explicit "drop the database file before upgrading" as the alternate path for operators who don't need pre-Epic-A history.
+**And** the migration completes within 5 seconds for databases up to 100MB.
+**And** OPC UA clients see `BadDataUnavailable` on legacy rows until the next poll cycle replaces them.
+**And** the migration is one-way (no rollback path documented; rollback would mean restoring from a pre-upgrade backup file).
+
+### Epic A — Story Acceptance Criteria
+
+**Given** an opcgw instance running against a real ChirpStack with real metric values flowing in,
+**When** an OPC UA client `Read`s any metric variable or `HistoryRead`s any range,
+**Then** the returned `DataValue` carries the actual measurement payload (not the data-type discriminant string).
+**And** this holds across poller restart and gateway upgrade from a v2.0-rc database.
+**And** Story 8-4 (threshold-based alarm conditions, currently descoped) becomes a meaningfully-scopable story under a new Phase B name (not "8-4") once Epic A lands.
+
+**Epic 9 retro (2026-05-14) AI6 reference:** see [`../implementation-artifacts/epic-9-retro-2026-05-14.md`](../implementation-artifacts/epic-9-retro-2026-05-14.md).
+
+**Sprint change proposal:** [`sprint-change-proposal-2026-05-14.md`](sprint-change-proposal-2026-05-14.md).
+
+---
+
 ## Epic 8: Web Configuration & Hot-Reload (Phase B)
 
 Configure devices from any browser on the LAN, see live metric values for debugging, changes apply without gateway restart.

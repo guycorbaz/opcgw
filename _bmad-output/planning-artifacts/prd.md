@@ -173,6 +173,20 @@ The core value proposition is simplicity: there is no easy way to connect ChirpS
 
 **Journeys unlocked:** Journey 3 (Adding a Sensor via Web UI), Journey 4 (Open-Source Adopter).
 
+### Phase B Closure — Epic A (Storage Payload Migration)
+
+**Discovery:** Issue [#108](https://github.com/guycorbaz/opcgw/issues/108) surfaced during Story 9-3 code review (2026-05-03) — the `MetricType` enum shipped in Epic 2 (Data Persistence) is payload-less. Every row in `metric_values.value` stores the data-type discriminant string (`"Float"`, `"Int"`, `"Bool"`, `"String"`) instead of the real measurement. Four shipped epics (2, 5, 8, 9-3) are surface-correct but data-incorrect; opcgw has never persisted real metric values.
+
+**Decision (Epic 9 retrospective, 2026-05-14, action item AI6):** Open Epic A — Storage Payload Migration as the immediate next epic. v2.0 is not considered production-ready until Epic A lands; currently shipped Phase A + Phase B commits constitute v2.0-rc.
+
+**Scope:** Storage-trait refactor making `MetricType` payload-bearing (`Float(f64)` / `Int(i64)` / `Bool(bool)` / `String(String)`), SQLite schema migration (v007, typed value columns), poller value-payload write pipeline, OPC UA `Read` / `HistoryRead` value-payload pipelines, web UI live-metrics value display, and an operator-facing migration runbook for existing v2.0-rc databases.
+
+**Story breakdown:** A-1 through A-7 + retrospective. See `_bmad-output/planning-artifacts/epics.md § Epic A`.
+
+**Sprint change proposal:** [`sprint-change-proposal-2026-05-14.md`](sprint-change-proposal-2026-05-14.md) — full impact analysis, alternatives considered, and approved artifact edits.
+
+**Journeys affected:** Journey 5 (Phase B Daily Operations — Subscriptions, History, Alarms) — the FR21 / FR22 / FR23 value-correctness contract relies on Epic A. FR23 itself (threshold-based alarm conditions, descoped Story 8-4) remains a Known Failure until Epic A lands.
+
 ### Vision (Future — Out of Scope)
 
 - Cloud connectivity or multi-gateway clustering
@@ -388,6 +402,7 @@ The core value proposition is simplicity: there is no easy way to connect ChirpS
 - **FR28:** System can prune historical data older than the configured retention period
 - **FR29:** System can support concurrent read/write access to the persistence layer without blocking
 - **FR30:** System can batch metric writes per poll cycle for write efficiency
+- **FR51:** Stored metric values preserve the original measurement payload such that OPC UA Reads, OPC UA HistoryReads, and web UI displays return the actual measurement (e.g., `23.5`, `42`, `true`, `"OK"`), not the data-type discriminant string. The persistence layer's value contract is strongly typed end-to-end from poller write to client read. (Closes [issue #108](https://github.com/guycorbaz/opcgw/issues/108) — surfaced post-Epic-9; satisfied by Epic A — Storage Payload Migration.)
 
 ### Configuration Management — Current (Phase A)
 

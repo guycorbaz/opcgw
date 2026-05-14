@@ -171,11 +171,28 @@ Use latest stable versions. When adding new dependencies, use current version. W
 - No dual-layer cache — SQLite read performance sufficient at this scale
 
 **SQLite Schema (5 tables):**
-- `metric_values` — Hot table, UPSERT per poll cycle. Primary key: (device_id, metric_name)
-- `metric_history` — Append-only log with timestamps. Indexed on (device_id, metric_name, recorded_at)
-- `command_queue` — Persistent FIFO. Status column (pending/sent/failed). Ordered by created_at ASC
-- `gateway_status` — Key-value store for health metrics
-- `retention_config` — Pruning rules (max_age_days per table)
+- `metric_values` — Hot table, UPSERT per poll cycle. Primary key: (device_id, metric_name). **Value payload (post-Epic-A, migration v007):** stored through typed columns (`value_real REAL NULL`, `value_int INTEGER NULL`, `value_bool INTEGER NULL`, `value_text TEXT NULL`) plus a `value_type` discriminant column. Exactly one of the typed columns is non-NULL per row, matching `value_type`. **Pre-Epic-A baseline (commit `90c2225` and earlier):** stored a single `value TEXT` column holding the data-type discriminant string (`"Float"`, `"Int"`, `"Bool"`, `"String"`) — [issue #108](https://github.com/guycorbaz/opcgw/issues/108).
+- `metric_history` — Append-only log with timestamps. Same payload contract as `metric_values` (typed value columns + `value_type`). Indexed on (device_id, metric_name, recorded_at).
+- `command_queue` — Persistent FIFO. Status column (pending/sent/failed). Ordered by created_at ASC.
+- `gateway_status` — Key-value store for health metrics.
+- `retention_config` — Pruning rules (max_age_days per table).
+
+**Storage Payload Migration Strategy (Epic A):**
+
+The Epic A schema bump (v007) adds typed value columns to `metric_values` and `metric_history` without dropping existing rows. Pre-Epic-A rows are tagged `value_type = 'legacy'` with NULL typed columns; the OPC UA reader returns `BadDataUnavailable` (Story 5-2 status-code path) for these rows until the next poll cycle UPSERTs a real payload, replacing the legacy entry. Operators with no production-value history can drop the database file before upgrading; the gateway recreates it on startup. Migration completes within 5 seconds for databases up to 100 MB (per Story A.7 AC).
+
+`MetricType` becomes payload-bearing post-Epic-A:
+
+```rust
+pub enum MetricType {
+    Float(f64),
+    Int(i64),
+    Bool(bool),
+    String(String),
+}
+```
+
+The `StorageBackend` trait's `set_metric_value(&MetricValue)` and `get_metric_value(...)` round-trip the full `MetricType` enum without flattening to a string. Pattern-matching at every read site (`OpcUa::get_value`, `OpcgwHistoryNodeManagerImpl::history_read_raw_modified`, `web::api::api_metrics`) emits the matching OPC UA `Variant` or JSON value, not the discriminant.
 
 **Concurrency Model:**
 - Each async task owns its own SQLite `Connection` — no shared lock for data access
