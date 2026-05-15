@@ -21,6 +21,7 @@ const MIGRATION_V004: &str = include_str!("../../migrations/v004_add_command_ind
 const MIGRATION_V005: &str = include_str!("../../migrations/v005_gateway_status.sql");
 const MIGRATION_V006: &str = include_str!("../../migrations/v006_gateway_status_health_metrics.sql");
 const MIGRATION_V007: &str = include_str!("../../migrations/v007_typed_value_columns.sql");
+const MIGRATION_V008: &str = include_str!("../../migrations/v008_typed_value_constraints.sql");
 
 /// Run all pending migrations based on current schema version.
 ///
@@ -57,7 +58,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
 
     // Latest available schema version
     #[allow(dead_code)]
-    const LATEST_VERSION: u32 = 7;
+    const LATEST_VERSION: u32 = 8;
 
     // Apply migrations in order
     if current_version < 1 {
@@ -234,6 +235,28 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
         info!(version = 7, "Applied migration v007_typed_value_columns");
     }
 
+    if current_version < 8 {
+        debug!("Applying migration v008_typed_value_constraints");
+
+        conn.execute_batch(MIGRATION_V008)
+            .map_err(|e| {
+                OpcGwError::Database(format!(
+                    "Failed to execute migration v008_typed_value_constraints: {}",
+                    e
+                ))
+            })?;
+
+        conn.pragma_update(None, "user_version", 8u32.to_string())
+            .map_err(|e| {
+                OpcGwError::Database(format!(
+                    "Failed to set schema version to 8: {}",
+                    e
+                ))
+            })?;
+
+        info!(version = 8, "Applied migration v008_typed_value_constraints");
+    }
+
     // Verify final version
     let final_version: u32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -274,11 +297,11 @@ mod tests {
         let result = run_migrations(&conn);
         assert!(result.is_ok(), "Migration on fresh DB should succeed");
 
-        // Verify version was set to the latest (7 — Epic A migration v007 typed value columns)
+        // Verify version was set to the latest (8 — Epic A migration v008 cross-column CHECK constraints)
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read version");
-        assert_eq!(version, 7, "Schema version should be 7 (latest)");
+        assert_eq!(version, 8, "Schema version should be 8 (latest — Epic A v008 cross-column CHECK)");
 
         // Verify tables were created (excluding sqlite_sequence which is created automatically for AUTOINCREMENT)
         let table_count: i32 = conn
@@ -307,7 +330,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read version");
-        assert_eq!(version, 7, "Version should still be 7 (latest)");
+        assert_eq!(version, 8, "Version should still be 8 (latest)");
 
         // Cleanup
         let _ = fs::remove_file(&path);
@@ -376,53 +399,56 @@ mod tests {
     // approach, replace `create_v006_baseline_db` with manual v001-v006
     // execution of `MIGRATION_V0NN` constants.
 
-    /// Creates a temp DB rolled back to v006 schema state for upgrade-path testing.
+    /// Creates a temp DB at v006 schema state for upgrade-path testing.
     ///
-    /// **Forward-compat guard (iter-3 review K2):** this helper rolls v007 off
-    /// by dropping the 5 columns A-2 added. It is only valid while v007 is the
-    /// latest migration. When a future v008+ lands that touches any of those
-    /// column names — or that adds columns this helper doesn't know to drop —
-    /// the "v006 baseline" produced here silently diverges from what
-    /// `MIGRATION_V001..V006` would produce on a fresh DB. The assertion below
-    /// fails loudly the moment `LATEST_VERSION` advances past 7, forcing the
-    /// next-story dev to refactor this helper (e.g. switch to manual v001-v006
-    /// execution of the `MIGRATION_V0NN` constants).
+    /// **A-3 refactor:** Story A-3 added v008 which uses CREATE TABLE … AS
+    /// SELECT to install table-level CHECK constraints. CHECK constraints
+    /// block the previous `ALTER TABLE … DROP COLUMN` rollback strategy
+    /// (SQLite refuses to drop columns referenced by CHECK constraints), so
+    /// this helper now MANUALLY runs `MIGRATION_V001` through `MIGRATION_V006`
+    /// (replicating the runner's v001-v006 logic) and stops at user_version=6,
+    /// producing a true v6 schema with no v007 columns + no v008 constraints.
+    /// Tests built on top of this helper exercise the full v6 → latest
+    /// upgrade path via a single `run_migrations(&conn)` call.
     fn create_v006_baseline_db() -> (Connection, PathBuf) {
-        // Constant is the same as in run_migrations(); a mismatch means a new
-        // migration was added without updating this helper.
-        const HELPER_LATEST_VERSION: u32 = 7;
-        // Cross-check against run_migrations' own LATEST_VERSION expectations
-        // — this is a compile-time-friendly invariant pin.
         let (conn, path) = temp_db();
-        run_migrations(&conn).expect("Failed to run baseline migrations");
-        let actual_version: u32 = conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .expect("Failed to read post-migration version");
-        assert_eq!(
-            actual_version, HELPER_LATEST_VERSION,
-            "create_v006_baseline_db is only valid while v{} is the latest migration; \
-             run_migrations landed at v{} which means a new migration was added \
-             without updating this helper. Refactor to manual v001-v006 execution.",
-            HELPER_LATEST_VERSION, actual_version
-        );
 
-        // Roll back v007 by dropping the columns it added
-        let v007_columns = ["value_real", "value_int", "value_bool", "value_text", "value_type"];
-        for col in &v007_columns {
-            conn.execute(
-                &format!("ALTER TABLE metric_values DROP COLUMN {}", col),
-                [],
-            )
-            .unwrap_or_else(|e| panic!("Failed to drop metric_values.{}: {}", col, e));
-            conn.execute(
-                &format!("ALTER TABLE metric_history DROP COLUMN {}", col),
-                [],
-            )
-            .unwrap_or_else(|e| panic!("Failed to drop metric_history.{}: {}", col, e));
+        // v001: full initial schema via execute_batch
+        conn.execute_batch(MIGRATION_V001)
+            .expect("Failed to apply MIGRATION_V001");
+
+        // v002: column-add loop (the runner uses a Rust loop, not pure SQL,
+        // so we replicate it here verbatim from run_migrations:84-115)
+        let v002_columns = [
+            ("command_name", "TEXT"),
+            ("parameters", "TEXT"),
+            ("enqueued_at", "TEXT"),
+            ("sent_at", "TEXT"),
+            ("confirmed_at", "TEXT"),
+            ("command_hash", "TEXT"),
+            ("chirpstack_result_id", "TEXT"),
+        ];
+        for (col_name, col_type) in v002_columns {
+            let sql = format!("ALTER TABLE command_queue ADD COLUMN {} {}", col_name, col_type);
+            conn.execute(&sql, [])
+                .unwrap_or_else(|e| panic!("Failed to add v002 column {}: {}", col_name, e));
         }
 
+        // v003 - v006: execute_batch in sequence
+        conn.execute_batch(MIGRATION_V003).expect("Failed to apply MIGRATION_V003");
+        conn.execute_batch(MIGRATION_V004).expect("Failed to apply MIGRATION_V004");
+        conn.execute_batch(MIGRATION_V005).expect("Failed to apply MIGRATION_V005");
+        conn.execute_batch(MIGRATION_V006).expect("Failed to apply MIGRATION_V006");
+
         conn.pragma_update(None, "user_version", 6u32.to_string())
-            .expect("Failed to rewind user_version to 6");
+            .expect("Failed to set user_version to 6");
+
+        // Sanity: confirm we landed at v006
+        let actual_version: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("Failed to read user_version after manual v001-v006 setup");
+        assert_eq!(actual_version, 6, "v6 baseline setup failed");
+
         (conn, path)
     }
 
@@ -477,7 +503,7 @@ mod tests {
         let post_version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read post-migration version");
-        assert_eq!(post_version, 7, "Post-upgrade version must be 7");
+        assert_eq!(post_version, 8, "Post-upgrade version must be 8 (v006 → v007 → v008 in one pass)");
 
         // Row counts preserved
         let mv_count: i32 = conn
@@ -648,20 +674,22 @@ mod tests {
             )
             .expect("value_type column query");
 
-        // Legacy columns populated per pre-A-2 contract
-        assert_eq!(legacy_value, "Float", "Legacy `value` column carries discriminant from to_string()");
+        // Legacy columns preserved per A-2-iter1-DEF1 heterogeneous-lexeme
+        // staging contract (both = discriminant for upsert_metric_value).
+        assert_eq!(legacy_value, "Float", "Legacy `value` column still carries discriminant from to_string()");
         assert_eq!(legacy_dt, "Float", "Legacy `data_type` column carries discriminant");
 
-        // Typed columns NULL — A-2 doesn't wire writers
-        assert!(value_real.is_none(), "value_real must be NULL post-A-2");
-        assert!(value_int.is_none(), "value_int must be NULL post-A-2");
-        assert!(value_bool.is_none(), "value_bool must be NULL post-A-2");
-        assert!(value_text.is_none(), "value_text must be NULL post-A-2");
+        // A-3 (AC#4): writers now populate typed columns. For Float(0.0):
+        // value_real = Some(0.0); other typed cols NULL; value_type = 'Float'.
+        assert_eq!(value_real, Some(0.0), "value_real must carry the typed payload post-A-3");
+        assert!(value_int.is_none(), "value_int must be NULL for Float variant");
+        assert!(value_bool.is_none(), "value_bool must be NULL for Float variant");
+        assert!(value_text.is_none(), "value_text must be NULL for Float variant");
 
-        // Default value_type applied
+        // A-3 sets value_type to the matching discriminant
         assert_eq!(
-            value_type, "legacy",
-            "value_type column default must apply to writer rows in A-2 (A-3 will set it explicitly)"
+            value_type, "Float",
+            "value_type must match MetricType discriminant post-A-3"
         );
 
         let _ = fs::remove_file(&db_path);
@@ -880,12 +908,20 @@ mod tests {
         assert!(err.is_err(), "INSERT with invalid value_type must fail");
         assert_check_constraint_violation(err.unwrap_err(), "invalid_kind discriminant");
 
-        // Sanity: valid value_type values are accepted
-        for vt in &["legacy", "Float", "Int", "Bool", "String"] {
+        // Sanity: valid value_type values are accepted (A-3 v008 cross-column
+        // CHECK requires each value_type to pair with the matching typed
+        // column NOT NULL; the helper sets up that pairing per variant).
+        for (vt, real, int_, bool_, text) in &[
+            ("legacy", None, None, None, None::<&str>),
+            ("Float", Some(1.5f64), None, None, None),
+            ("Int", None, Some(42i64), None, None),
+            ("Bool", None, None, Some(1i64), None),
+            ("String", None, None, None, Some("ok")),
+        ] {
             conn.execute(
-                "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_type) \
-                 VALUES (?1, 'm', '0', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', ?2)",
-                rusqlite::params![format!("dev_{}", vt), vt],
+                "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_type, value_real, value_int, value_bool, value_text) \
+                 VALUES (?1, 'm', '0', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![format!("dev_{}", vt), vt, real, int_, bool_, text],
             )
             .unwrap_or_else(|e| panic!("Valid value_type {} rejected: {}", vt, e));
         }
@@ -905,9 +941,13 @@ mod tests {
             "FLOAT", "float", "Float ", " Float", "", "INT", "boolean",
             "Boolean", "Int64", "Int32", "Double",
         ] {
+            // Each invalid value_type with a Float-shaped typed-column payload
+            // (value_real=Some) — even though the row would satisfy v008's
+            // cross-column CHECK for some valid value_type, the value_type
+            // whitelist CHECK rejects the bad discriminant first.
             let err = conn.execute(
-                "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_type) \
-                 VALUES (?1, 'm', '0', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', ?2)",
+                "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_type, value_real) \
+                 VALUES (?1, 'm', '0', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', ?2, 1.5)",
                 rusqlite::params![format!("dev_case_{}", bad), bad],
             );
             assert!(
@@ -959,12 +999,19 @@ mod tests {
         assert!(err.is_err(), "metric_history INSERT with invalid value_type must fail");
         assert_check_violation(err.unwrap_err(), "metric_history invalid_kind discriminant");
 
-        // Valid discriminants accepted on metric_history too
-        for vt in &["legacy", "Float", "Int", "Bool", "String"] {
+        // Valid discriminants accepted on metric_history too (A-3 v008
+        // cross-column CHECK enforces typed-column pairing).
+        for (vt, real, int_, bool_, text) in &[
+            ("legacy", None, None, None, None::<&str>),
+            ("Float", Some(1.5f64), None, None, None),
+            ("Int", None, Some(42i64), None, None),
+            ("Bool", None, None, Some(1i64), None),
+            ("String", None, None, None, Some("ok")),
+        ] {
             conn.execute(
-                "INSERT INTO metric_history (device_id, metric_name, value, data_type, timestamp, created_at, value_type) \
-                 VALUES (?1, 'm', '0', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', ?2)",
-                rusqlite::params![format!("dev_{}", vt), vt],
+                "INSERT INTO metric_history (device_id, metric_name, value, data_type, timestamp, created_at, value_type, value_real, value_int, value_bool, value_text) \
+                 VALUES (?1, 'm', '0', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![format!("dev_{}", vt), vt, real, int_, bool_, text],
             )
             .unwrap_or_else(|e| panic!("metric_history rejected valid value_type {}: {}", vt, e));
         }
@@ -978,8 +1025,8 @@ mod tests {
             "Boolean", "Int64", "Int32", "Double",
         ] {
             let err = conn.execute(
-                "INSERT INTO metric_history (device_id, metric_name, value, data_type, timestamp, created_at, value_type) \
-                 VALUES (?1, 'm', '0', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', ?2)",
+                "INSERT INTO metric_history (device_id, metric_name, value, data_type, timestamp, created_at, value_type, value_real) \
+                 VALUES (?1, 'm', '0', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', ?2, 1.5)",
                 rusqlite::params![format!("dev_case_{}", bad), bad],
             );
             assert!(
@@ -998,35 +1045,36 @@ mod tests {
 
     /// IM1 (iter-1 Blind F20 + Edge F12): the `value_bool` column has a
     /// `CHECK(value_bool IS NULL OR value_bool IN (0, 1))` constraint —
-    /// rejects sentinel / out-of-domain integers on both tables.
+    /// rejects sentinel / out-of-domain integers on both tables. A-3 v008
+    /// adds the cross-column CHECK that pairs value_bool with value_type=Bool.
     #[test]
     fn test_v007_value_bool_check_constraint() {
         let (conn, path) = temp_db();
         run_migrations(&conn).expect("Migration must succeed");
 
-        // NULL is allowed
+        // NULL is allowed for value_type='legacy' rows (all typed cols NULL)
         conn.execute(
-            "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_bool) \
-             VALUES ('dev1', 'm', '0', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', NULL)",
+            "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at) \
+             VALUES ('dev1', 'm', '0', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
             [],
         )
-        .expect("NULL value_bool must be allowed");
+        .expect("Default value_type='legacy' row with all typed NULL must be allowed");
 
-        // 0 and 1 are allowed
+        // 0 and 1 are allowed with value_type='Bool' (A-3 v008 cross-column pairing)
         for v in &[0i64, 1i64] {
             conn.execute(
-                "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_bool) \
-                 VALUES (?1, 'm', '0', 'Bool', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', ?2)",
+                "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_bool, value_type) \
+                 VALUES (?1, 'm', '0', 'Bool', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', ?2, 'Bool')",
                 rusqlite::params![format!("dev_bool_{}", v), v],
             )
             .unwrap_or_else(|e| panic!("value_bool = {} must be accepted: {}", v, e));
         }
 
-        // Anything else must be rejected — pin the schema-side defence
+        // Anything else must be rejected by the column-level value_bool CHECK
         for bad in &[-1i64, 2i64, 99i64, i64::MAX, i64::MIN] {
             let err = conn.execute(
-                "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_bool) \
-                 VALUES (?1, 'm', '0', 'Bool', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', ?2)",
+                "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_bool, value_type) \
+                 VALUES (?1, 'm', '0', 'Bool', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', ?2, 'Bool')",
                 rusqlite::params![format!("dev_bad_{}", bad), bad],
             );
             assert!(
@@ -1050,8 +1098,8 @@ mod tests {
         // expanding the history-side IN list to `(0,1,2)`).
         for bad in &[-1i64, 2i64, 99i64, 42i64, i64::MAX, i64::MIN] {
             let err = conn.execute(
-                "INSERT INTO metric_history (device_id, metric_name, value, data_type, timestamp, created_at, value_bool) \
-                 VALUES (?1, 'm', '0', 'Bool', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', ?2)",
+                "INSERT INTO metric_history (device_id, metric_name, value, data_type, timestamp, created_at, value_bool, value_type) \
+                 VALUES (?1, 'm', '0', 'Bool', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', ?2, 'Bool')",
                 rusqlite::params![format!("dev_hist_{}", bad), bad],
             );
             assert!(

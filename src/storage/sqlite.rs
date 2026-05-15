@@ -537,22 +537,56 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 e
             })?;
 
-        // TODO(A-2): replace the dual-encoded write — the `value` column
-        // currently stores a serde_json blob of the full `MetricType` enum
-        // (e.g. `{"Float":0.0}`) and the `data_type` column stores the bare
-        // discriminant — with the typed-value-column UPSERT introduced in
-        // the A-2 schema migration. The exact column shape (single
-        // polymorphic column with type tag, vs four typed columns) is
-        // settled by A-2's design.
+        // A-3: typed columns populated; legacy `value`/`data_type` retained until A-5/A-7 retires readers.
         let data_type = value.to_string();
         let timestamp = Utc::now().to_rfc3339();
         let value_str = serde_json::to_string(&value).map_err(|e| {
             OpcGwError::Database(format!("Failed to serialize metric value: {}", e))
         })?;
 
+        // A-3 (AC#4): inline pattern-match into 5 sequential `let` bindings to
+        // populate the typed value columns + `value_type` discriminant.
+        // Sequential lets keep clippy::type_complexity quiet on what would
+        // otherwise be a 5-field tuple destructure (A-2 iter-1 IM3 precedent).
+        let value_real: Option<f64>;
+        let value_int: Option<i64>;
+        let value_bool: Option<i64>;
+        let value_text: Option<String>;
+        let value_type: &'static str;
+        match &value {
+            MetricType::Float(f) => {
+                value_real = Some(*f);
+                value_int = None;
+                value_bool = None;
+                value_text = None;
+                value_type = "Float";
+            }
+            MetricType::Int(i) => {
+                value_real = None;
+                value_int = Some(*i);
+                value_bool = None;
+                value_text = None;
+                value_type = "Int";
+            }
+            MetricType::Bool(b) => {
+                value_real = None;
+                value_int = None;
+                value_bool = Some(if *b { 1 } else { 0 });
+                value_text = None;
+                value_type = "Bool";
+            }
+            MetricType::String(s) => {
+                value_real = None;
+                value_int = None;
+                value_bool = None;
+                value_text = Some(s.clone());
+                value_type = "String";
+            }
+        }
+
         conn.execute(
-                "INSERT OR REPLACE INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), COALESCE((SELECT created_at FROM metric_values WHERE device_id=?1 AND metric_name=?2), datetime('now')))",
-                params![device_id, metric_name, value_str, data_type, timestamp],
+                "INSERT OR REPLACE INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_real, value_int, value_bool, value_text, value_type) VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), COALESCE((SELECT created_at FROM metric_values WHERE device_id=?1 AND metric_name=?2), datetime('now')), ?6, ?7, ?8, ?9, ?10)",
+                params![device_id, metric_name, value_str, data_type, timestamp, value_real, value_int, value_bool, value_text, value_type],
             )
             .map_err(|e| {
                 OpcGwError::Database(format!(
@@ -843,22 +877,57 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 e
             })?;
 
-        // TODO(A-2): both `value` and `data_type` are derived from
-        // `value.to_string()` (the discriminant — "Float"/"Int"/"Bool"/
-        // "String") because A-1 staging keeps the legacy discriminant-string
-        // write path (option-b). A-2's schema migration replaces this with a
-        // typed-payload write; the collapse of value↔data_type goes away.
+        // A-3: typed columns populated; legacy `value`/`data_type` retained
+        // (both = discriminant string per pre-A-3 contract — A-2-iter1-DEF1
+        // heterogeneous-lexeme staging) until A-5/A-7 retires readers.
         let value_str = value.to_string();
         let data_type = value.to_string();
         let now_rfc3339 = chrono::DateTime::<Utc>::from(now_ts).to_rfc3339();
 
+        // A-3 (AC#4): inline pattern-match into 5 sequential `let` bindings.
+        let value_real: Option<f64>;
+        let value_int: Option<i64>;
+        let value_bool: Option<i64>;
+        let value_text: Option<String>;
+        let value_type: &'static str;
+        match value {
+            MetricType::Float(f) => {
+                value_real = Some(*f);
+                value_int = None;
+                value_bool = None;
+                value_text = None;
+                value_type = "Float";
+            }
+            MetricType::Int(i) => {
+                value_real = None;
+                value_int = Some(*i);
+                value_bool = None;
+                value_text = None;
+                value_type = "Int";
+            }
+            MetricType::Bool(b) => {
+                value_real = None;
+                value_int = None;
+                value_bool = Some(if *b { 1 } else { 0 });
+                value_text = None;
+                value_type = "Bool";
+            }
+            MetricType::String(s) => {
+                value_real = None;
+                value_int = None;
+                value_bool = None;
+                value_text = Some(s.clone());
+                value_type = "String";
+            }
+        }
+
         // UPSERT with COALESCE: preserves created_at on update, sets it on first insert
-        let query = "INSERT OR REPLACE INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE((SELECT created_at FROM metric_values WHERE device_id=?1 AND metric_name=?2), ?6))";
+        let query = "INSERT OR REPLACE INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_real, value_int, value_bool, value_text, value_type)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE((SELECT created_at FROM metric_values WHERE device_id=?1 AND metric_name=?2), ?6), ?7, ?8, ?9, ?10, ?11)";
 
         conn.execute(
             query,
-            params![device_id, metric_name, value_str, data_type, now_rfc3339, now_rfc3339],
+            params![device_id, metric_name, value_str, data_type, now_rfc3339, now_rfc3339, value_real, value_int, value_bool, value_text, value_type],
         )
         .map_err(|e| {
             OpcGwError::Storage(format!(
@@ -964,21 +1033,12 @@ impl crate::storage::StorageBackend for SqliteBackend {
             }
         };
 
-        // TODO(A-2): see `set_metric` / `upsert_metric_value` — the
-        // discriminant-string `value` column write is option-b A-1 staging.
-        // A-2's schema migration replaces this with a typed-payload write;
-        // see the canonical TODO at `set_metric` for the design notes.
+        // A-3: typed columns populated; legacy `value`/`data_type` retained.
+        // This single-row method is legacy — only test fallbacks call it.
+        // Production poller uses `batch_write_metrics`. Legacy `value`/`data_type`
+        // both = discriminant string per pre-A-3 contract (A-2-iter1-DEF1
+        // heterogeneous-lexeme staging).
         let value_str = value.to_string();
-        // NOTE: This single-row method is **legacy** — only the test fallback
-        // in `chirpstack.rs:1438-1468` calls it. The production poller uses
-        // `batch_write_metrics` (`:992-1109`), which stores the **actual
-        // sensor value** (numeric / boolean / text string) in
-        // `metric_history.value`. Story 8-3's HistoryRead path
-        // (`query_metric_history`, `:1357`) reads those rows directly and
-        // returns the actual values. The "type variant only" pattern below
-        // is a quirk of this legacy method's signature (which takes
-        // `value: &MetricType`, not the actual value); it does not affect
-        // production data.
         let data_type = value.to_string();
         // Use 'Z' suffix for UTC timezone to ensure consistent lexicographic ordering
         // Microsecond precision (%.6f) matches prune cutoff calculation for boundary accuracy
@@ -986,12 +1046,49 @@ impl crate::storage::StorageBackend for SqliteBackend {
         let timestamp_rfc3339 = format!("{}Z", dt_utc.format("%Y-%m-%dT%H:%M:%S%.6f"));
         let created_at_rfc3339 = timestamp_rfc3339.clone();
 
-        let query = "INSERT INTO metric_history (device_id, metric_name, value, data_type, timestamp, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+        // A-3 (AC#4): inline pattern-match into 5 sequential `let` bindings.
+        let value_real: Option<f64>;
+        let value_int: Option<i64>;
+        let value_bool: Option<i64>;
+        let value_text: Option<String>;
+        let value_type: &'static str;
+        match value {
+            MetricType::Float(f) => {
+                value_real = Some(*f);
+                value_int = None;
+                value_bool = None;
+                value_text = None;
+                value_type = "Float";
+            }
+            MetricType::Int(i) => {
+                value_real = None;
+                value_int = Some(*i);
+                value_bool = None;
+                value_text = None;
+                value_type = "Int";
+            }
+            MetricType::Bool(b) => {
+                value_real = None;
+                value_int = None;
+                value_bool = Some(if *b { 1 } else { 0 });
+                value_text = None;
+                value_type = "Bool";
+            }
+            MetricType::String(s) => {
+                value_real = None;
+                value_int = None;
+                value_bool = None;
+                value_text = Some(s.clone());
+                value_type = "String";
+            }
+        }
+
+        let query = "INSERT INTO metric_history (device_id, metric_name, value, data_type, timestamp, created_at, value_real, value_int, value_bool, value_text, value_type)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)";
 
         conn.execute(
             query,
-            params![device_id, metric_name, value_str, data_type, timestamp_rfc3339, created_at_rfc3339],
+            params![device_id, metric_name, value_str, data_type, timestamp_rfc3339, created_at_rfc3339, value_real, value_int, value_bool, value_text, value_type],
         )
         .map_err(|e| {
             OpcGwError::Storage(format!(
@@ -1070,23 +1167,60 @@ impl crate::storage::StorageBackend for SqliteBackend {
         trace!(operation = "txn_begin", operation_count = metric_count);
 
         for metric in metrics {
-            // TODO(A-2): `data_type_str` is the discriminant; `metric.value`
-            // is the real string-encoded sensor reading written into the
-            // `value` column. A-2's schema migration replaces the textual
-            // `value` column with a typed-payload write, and the
-            // `BatchMetricWrite.value: String` field is removed in favour of
-            // reading the payload directly off `metric.data_type`.
+            // A-3: typed columns populated; legacy `value`/`data_type` retained
+            // (`metric.value` is the real string-encoded sensor reading;
+            // `data_type_str` is the discriminant) until A-5/A-7 retires readers.
             let data_type_str = metric.data_type.to_string();
             let timestamp_rfc3339 = chrono::DateTime::<Utc>::from(metric.timestamp).to_rfc3339();
 
+            // A-3 (AC#4): inline pattern-match on metric.data_type into 5
+            // sequential `let` bindings (BatchMetricWrite.data_type already
+            // carries the typed payload per A-1/A-2 contract — no new field
+            // on the struct; data_type.to_string() yields `value_type`).
+            let value_real: Option<f64>;
+            let value_int: Option<i64>;
+            let value_bool: Option<i64>;
+            let value_text: Option<String>;
+            let value_type: &'static str;
+            match &metric.data_type {
+                MetricType::Float(f) => {
+                    value_real = Some(*f);
+                    value_int = None;
+                    value_bool = None;
+                    value_text = None;
+                    value_type = "Float";
+                }
+                MetricType::Int(i) => {
+                    value_real = None;
+                    value_int = Some(*i);
+                    value_bool = None;
+                    value_text = None;
+                    value_type = "Int";
+                }
+                MetricType::Bool(b) => {
+                    value_real = None;
+                    value_int = None;
+                    value_bool = Some(if *b { 1 } else { 0 });
+                    value_text = None;
+                    value_type = "Bool";
+                }
+                MetricType::String(s) => {
+                    value_real = None;
+                    value_int = None;
+                    value_bool = None;
+                    value_text = Some(s.clone());
+                    value_type = "String";
+                }
+            }
+
             // UPSERT for metric_values
-            let upsert_query = "INSERT OR REPLACE INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at)
-                                VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE((SELECT created_at FROM metric_values WHERE device_id=?1 AND metric_name=?2), ?6))";
+            let upsert_query = "INSERT OR REPLACE INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_real, value_int, value_bool, value_text, value_type)
+                                VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE((SELECT created_at FROM metric_values WHERE device_id=?1 AND metric_name=?2), ?6), ?7, ?8, ?9, ?10, ?11)";
 
             let upsert_start = Instant::now();
             conn.execute(
                 upsert_query,
-                params![&metric.device_id, &metric.metric_name, &metric.value, data_type_str, timestamp_rfc3339, timestamp_rfc3339],
+                params![&metric.device_id, &metric.metric_name, &metric.value, data_type_str, timestamp_rfc3339, timestamp_rfc3339, value_real, value_int, &value_bool, &value_text, value_type],
             )
             .map_err(|e| {
                 log_sqlite_busy_if_applicable(
@@ -1117,12 +1251,12 @@ impl crate::storage::StorageBackend for SqliteBackend {
 
             // INSERT for metric_history
             let history_timestamp = Utc::now().to_rfc3339();
-            let insert_query = "INSERT INTO metric_history (device_id, metric_name, value, data_type, timestamp, created_at)
-                                VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+            let insert_query = "INSERT INTO metric_history (device_id, metric_name, value, data_type, timestamp, created_at, value_real, value_int, value_bool, value_text, value_type)
+                                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)";
 
             conn.execute(
                 insert_query,
-                params![&metric.device_id, &metric.metric_name, &metric.value, data_type_str, timestamp_rfc3339, history_timestamp],
+                params![&metric.device_id, &metric.metric_name, &metric.value, data_type_str, timestamp_rfc3339, history_timestamp, value_real, value_int, &value_bool, &value_text, value_type],
             )
             .map_err(|e| {
                 // Review patch P17: see upsert site above for rationale.
@@ -4808,6 +4942,320 @@ mod tests {
             row_count, 1,
             "UPSERT must not create duplicate metric_history rows"
         );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    // ===== Story A-3 (AC#4): writer typed-column population =====
+    //
+    // The tests below pin the A-3 contract: each writer populates the
+    // matching typed column (`value_real` / `value_int` / `value_bool` /
+    // `value_text`) + `value_type` (per `MetricType::Display`) based on the
+    // `MetricType` payload pattern. Legacy `value` + `data_type` columns are
+    // also preserved per A-2-iter1-DEF1 heterogeneous-lexeme staging.
+
+    /// Helper: read typed columns + value_type for a (device_id, metric_name)
+    /// row from `metric_values`. Returns `(value_real, value_int, value_bool,
+    /// value_text, value_type, legacy_value, legacy_data_type)`.
+    #[allow(clippy::type_complexity)]
+    fn read_typed_columns(
+        path: &str,
+        device_id: &str,
+        metric_name: &str,
+    ) -> (
+        Option<f64>,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        String,
+        String,
+        String,
+    ) {
+        let conn = rusqlite::Connection::open(path).expect("re-open temp DB");
+        conn.query_row(
+            "SELECT value_real, value_int, value_bool, value_text, value_type, value, data_type \
+             FROM metric_values WHERE device_id = ?1 AND metric_name = ?2",
+            rusqlite::params![device_id, metric_name],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .expect("row must exist")
+    }
+
+    #[test]
+    fn test_set_metric_populates_typed_columns_float() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("create backend");
+
+        backend
+            .set_metric("dev1", "temp", MetricType::Float(23.5))
+            .expect("set_metric Float");
+
+        let (vr, vi, vb, vt, vty, _legacy_value, legacy_dt) =
+            read_typed_columns(&path, "dev1", "temp");
+        assert_eq!(vr, Some(23.5), "value_real must carry the f64 payload");
+        assert!(vi.is_none() && vb.is_none() && vt.is_none(), "other typed cols must be NULL");
+        assert_eq!(vty, "Float", "value_type discriminant");
+        assert_eq!(legacy_dt, "Float", "legacy data_type preserved");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_set_metric_populates_typed_columns_int() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("create backend");
+
+        backend
+            .set_metric("dev1", "counter", MetricType::Int(42))
+            .expect("set_metric Int");
+
+        let (vr, vi, vb, vt, vty, _, _) = read_typed_columns(&path, "dev1", "counter");
+        assert!(vr.is_none(), "value_real must be NULL");
+        assert_eq!(vi, Some(42), "value_int must carry the i64 payload");
+        assert!(vb.is_none() && vt.is_none(), "other typed cols must be NULL");
+        assert_eq!(vty, "Int");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_set_metric_populates_typed_columns_bool() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("create backend");
+
+        backend
+            .set_metric("dev1", "on", MetricType::Bool(true))
+            .expect("set_metric Bool(true)");
+        backend
+            .set_metric("dev2", "off", MetricType::Bool(false))
+            .expect("set_metric Bool(false)");
+
+        let (_, _, vb_on, _, vty_on, _, _) = read_typed_columns(&path, "dev1", "on");
+        assert_eq!(vb_on, Some(1), "Bool(true) → value_bool = 1");
+        assert_eq!(vty_on, "Bool");
+
+        let (_, _, vb_off, _, vty_off, _, _) = read_typed_columns(&path, "dev2", "off");
+        assert_eq!(vb_off, Some(0), "Bool(false) → value_bool = 0");
+        assert_eq!(vty_off, "Bool");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_set_metric_populates_typed_columns_string() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("create backend");
+
+        backend
+            .set_metric("dev1", "label", MetricType::String("OK".to_string()))
+            .expect("set_metric String");
+
+        let (vr, vi, vb, vt, vty, _, _) = read_typed_columns(&path, "dev1", "label");
+        assert!(vr.is_none() && vi.is_none() && vb.is_none(), "other typed cols must be NULL");
+        assert_eq!(vt.as_deref(), Some("OK"), "value_text must carry the payload");
+        assert_eq!(vty, "String");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_upsert_metric_value_populates_typed_columns_all_variants() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("create backend");
+        let now = SystemTime::now();
+
+        backend
+            .upsert_metric_value("dev_f", "m", &MetricType::Float(7.25), now)
+            .expect("upsert Float");
+        backend
+            .upsert_metric_value("dev_i", "m", &MetricType::Int(-100), now)
+            .expect("upsert Int");
+        backend
+            .upsert_metric_value("dev_b", "m", &MetricType::Bool(true), now)
+            .expect("upsert Bool");
+        backend
+            .upsert_metric_value(
+                "dev_s",
+                "m",
+                &MetricType::String("hello".to_string()),
+                now,
+            )
+            .expect("upsert String");
+
+        let (vr, _, _, _, vty_f, _, _) = read_typed_columns(&path, "dev_f", "m");
+        assert_eq!(vr, Some(7.25));
+        assert_eq!(vty_f, "Float");
+
+        let (_, vi, _, _, vty_i, _, _) = read_typed_columns(&path, "dev_i", "m");
+        assert_eq!(vi, Some(-100));
+        assert_eq!(vty_i, "Int");
+
+        let (_, _, vb, _, vty_b, _, _) = read_typed_columns(&path, "dev_b", "m");
+        assert_eq!(vb, Some(1));
+        assert_eq!(vty_b, "Bool");
+
+        let (_, _, _, vt, vty_s, _, _) = read_typed_columns(&path, "dev_s", "m");
+        assert_eq!(vt.as_deref(), Some("hello"));
+        assert_eq!(vty_s, "String");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_batch_write_metrics_populates_typed_columns_all_variants() {
+        use crate::storage::BatchMetricWrite;
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("create backend");
+        let now = SystemTime::now();
+
+        let batch = vec![
+            BatchMetricWrite {
+                device_id: "dev_f".into(),
+                metric_name: "m".into(),
+                value: "1.5".into(),
+                data_type: MetricType::Float(1.5),
+                timestamp: now,
+            },
+            BatchMetricWrite {
+                device_id: "dev_i".into(),
+                metric_name: "m".into(),
+                value: "99".into(),
+                data_type: MetricType::Int(99),
+                timestamp: now,
+            },
+            BatchMetricWrite {
+                device_id: "dev_b".into(),
+                metric_name: "m".into(),
+                value: "true".into(),
+                data_type: MetricType::Bool(true),
+                timestamp: now,
+            },
+            BatchMetricWrite {
+                device_id: "dev_s".into(),
+                metric_name: "m".into(),
+                value: "ok".into(),
+                data_type: MetricType::String("ok".into()),
+                timestamp: now,
+            },
+        ];
+        backend.batch_write_metrics(batch).expect("batch_write_metrics");
+
+        // metric_values typed columns populated
+        let (vr, _, _, _, vty_f, leg_v_f, _) = read_typed_columns(&path, "dev_f", "m");
+        assert_eq!(vr, Some(1.5));
+        assert_eq!(vty_f, "Float");
+        assert_eq!(leg_v_f, "1.5", "legacy `value` carries real string-encoded sensor reading via BatchMetricWrite.value");
+
+        let (_, vi, _, _, vty_i, _, _) = read_typed_columns(&path, "dev_i", "m");
+        assert_eq!(vi, Some(99));
+        assert_eq!(vty_i, "Int");
+
+        let (_, _, vb, _, vty_b, _, _) = read_typed_columns(&path, "dev_b", "m");
+        assert_eq!(vb, Some(1));
+        assert_eq!(vty_b, "Bool");
+
+        let (_, _, _, vt, vty_s, _, _) = read_typed_columns(&path, "dev_s", "m");
+        assert_eq!(vt.as_deref(), Some("ok"));
+        assert_eq!(vty_s, "String");
+
+        // metric_history also populated for all 4 variants
+        let conn = rusqlite::Connection::open(&path).expect("re-open");
+        let mh_count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM metric_history", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(mh_count, 4, "batch_write_metrics inserts 1 row per variant into metric_history");
+
+        let mh_typed: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM metric_history WHERE value_type IN ('Float','Int','Bool','String')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count typed");
+        assert_eq!(mh_typed, 4, "all metric_history rows carry the typed payload");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_append_metric_history_populates_typed_columns() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("create backend");
+        let now = SystemTime::now();
+
+        backend
+            .append_metric_history("dev_f", "m", &MetricType::Float(2.71), now)
+            .expect("append Float");
+
+        let conn = rusqlite::Connection::open(&path).expect("re-open");
+        let (vr, vi, vb, vt, vty): (
+            Option<f64>,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT value_real, value_int, value_bool, value_text, value_type \
+                 FROM metric_history WHERE device_id='dev_f' AND metric_name='m'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .expect("history row");
+        assert_eq!(vr, Some(2.71));
+        assert!(vi.is_none() && vb.is_none() && vt.is_none());
+        assert_eq!(vty, "Float");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// AC#9 sanity: counter monotonic reset detection uses the typed payload
+    /// (MetricType::Int) on the prev_metric.data_type when available — pinned
+    /// by an end-to-end write then read via SqliteBackend.
+    #[test]
+    fn test_counter_typed_payload_round_trip() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("create backend");
+        let now = SystemTime::now();
+
+        backend
+            .upsert_metric_value("dev_c", "counter", &MetricType::Int(1000), now)
+            .expect("upsert");
+
+        let mv = backend
+            .get_metric_value("dev_c", "counter")
+            .expect("get")
+            .expect("row");
+
+        // get_metric_value reconstructs MetricType from the legacy `data_type`
+        // column today — A-4 will rewire it to project from the typed columns.
+        // The legacy reconstruction yields Int(0) (zero default from FromStr).
+        // The READ path improvement is A-4's job; A-3 just makes the WRITE
+        // side populate the typed columns (which a raw SQL query confirms).
+        match mv.data_type {
+            MetricType::Int(_) => {}
+            other => panic!("expected MetricType::Int variant, got {:?}", other),
+        }
+
+        let conn = rusqlite::Connection::open(&path).expect("re-open");
+        let vi: Option<i64> = conn
+            .query_row(
+                "SELECT value_int FROM metric_values WHERE device_id='dev_c' AND metric_name='counter'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query");
+        assert_eq!(vi, Some(1000), "A-3 writer must populate typed value_int with the real i64 payload");
 
         let _ = fs::remove_file(&path);
     }

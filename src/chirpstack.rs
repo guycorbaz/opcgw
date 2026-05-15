@@ -309,12 +309,12 @@ pub(crate) fn validate_bool_metric_value(
                 "Not a valid boolean value"
             );
             warn!(
-                operation = "metric_parse",
+                event = "metric_parse",
                 device_id = %device_id,
                 metric_name = %metric_name,
-                raw_value = ?raw_value,
-                error = "invalid boolean value (must be 0.0 or 1.0)",
-                fallback_value = "none",
+                raw_value = %raw_value,
+                expected_type = "Bool",
+                reason = "invalid_bool",
                 "Metric parse failed; skipping update"
             );
             None
@@ -1583,20 +1583,37 @@ impl ChirpstackPoller {
 
         let raw_value = metric.datasets[0].data[0];
 
+        // A-3 (AC#2, AC#10): NaN/Inf guard — emitted BEFORE constructing any
+        // `MetricType::Float(raw_value)` payload so the operator-facing audit
+        // event captures the original `raw_value`. Skip the metric for this
+        // cycle; the next poll cycle re-evaluates.
+        if !(raw_value as f64).is_finite() {
+            warn!(
+                event = "metric_parse",
+                device_id = %device_id,
+                metric_name = %metric_name,
+                raw_value = %raw_value,
+                expected_type = "Float",
+                reason = "non_finite",
+                "Skipping metric: non-finite Float (NaN or Inf)"
+            );
+            return None;
+        }
+
         // 2. Determine target MetricType (kind-first priority).
-        // A-1: payload-bearing zero defaults — A-3 will replace with raw_value.
+        // A-3: real payload wrapping via raw_value: f32 → f64 (Float) or as i64 (Int).
         let target_type = match kind {
             ChirpStackMetricKind::Gauge => {
                 debug!(metric_name = %metric_name, device_id = %device_id, metric_kind = ?kind, kind_driven_conversion = true, "Using GAUGE → Float");
-                MetricType::Float(0.0) // TODO(A-3): use raw_value
+                MetricType::Float(raw_value as f64)
             }
             ChirpStackMetricKind::Counter => {
                 debug!(metric_name = %metric_name, device_id = %device_id, metric_kind = ?kind, kind_driven_conversion = true, "Using COUNTER → Int");
-                MetricType::Int(0) // TODO(A-3): use raw_value as i64
+                MetricType::Int(raw_value as i64)
             }
             ChirpStackMetricKind::Absolute => {
                 debug!(metric_name = %metric_name, device_id = %device_id, metric_kind = ?kind, kind_driven_conversion = true, "Using ABSOLUTE → Float");
-                MetricType::Float(0.0) // TODO(A-3): use raw_value
+                MetricType::Float(raw_value as f64)
             }
             ChirpStackMetricKind::Unknown => {
                 // Fallback to config type if available
@@ -1604,9 +1621,13 @@ impl ChirpstackPoller {
                     Some(cfg_type) => {
                         debug!(metric_name = %metric_name, device_id = %device_id, metric_kind = ?kind, "Using config fallback for unknown kind");
                         match cfg_type {
-                            OpcMetricTypeConfig::Bool => MetricType::Bool(false), // TODO(A-3)
-                            OpcMetricTypeConfig::Int => MetricType::Int(0),       // TODO(A-3)
-                            OpcMetricTypeConfig::Float => MetricType::Float(0.0), // TODO(A-3)
+                            // The Bool branch defers to validate_bool_metric_value (step 4)
+                            // so the kind=Unknown + cfg=Bool path emits the right metric_parse
+                            // warn on invalid bool input. The placeholder false is replaced
+                            // in step 4's MetricType::Bool(_) arm.
+                            OpcMetricTypeConfig::Bool => MetricType::Bool(false),
+                            OpcMetricTypeConfig::Int => MetricType::Int(raw_value as i64),
+                            OpcMetricTypeConfig::Float => MetricType::Float(raw_value as f64),
                             OpcMetricTypeConfig::String => {
                                 warn!("Reading string metrics from ChirpStack server is not implemented");
                                 return None;
@@ -1621,10 +1642,17 @@ impl ChirpstackPoller {
             }
         };
 
-        // 3. For Counter type: check monotonic property (reject reset: new < previous)
+        // 3. For Counter type: check monotonic property (reject reset: new < previous).
+        // A-3 (AC#9): prefer the typed payload on the previous row when available
+        // (post-A-3 writers populate it); fall back to the legacy string parse for
+        // rows written by pre-A-3 binaries (`value_type = 'legacy'` rows).
         if matches!(target_type, MetricType::Int(_)) && kind == ChirpStackMetricKind::Counter {
             if let Ok(Some(prev_metric)) = self.backend.get_metric_value(&device_id_string, &metric_name) {
-                if let Ok(prev_int) = prev_metric.value.parse::<i64>() {
+                let prev_int_opt: Option<i64> = match &prev_metric.data_type {
+                    MetricType::Int(prev_int) => Some(*prev_int),
+                    _ => prev_metric.value.parse::<i64>().ok(),
+                };
+                if let Some(prev_int) = prev_int_opt {
                     let new_int = raw_value as i64;
                     if new_int < prev_int {
                         warn!(device_id = %device_id, metric_name = %metric_name,
@@ -1637,8 +1665,7 @@ impl ChirpstackPoller {
         }
 
         // 4. Validate and convert value based on target type.
-        // A-1: pattern-match adds (_) discards; constructions get TODO(A-3)
-        // markers with zero defaults — A-3 will wrap the validated value.
+        // A-3: wrap validated/converted value into the typed MetricType payload.
         let (value_str, metric_type) = match target_type {
             MetricType::Bool(_) => {
                 // Iter-3 review pending #1: helper-extracted to
@@ -1647,7 +1674,7 @@ impl ChirpstackPoller {
                 // full `ChirpstackPoller` instance. The helper emits the
                 // canonical `metric_parse` warn on invalid input.
                 match validate_bool_metric_value(raw_value, device_id, &metric_name, kind) {
-                    Some(s) => (s.to_string(), MetricType::Bool(false)), // TODO(A-3): MetricType::Bool(s)
+                    Some(s) => (s.to_string(), MetricType::Bool(s == "1")),
                     None => return None,
                 }
             }
@@ -1657,9 +1684,9 @@ impl ChirpstackPoller {
                     warn!(value = %raw_value, metric_name = %metric_name, device_id = %device_id,
                           metric_kind = ?kind, "Counter metric has fractional value; precision lost");
                 }
-                (int_val.to_string(), MetricType::Int(0)) // TODO(A-3): MetricType::Int(int_val)
+                (int_val.to_string(), MetricType::Int(int_val))
             }
-            MetricType::Float(_) => (raw_value.to_string(), MetricType::Float(0.0)), // TODO(A-3): MetricType::Float(raw_value)
+            MetricType::Float(_) => (raw_value.to_string(), MetricType::Float(raw_value as f64)),
             MetricType::String(_) => {
                 warn!(metric_name = %metric_name, device_id = %device_id, metric_kind = ?kind, "Reading string metrics from ChirpStack server is not implemented");
                 return None;
@@ -1681,31 +1708,102 @@ impl ChirpstackPoller {
     /// replaced in production by `prepare_metric_for_batch` +
     /// `batch_write_metrics`).
     ///
-    /// **Status (Story A-1):** the body is a `todo!()` placeholder pending
-    /// Story A-3. The pre-A-1 body unconditionally stamped zero-defaulted
-    /// payloads (`MetricType::Bool(false)` / `Int(0)` / `Float(0.0)` /
-    /// `String(String::new())`) regardless of the real sensor value — a
-    /// data-loss landmine if re-enabled before A-3 plumbs
-    /// `metric.datasets[0].data[0]` into the typed payload. The original
-    /// kind→variant dispatch + bool 0/1 validation + int fractional warn is
-    /// preserved in git history (`git show 16e7811:src/chirpstack.rs`) and
-    /// should be reinstated by A-3 with the real payload threading.
+    /// **Status (Story A-3):** reinstated. Kept `#[allow(dead_code)]` because
+    /// production code reaches storage via `prepare_metric_for_batch` +
+    /// `batch_write_metrics`. The body mirrors `prepare_metric_for_batch`'s
+    /// dispatch: NaN/Inf guard, kind→variant wrap with real payload, bool 0/1
+    /// validation via `validate_bool_metric_value`, int fractional warn, and
+    /// per-variant `upsert_metric_value` + `append_metric_history` calls.
     ///
     /// # Arguments
     ///
     /// * `device_id` - The unique identifier of the device
     /// * `metric` - The metric data received from ChirpStack
     #[allow(dead_code)]
-    pub fn store_metric(&self, _device_id: &String, _metric: &Metric) {
-        // Review patch P9 (iter-1) defensive guard, refined by iter-2 IR5:
-        // use `todo!()` (not `unimplemented!()`) — the method's body **will**
-        // be reinstated by Story A-3, so the macro that signals "scaffolded
-        // for later implementation" is the correct one. Both macros panic
-        // with `not yet implemented`, so behaviour at runtime is identical.
-        todo!(
-            "store_metric body to be reinstated by Story A-3 — see review patch P9 \
-             in A-1-metrictype-payload-bearing-enum.md § Review Findings"
-        );
+    pub fn store_metric(&self, device_id: &String, metric: &Metric) {
+        debug!("Store chirpstack device metric in storage");
+        let device_name = match self.config.get_device_name(device_id) {
+            Some(name) => name,
+            None => {
+                warn!(device_id = %device_id, "Device name not found in config, skipping metric");
+                return;
+            }
+        };
+
+        if metric.datasets.is_empty() || metric.datasets[0].data.is_empty() {
+            warn!(device_id = %device_id, metric_name = %metric.name, "Metric has no data; skipping");
+            return;
+        }
+
+        let metric_name = metric.name.clone();
+        let raw_value = metric.datasets[0].data[0];
+        let now_ts = SystemTime::now();
+        let kind = classify_metric_kind(metric.kind);
+
+        // A-3 (AC#2, AC#8): NaN/Inf guard — emitted before constructing any
+        // Float payload so the audit event captures the original raw_value.
+        if !(raw_value as f64).is_finite() {
+            warn!(
+                event = "metric_parse",
+                device_id = %device_id,
+                metric_name = %metric_name,
+                raw_value = %raw_value,
+                expected_type = "Float",
+                reason = "non_finite",
+                "Skipping metric: non-finite Float (NaN or Inf)"
+            );
+            return;
+        }
+
+        // A-3 (AC#8): kind→variant dispatch with real payload wrapping.
+        // Structural shape mirrors `prepare_metric_for_batch` Task 1.
+        // NOTE: If upsert_metric_value() succeeds but append_metric_history() fails,
+        // the metric will exist in metric_values but not in metric_history. This is
+        // intentional to allow the poller to continue (non-fatal error handling).
+        match self.config.get_metric_type(&metric_name, device_id) {
+            Some(metric_type) => match metric_type {
+                OpcMetricTypeConfig::Bool => {
+                    debug!(metric = ?metric, "Bool metric");
+                    let parsed = match validate_bool_metric_value(raw_value, device_id, &metric_name, kind) {
+                        Some(s) => s == "1",
+                        None => return,
+                    };
+                    let metric_val = MetricType::Bool(parsed);
+                    if let Err(e) = self.backend.upsert_metric_value(device_id, &metric_name, &metric_val, now_ts) {
+                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to upsert bool metric");
+                    } else if let Err(e) = self.backend.append_metric_history(device_id, &metric_name, &metric_val, now_ts) {
+                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to append bool metric to history");
+                    }
+                }
+                OpcMetricTypeConfig::Int => {
+                    debug!(metric = ?metric, "Int metric");
+                    if raw_value.fract() != 0.0 {
+                        warn!(value = %raw_value, metric_name = %metric_name, "Float metric truncated to int; precision lost");
+                    }
+                    let metric_val = MetricType::Int(raw_value as i64);
+                    if let Err(e) = self.backend.upsert_metric_value(device_id, &metric_name, &metric_val, now_ts) {
+                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to upsert int metric");
+                    } else if let Err(e) = self.backend.append_metric_history(device_id, &metric_name, &metric_val, now_ts) {
+                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to append int metric to history");
+                    }
+                }
+                OpcMetricTypeConfig::Float => {
+                    debug!(metric = ?metric, "Float metric");
+                    let metric_val = MetricType::Float(raw_value as f64);
+                    if let Err(e) = self.backend.upsert_metric_value(device_id, &metric_name, &metric_val, now_ts) {
+                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to upsert float metric");
+                    } else if let Err(e) = self.backend.append_metric_history(device_id, &metric_name, &metric_val, now_ts) {
+                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to append float metric to history");
+                    }
+                }
+                OpcMetricTypeConfig::String => {
+                    warn!(metric_name = %metric_name, device_id = %device_id, "Reading string metrics from ChirpStack server is not implemented");
+                }
+            },
+            None => {
+                warn!(metric_name = ?metric_name, device_name = ?device_name, "No metric type found for chirpstack metric");
+            }
+        };
     }
 
     /// Fetches all applications with pagination support (Story 4-3).
@@ -2685,8 +2783,14 @@ mod tests {
             result.is_none(),
             "0.5 is not a valid boolean (must be 0.0 or 1.0)"
         );
-        assert!(logs_contain("operation=\"metric_parse\""));
-        assert!(logs_contain("fallback_value=\"none\""));
+        // A-3 (AC#10): emission renamed `operation = "metric_parse"` →
+        // `event = "metric_parse"` to align with the grep contract pattern
+        // used by Stories 9-4 through 9-8 (`event = "<prefix>_..."`).
+        // Field schema also added `expected_type = "Bool"` + `reason = "invalid_bool"`
+        // — closed enum across the two emission sites in chirpstack.rs.
+        assert!(logs_contain("event=\"metric_parse\""));
+        assert!(logs_contain("expected_type=\"Bool\""));
+        assert!(logs_contain("reason=\"invalid_bool\""));
         assert!(logs_contain("device_id=test_device"));
         assert!(logs_contain("metric_name=is_on"));
     }
