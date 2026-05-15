@@ -18,6 +18,18 @@
 --           Uses the standard CREATE TABLE … AS SELECT recreate pattern: O(table-size).
 --           Wrapped in explicit BEGIN/COMMIT to give v008 atomic guarantees (partial close
 --           of A-1-iter3-DEF6 / A-2-iter1-DEF-IH1 for v008 specifically).
+--           A-3 iter-1 IR7: `PRAGMA foreign_keys = OFF` bracketing the recreate per the
+--           SQLite official table-recreate procedure
+--           (https://www.sqlite.org/lang_altertable.html#otheralter) so any future
+--           FK references to `metric_values(id)` / `metric_history(id)` would not detach
+--           during the DROP+RENAME. None today, but defensive correctness for future
+--           schema work. The `PRAGMA = ON` after the transaction restores the original
+--           setting for the connection lifetime.
+-- PK shape: v001's `metric_values` and `metric_history` use `INTEGER PRIMARY KEY` (no
+--           AUTOINCREMENT). v008's recreate matches verbatim. AUTOINCREMENT semantics
+--           are preserved by NOT using the keyword on either side.
+
+PRAGMA foreign_keys = OFF;
 
 BEGIN TRANSACTION;
 
@@ -105,3 +117,5 @@ CREATE INDEX IF NOT EXISTS idx_metric_history_device_timestamp
   ON metric_history(device_id, timestamp);
 
 COMMIT;
+
+PRAGMA foreign_keys = ON;

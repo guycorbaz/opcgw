@@ -5,7 +5,7 @@
 | Story key     | `A-3-poller-value-payload-write-pipeline`                                                             |
 | Epic          | A — Storage Payload Migration (Phase B Closure, gates v2.0 GA)                                        |
 | FRs           | FR51 (Epic-A umbrella)                                                                                |
-| Status        | review                                                                                                |
+| Status        | done                                                                                                  |
 | Created       | 2026-05-15                                                                                            |
 | Source epic   | `_bmad-output/planning-artifacts/epics.md § Epic A § Story A.3`                                       |
 | Sprint change | `_bmad-output/planning-artifacts/sprint-change-proposal-2026-05-14.md`                                |
@@ -584,6 +584,124 @@ Claude Opus 4.7 (1M context) — `claude-opus-4-7[1m]`. Implementation completed
 - `src/main.rs::initialise_tracing` (function body untouched)
 - `src/config_reload.rs`, `src/opcua_topology_apply.rs`
 - All other `tests/*.rs` files (only `metric_types_test.rs` is in scope per AC#11 and remained untouched — sufficient coverage via the new `src/storage/sqlite.rs::tests` set).
+
+### Review Findings
+
+Iter-1 code review run on 2026-05-15 via `bmad-code-review A-3` on a different LLM — 3 parallel adversarial layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor).
+
+**Raw findings:** 33 (Blind) + 15 (Edge) + 13 SATISFIED / 1 VIOLATED (AC#7) / 1 AMBIGUOUS (AC#1) + 9 Cross-AC (Auditor) = **~70 layer-level items**.
+**After dedupe / triage:** **2 decision-needed (resolved), 13 patches applied (3 HIGH + 8 MED + 2 LOW), ~22 deferred, ~6 dismissed**.
+
+#### Decision-needed (2, resolved)
+
+- [x] [Review][Decision] **IR1 [HIGH] Counter monotonic typed-path regression** — Convergent Blind F1 + Edge F1: the new "prefer typed payload" branch was implemented per AC#9 but is premature — `SqliteBackend::get_metric_value` still reads from the legacy column and returns `MetricType::Int(0)` (zero default from FromStr) regardless of stored value. The typed match always succeeds with `prev_int=0`, making `new < 0` virtually never true and silently disabling reset detection. **User decision (2026-05-15):** revert the typed-path branch to the legacy `prev_metric.value.parse::<i64>()` path; defer AC#9 typed-path preference to Story A-4 (when the reader rewrite actually returns the typed payload).
+- [x] [Review][Decision] **IR8: structured field schema change in `validate_bool_metric_value`** — Blind F14 flagged that removing `error` + `fallback_value` fields breaks downstream log-grep pipelines. **User decision (implied by "Apply all HIGH + MEDIUM"):** keep the closed-enum field schema per AC#10 (don't restore the old fields), but document the schema change in `docs/logging.md` so operators can migrate their pipelines.
+
+#### Patches (13, all applied)
+
+- [x] [Review][Patch] **IR1 [HIGH] Revert Counter monotonic typed-path branch** [src/chirpstack.rs:1644-1665] — Restored legacy `prev_metric.value.parse::<i64>()` path. AC#9 typed-path preference deferred to A-4. Inline comment documents the staging rationale. (Blind F1 + Edge F1 convergent)
+- [x] [Review][Patch] **IR2 [HIGH] i64 saturation guard at poller + store_metric** [src/chirpstack.rs] — Added `kind == Counter && (raw_as_f64 < i64::MIN as f64 || raw_as_f64 > i64::MAX as f64)` guard with new `reason="int_overflow"` audit event. Catches finite-but-out-of-range floats (e.g. f32=1e30) before the silently-saturating `as i64` cast. (Blind F3 + Edge F5 convergent)
+- [x] [Review][Patch] **IR3 [HIGH] v008 30s SLA test** [src/storage/schema.rs::tests::test_v008_migration_under_30s_for_10k_rows] — Closes AC#7 VIOLATED. Seeds 10 000+10 000 rows tagged `value_type='legacy'` at v007, times the v008 CREATE TABLE … AS SELECT pass. Runs in well under 30s on a clean runner. (Auditor AC#7)
+- [x] [Review][Patch] **IR4 [MEDIUM] Fix NaN/Inf `expected_type` misattribution** [src/chirpstack.rs] — `expected_type` is now kind-aware (`"Int"` for Counter, `"Float"` for Gauge/Absolute) at the poller and config-aware in `store_metric`. Extends AC#10's closed enum from `{Float}` → `{Float, Int, Bool}`. (Blind F2 + Blind F17 + Edge F12 convergent)
+- [x] [Review][Patch] **IR5 [MEDIUM] `store_metric` doc-comment correction** [src/chirpstack.rs:1714-1735] — Replaced "Structural shape mirrors `prepare_metric_for_batch`" with an accurate explanation of the **config-driven vs kind-driven** dispatch divergence, plus an explicit partial-failure note about table divergence. (Blind F4 + Edge F14)
+- [x] [Review][Patch] **IR6 [MEDIUM] 4-site copy-paste → private helper** [src/storage/sqlite.rs] — Factored a private `TypedValueColumns` struct + `typed_value_columns(value: &MetricType) -> TypedValueColumns` free function. All 4 writers collapse from ~30 lines of inline match to a single `let tc = typed_value_columns(...);` call. Single source of truth for the discriminant lexicon. (Blind F5+F6+F7+F29+F30+F33 convergent — 6 findings collapsed)
+- [x] [Review][Patch] **IR7 [MEDIUM] v008 SQL hygiene** [migrations/v008_typed_value_constraints.sql] — Added `PRAGMA foreign_keys = OFF/ON` bracketing per SQLite's official table-recreate procedure (defensive against any future FK references). Verified `id INTEGER PRIMARY KEY` matches v001 exactly (no AUTOINCREMENT mismatch). (Blind F8 + Blind F12)
+- [x] [Review][Patch] **IR8 [MEDIUM] Document `validate_bool_metric_value` schema change in logging.md** [docs/logging.md:152] — Closed enum field schema (`expected_type ∈ {Float, Int, Bool}`, `reason ∈ {invalid_bool, non_finite, int_overflow}`) replaces the legacy `error` + `fallback_value` fields. Migration note added for downstream pipeline consumers. (Blind F14 + Auditor CAC#2)
+- [x] [Review][Patch] **IR9 [MEDIUM] `store_metric` atomicity note in doc-comment** [src/chirpstack.rs:1714-1735] — Explicit partial-failure note about silent table divergence on append_metric_history failure after upsert_metric_value success. Inherited pre-A-1 behaviour; full alerting hook out of A-3 scope. (Blind F16)
+- [x] [Review][Patch] **IR10 [MEDIUM] Missing tests** [src/storage/schema.rs::tests] — Added 4 new test fns covering AC#6 cross-column CHECK rejection (3 inconsistent variants on both tables), AC#6 cross-column CHECK acceptance (each variant per typed-column pairing), AC#7 SLA at 10k rows, v008 recreate data preservation (Blind F19 + F20 + Auditor CAC#1 partial). Remaining gaps (NaN/Inf integration test, counter typed-path) accepted as documented deferrals — they would require constructing a full `ChirpstackPoller` integration harness in `tests/`.
+- [x] [Review][Patch] **IR11 [LOW] v008 legacy default writer-side comment** [src/storage/sqlite.rs::typed_value_columns] — The IR6 helper docstring documents the v008 `value_type='legacy'` default + CHECK interaction at the central place all 4 writers funnel through. (Blind F31)
+- [x] [Review][Patch] **IR12 [LOW] `validate_bool_metric_value` `"0"`/`"1"` contract pin** [src/chirpstack.rs:1701] — Added an inline comment at the `s == "1"` call site documenting the implicit `Some("0")`/`Some("1")` return-value contract and the data-corruption hazard if the helper's return alphabet ever widens. (Edge F3)
+- [x] [Review][Patch] **IR13 [LOW] AC#1 grep contract scrub** [src/storage/types.rs:112 + src/storage/mod.rs:140] — Two stale `TODO(A-3)` doc-comment references reworded to satisfy AC#1's literal `grep -rn 'TODO(A-3)' src/` returns-zero contract. Per Auditor CAC#3 the 2-line micro-touch is justified as the AC#1↔AC#11 tension resolution (AC#11 strict-zero on those files is about behavioural change, not doc text). (Auditor CAC#3)
+
+#### Deferred (~22 LOW)
+
+- DEF-iter1-A3-1 (Blind F18 / Auditor CAC#1): NaN/Inf integration test in `tests/metric_types_test.rs` deferred. Would require full ChirpstackPoller harness; unit coverage of `validate_bool_metric_value` is sufficient pin for the schema. (Out of A-3 test-budget scope.)
+- DEF-iter1-A3-2 (Blind F21 / Auditor CAC#1): Counter monotonic typed-path test deferred — moot now that IR1 reverted the typed-path branch; revisit when A-4 lands.
+- DEF-iter1-A3-3 (Blind F10 / F11): v008 recreate doesn't audit/recreate non-named indexes or triggers. Today only the 2 named indexes exist on `metric_values` / `metric_history`; defensive index-discovery + recreate is housekeeping for a future migration story.
+- DEF-iter1-A3-4 (Blind F9): v008's BEGIN/COMMIT inside `execute_batch` is fragile if the runner ever wraps migrations in a top-level transaction. Inherited from A-1-iter3-DEF6 / A-2-iter1-DEF-IH1 (HIGH user-confirmed deferral); v008 just inherits the pattern. Resolves with the runner-hardening story.
+- DEF-iter1-A3-5 (Blind F28): `INSERT INTO metric_values_new SELECT id, device_id, ...` has no INSERT column list — relies on positional matching with the explicit SELECT column list. Defensive form would name both sides. Cosmetic.
+- DEF-iter1-A3-6 (Blind F13): NaN/Inf `reason="non_finite"` collapses NaN/Inf+/Inf−. Operator diagnostic precision; cheap split if alerting becomes noisy.
+- DEF-iter1-A3-7 (Blind F15): `device_name` computed but unused in `store_metric` OK paths. Dead variable; `_device_name` would silence the lint cleanly. Cosmetic.
+- DEF-iter1-A3-8 (Blind F22): `create_v006_baseline_db` hardcodes v002 column list. Two sources of truth for v002 (runner body + helper array). Migrations are immutable so drift risk is low.
+- DEF-iter1-A3-9 (Blind F23): forward-compat assertion previously protecting `create_v006_baseline_db` was lost in A-3's refactor to manual v001-v006 setup. No K2-style guard for v009+. Add when v009 lands.
+- DEF-iter1-A3-10 (Blind F24): negative zero passes the NaN/Inf guard. `Float(-0.0)` is finite; OPC UA clients may render `-0.0` differently from `0.0`. Cosmetic / domain-specific.
+- DEF-iter1-A3-11 (Blind F25): `value_text=NULL` ambiguity for Bool/Int/Float variants. A-4 readers must `value_type`-check first; A-3 enforces invariant via v008 CHECK.
+- DEF-iter1-A3-12 (Blind F26): `as i64` saturation is rustc-version-dependent (≥1.45). CLAUDE.md pins ≥1.87.0. Inline comment optional.
+- DEF-iter1-A3-13 (Blind F27): `s.clone()` per write in batch path — perf hint. `batch_write_metrics` owns the Vec and could move; per-row cost negligible at typical batch sizes.
+- DEF-iter1-A3-14 (Blind F32): `prev_metric.value.parse::<i64>()` fallback is ineffective for set_metric/upsert/append-written rows (those write the discriminant string). Pre-existing pattern; only batch_write_metrics writes the real string. Acceptable; A-4 closes via typed-column read.
+- DEF-iter1-A3-15 (Auditor CAC#1 partial): `tests/metric_types_test.rs` retrofits to assert REAL payload + NaN/Inf siblings deferred (would require full ChirpstackPoller integration harness; unit-test surface in src/storage/sqlite.rs::tests + src/storage/schema.rs::tests is sufficient for the writer/schema contracts).
+- DEF-iter1-A3-16 (Edge F11): `value_text=Some("")` for empty-string payload — schema invariant. A-4/A-6 readers must distinguish empty from NULL; v008 CHECK enforces consistency. Documented invariant.
+- DEF-iter1-A3-17 (Edge F4): `f32::to_string()` lossy stringification for legacy `value` column. Pre-A-3 pattern; A-4 reader rewrite consumes typed `value_real` column directly. Closes naturally.
+- DEF-iter1-A3-18 (Edge F6): NaN/Inf emission shape divergence between `prepare_metric_for_batch` and `store_metric`. Schema is field-identical today; logs_contain test pin on store_metric site would harden — deferred.
+- DEF-iter1-A3-19 (Edge F7): `create_v006_baseline_db` not idempotent w.r.t. v002 column-add loop. Only called by `temp_db()`-fresh DBs in tests; latent if helper expands.
+- DEF-iter1-A3-20 (Edge F8): v008 INSERT INTO ... SELECT fails loud if pre-A-3 row violates new CHECK. No realistic prod scenario produces such a row (A-2 set defaults to 'legacy' + NULL). Operator escape hatch deferred.
+- DEF-iter1-A3-21 (Edge F10): `read_typed_columns` test helper uses `#[allow(clippy::type_complexity)]` (7-tuple return). AC#4 prohibition was for production writer sites; test helpers are arguably exempt. Could refactor to return struct.
+- DEF-iter1-A3-22 (Edge F13): A-2 test retrofits — documentation drift between A-2-era test names and A-3-strengthened assertions. Test names are stable; comments could be updated.
+
+#### Dismissed (~6)
+
+Blind F31 / F33 / Auditor CAC#9 — minor stylistic notes already addressed by IR6 refactor (single helper eliminates the per-site discrepancies). Auditor CAC#4-CAC#8 are positive confirmations (heterogeneous lexemes preserved, v008 BEGIN/COMMIT, NaN/Inf hazard closed, retrofit strength, no out-of-scope drift, benign Bool placeholder under Unknown branch).
+
+#### Iter-1 patch round verification (2026-05-15)
+
+All 13 patches applied. Post-patch verification:
+
+- `cargo build --all-targets` — clean.
+- `cargo test --all-targets` — **1167 passed / 0 failed / 10 ignored** (+8 vs 1159 post-implementation baseline; +24 vs 1143 A-2-review baseline). Exceeds AC#12 target ≥1151 by 16.
+- `cargo clippy --all-targets -- -D warnings` — clean (1 mid-iter-1 fix: split `Vec<wide-tuple>` into per-variant INSERT statements in `test_v008_cross_column_check_accepts_consistent_rows` to clear `clippy::type_complexity`).
+- `cargo test --doc` — 0 failed / 55 ignored (AC#12 preserved).
+
+New tests added in iter-1:
+- `test_v008_cross_column_check_rejects_inconsistent_rows` (IR10) — 4 negative cases on both tables.
+- `test_v008_cross_column_check_accepts_consistent_rows` (IR10) — 5 positive cases per variant.
+- `test_v008_migration_under_30s_for_10k_rows` (IR3) — 10k+10k SLA test.
+- `test_v008_preserves_typed_column_data_through_recreate` (IR10) — recreate data-preservation pin.
+
+Per CLAUDE.md "Code Review & Story Validation Loop Discipline": iter-1 was a heavy patch round (13 patches across multiple files including a HIGH-severity revert + HIGH saturation guard + HIGH SLA test + helper refactor + 4 new tests). Per the 8-story validated `feedback_iter3_validation` pattern, iter-2 typically catches regressions iter-1 introduced. Recommend running iter-2 review before flipping to `done`.
+
+#### Iter-2 review (2026-05-15)
+
+Iter-2 code review run on 2026-05-15 via `bmad-code-review A-3` on the iter-1 patch diff (`/tmp/a3-iter2-patches.patch`, 730 lines, 7 files). 3 parallel adversarial layers; Blind Hunter returned 30 findings, Edge Case Hunter 9 findings, Acceptance Auditor verdict ELIGIBLE-FOR-DONE. Convergent (Blind + Edge agreement) findings carry the strongest signal per the 8-story `feedback_iter3_validation` pattern.
+
+**Iter-2 patch round (9 applied — all HIGH + MEDIUM + LOW fold-ins per user decision):**
+
+- [x] **IR2-A [MEDIUM convergent — Blind F6 / Edge F1]:** i64::MAX boundary off-by-one. `i64::MAX = 2^63 − 1` is not exactly representable in f64; `i64::MAX as f64` rounds UP to `2^63`. The iter-1 guard used `raw_as_f64 > i64::MAX as f64` which is `false` at exactly `2^63`, letting the boundary value slip through and saturate silently to `i64::MAX` — the very hazard the guard targets. Changed `>` → `>=` on the upper bound at `src/chirpstack.rs:1622` and `:1819`. Lower bound stays `<` because `i64::MIN = -2^63` is exactly representable.
+- [x] **IR2-B [HIGH convergent — Blind F3 / Edge F2]:** Saturation guard missed Unknown+cfg=Int. Production path's guard predicate was `kind == Counter`, but `prepare_metric_for_batch` also wraps `MetricType::Int(raw as i64)` at the `kind=Unknown` + `cfg=Int` fallback (chirpstack.rs:1653). Moved `cfg_type` lookup ahead of the guard; predicate now `int_target = kind==Counter || (kind==Unknown && cfg==Int)`. Audit message body changed `"Counter metric"` → `"Int target"` to match `store_metric`. Eliminates a redundant `get_metric_type` HashMap lookup at the Unknown-kind fallback branch as a side effect.
+- [x] **IR3-A [MEDIUM convergent — Blind F19 / Edge F3]:** `store_metric` closed-enum violation. The iter-1 IR4 doc claimed `expected_type ∈ {Float, Int, Bool}` but `store_metric` could emit `"String"` (cfg=String) or `"Float"`-for-`None` (cfg=None — misattributing unconfigured metrics as Float). Widened the docs/logging.md closed enum to `{Float, Int, Bool, String, Unknown}` and changed `None => "Unknown"` in `store_metric`. Upper-bound guard fix from IR2-A also applied to the store_metric site.
+- [x] **IR4-A [MEDIUM convergent — Blind F4 / Edge F9]:** Bool misattribution in `prepare_metric_for_batch`. The iter-1 IR4 kind-only lookup emitted `expected_type="Float"` for a `kind=Unknown + cfg=Bool` metric. Replaced with a kind+cfg combined match: Counter→"Int", Gauge/Absolute→"Float", Unknown defers to cfg_type for all 5 cases.
+- [x] **F-E [MEDIUM single-agent — Blind F10]:** SLA test missing `user_version == 8` post-migration assertion. Without it, a silent-no-op runner would still pass the SLA assertion. Added `assert_eq!(version, 8, "v008 migration must have advanced user_version to 8")` after `run_migrations` in `test_v008_migration_under_30s_for_10k_rows`.
+- [x] **F-G [LOW — Blind F11/F12 / Edge F6 / Auditor cross-pass #1]:** SLA test row-count mismatch with AC#7 literal. AC#7 specifies "10 000 + 10 000" but the iter-1 test seeded 5000+5000. Scaled the seed loop to `0..10_000`, updated assertion messages to `10_000` and `"10 000 + 10 000 row DB"`, rewrote the docstring.
+- [x] **F-H [LOW — Blind F7]:** IR1 revert comment counterexample was misleading. The original wording claimed reset would be masked "via `new < 0`", suggesting only negative resets matter — but the real failure mode is that `prev_metric.data_type` always returns the zero-default `MetricType::Int(0)` from `FromStr`, making `prev_int == 0` so `new < 0` is false for positive resets (1000→5) too. Rewrote the comment to explain accurately: the typed match would always succeed with `prev_int == 0`, turning every positive Counter reset into a false negative; the legacy `value`-parse path operates on the heterogeneous-lexeme column that production writers populate, so it picks up the prior integer correctly.
+- [x] **F-I [LOW — Blind F18]:** docs/logging.md missing per-reason emission-site documentation. Added an "Emission sites" sentence mapping each `reason` value to its emitter (`invalid_bool` from `validate_bool_metric_value`; `non_finite` + `int_overflow` from both `prepare_metric_for_batch` and `store_metric`; `expected_type="Unknown"` only from `store_metric` when cfg=None).
+- [x] **F-J [LOW — Blind F15]:** Symmetric `metric_history` CHECK negative tests. iter-1 only covered Float-null on metric_history; mirrored the full negative-test triad on `metric_history` (Float-null, legacy-with-real, Bool-with-text) so a typo / missed AND clause / copy-paste fail on metric_history's CHECK can't slip through.
+
+**Iter-2 deferred (single-agent LOW, low impact or A-4 territory):**
+
+- Blind F8/F9/F22 — `typed_value_columns()` helper styling (Option<i64> for value_bool, eager String::clone, doc claim "eliminates" 4-site copy-paste). Helper is mechanically correct; styling notes are A-4/post-Epic.
+- Blind F13/F25 — PRAGMA foreign_keys integration test (no explicit FK on `metric_values(id)` today; defensive-only).
+- Blind F14 — PRAGMA may be inert inside transaction. SQLite docs note `foreign_keys` PRAGMA is a no-op within a transaction; the v008 SQL places it OUTSIDE the BEGIN/COMMIT so it should take effect, but no test currently proves this. Defer to A-4 reader work.
+- Blind F16 — positive cross-column test should SELECT-back the inserted value. Acceptable as INSERT-only — the CHECK is structural, not value-content.
+- Blind F17/F20/F21 — minor warn-body phrasing + cfg_type lookup placement in `store_metric`. `store_metric` is `#[allow(dead_code)]`; not worth a refactor.
+- Blind F23 — debug_assert on `validate_bool_metric_value` contract. Comment-only pin (IR12) is sufficient until the helper is touched.
+- Blind F24 — IR13 breadcrumb "search A-3/A-4 TODOs in earlier revisions" points at deleted markers. Defer doc rewrite to A-4 along with reader changes.
+- Blind F26/F27/F28/F29 — test hygiene (seed values, Drop guard for temp DB, `MIGRATION_V007` direct access, `&metric_name` borrow shape). Inherited conventions; not iter-2 regressions.
+- Blind F30 — `validate_bool_metric_value` helper not in diff. Helper already emits `expected_type="Bool"` via its A-1 iter-3 refactor; iter-1 IR12 comment pins the contract.
+- Edge F4 / Blind F1+F2 — AC#1 / AC#11 doc-comment scrub. Auditor CAC#3 from iter-1 explicitly absolves the doc-only micro-touch; no re-litigation. The 3 `TODO(A-3)` markers Edge F4 found in `tests/metric_types_test.rs` are out of AC#1's literal scope (`src/`), but the underlying tautological `Float(0.0)==Float(0.0)` assertions are tracked for A-4 follow-up (a real end-to-end value-equality test belongs with the reader rewrite).
+- Edge F7 — `set_metric`'s serde_json `value_str` ("{\"Int\":42}") incompatible with the Counter monotonic `parse::<i64>()` path. `set_metric` is a legacy/test path; production goes through `batch_write_metrics` which writes integer-as-string. A-4's reader rewrite supersedes this entirely.
+- Edge F8 — IR1 revert comment cross-check (FromStr zero-default). Confirmed accurate post-F-H fix; A-4 reader rewrite will explicitly reinstate AC#9 typed-path.
+
+**Auditor iter-2 verdict: ELIGIBLE-FOR-DONE.** Per CLAUDE.md loop-discipline condition #2 (only LOW remains) — the 4 MEDIUM + 1 HIGH iter-2 findings were patched; all remaining items are LOW deferrals with explicit one-line rationale (above). Auditor cross-pass spec drift items (AC#7 row-count wording + File List header) folded into the iter-2 commit.
+
+#### Iter-2 patch round verification (2026-05-15)
+
+All 9 patches applied. Post-patch verification:
+
+- `cargo build --all-targets` — clean.
+- `cargo test --all-targets` — **1167 passed / 0 failed / 10 ignored** (identical to iter-1 baseline; F-J/F-E folded as new assertions inside existing `#[test]` fns rather than new fn count).
+- `cargo clippy --all-targets -- -D warnings` — clean.
+- `cargo test --doc` — 0 failed / 55 ignored (AC#13 preserved).
+
+Per CLAUDE.md "Code Review & Story Validation Loop Discipline": iter-2 surfaced 1 HIGH + 4 MEDIUM convergent findings that iter-1 did not catch — concrete validation of the `feedback_iter3_validation` 8-story pattern (this is the 9th story). Loop termination per condition #2 (only LOW remains). Story A-3 status flip `review → done`.
 
 ### Change Log
 

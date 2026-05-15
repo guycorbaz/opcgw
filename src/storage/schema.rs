@@ -1123,4 +1123,216 @@ mod tests {
 
         let _ = fs::remove_file(&path);
     }
+
+    // ===== Story A-3 iter-1 IR3 + IR10: missing test deliverables =====
+
+    /// AC#6 negative test (iter-1 IR10): the v008 cross-column CHECK rejects
+    /// any row where `value_type` does not pair with the matching typed
+    /// column being non-NULL. Pinned for both `metric_values` and
+    /// `metric_history`.
+    #[test]
+    fn test_v008_cross_column_check_rejects_inconsistent_rows() {
+        let (conn, path) = temp_db();
+        run_migrations(&conn).expect("run migrations");
+
+        // value_type='Float' but value_real=NULL → reject
+        let err = conn.execute(
+            "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_type) \
+             VALUES ('d', 'm', '0', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'Float')",
+            [],
+        );
+        assert!(err.is_err(), "value_type='Float' + value_real=NULL must be rejected");
+
+        // value_type='legacy' but value_real=Some → reject
+        let err = conn.execute(
+            "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_type, value_real) \
+             VALUES ('d2', 'm', '0', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'legacy', 1.5)",
+            [],
+        );
+        assert!(err.is_err(), "value_type='legacy' + value_real NOT NULL must be rejected");
+
+        // value_type='Bool' but value_text=Some → reject (Bool requires value_bool NOT NULL, others NULL)
+        let err = conn.execute(
+            "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_type, value_bool, value_text) \
+             VALUES ('d3', 'm', '0', 'Bool', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'Bool', 1, 'oops')",
+            [],
+        );
+        assert!(err.is_err(), "value_type='Bool' + value_text NOT NULL must be rejected");
+
+        // Symmetric on metric_history — full triad mirroring metric_values
+        // (iter-2 F-J): Float-null, legacy-with-real, Bool-with-text.
+        // A typo / missed AND clause / copy-paste fail on metric_history's
+        // CHECK would slip through without all three sub-cases.
+        let err = conn.execute(
+            "INSERT INTO metric_history (device_id, metric_name, value, data_type, timestamp, created_at, value_type) \
+             VALUES ('d', 'm', '0', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'Float')",
+            [],
+        );
+        assert!(err.is_err(), "metric_history: value_type='Float' + value_real=NULL must be rejected");
+
+        let err = conn.execute(
+            "INSERT INTO metric_history (device_id, metric_name, value, data_type, timestamp, created_at, value_type, value_real) \
+             VALUES ('d2', 'm', '0', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'legacy', 1.5)",
+            [],
+        );
+        assert!(err.is_err(), "metric_history: value_type='legacy' + value_real NOT NULL must be rejected");
+
+        let err = conn.execute(
+            "INSERT INTO metric_history (device_id, metric_name, value, data_type, timestamp, created_at, value_type, value_bool, value_text) \
+             VALUES ('d3', 'm', '0', 'Bool', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'Bool', 1, 'oops')",
+            [],
+        );
+        assert!(err.is_err(), "metric_history: value_type='Bool' + value_text NOT NULL must be rejected");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// AC#6 positive test (iter-1 IR10): the v008 cross-column CHECK accepts
+    /// a row for each (value_type, typed-column) pairing.
+    #[test]
+    fn test_v008_cross_column_check_accepts_consistent_rows() {
+        let (conn, path) = temp_db();
+        run_migrations(&conn).expect("run migrations");
+
+        // Each variant with the correct typed-column pairing must INSERT cleanly.
+        // Split into individual INSERTs to keep clippy::type_complexity happy
+        // (A-2 iter-1 IM3 / A-3 iter-1 IR6 precedent — avoid wide tuples).
+        conn.execute(
+            "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_type) \
+             VALUES ('dev_legacy', 'm', '0', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'legacy')",
+            [],
+        )
+        .expect("legacy variant must accept");
+        conn.execute(
+            "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_type, value_real) \
+             VALUES ('dev_float', 'm', '0', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'Float', 23.5)",
+            [],
+        )
+        .expect("Float variant must accept");
+        conn.execute(
+            "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_type, value_int) \
+             VALUES ('dev_int', 'm', '0', 'Int', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'Int', 42)",
+            [],
+        )
+        .expect("Int variant must accept");
+        conn.execute(
+            "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_type, value_bool) \
+             VALUES ('dev_bool', 'm', '0', 'Bool', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'Bool', 1)",
+            [],
+        )
+        .expect("Bool variant must accept");
+        conn.execute(
+            "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_type, value_text) \
+             VALUES ('dev_string', 'm', '0', 'String', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'String', 'ok')",
+            [],
+        )
+        .expect("String variant must accept");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// AC#7 (iter-1 IR3 + iter-2 F-E/F-G): v008 migration completes within 30s
+    /// for 10 000 + 10 000 rows (matching AC#7's literal contract). 30s is the
+    /// operator-runbook SLA per Story A.7 (looser than v007's 5s because v008's
+    /// CREATE TABLE … AS SELECT is O(table-size) rather than metadata-only).
+    /// Seed pre-A-3 rows tagged value_type='legacy' so they satisfy the new
+    /// cross-column CHECK on the SELECT. Post-migration, the test also pins
+    /// `user_version == 8` to prove v008 actually ran (iter-2 F-E): a
+    /// silent-no-op runner would otherwise leave the SLA assertion vacuous.
+    #[test]
+    fn test_v008_migration_under_30s_for_10k_rows() {
+        let (conn, path) = create_v006_baseline_db();
+
+        // Apply v007 manually to get the schema shape without v008's CHECK
+        // — we need to seed rows AT v007 then time the v008 application.
+        conn.execute_batch(MIGRATION_V007).expect("apply v007 manually");
+        conn.pragma_update(None, "user_version", 7u32.to_string())
+            .expect("set user_version=7");
+
+        // Seed 10 000 metric_values + 10 000 metric_history rows tagged
+        // 'legacy' (column default; all typed cols NULL) — satisfies v008
+        // CHECK. Matches AC#7's literal "10 000 + 10 000" contract.
+        conn.execute_batch("BEGIN TRANSACTION").unwrap();
+        let mv_stmt = "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at) \
+                       VALUES (?1, ?2, '0.0', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')";
+        let mh_stmt = "INSERT INTO metric_history (device_id, metric_name, value, data_type, timestamp, created_at) \
+                       VALUES (?1, ?2, '0.0', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')";
+        let mut mv_prep = conn.prepare(mv_stmt).unwrap();
+        let mut mh_prep = conn.prepare(mh_stmt).unwrap();
+        for i in 0..10_000 {
+            let device_id = format!("dev_{}", i % 100);
+            let metric_name = format!("m_{}", i);
+            mv_prep.execute(rusqlite::params![&device_id, &metric_name]).unwrap();
+            mh_prep.execute(rusqlite::params![&device_id, &metric_name]).unwrap();
+        }
+        drop(mv_prep);
+        drop(mh_prep);
+        conn.execute_batch("COMMIT").unwrap();
+
+        // Time the v008 application
+        let start = std::time::Instant::now();
+        run_migrations(&conn).expect("v008 migration must succeed");
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed.as_secs_f64() < 30.0,
+            "v008 migration took {:?} on 10 000 + 10 000 row DB; AC#7 ceiling is 30 s",
+            elapsed
+        );
+
+        // iter-2 F-E: prove v008 actually ran (not a silent-no-op fallthrough)
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 8, "v008 migration must have advanced user_version to 8");
+
+        // Sanity: row counts preserved through the recreate
+        let mv_count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM metric_values", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mv_count, 10_000, "metric_values count preserved through v008 recreate");
+
+        let mh_count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM metric_history", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mh_count, 10_000, "metric_history count preserved through v008 recreate");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// IR10 + Blind F20: v008 preserves per-column data through the CREATE
+    /// TABLE … AS SELECT recreate. Seeds typed-column data at v007, runs
+    /// v008, asserts the typed payload survives.
+    #[test]
+    fn test_v008_preserves_typed_column_data_through_recreate() {
+        let (conn, path) = create_v006_baseline_db();
+        conn.execute_batch(MIGRATION_V007).expect("apply v007 manually");
+        conn.pragma_update(None, "user_version", 7u32.to_string())
+            .expect("set user_version=7");
+
+        // Seed legacy-typed rows at v007 (typed cols NULL; value_type='legacy' default)
+        conn.execute(
+            "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at) \
+             VALUES ('dev1', 'temp', 'Float', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // Apply v008
+        run_migrations(&conn).expect("v008 migration");
+
+        // Legacy row's legacy columns preserved + value_type='legacy' (default carries through)
+        let (vt, vr, leg_value): (String, Option<f64>, String) = conn
+            .query_row(
+                "SELECT value_type, value_real, value FROM metric_values WHERE device_id='dev1' AND metric_name='temp'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(vt, "legacy", "pre-A-3 row carries value_type='legacy' through v008 recreate");
+        assert!(vr.is_none(), "pre-A-3 row's typed cols stay NULL through v008 recreate");
+        assert_eq!(leg_value, "Float", "legacy `value` column preserved byte-for-byte through v008 recreate");
+
+        let _ = fs::remove_file(&path);
+    }
 }

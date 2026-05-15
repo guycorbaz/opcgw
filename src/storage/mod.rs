@@ -137,7 +137,7 @@ use rusqlite::Result as SqliteResult;
 /// transition window, `value: String` carries the real string-encoded sensor
 /// reading (Float/Int/Bool/String formatted via the poller) while
 /// `data_type: MetricType` is type-level payload-bearing but its payload is
-/// zero-defaulted on every production caller (search `TODO(A-3)` in
+/// zero-defaulted on every production caller (historical staging marker — pre-A-3 sites in
 /// `chirpstack.rs`). A-2's schema migration replaces the dual-storage with
 /// a typed-payload write; **TODO(A-5)** removes the `value: String` field
 /// once consumers pattern-match the typed payload directly. Mirrors the

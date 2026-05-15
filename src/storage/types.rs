@@ -109,7 +109,7 @@ pub struct MetricValue {
     /// `append_metric_history` use `value.to_string()` = discriminant; OPC UA
     /// Variant→Metric conversion in `src/opc_ua.rs` zero-defaults; ChirpStack
     /// poller arms in `src/chirpstack.rs` stamp `Float(0.0)`/`Int(0)`/etc. —
-    /// search `TODO(A-3)` / `TODO(A-4)`). Until those `TODO`s are closed,
+    /// search `A-3 / A-4` TODOs in earlier revisions of those files). Until those staging gaps are closed,
     /// the **real** measurement is carried by the sibling `value: String`
     /// field. The single exception is the production poller's
     /// `batch_write_metrics` path, which writes `BatchMetricWrite.value`

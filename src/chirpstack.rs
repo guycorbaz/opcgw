@@ -1583,19 +1583,64 @@ impl ChirpstackPoller {
 
         let raw_value = metric.datasets[0].data[0];
 
-        // A-3 (AC#2, AC#10): NaN/Inf guard — emitted BEFORE constructing any
-        // `MetricType::Float(raw_value)` payload so the operator-facing audit
-        // event captures the original `raw_value`. Skip the metric for this
-        // cycle; the next poll cycle re-evaluates.
-        if !(raw_value as f64).is_finite() {
+        // A-3 (AC#2, AC#10) + IR2/IR4 (iter-1 review) + iter-2 IR2-A/B/IR4-A:
+        // (a) NaN/Inf guard rejects non-finite raw_values before payload
+        //     construction. Rust's `as i64` saturates silently on overflow, so
+        //     (b) finite-but-out-of-i64-range guard rejects values that would
+        //     silently become `i64::MAX` / `i64::MIN` for any Int target —
+        //     not just `kind == Counter` (iter-2 IR2-B closed the
+        //     Unknown+cfg=Int gap).
+        //
+        // Upper-bound predicate uses `>=` not `>` (iter-2 IR2-A): `i64::MAX`
+        // (= 2^63 − 1) is not exactly representable in f64; `i64::MAX as f64`
+        // rounds UP to 2^63. Without `>=`, the exact-2^63 case slips through
+        // and `as i64` saturates silently — the very hazard the guard targets.
+        // Lower bound stays `<` because `i64::MIN` (= -2^63) is exactly
+        // representable; `raw_as_f64 == i64::MIN as f64` casts cleanly.
+        //
+        // `expected_type` (iter-2 IR4-A): kind=Counter → "Int"; Gauge/Absolute
+        // → "Float"; Unknown defers to cfg_type so Bool/Int/String metrics
+        // emit the correct audit attribution. Closed enum extended to
+        // {Float, Int, Bool, String, Unknown} — see docs/logging.md.
+        let raw_as_f64 = raw_value as f64;
+        let cfg_type = self.config.get_metric_type(&metric_name, &device_id_string);
+        let expected_type: &'static str = match kind {
+            ChirpStackMetricKind::Counter => "Int",
+            ChirpStackMetricKind::Gauge | ChirpStackMetricKind::Absolute => "Float",
+            ChirpStackMetricKind::Unknown => match cfg_type {
+                Some(OpcMetricTypeConfig::Bool) => "Bool",
+                Some(OpcMetricTypeConfig::Int) => "Int",
+                Some(OpcMetricTypeConfig::String) => "String",
+                Some(OpcMetricTypeConfig::Float) => "Float",
+                None => "Unknown",
+            },
+        };
+        if !raw_as_f64.is_finite() {
             warn!(
                 event = "metric_parse",
                 device_id = %device_id,
                 metric_name = %metric_name,
                 raw_value = %raw_value,
-                expected_type = "Float",
+                expected_type = expected_type,
                 reason = "non_finite",
                 "Skipping metric: non-finite Float (NaN or Inf)"
+            );
+            return None;
+        }
+        let int_target = matches!(kind, ChirpStackMetricKind::Counter)
+            || (matches!(kind, ChirpStackMetricKind::Unknown)
+                && matches!(cfg_type, Some(OpcMetricTypeConfig::Int)));
+        if int_target
+            && (raw_as_f64 < i64::MIN as f64 || raw_as_f64 >= i64::MAX as f64)
+        {
+            warn!(
+                event = "metric_parse",
+                device_id = %device_id,
+                metric_name = %metric_name,
+                raw_value = %raw_value,
+                expected_type = expected_type,
+                reason = "int_overflow",
+                "Skipping Int target: value would saturate i64 cast"
             );
             return None;
         }
@@ -1616,11 +1661,13 @@ impl ChirpstackPoller {
                 MetricType::Float(raw_value as f64)
             }
             ChirpStackMetricKind::Unknown => {
-                // Fallback to config type if available
-                match self.config.get_metric_type(&metric_name, &device_id_string) {
-                    Some(cfg_type) => {
+                // Fallback to config type if available (reuses cfg_type queried
+                // above for the audit-event attribution to avoid a redundant
+                // HashMap lookup per poll cycle).
+                match cfg_type {
+                    Some(t) => {
                         debug!(metric_name = %metric_name, device_id = %device_id, metric_kind = ?kind, "Using config fallback for unknown kind");
-                        match cfg_type {
+                        match t {
                             // The Bool branch defers to validate_bool_metric_value (step 4)
                             // so the kind=Unknown + cfg=Bool path emits the right metric_parse
                             // warn on invalid bool input. The placeholder false is replaced
@@ -1643,16 +1690,23 @@ impl ChirpstackPoller {
         };
 
         // 3. For Counter type: check monotonic property (reject reset: new < previous).
-        // A-3 (AC#9): prefer the typed payload on the previous row when available
-        // (post-A-3 writers populate it); fall back to the legacy string parse for
-        // rows written by pre-A-3 binaries (`value_type = 'legacy'` rows).
+        // A-3: stays on the legacy string-parse path. The original A-3 spec AC#9
+        // pre-empted this with a typed-payload `MetricType::Int(prev_int)`
+        // match. The reader (`get_metric_value`) populates `MetricValue.data_type`
+        // via `FromStr`, which today returns the zero-default `MetricType::Int(0)`
+        // (the string-parse path on the legacy `value` column does not yet
+        // round-trip typed payloads — that's Story A-4's reader rewrite).
+        // Result: the typed match would always succeed with `prev_int == 0`,
+        // turning every Counter reset where `new < 0` is false (i.e. positive
+        // resets like 1000→5) into a false negative — monotonic-OK on a real
+        // reset because `5 < 0` is false. The legacy `prev_metric.value.parse::<i64>()`
+        // path below operates on the heterogeneous-lexeme `value` column that
+        // production writes populate, so it picks up the prior integer
+        // correctly. AC#9 typed-path preference defers to A-4 when the reader
+        // actually projects the typed payload from `value_int`.
         if matches!(target_type, MetricType::Int(_)) && kind == ChirpStackMetricKind::Counter {
             if let Ok(Some(prev_metric)) = self.backend.get_metric_value(&device_id_string, &metric_name) {
-                let prev_int_opt: Option<i64> = match &prev_metric.data_type {
-                    MetricType::Int(prev_int) => Some(*prev_int),
-                    _ => prev_metric.value.parse::<i64>().ok(),
-                };
-                if let Some(prev_int) = prev_int_opt {
+                if let Ok(prev_int) = prev_metric.value.parse::<i64>() {
                     let new_int = raw_value as i64;
                     if new_int < prev_int {
                         warn!(device_id = %device_id, metric_name = %metric_name,
@@ -1673,6 +1727,14 @@ impl ChirpstackPoller {
                 // boolean-validation path directly without constructing a
                 // full `ChirpstackPoller` instance. The helper emits the
                 // canonical `metric_parse` warn on invalid input.
+                // Iter-1 IR12 contract pin: `validate_bool_metric_value`
+                // returns `Some("0")` for `false` / `Some("1")` for `true` /
+                // `None` for invalid input (chirpstack.rs:294-323). The
+                // caller maps `"1"` → true / anything else → false. If the
+                // helper's return alphabet ever widens (e.g. `Some("true")`),
+                // this caller silently writes `Bool(false)` for every input —
+                // ensure helper changes update both call sites here and at
+                // `store_metric`.
                 match validate_bool_metric_value(raw_value, device_id, &metric_name, kind) {
                     Some(s) => (s.to_string(), MetricType::Bool(s == "1")),
                     None => return None,
@@ -1710,10 +1772,19 @@ impl ChirpstackPoller {
     ///
     /// **Status (Story A-3):** reinstated. Kept `#[allow(dead_code)]` because
     /// production code reaches storage via `prepare_metric_for_batch` +
-    /// `batch_write_metrics`. The body mirrors `prepare_metric_for_batch`'s
-    /// dispatch: NaN/Inf guard, kind→variant wrap with real payload, bool 0/1
-    /// validation via `validate_bool_metric_value`, int fractional warn, and
-    /// per-variant `upsert_metric_value` + `append_metric_history` calls.
+    /// `batch_write_metrics`. The body shares `prepare_metric_for_batch`'s
+    /// validation primitives (NaN/Inf guard, `validate_bool_metric_value`,
+    /// int fractional warn) but uses **config-driven** dispatch
+    /// (`OpcMetricTypeConfig`) rather than the kind-driven dispatch
+    /// (`ChirpStackMetricKind`) of the production path — that's the historical
+    /// shape of this method and tests built on top of it exercise the
+    /// config-driven branch deliberately.
+    ///
+    /// **Partial-failure note:** when `upsert_metric_value` succeeds but
+    /// `append_metric_history` fails, `metric_values` carries the new row
+    /// while `metric_history` does not — silent table divergence. The error
+    /// is logged but not surfaced via a counter or audit event. This is
+    /// inherited pre-A-1 behaviour; an alerting hook is out of scope for A-3.
     ///
     /// # Arguments
     ///
@@ -1740,17 +1811,46 @@ impl ChirpstackPoller {
         let now_ts = SystemTime::now();
         let kind = classify_metric_kind(metric.kind);
 
-        // A-3 (AC#2, AC#8): NaN/Inf guard — emitted before constructing any
-        // Float payload so the audit event captures the original raw_value.
-        if !(raw_value as f64).is_finite() {
+        // A-3 (AC#2, AC#8) + iter-1 IR2/IR4 + iter-2 IR2-A/IR3-A:
+        // NaN/Inf and i64-overflow guard. `expected_type` is config-aware
+        // (this method dispatches on `OpcMetricTypeConfig`, not
+        // `ChirpStackMetricKind`). Closed enum extended to
+        // {Float, Int, Bool, String, Unknown} — cfg=None reports "Unknown"
+        // rather than misattributing as "Float" (iter-2 Blind F20 / Edge F3).
+        // Upper-bound guard uses `>=` to catch the i64::MAX boundary that
+        // `>` misses due to f64 rounding (iter-2 IR2-A).
+        let raw_as_f64 = raw_value as f64;
+        let cfg_type = self.config.get_metric_type(&metric_name, device_id);
+        let expected_type: &'static str = match cfg_type {
+            Some(OpcMetricTypeConfig::Bool) => "Bool",
+            Some(OpcMetricTypeConfig::Int) => "Int",
+            Some(OpcMetricTypeConfig::Float) => "Float",
+            Some(OpcMetricTypeConfig::String) => "String",
+            None => "Unknown",
+        };
+        if !raw_as_f64.is_finite() {
             warn!(
                 event = "metric_parse",
                 device_id = %device_id,
                 metric_name = %metric_name,
                 raw_value = %raw_value,
-                expected_type = "Float",
+                expected_type = expected_type,
                 reason = "non_finite",
                 "Skipping metric: non-finite Float (NaN or Inf)"
+            );
+            return;
+        }
+        if matches!(cfg_type, Some(OpcMetricTypeConfig::Int))
+            && (raw_as_f64 < i64::MIN as f64 || raw_as_f64 >= i64::MAX as f64)
+        {
+            warn!(
+                event = "metric_parse",
+                device_id = %device_id,
+                metric_name = %metric_name,
+                raw_value = %raw_value,
+                expected_type = expected_type,
+                reason = "int_overflow",
+                "Skipping Int target: value would saturate i64 cast"
             );
             return;
         }
