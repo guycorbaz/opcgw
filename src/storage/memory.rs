@@ -506,11 +506,105 @@ mod tests {
         );
     }
 
-    // Tests for trait methods are disabled until trait signature is updated in story 2-2
-    // #[test] fn test_set_then_get_float_metric() { ... }
-    // #[test] fn test_set_then_get_int_metric() { ... }
-    // #[test] fn test_set_then_get_bool_metric() { ... }
-    // #[test] fn test_set_then_get_string_metric() { ... }
+    // ===== Story A-1 AC#6: 4-variant payload-bearing round-trip =====
+    //
+    // The four tests below pin the `InMemoryBackend::set_metric` →
+    // `get_metric` round trip for each `MetricType` variant. Per AC#6 the
+    // backend must store the payload byte-for-byte (no discriminant-only
+    // flattening). The 2-1c-era scaffolds were enabled and adapted to the
+    // payload-bearing `MetricType` shape introduced in Story A-1.
+
+    #[test]
+    fn test_set_then_get_float_metric_roundtrips_payload() {
+        let backend = InMemoryBackend::new();
+        backend
+            .set_metric("dev1", "temperature", MetricType::Float(23.5))
+            .expect("set_metric must succeed");
+        assert_eq!(
+            backend
+                .get_metric("dev1", "temperature")
+                .expect("get_metric must succeed"),
+            Some(MetricType::Float(23.5)),
+            "InMemoryBackend must round-trip the Float payload byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn test_set_then_get_int_metric_roundtrips_payload() {
+        let backend = InMemoryBackend::new();
+        backend
+            .set_metric("dev1", "counter", MetricType::Int(i64::MAX))
+            .expect("set_metric must succeed");
+        assert_eq!(
+            backend.get_metric("dev1", "counter").unwrap(),
+            Some(MetricType::Int(i64::MAX))
+        );
+
+        backend
+            .set_metric("dev1", "negative_int", MetricType::Int(i64::MIN))
+            .expect("set_metric must succeed");
+        assert_eq!(
+            backend.get_metric("dev1", "negative_int").unwrap(),
+            Some(MetricType::Int(i64::MIN))
+        );
+    }
+
+    #[test]
+    fn test_set_then_get_bool_metric_roundtrips_payload() {
+        let backend = InMemoryBackend::new();
+        backend
+            .set_metric("dev1", "on", MetricType::Bool(true))
+            .expect("set_metric must succeed");
+        assert_eq!(
+            backend.get_metric("dev1", "on").unwrap(),
+            Some(MetricType::Bool(true)),
+            "Bool(true) payload must survive round-trip — guards against the \
+             discriminant-only regression the A-1 refactor explicitly prevents"
+        );
+
+        backend
+            .set_metric("dev1", "off", MetricType::Bool(false))
+            .expect("set_metric must succeed");
+        assert_eq!(
+            backend.get_metric("dev1", "off").unwrap(),
+            Some(MetricType::Bool(false))
+        );
+    }
+
+    #[test]
+    fn test_set_then_get_string_metric_roundtrips_payload() {
+        let backend = InMemoryBackend::new();
+        backend
+            .set_metric(
+                "dev1",
+                "status",
+                MetricType::String("active".to_string()),
+            )
+            .expect("set_metric must succeed");
+        assert_eq!(
+            backend.get_metric("dev1", "status").unwrap(),
+            Some(MetricType::String("active".to_string()))
+        );
+
+        // Boundary: empty string is a valid payload distinct from "no value yet".
+        backend
+            .set_metric("dev1", "empty", MetricType::String(String::new()))
+            .expect("set_metric must succeed");
+        assert_eq!(
+            backend.get_metric("dev1", "empty").unwrap(),
+            Some(MetricType::String(String::new()))
+        );
+
+        // Boundary: unicode + embedded NUL.
+        let weird = "\0\u{FFFD}embedded";
+        backend
+            .set_metric("dev1", "unicode", MetricType::String(weird.to_string()))
+            .expect("set_metric must succeed");
+        assert_eq!(
+            backend.get_metric("dev1", "unicode").unwrap(),
+            Some(MetricType::String(weird.to_string()))
+        );
+    }
 
     #[test]
     fn test_get_status() {

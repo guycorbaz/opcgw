@@ -537,6 +537,13 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 e
             })?;
 
+        // TODO(A-2): replace the dual-encoded write — the `value` column
+        // currently stores a serde_json blob of the full `MetricType` enum
+        // (e.g. `{"Float":0.0}`) and the `data_type` column stores the bare
+        // discriminant — with the typed-value-column UPSERT introduced in
+        // the A-2 schema migration. The exact column shape (single
+        // polymorphic column with type tag, vs four typed columns) is
+        // settled by A-2's design.
         let data_type = value.to_string();
         let timestamp = Utc::now().to_rfc3339();
         let value_str = serde_json::to_string(&value).map_err(|e| {
@@ -836,6 +843,11 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 e
             })?;
 
+        // TODO(A-2): both `value` and `data_type` are derived from
+        // `value.to_string()` (the discriminant — "Float"/"Int"/"Bool"/
+        // "String") because A-1 staging keeps the legacy discriminant-string
+        // write path (option-b). A-2's schema migration replaces this with a
+        // typed-payload write; the collapse of value↔data_type goes away.
         let value_str = value.to_string();
         let data_type = value.to_string();
         let now_rfc3339 = chrono::DateTime::<Utc>::from(now_ts).to_rfc3339();
@@ -894,13 +906,17 @@ impl crate::storage::StorageBackend for SqliteBackend {
     ///
     /// # Data Storage
     ///
-    /// Values are serialized to TEXT format for durability and flexibility:
-    /// - MetricType::Float(3.14) → "3.14"
-    /// - MetricType::Int(42) → "42"
-    /// - MetricType::Bool(true) → "true"
-    /// - MetricType::String("hello") → "hello"
+    /// **A-1 staging (option-b — see `TODO(A-2)` below):** the `value`
+    /// column is currently written via `MetricType::to_string()`, which
+    /// renders the *discriminant* ("Float"/"Int"/"Bool"/"String") — not the
+    /// payload. This is a legacy single-row method invoked only by the test
+    /// fallback; production code reaches the real measurement through
+    /// `batch_write_metrics` (which writes `BatchMetricWrite.value` —
+    /// the real string-encoded sensor reading) instead. A-2's schema
+    /// migration replaces both columns with a typed-payload write.
     ///
-    /// data_type column stores the variant name for type preservation: "Float", "Int", "Bool", "String"
+    /// The `data_type` column stores the variant name for type preservation:
+    /// "Float", "Int", "Bool", "String".
     ///
     /// # Timestamp Ordering (RFC3339)
     ///
@@ -948,6 +964,10 @@ impl crate::storage::StorageBackend for SqliteBackend {
             }
         };
 
+        // TODO(A-2): see `set_metric` / `upsert_metric_value` — the
+        // discriminant-string `value` column write is option-b A-1 staging.
+        // A-2's schema migration replaces this with a typed-payload write;
+        // see the canonical TODO at `set_metric` for the design notes.
         let value_str = value.to_string();
         // NOTE: This single-row method is **legacy** — only the test fallback
         // in `chirpstack.rs:1438-1468` calls it. The production poller uses
@@ -1050,6 +1070,12 @@ impl crate::storage::StorageBackend for SqliteBackend {
         trace!(operation = "txn_begin", operation_count = metric_count);
 
         for metric in metrics {
+            // TODO(A-2): `data_type_str` is the discriminant; `metric.value`
+            // is the real string-encoded sensor reading written into the
+            // `value` column. A-2's schema migration replaces the textual
+            // `value` column with a typed-payload write, and the
+            // `BatchMetricWrite.value: String` field is removed in favour of
+            // reading the payload directly off `metric.data_type`.
             let data_type_str = metric.data_type.to_string();
             let timestamp_rfc3339 = chrono::DateTime::<Utc>::from(metric.timestamp).to_rfc3339();
 

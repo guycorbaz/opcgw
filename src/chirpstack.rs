@@ -1677,116 +1677,35 @@ impl ChirpstackPoller {
         })
     }
 
-    /// Stores a device metric in the shared storage.
+    /// Direct-store helper retained from the pre-batch-write era (now
+    /// replaced in production by `prepare_metric_for_batch` +
+    /// `batch_write_metrics`).
     ///
-    /// Processes a metric received from ChirpStack and stores it in the appropriate
-    /// format in the shared storage. The metric is converted to the correct type
-    /// based on the configuration.
+    /// **Status (Story A-1):** the body is a `todo!()` placeholder pending
+    /// Story A-3. The pre-A-1 body unconditionally stamped zero-defaulted
+    /// payloads (`MetricType::Bool(false)` / `Int(0)` / `Float(0.0)` /
+    /// `String(String::new())`) regardless of the real sensor value — a
+    /// data-loss landmine if re-enabled before A-3 plumbs
+    /// `metric.datasets[0].data[0]` into the typed payload. The original
+    /// kind→variant dispatch + bool 0/1 validation + int fractional warn is
+    /// preserved in git history (`git show 16e7811:src/chirpstack.rs`) and
+    /// should be reinstated by A-3 with the real payload threading.
     ///
     /// # Arguments
     ///
     /// * `device_id` - The unique identifier of the device
     /// * `metric` - The metric data received from ChirpStack
-    ///
-    /// # Process
-    ///
-    /// 1. Determines the expected metric type from configuration
-    /// 2. Converts the metric value to the appropriate type (Bool, Int, Float, String)
-    /// 3. Stores the converted value in the shared storage
-    ///
-    /// # Type Conversions
-    ///
-    /// - **Bool**: 0.0 → false, 1.0 → true
-    /// - **Int**: Converts float to i64
-    /// - **Float**: Stores as f64
-    /// - **String**: Not yet implemented
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// // Called automatically during polling
-    /// poller.store_metric(&device_id, &metric);
-    /// ```
-    // Direct-store helper retained from the pre-batch-write era (now replaced
-    // by `prepare_metric_for_batch` + `batch_write_metrics`). Kept for tests
-    // that still import the symbol; safe to remove once those tests update.
     #[allow(dead_code)]
-    pub fn store_metric(&self, device_id: &String, metric: &Metric) {
-        debug!("Store chirpstack device metric in storage");
-        let device_name = match self.config.get_device_name(device_id) {
-            Some(name) => name,
-            None => {
-                warn!(device_id = %device_id, "Device name not found in config, skipping metric");
-                return;
-            }
-        };
-
-        let metric_name = metric.name.clone();
-        let now_ts = SystemTime::now();
-
-        // Process metric based on configured type, with append-only historical logging
-        // NOTE: If upsert_metric_value() succeeds but append_metric_history() fails,
-        // the metric will exist in metric_values but not in metric_history. This is
-        // intentional to allow the poller to continue (non-fatal error handling).
-        // Story 2-3c will implement batch transactional wrapping to ensure atomicity.
-        match self.config.get_metric_type(&metric_name, device_id) {
-            Some(metric_type) => match metric_type {
-                OpcMetricTypeConfig::Bool => {
-                    debug!(metric = ?metric, "Bool metric");
-                    let value = metric.datasets[0].data[0];
-                    match value {
-                        0.0 | 1.0 => {},
-                        _ => {
-                            error!(value = %value, "Not a boolean value");
-                            return;
-                        }
-                    };
-                    // TODO(A-3): wrap real raw_value in MetricType::Bool(...)
-                    let metric_val = MetricType::Bool(false);
-                    if let Err(e) = self.backend.upsert_metric_value(device_id, &metric_name, &metric_val, now_ts) {
-                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to upsert bool metric");
-                    } else if let Err(e) = self.backend.append_metric_history(device_id, &metric_name, &metric_val, now_ts) {
-                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to append bool metric to history");
-                    }
-                }
-                OpcMetricTypeConfig::Int => {
-                    debug!(metric = ?metric, "Int metric");
-                    let raw_value = metric.datasets[0].data[0];
-                    if raw_value.fract() != 0.0 {
-                        warn!(value = %raw_value, metric_name = %metric_name, "Float metric truncated to int; precision lost");
-                    }
-                    // TODO(A-3): wrap raw_value as i64 in MetricType::Int(...)
-                    let metric_val = MetricType::Int(0);
-                    if let Err(e) = self.backend.upsert_metric_value(device_id, &metric_name, &metric_val, now_ts) {
-                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to upsert int metric");
-                    } else if let Err(e) = self.backend.append_metric_history(device_id, &metric_name, &metric_val, now_ts) {
-                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to append int metric to history");
-                    }
-                }
-                OpcMetricTypeConfig::Float => {
-                    debug!(metric = ?metric, "Float metric");
-                    // TODO(A-3): wrap metric.datasets[0].data[0] in MetricType::Float(...)
-                    let metric_val = MetricType::Float(0.0);
-                    if let Err(e) = self.backend.upsert_metric_value(device_id, &metric_name, &metric_val, now_ts) {
-                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to upsert float metric");
-                    } else if let Err(e) = self.backend.append_metric_history(device_id, &metric_name, &metric_val, now_ts) {
-                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to append float metric to history");
-                    }
-                }
-                OpcMetricTypeConfig::String => {
-                    // TODO(A-3): wrap real value in MetricType::String(...)
-                    let metric_val = MetricType::String(String::new());
-                    if let Err(e) = self.backend.upsert_metric_value(device_id, &metric_name, &metric_val, now_ts) {
-                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to upsert string metric");
-                    } else if let Err(e) = self.backend.append_metric_history(device_id, &metric_name, &metric_val, now_ts) {
-                        error!(device_id = %device_id, metric_name = %metric_name, error = %e, "Failed to append string metric to history");
-                    }
-                }
-            },
-            None => {
-                warn!(metric_name = ?metric_name, device_name = ?device_name, "No metric type found for chirpstack metric");
-            }
-        };
+    pub fn store_metric(&self, _device_id: &String, _metric: &Metric) {
+        // Review patch P9 (iter-1) defensive guard, refined by iter-2 IR5:
+        // use `todo!()` (not `unimplemented!()`) — the method's body **will**
+        // be reinstated by Story A-3, so the macro that signals "scaffolded
+        // for later implementation" is the correct one. Both macros panic
+        // with `not yet implemented`, so behaviour at runtime is identical.
+        todo!(
+            "store_metric body to be reinstated by Story A-3 — see review patch P9 \
+             in A-1-metrictype-payload-bearing-enum.md § Review Findings"
+        );
     }
 
     /// Fetches all applications with pagination support (Story 4-3).

@@ -1987,25 +1987,46 @@ impl OpcUa {
         }
     }
 
-    /// Converts an OPC UA Variant to a MetricType
+    /// Converts an OPC UA Variant to a `(value_string, MetricType)` tuple.
     ///
-    /// This method handles the conversion between OPC UA data types (Variant) and
-    /// the internal metric representation (MetricType) used by the application.
-    /// It supports conversion of common data types including integers, floats,
-    /// strings, and booleans.
+    /// Maps OPC UA scalar Variant subtypes to the internal `MetricType`
+    /// discriminant and returns the stringified value alongside it.
+    ///
+    /// # Variant → MetricType discriminant mapping
+    /// * `Int32`, `Int64` → `MetricType::Int(_)`
+    /// * `Float`, `Double` → `MetricType::Float(_)`
+    /// * `String` → `MetricType::String(_)`
+    /// * `Boolean` → `MetricType::Bool(_)`
+    ///
+    /// # Unsupported Variant subtypes
+    ///
+    /// Every Variant subtype outside the 6 mapped scalars above falls through
+    /// to the catch-all `Err("Unsupported variant type ...")` arm:
+    /// - Other scalars: `UInt32`, `UInt64`, `Byte`, `SByte`, `Int16`, `UInt16`,
+    ///   `DateTime`, `ByteString`, `Guid`, `NodeId`, `LocalizedText`.
+    /// - Complex/composite: `Array`, `StatusCode`, `XmlElement`,
+    ///   `QualifiedName`, `ExpandedNodeId`, `ExtensionObject`, `DataValue`,
+    ///   `DiagnosticInfo`, and `Variant` (nested).
+    /// - Sentinel: `Empty`.
+    ///
+    /// A SCADA client writing a `UInt32` counter or an `Array` (both
+    /// legitimate OPC UA writes) will surface the error in the operator log;
+    /// Story A-4 will extend the mapping if those subtypes are needed in
+    /// production.
+    ///
+    /// **A-1 transitional contract:** the `MetricType` returned here carries a
+    /// zero-defaulted payload (`Int(0)` / `Float(0.0)` / `Bool(false)` /
+    /// `String(String::new())`). The actual measurement is carried by the
+    /// `String` half of the returned tuple via `value.to_string()`. Story A-4
+    /// will plumb the inbound `value` into the payload directly, eliminating
+    /// the dual-storage requirement.
     ///
     /// # Arguments
     /// * `variant` - Reference to the OPC UA Variant to be converted
     ///
     /// # Returns
-    /// * `Ok(MetricType)` - Successfully converted metric type
-    /// * `Err(String)` - Error message if the variant type is not supported
-    ///
-    /// # Supported Conversions
-    /// * `Int32/Int64` -> `MetricType::Int(0)`
-    /// * `Float/Double` -> `MetricType::Float(0.0)`
-    /// * `String` -> `MetricType::String(String::new())`
-    /// * `Boolean` -> `MetricType::Bool(false)`
+    /// * `Ok((value_string, MetricType))` - Stringified value + discriminant variant
+    /// * `Err(String)` - Error message if the variant subtype is unmapped
     fn convert_variant_to_metric(variant: &Variant) -> Result<(String, crate::storage::MetricType), String> {
         trace!("Convert variant to metric");
         // TODO(A-4/A-6): plumb the real payload into MetricType variants instead

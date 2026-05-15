@@ -5,7 +5,7 @@
 | Story key     | `A-1-metrictype-payload-bearing-enum`                                                                 |
 | Epic          | A — Storage Payload Migration (Phase B Closure, gates v2.0 GA)                                        |
 | FRs           | FR51 (new in PRD via correct-course commit `e0b64a0`)                                                 |
-| Status        | review                                                                                                |
+| Status        | done                                                                                                  |
 | Created       | 2026-05-14                                                                                            |
 | Source epic   | `_bmad-output/planning-artifacts/epics.md § Epic A § Story A.1`                                       |
 | Sprint change | `_bmad-output/planning-artifacts/sprint-change-proposal-2026-05-14.md`                                |
@@ -358,3 +358,180 @@ Recommend running `bmad-code-review A-1` on a different LLM per CLAUDE.md "Code 
 ### Change Log
 
 - 2026-05-14: A-1 implementation complete via bmad-dev-story. Status flipped `ready-for-dev → in-progress → review`. Iter-0 scope revision applied pre-implementation (AC#10 shrunk, AC#4 deferred to A-5). `cargo test --all-targets` 1113 passed / 0 failed / 10 ignored. `cargo clippy --all-targets -- -D warnings` clean. `cargo test --doc` 0 failed / 56 ignored.
+
+### Review Findings
+
+Iter-1 code review run on 2026-05-15 via `bmad-code-review` — 3 parallel adversarial layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor). Layer raw output: 30 + 22 + 19. After dedupe / triage: **1 decision-needed, 9 patches, 22 defers, 6 dismissed**.
+
+#### Decision-needed (1)
+
+- [x] [Review][Decision] **D1: Iter-0 scope revisions explicitly confirmed by user (2026-05-15, iter-1 review)** — Per CLAUDE.md "Code Review & Story Validation Loop Discipline" requirement *"Accepted as deferred requires the user's explicit decision per finding."* On 2026-05-15 the user (Guy) explicitly confirmed BOTH Iter-0 revisions on the iter-1 review pass via the `AskUserQuestion` prompt: (a) AC#10 strict-zero shrink removing `src/opc_ua_history.rs` — **CONFIRMED** (carve-out justified; the auditor verified the touched portion is minimal — only (_) discards + 4 TODO(A-5) comments); (b) AC#4 (`MetricValue.value: String` removal) deferral to A-5 — **CONFIRMED** (removing in A-1 would require rewriting read sites that belong to A-5's scope). Original concern raised by Blind F18 + Auditor X2 resolved.
+
+#### Patches (9)
+
+- [x] [Review][Patch] **P1 [HIGH] AC#5 violated — backfill `StorageBackend` trait doc comments to reflect payload-bearing semantics** [src/storage/mod.rs:187-248] — Spec AC#5 requires both "signatures unchanged" AND "doc comments amended to reflect the payload-bearing semantics (no more 'parse based on data_type field' footgun)." Signatures are intact, but the trait method docs at lines 187-248 retain pre-A-1 prose with zero mention of payload-bearing semantics. Per CLAUDE.md loop discipline, A-1 cannot flip to `done` while a HIGH AC violation is open. (Auditor X1)
+- [x] [Review][Patch] **P2 [MEDIUM] Rewrite `convert_metric_to_variant` doc to describe variant-kind mapping, not zero-default returns** [src/opc_ua.rs:2002-2009] — Current doc reads "`Int32/Int64` → `MetricType::Int(0)`" / "`Float/Double` → `MetricType::Float(0.0)`" which a casual reader will interpret as "value is discarded." Should describe variant-kind mapping semantics. (Blind F3)
+- [x] [Review][Patch] **P3 [MEDIUM] Pin discriminant-only `Display` contract against a non-zero payload** [src/storage/types.rs::tests] — Add a test asserting e.g. `MetricType::Float(23.5).to_string() == "Float"`, `MetricType::Bool(true).to_string() == "Bool"`. Currently only zero payloads are exercised, but the SQLite `data_type` column write path (and any future grep contract) depends on discriminant-only rendering surviving real payloads. (Blind F7+F30 + Edge F9)
+- [x] [Review][Patch] **P4 [MEDIUM] Strengthen round-trip tests; close AC#6 location/granularity gap and boundary coverage** [src/storage/memory.rs::tests + src/storage/types.rs::tests] — (a) Move/duplicate the 4-variant `test_metric_type_payload_roundtrip` to `src/storage/memory.rs::tests` and split into 4 per-variant functions exercising `InMemoryBackend::set_metric` → `get_metric` (closes AC#6 spec location requirement); (b) add boundary-value coverage to the existing types.rs test: `Float(f64::NAN)` (note PartialEq returns false), `Float(f64::INFINITY)`, `Float(-0.0)`, `Int(i64::MIN)`/`Int(i64::MAX)`, `String("")` empty, `String("\0\u{FFFD}")` embedded NUL. Brings test count to the Dev Notes aspirational ≥1116. (Blind F11+F14+F28 + Edge F13 + Auditor AC#6 + X3)
+- [x] [Review][Patch] **P5 [LOW] Add in-source `TODO(A-2)` markers near sqlite.rs discriminant-string write paths** [src/storage/sqlite.rs::upsert_metric_value + batch_write_metrics + set_metric] — `grep -rn 'TODO(A-2)' src/` currently returns zero hits; option-(b) staging exists only as prose in spec/dev-notes. Add a 2-line comment near each discriminant-string write so future readers / `grep`-based audits can locate the deferred work. (Auditor X4)
+- [x] [Review][Patch] **P6 [LOW] Cross-reference `TODO(A-5)` in dual-storage doc comments** [src/storage/types.rs:90 + src/storage/mod.rs `MetricValueInternal`] — The `MetricValue.data_type` field doc currently says "carries the typed payload (post-A-1)" without the "but zero-defaulted until A-3/A-4/A-5/A-6 land" caveat. `MetricValueInternal` has no `TODO(A-5)` marker either. Update both to mirror the disclaimer already on `MetricValue.value`. (Edge F2 + Auditor X5)
+- [x] [Review][Patch] **P7 [LOW] Reconcile README "version bumped to 2.0.0-rc" claim with `Cargo.toml` (currently `version = "2.0.0"`)** [README.md:198 + Cargo.toml] — Either bump `Cargo.toml` to `2.0.0-rc` to match the Phase B Closure framing, or back out the README claim. CLAUDE.md "Documentation Sync" requires README to be a faithful entry-point. (Blind F29)
+- [x] [Review][Patch] **P8 [LOW] Audit perl-substitution-touched test files for tautological / mis-replaced assertions** [13 test files cited in File List] — Dev Agent Record's Debug Log notes `test_metric_value_creation` was hand-fixed after the perl bulk substitution corrupted an assertion. Run a sanity grep across all 13 test files to confirm no other assertion compares a real expected payload against a `MetricType::X(default)` placeholder, or asserts `MetricType::X(0) == MetricType::X(0)` where the original test intended to check a specific value. (Blind F23)
+- [x] [Review][Patch] **P9 [LOW] Replace `store_metric` (#[allow(dead_code)]) placeholder body with `unimplemented!()` until A-3** [src/chirpstack.rs:1714-1750] — Currently the Bool arm builds `MetricType::Bool(false)` even when the validated input is `1.0` (i.e., `true`). The method is `#[allow(dead_code)]` today, but a future contributor re-enabling it before A-3 lands would silently store `false` for every true input. Defensive: replace the placeholder body with `unimplemented!("store_metric body is pre-A-3 — payload wiring lands in Story A-3")`. (Edge F17)
+
+#### Deferred (22) — pre-existing or transitional issues
+
+Recorded in `_bmad-output/implementation-artifacts/deferred-work.md` under `## Deferred from: code review of A-1 (2026-05-15)`. Summary:
+
+- [x] [Review][Defer] DEF1: `InMemoryBackend::load_all_metrics` reconstructs `MetricValue.value` from `metric_type.to_string()` = discriminant — pre-existing; A-5 rewrites read sites. [src/storage/memory.rs:204-222]
+- [x] [Review][Defer] DEF2: Counter monotonic check `prev_metric.value.parse::<i64>()` fragile under value-column encoding drift — pre-existing; A-3 plumbs typed payload. [src/chirpstack.rs:1626-1636]
+- [x] [Review][Defer] DEF3: `convert_variant_to_metric` discards inbound payload (typed side hardcoded to zero defaults) — explicit `TODO(A-4)` markers; A-4 closes. [src/opc_ua.rs:2018-2024]
+- [x] [Review][Defer] DEF4: Bool validation arm in `process_metrics` drops parsed bool into `Bool(false)` — explicit `TODO(A-3)`; string-side carries truth. [src/chirpstack.rs:1640]
+- [x] [Review][Defer] DEF5: `set_metric` (writes `serde_json::to_string`) vs `upsert_metric_value` (writes `value.to_string()`) heterogeneous encodings on the `value` column — pre-existing; A-2 schema migration unifies. [src/storage/sqlite.rs:539-544 vs 839-840]
+- [x] [Review][Defer] DEF6: Divergent fractional-warn policy across chirpstack Counter arms — A-3 housekeeping. [src/chirpstack.rs:1602-1622 vs 1755-1760]
+- [x] [Review][Defer] DEF7: `Storage::new` startup-defaults dual-source-of-truth (string `value` arm mirrors payload `metric_type` arm) — transitional; A-5 removes `value`. [src/storage/mod.rs:998-1015]
+- [x] [Review][Defer] DEF8: `FromStr` has no compile-time enforcement of "pair with value source" contract — option-(b) explicitly chosen and documented; newtype refactor out of A-1 scope. [src/storage/types.rs:67-77]
+- [x] [Review][Defer] DEF9: `MetricValue.value` / `MetricValue.data_type` / `BatchMetricWrite` dual source of truth not enforced by any constructor — transitional; A-5. [src/storage/types.rs:96-117 + src/storage/mod.rs `BatchMetricWrite`]
+- [x] [Review][Defer] DEF10: README "Current Version" is now a 4000-char single-line paragraph; reviewability degrading — housekeeping. [README.md:198]
+- [x] [Review][Defer] DEF11: `chirpstack.rs:1745-1781` arms structurally identical — A-3 refactor housekeeping. [src/chirpstack.rs:1745-1781]
+- [x] [Review][Defer] DEF12: `SqliteBackend` Float NaN filter at line 1444 uses `matches!()` + separate `value.parse::<f64>()`; refactor landmine when A-2 lands. [src/storage/sqlite.rs:1444]
+- [x] [Review][Defer] DEF13: Test assertions `assert_eq!(_, MetricType::X(default))` will silently pin to placeholder values once A-3 wires real payloads — bulk test maintenance lands with A-3. [many test files]
+- [x] [Review][Defer] DEF14: `cargo test --doc` 56 ignored baseline; future doctests with zero-payload examples would harden the temporary contract — hypothetical, monitor in A-2 onward. [src/storage/types.rs doc comments]
+- [x] [Review][Defer] DEF15: `MetricValue.value` is `pub` and `TODO(A-5): remove` is a SemVer break for any downstream consumer — 2.0.0-rc framing arguably covers; revisit at A-5. [src/storage/types.rs:104-117]
+- [x] [Review][Defer] DEF16: `opc_ua_history.rs` trace-level row-skip log is too quiet for a row-loss event — A-5 rewrites HistoryRead read path; promote to warn then. [src/opc_ua_history.rs:386-414]
+- [x] [Review][Defer] DEF17: `opc_ua.rs::convert_metric_to_variant` Float arm narrows f64→f32 without finite-after-narrowing check (siblings in `opc_ua_history.rs:390-397` do) — pre-existing; A-4 OPC UA Read pipeline will harden. [src/opc_ua.rs:1845-1859]
+- [x] [Review][Defer] DEF18: Counter `Int` arm casts non-finite f64 to i64 via `as` (saturating) — pre-existing; A-3. [src/chirpstack.rs:1654-1660]
+- [x] [Review][Defer] DEF19: `Storage::set_metric_value` accepts arbitrary `MetricValueInternal` with no value↔data_type invariant check — transitional; constructor-pattern refactor with A-5. [src/storage/mod.rs:1268-1300]
+- [x] [Review][Defer] DEF20: `Variant::String(value)` may be a null `UAString`; `value.to_string()` returns `""` indistinguishable from legitimate empty — pre-existing. [src/opc_ua.rs:2020]
+- [x] [Review][Defer] DEF21: `Variant::Int32` and `Variant::Int64` collapse to identical `MetricType::Int(0)` — bit-width loss baked into typed enum. [src/opc_ua.rs:2016-2017]
+- [x] [Review][Defer] DEF22: Boolean variant from invalid string defaults to `false` with warn but no event-tracking metric — pre-existing. [src/opc_ua.rs:1862-1873]
+
+#### Dismissed (6) — noise / false positives
+
+DM1 (`String::new()` micro-allocation), DM2 (clippy::approx_constant 3.14→1.5 cosmetic), DM3 (`matches!` vs `==` hypothetical weakening), DM4 (`.clone()` cascade necessary post-Copy-drop), DM5 (`FromStr` to_lowercase micro-opt pre-existing), DM6 (Edge F21 AC#10 strict-zero positive confirmation).
+
+#### Iter-2 review (2026-05-15)
+
+Iter-2 surfaced 20 (Blind) + 11 (Edge) + 9 patch verdicts (Auditor). All 9 iter-1 patches verified PATCHED-CORRECTLY or PATCHED-WITH-CAVEAT by the Auditor. AC#5, AC#6, AC#11 all SATISFIED post-iter-1.
+
+**Convergent iter-2 HIGH-REGs** (Blind F13 + Edge F1 + Edge F2): the iter-1 P1 trait-doc backfill made backend-impl claims the implementations don't actually fulfil — the "real value reconstruction via `get_metric_value` → `MetricValue.value`" path is only valid post-`batch_write_metrics`, not after `set_metric` (split-brain between `InMemoryBackend.metrics` and `InMemoryBackend.metric_values`).
+
+After iter-2 dedupe / triage: **1 HIGH, 5 MEDIUM, 4 LOW** iter-2 patches; 12 defers; 3 dismissals.
+
+##### Iter-2 patches (10, all applied)
+
+- [x] [Iter-2][Patch] **IR1 [HIGH] Tighten trait docs — remove backend-specific caveats, fix LSP framing** [src/storage/mod.rs:189-282 + src/storage/types.rs:103-122] — Tightened `get_metric` / `get_metric_value` / `set_metric` trait docs to describe only the trait-level contract; removed the misleading "real value reconstruction" path that didn't hold for `InMemoryBackend::set_metric → get_metric_value` (split-brain HashMap). `MetricValue.data_type` field doc corrected to flag the `batch_write_metrics` path as the only fully-consistent write→read route. (Blind F13 + Edge F1 + Edge F2)
+- [x] [Iter-2][Patch] **IR2 [MEDIUM] Correct `set_metric` SQLite TODO(A-2) — it serde_json-encodes, not discriminant-only** [src/storage/sqlite.rs:540-549] — Pre-iter-2 TODO claimed "discriminant-string + JSON-encoded value" which mischaracterised the dual-encoded write. New TODO accurately describes `{"Float":0.0}` JSON + bare discriminant. (Edge F3)
+- [x] [Iter-2][Patch] **IR3 [MEDIUM] Update `append_metric_history` doc bullet list** [src/storage/sqlite.rs:907-918] — Stale bullets (`Float(3.14) → "3.14"`, `Int(42) → "42"`, ...) contradicted the adjacent TODO(A-2) banner. Replaced with A-1 staging description naming `MetricType::to_string()` (discriminant) + cross-reference to `batch_write_metrics` for real values. (Edge F4)
+- [x] [Iter-2][Patch] **IR4 [MEDIUM] Soften TODO(A-2) — remove premature A-2 column-name commitments** [src/storage/sqlite.rs:540 + 845 + 964 + 1070] — Pre-iter-2 TODOs hardcoded `value_real`/`value_int`/`value_bool`/`value_text` column names. A-2 owns the schema design; A-1 should not commit it. New TODOs name only "typed-payload write" + "A-2's schema migration" without column-name presumption. (Blind F11)
+- [x] [Iter-2][Patch] **IR5 [MEDIUM] Replace `unimplemented!()` with `todo!()` in `store_metric`** [src/chirpstack.rs:1714-1736] — Semantic mismatch: `unimplemented!()` connotes "TODO will implement," but the method's intent is "will be reinstated by A-3." `todo!()` is the canonical macro for that. Runtime behaviour identical (both panic with `not yet implemented`); semantic intent clearer. (Blind F2)
+- [x] [Iter-2][Patch] **IR6 [MEDIUM] Update README badge + docker references to `2.0.0-rc`** [README.md:2 + 77] — Iter-1 P7 only bumped Cargo.toml + README "Current Version" line; the SVG badge URL and `docker run` example still referenced `2.0.0`. CLAUDE.md doc-sync rule requires both to mirror Cargo.toml. (Edge F10)
+- [x] [Iter-2][Patch] **IR7 [LOW] Strip stale 3-step contract from `store_metric` doc** [src/chirpstack.rs:1680-1709] — Pre-iter-2 doc still claimed "1. Determines metric type, 2. Converts value, 3. Stores in shared storage" — all 3 steps are dead since `todo!()`. Rewrote doc to name A-3 reinstatement contract + git-history pointer. (Edge F11)
+- [x] [Iter-2][Patch] **IR8 [LOW] Add `Bool(true)` to boundary roundtrip test** [src/storage/types.rs::test_metric_type_payload_roundtrip_boundary_values] — Test only covered `Bool(false)`. Bool is a 2-valued domain — both ends matter. Added `MetricType::Bool(true).clone()` assertion. (Blind F20)
+- [x] [Iter-2][Patch] **IR9 [LOW] Expand Display test doc to mention `value` column load-bearing role** [src/storage/types.rs::test_metric_type_display_pins_discriminant_only_contract] — Pre-iter-2 doc only mentioned the `data_type` column; but `upsert_metric_value`/`append_metric_history` also write the discriminant to the `value` column per option-(b) A-1 staging. Expanded doc to capture the full blast radius. (Blind F5)
+- [x] [Iter-2][Patch] **IR10 [LOW] Document unsupported Variant subtypes in `convert_variant_to_metric`** [src/opc_ua.rs:1996-2022] — Pre-iter-2 doc only listed the 4 supported subtypes. Added explicit `# Unsupported Variant subtypes` block naming `UInt32`/`UInt64`/`Byte`/`SByte`/`Int16`/`UInt16`/`DateTime`/`ByteString`/etc. and noting A-4's potential extension. (Edge F5)
+
+##### Iter-2 patch verification (2026-05-15)
+
+- `cargo build --all-targets` — clean.
+- `cargo test --all-targets` — **1125 passed / 0 failed / 10 ignored** (unchanged from iter-1 — IR8 added an assertion to an existing test, no new tests; all other patches are doc/macro changes).
+- `cargo clippy --all-targets -- -D warnings` — clean.
+- `cargo test --doc` — **0 failed / 55 ignored** (was 56 pre-iter-2; net −1 from IR7 deliberately removing the stale `rust,ignore` doctest example in `store_metric` doc that would have been factually misleading after the `todo!()` body swap). Spirit of AC#12 / issue #100 preserved (zero failures); letter is off by 1 ignored — captured here for record-keeping per Iter-3 Auditor CF1.
+
+##### Iter-2 deferred (12)
+
+Appended to `deferred-work.md` under `## Deferred from: code review of A-1 — iter-2 (2026-05-15)`:
+
+- DEF-iter2-1 (Blind F3): missing-device error-path test for new round-trip tests.
+- DEF-iter2-2 (Blind F4): bool roundtrip-guard message overstated for standalone assertion.
+- DEF-iter2-3 (Blind F6): NaN handling test only validates `Clone`, not a backend round-trip.
+- DEF-iter2-4 (Blind F7): `2.0.0-rc` lacks numeric suffix (`-rc.1`) — confirmed Phase B Closure framing per Dev Agent Record.
+- DEF-iter2-5 (Blind F9): MetricValueInternal "must move together" invariant not enforced by any test.
+- DEF-iter2-6 (Blind F10): 4 `TODO(A-2)` comments near-duplicate; drift hazard.
+- DEF-iter2-7 (Blind F14): embedded-NUL payload tests don't exercise SQLite NUL-handling.
+- DEF-iter2-8 (Blind F15): `opc_ua_history.rs::history_read_raw_modified` reference path not grep-verified.
+- DEF-iter2-9 (Blind F17): `store_metric` body deletion archaeology cost (A-3 must `git show 16e7811:src/chirpstack.rs`).
+- DEF-iter2-10 (Blind F18): `MetricType` variant exhaustiveness not enforced by Display test.
+- DEF-iter2-11 (Blind F19): `TODO(A-N)` form drift (some sites use `TODO(A-4/A-6):`).
+- DEF-iter2-12 (Edge F6/F7/F8/F9): boundary coverage holes (subnormals, signaling NaN, set_metric overwrite, cross-device same-metric-name, empty device_id).
+
+##### Iter-2 dismissed (3)
+
+DM-iter2-1 (Blind F8 — `convert_variant_to_metric` body not shown in diff; Auditor verified body matches doc), DM-iter2-2 (Blind F12 — trait doc impl mention partially patched by IR1), DM-iter2-3 (Auditor cross-findings 1-3 — cosmetic line drift / spec function-name typo / counter off-by-one).
+
+#### Iter-3 review (2026-05-15)
+
+Iter-3 same-LLM termination pass per CLAUDE.md + memory `feedback_iter3_validation` (6-story validated pattern). 3 parallel layers (Blind, Edge, Auditor) against combined iter-1 + iter-2 patch diff (711 lines, 9 files).
+
+**Raw findings:** 12 (Blind) + 6 (Edge) + 19 patch verdicts (Auditor — all PATCHED-CORRECTLY).
+
+##### Auditor verdict
+
+All 13 ACs SATISFIED (AC4 DEFERRED-DOCUMENTED per user-confirmed Iter-0 Revision 2; AC12 MARGINAL with off-by-one doctest count noted as CF1). All 19 iter-1 + iter-2 patches verified PATCHED-CORRECTLY post-iter-3. **Loop-termination verdict: ELIGIBLE-FOR-DONE.**
+
+##### Iter-3 dismissed (4 false positives)
+
+DM-iter3-1 (Blind F1 — claim that `TODO(A-3)` markers were deleted from `chirpstack.rs`; only `store_metric` arms removed, `process_metrics` arms still carry them at lines 1591-1666; grep still returns hits). DM-iter3-2 (Blind F2 — `store_metric` test callers panic risk; `cargo test 1125/0/10` green, no test invokes the symbol). DM-iter3-3 (Blind F4 — `TODO(A-5)` on `MetricValue.value` missing; present at `types.rs:99` from iter-1 P6). DM-iter3-4 (Blind F8 — `convert_variant_to_metric` body-doc alignment; Auditor verified body matches doc).
+
+##### Iter-3 patches (4 small LOW, all applied)
+
+- [x] [Iter-3][Patch] **ITR1 [LOW] Add `Bool(true)` to `test_metric_type_display_pins_discriminant_only_contract`** [src/storage/types.rs::tests] — IR8 added Bool(true) to the boundary-roundtrip test; this mirrors it on the Display contract test for completeness. (Blind F6)
+- [x] [Iter-3][Patch] **ITR2 [LOW] Correct doctest count in iter-2 spec verification block** [this file] — Iter-2 IR7 deliberately removed a `rust,ignore` doctest in `store_metric` that would have been factually misleading after the `todo!()` body swap. Actual is `0 failed / 55 ignored` (was 56). Spec text updated for record-keeping. (Auditor CF1)
+- [x] [Iter-3][Patch] **ITR3 [LOW] `BatchMetricWrite.data_type` doc parity** [src/storage/mod.rs:131-155] — Iter-1 P6 + iter-2 IR1 added A-1 transitional caveats to `MetricValue.data_type` and `MetricValueInternal.value`, but the structurally-parallel `BatchMetricWrite` was missed. Brought into parity with the same TODO(A-5) cross-references. (Edge F1)
+- [x] [Iter-3][Patch] **ITR4 [LOW] Expand `convert_variant_to_metric` Unsupported list** [src/opc_ua.rs::convert_variant_to_metric] — IR10 listed 12 unsupported subtypes + "etc."; ITR4 names the remaining complex variants (`Array`, `StatusCode`, `XmlElement`, `QualifiedName`, `ExpandedNodeId`, `ExtensionObject`, `DataValue`, `DiagnosticInfo`, nested `Variant`, sentinel `Empty`) for operator-facing completeness. (Edge F5)
+
+##### Iter-3 deferred (11)
+
+Appended to `deferred-work.md` under `## Deferred from: code review of A-1 — iter-3 (2026-05-15)`:
+
+- DEF-iter3-1 (Blind F3): `get_metric_value` trait doc "may not populate" wording — true for InMemoryBackend after `set_metric` (split-brain), but the doc's nuance could mislead. LOW.
+- DEF-iter3-2 (Blind F5): `todo!()` panic message references internal review doc path (`A-1-metrictype-payload-bearing-enum.md § Review Findings`) that operators can't resolve. LOW.
+- DEF-iter3-3 (Blind F7): `InMemoryBackend::set_metric` auto-creates devices; trait doc says missing device returns Err. Trait/impl divergence to be tightened. LOW.
+- DEF-iter3-4 (Blind F9): `tests/metric_types_test.rs` tautological assertions remain (already DEF13 from iter-1; TODO(A-3) comments now in place). LOW.
+- DEF-iter3-5 (Blind F10): Three A-1 staging caveats (MetricValue/MetricValueInternal/BatchMetricWrite plus trait docs) — extract to module-level rustdoc anchor at A-5 cleanup. LOW.
+- DEF-iter3-6 (Blind F11): `docker run ghcr.io/guycorbaz/opcgw:2.0.0-rc` references an image tag not yet published on GHCR — release-process concern, out of A-1 scope. LOW.
+- DEF-iter3-7 (Blind F12): `convert_variant_to_metric` top-line doc doesn't lead with "real value in String half" — transitional caveat is buried. LOW.
+- **DEF-iter3-8 (Edge F3 — MUST address in A-3): `SqliteBackend::set_metric` calls `serde_json::to_string(&value)` which rejects NaN/Inf. Today unreachable because the poller stamps `Float(0.0)`, but A-3's real-payload wiring will hit this. A-3 must decide policy: filter NaN at the poller, use a `serde_json` configuration that allows NaN/Inf, or surface a clean operator error.** **User explicitly accepted deferral on 2026-05-15 iter-3 pass.** MEDIUM (severity preserved for A-3 attention).
+- DEF-iter3-9 (Edge F4): `store_metric` doc `# Arguments` section reads as if params were used; body is `todo!()`. Minor voice mismatch. LOW.
+- DEF-iter3-10 (Edge F6): `MetricValueInternal::ToSql`/`FromSql` no pre-A-1 backward-compat shim; theoretical hazard if any path reaches the ToSql/FromSql code (currently `#![allow(dead_code)]`). LOW.
+- DEF-iter3-11 (Auditor CF4 — already DEF-iter2-5): MetricValueInternal "must move together" invariant not enforced by test. LOW.
+
+##### Iter-3 patch verification (2026-05-15)
+
+- `cargo build --all-targets` — clean.
+- `cargo test --all-targets` — **1125 passed / 0 failed / 10 ignored** (ITR1 adds an assertion within an existing test; no new test functions).
+- `cargo clippy --all-targets -- -D warnings` — clean.
+- `cargo test --doc` — **0 failed / 55 ignored** (preserved from iter-2 post-IR7; AC#12 letter off by 1 vs #100 baseline, spirit preserved).
+
+#### Loop-termination check (iter-3 → done)
+
+Per CLAUDE.md "Code Review & Story Validation Loop Discipline":
+> The loop terminates when one of these is true:
+> 1. Zero findings, **or**
+> 2. Only LOW severity findings remain, **or**
+> 3. The user has explicitly accepted each remaining HIGH/MEDIUM finding by marking it deferred...
+
+Post-iter-2 patch state:
+- Iter-1 findings (1 HIGH + 3 MED + 5 LOW): all PATCHED-CORRECTLY per Auditor.
+- Iter-2 findings (1 HIGH + 5 MED + 4 LOW): all 10 PATCHED.
+- 22 iter-1 defers + 12 iter-2 defers: all LOW or pre-existing/transitional, all in `deferred-work.md`.
+
+Condition #1 (zero findings) is met. Eligible to flip A-1 to `done` — pending optional iter-3 sweep.
+
+#### Iter-1 patch round verification (2026-05-15)
+
+All 9 patches applied + D1 confirmed. Post-patch verification:
+
+- `cargo build --all-targets` — clean.
+- `cargo test --all-targets` — **1125 passed / 0 failed / 10 ignored** (+12 vs 1113 baseline; exceeds Dev Notes ≥1116 aspirational target).
+- `cargo clippy --all-targets -- -D warnings` — clean.
+- `cargo test --doc` — 0 failed / 56 ignored (#100 baseline preserved).
+
+New tests landed:
+- `test_metric_type_display_pins_discriminant_only_contract` (P3, pins SQLite `data_type` column write contract against boundary payloads — NaN/Inf/i64::MIN/MAX/empty/unicode/embedded-NUL/10k-char).
+- `test_metric_type_payload_roundtrip_boundary_values` (P4, boundary coverage for `Clone` + `PartialEq` round-trip; NaN handled via `f.is_nan()` pattern destructure, signed-zero via `to_bits()`).
+- `test_set_then_get_float_metric_roundtrips_payload` / `_int_` / `_bool_` / `_string_` (P4, 4 per-variant tests in `src/storage/memory.rs::tests` — closes AC#6 spec location requirement; exercises `InMemoryBackend::set_metric → get_metric` path with boundary payloads including i64::MIN/MAX, empty string, embedded NUL).
+
+In-source `TODO(A-2)` markers added at 4 SQLite write paths (P5): `set_metric:540`, `upsert_metric_value:839`, `append_metric_history:951`, `batch_write_metrics:1052`. `grep -rn 'TODO(A-2)' src/` now returns 4 matches.
+
+Per CLAUDE.md "Code Review & Story Validation Loop Discipline": the iter-1 patch round was non-trivial (9 patches across 7 files including a HIGH AC#5 fix and 6 new tests). Recommend running iter-2 review before flipping to `done`.

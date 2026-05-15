@@ -132,15 +132,30 @@ use rusqlite::Result as SqliteResult;
 /// Used with `batch_write_metrics()` to group multiple metric updates
 /// into a single atomic transaction. Includes both the current metric value
 /// (for UPSERT) and the historical record (for append-only audit log).
+///
+/// **Story A-1 / Epic A — Storage Payload Migration:** during the A-1 → A-5
+/// transition window, `value: String` carries the real string-encoded sensor
+/// reading (Float/Int/Bool/String formatted via the poller) while
+/// `data_type: MetricType` is type-level payload-bearing but its payload is
+/// zero-defaulted on every production caller (search `TODO(A-3)` in
+/// `chirpstack.rs`). A-2's schema migration replaces the dual-storage with
+/// a typed-payload write; **TODO(A-5)** removes the `value: String` field
+/// once consumers pattern-match the typed payload directly. Mirrors the
+/// transitional caveat on [`MetricValue`](crate::storage::MetricValue) and
+/// [`MetricValueInternal`].
 #[derive(Clone, Debug)]
 pub struct BatchMetricWrite {
     /// Unique device identifier from ChirpStack
     pub device_id: String,
     /// Metric name as defined in ChirpStack
     pub metric_name: String,
-    /// The metric value as a string (numeric value for Float/Int, boolean for Bool, text for String)
+    /// Real string-encoded sensor reading (`"23.5"` / `"42"` / `"true"` / `"hello"`).
+    /// TODO(A-5): remove once `BatchMetricWrite.data_type` carries the typed payload
+    /// and consumers pattern-match it directly.
     pub value: String,
-    /// The metric type (Int, Float, Bool, String)
+    /// Metric type, type-level payload-bearing (post-A-1). Production callers
+    /// currently stamp a zero-defaulted payload; the real measurement is in
+    /// `value: String` until A-3 plumbs the typed payload end-to-end.
     pub data_type: MetricType,
     /// Timestamp when this metric was measured (system time)
     pub timestamp: std::time::SystemTime,
@@ -189,6 +204,16 @@ pub trait StorageBackend: Send + Sync {
 
     /// Retrieves the current value of a specific metric for a device.
     ///
+    /// **Payload-bearing contract (Story A-1, Epic A — Storage Payload
+    /// Migration):** the returned `MetricType` is type-level payload-bearing —
+    /// each variant (`Float(f64)`, `Int(i64)`, `Bool(bool)`, `String(String)`)
+    /// can carry the actual measurement. The trait does not constrain
+    /// implementations to populate the payload during the A-1 → A-5
+    /// transition window; see each backend's impl docs for its current
+    /// staging behaviour. Pattern-match the variant for the discriminant; do
+    /// not assume the payload is the real measurement until A-3/A-4 close
+    /// the write/read pipelines.
+    ///
     /// # Arguments
     ///
     /// * `device_id` - The unique identifier for the device
@@ -207,10 +232,27 @@ pub trait StorageBackend: Send + Sync {
     /// - **Metric not found**: The metric_name does not exist for the device
     fn get_metric(&self, device_id: &str, metric_name: &str) -> Result<Option<MetricType>, OpcGwError>;
 
-    /// Retrieves the complete metric value (type and data) for counter monotonic checking.
+    /// Retrieves the complete metric value (type + legacy string payload) for a device.
     ///
-    /// This method is optimized for the counter monotonic check use case, returning
-    /// both the metric type and its numeric value for efficient comparison of counter resets.
+    /// **Payload-bearing contract (Story A-1, Epic A — Storage Payload
+    /// Migration):** the returned `MetricValue` exposes both `data_type:
+    /// MetricType` (type-level payload-bearing post-A-1) and the legacy
+    /// `value: String` field. The trait does not enforce consistency between
+    /// the two — implementations populate them per their staging stage. The
+    /// `value: String` field is retained during the A-1 → A-5 transition for
+    /// callers that need a stable string representation of the measurement;
+    /// A-5 removes it once consumers (`src/opc_ua.rs::get_value`,
+    /// `src/opc_ua_history.rs`) are rewritten to pattern-match the typed
+    /// payload directly. See `MetricValue` doc for the dual-storage caveat.
+    ///
+    /// Used today by the counter monotonic check in `chirpstack.rs`, which
+    /// reads `MetricValue.value` (string-side) because the typed payload is
+    /// zero-defaulted by many production writers in A-1 staging.
+    ///
+    /// **Note on availability:** not all writes populate the
+    /// `MetricValue`-shaped store. Single-row write methods (`set_metric`,
+    /// `upsert_metric_value`) may not. The `batch_write_metrics` path
+    /// guarantees `get_metric_value` sees the written row on every backend.
     ///
     /// # Arguments
     ///
@@ -224,7 +266,16 @@ pub trait StorageBackend: Send + Sync {
     /// * `Err(OpcGwError)` - If an error occurs during retrieval
     fn get_metric_value(&self, device_id: &str, metric_name: &str) -> Result<Option<MetricValue>, OpcGwError>;
 
-    /// Updates the value of a specific metric for a device.
+    /// Stores the value of a specific metric for a device.
+    ///
+    /// **Payload-bearing contract (Story A-1, Epic A — Storage Payload
+    /// Migration):** the `value: MetricType` argument is payload-bearing —
+    /// callers wrap the actual measurement in the appropriate variant
+    /// (`Float(f64)`, `Int(i64)`, `Bool(bool)`, `String(String)`). The trait
+    /// requires the discriminant to be persisted; persistence of the payload
+    /// is per-backend during the A-1 → A-5 transition (`TODO(A-2)` markers
+    /// on the SQLite write paths flag the staging gap). See each backend's
+    /// impl doc for its current behaviour.
     ///
     /// If the metric does not exist, it will be created with the specified value.
     /// If the device does not exist, returns an error.
@@ -233,7 +284,7 @@ pub trait StorageBackend: Send + Sync {
     ///
     /// * `device_id` - The unique identifier for the device
     /// * `metric_name` - The name of the metric to update
-    /// * `value` - The new metric value
+    /// * `value` - The new metric value (payload-bearing post-A-1)
     ///
     /// # Returns
     ///
@@ -763,11 +814,22 @@ pub struct Device {
 
 
 /// Internal metric value representation with full metadata.
-/// Harmonized with types.rs MetricValue for easier SQL persistence.
+/// Harmonized with types.rs `MetricValue` for easier SQL persistence.
+///
+/// **Story A-1 / Epic A — Storage Payload Migration:** like
+/// `crate::storage::MetricValue`, this struct mirrors the dual-storage
+/// transition state — `data_type: MetricType` carries the typed payload
+/// (post-A-1) but production write paths currently zero-default the payload
+/// and rely on `value: String` for the real measurement.
+///
+/// **TODO(A-5):** remove `value: String` once `crate::storage::MetricValue`'s
+/// equivalent field is removed; the two structs must move together to
+/// preserve the harmonisation contract.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MetricValueInternal {
     pub device_id: String,
     pub metric_name: String,
+    /// TODO(A-5): remove once typed-payload reads land — see `MetricValue.value`.
     pub value: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub data_type: MetricType,

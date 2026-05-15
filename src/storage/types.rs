@@ -100,7 +100,23 @@ pub struct MetricValue {
     pub value: String,
     /// Timestamp of when the metric was collected
     pub timestamp: DateTime<Utc>,
-    /// Data type of the metric, carrying the typed payload (post-A-1).
+    /// Data type of the metric, type-level payload-bearing (post-A-1, Story
+    /// A-1 / Epic A — Storage Payload Migration).
+    ///
+    /// **Transitional dual-storage caveat (A-1 → A-5):** during the A-1
+    /// staging window the typed payload is zero-defaulted at most production
+    /// write sites (SqliteBackend `set_metric`/`upsert_metric_value`/
+    /// `append_metric_history` use `value.to_string()` = discriminant; OPC UA
+    /// Variant→Metric conversion in `src/opc_ua.rs` zero-defaults; ChirpStack
+    /// poller arms in `src/chirpstack.rs` stamp `Float(0.0)`/`Int(0)`/etc. —
+    /// search `TODO(A-3)` / `TODO(A-4)`). Until those `TODO`s are closed,
+    /// the **real** measurement is carried by the sibling `value: String`
+    /// field. The single exception is the production poller's
+    /// `batch_write_metrics` path, which writes `BatchMetricWrite.value`
+    /// (real string) — but its `data_type` payload is still discriminant-
+    /// flavoured. **TODO(A-5):** once read sites in `src/opc_ua.rs` and
+    /// `src/opc_ua_history.rs` are rewritten to consume the typed payload,
+    /// this caveat goes away.
     pub data_type: MetricType,
 }
 
@@ -288,6 +304,47 @@ mod tests {
         assert_eq!(MetricType::String("hi".into()).to_string(), "String");
     }
 
+    /// Contract pin: `Display` MUST emit the discriminant only — never the
+    /// payload — regardless of payload contents (including boundary values
+    /// like NaN, Infinity, i64::MIN/MAX, empty strings, embedded NUL).
+    ///
+    /// **Load-bearing for (A-1 staging — see `TODO(A-2)` in `sqlite.rs`):**
+    /// - SQLite `data_type` column: every backend write path
+    ///   (`set_metric`, `upsert_metric_value`, `append_metric_history`,
+    ///   `batch_write_metrics`) populates this column via
+    ///   `value.to_string()`.
+    /// - SQLite `value` column on `upsert_metric_value` /
+    ///   `append_metric_history`: also written via `value.to_string()` (the
+    ///   discriminant) per option-(b) A-1 staging. So today the `value`
+    ///   column is grep-distinguishable from the `data_type` column on
+    ///   `set_metric`/`batch_write_metrics` rows only (which embed JSON / a
+    ///   real string respectively).
+    /// - Log output volume — many `info!` / `debug!` / `trace!` sites format
+    ///   metric types with `{}` and expect a single short token.
+    ///
+    /// If a future change extends Display to render the payload (e.g.
+    /// `"Float(23.5)"`), the SQLite write paths and grep contracts MUST be
+    /// migrated in the same change.
+    #[test]
+    fn test_metric_type_display_pins_discriminant_only_contract() {
+        // Boundary payloads must still render as bare discriminants.
+        assert_eq!(MetricType::Float(f64::NAN).to_string(), "Float");
+        assert_eq!(MetricType::Float(f64::INFINITY).to_string(), "Float");
+        assert_eq!(MetricType::Float(f64::NEG_INFINITY).to_string(), "Float");
+        assert_eq!(MetricType::Float(-0.0).to_string(), "Float");
+        assert_eq!(MetricType::Float(f64::MAX).to_string(), "Float");
+        assert_eq!(MetricType::Int(i64::MIN).to_string(), "Int");
+        assert_eq!(MetricType::Int(i64::MAX).to_string(), "Int");
+        assert_eq!(MetricType::Bool(false).to_string(), "Bool");
+        assert_eq!(MetricType::Bool(true).to_string(), "Bool");
+        assert_eq!(MetricType::String(String::new()).to_string(), "String");
+        assert_eq!(MetricType::String("\0\u{FFFD}embedded".into()).to_string(), "String");
+        assert_eq!(
+            MetricType::String("a".repeat(10_000)).to_string(),
+            "String"
+        );
+    }
+
     #[test]
     fn test_metric_type_from_str() {
         // FromStr produces zero-valued payloads per the A-1 contract; callers
@@ -304,7 +361,7 @@ mod tests {
 
     #[test]
     fn test_metric_type_payload_roundtrip() {
-        // A-1 AC#6 (in-memory shape): every variant round-trips its payload
+        // A-1 AC#6 (type-level shape): every variant round-trips its payload
         // through Clone + PartialEq without lossy conversion.
         let float = MetricType::Float(23.5);
         let int = MetricType::Int(42);
@@ -314,6 +371,62 @@ mod tests {
         assert_eq!(int.clone(), MetricType::Int(42));
         assert_eq!(bool_.clone(), MetricType::Bool(true));
         assert_eq!(string.clone(), MetricType::String("OK".to_string()));
+    }
+
+    #[test]
+    fn test_metric_type_payload_roundtrip_boundary_values() {
+        // A-1 AC#6 boundary coverage: payload integrity across edge cases of
+        // each variant type. Note: `Float(NaN)` is intentionally checked via
+        // pattern destructuring + `f.is_nan()` because `NaN == NaN` is false
+        // under PartialEq (IEEE 754).
+        let nan = MetricType::Float(f64::NAN).clone();
+        match nan {
+            MetricType::Float(f) => assert!(f.is_nan(), "NaN payload must survive Clone"),
+            _ => panic!("Float variant not preserved through Clone"),
+        }
+
+        assert_eq!(
+            MetricType::Float(f64::INFINITY).clone(),
+            MetricType::Float(f64::INFINITY)
+        );
+        assert_eq!(
+            MetricType::Float(f64::NEG_INFINITY).clone(),
+            MetricType::Float(f64::NEG_INFINITY)
+        );
+        // Signed zero — PartialEq treats +0.0 == -0.0 as true, so we check
+        // the bit pattern explicitly to pin signed-zero preservation.
+        let neg_zero = MetricType::Float(-0.0).clone();
+        if let MetricType::Float(f) = neg_zero {
+            assert_eq!(f.to_bits(), (-0.0f64).to_bits(), "signed-zero payload must survive Clone");
+        } else {
+            panic!("Float variant not preserved through Clone");
+        }
+        assert_eq!(
+            MetricType::Float(f64::MAX).clone(),
+            MetricType::Float(f64::MAX)
+        );
+
+        assert_eq!(MetricType::Int(i64::MIN).clone(), MetricType::Int(i64::MIN));
+        assert_eq!(MetricType::Int(i64::MAX).clone(), MetricType::Int(i64::MAX));
+        assert_eq!(MetricType::Int(0).clone(), MetricType::Int(0));
+
+        // Bool covers both true and false (2-valued domain — both ends matter).
+        assert_eq!(MetricType::Bool(false).clone(), MetricType::Bool(false));
+        assert_eq!(MetricType::Bool(true).clone(), MetricType::Bool(true));
+
+        assert_eq!(
+            MetricType::String(String::new()).clone(),
+            MetricType::String(String::new())
+        );
+        assert_eq!(
+            MetricType::String("\0\u{FFFD}embedded".into()).clone(),
+            MetricType::String("\0\u{FFFD}embedded".into())
+        );
+        let long = "a".repeat(10_000);
+        assert_eq!(
+            MetricType::String(long.clone()).clone(),
+            MetricType::String(long)
+        );
     }
 
     #[test]

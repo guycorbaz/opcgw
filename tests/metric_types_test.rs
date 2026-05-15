@@ -65,6 +65,9 @@ fn test_metric_kind_gauge_to_float() {
     assert_eq!(gauge_metric.datasets[0].data[0], 25.5);
 
     // The metric kind is GAUGE (2), which should map to Float
+    // TODO(A-3): once the poller wires the real `datasets[0].data[0]` into the
+    // payload, replace the tautological `Float(0.0) == Float(0.0)` check with
+    // an end-to-end assertion that the stored payload equals `25.5`.
     let expected_type = MetricType::Float(0.0);
     assert_eq!(expected_type, MetricType::Float(0.0));
 }
@@ -80,6 +83,8 @@ fn test_metric_kind_counter_to_int() {
     assert_eq!(counter_metric.datasets[0].data[0], 100.0);
 
     // The metric kind is COUNTER (0), which should map to Int
+    // TODO(A-3): once the poller wires the real value, replace with an
+    // assertion that the stored payload equals `100`.
     let expected_type = MetricType::Int(0);
     assert_eq!(expected_type, MetricType::Int(0));
 }
@@ -95,6 +100,8 @@ fn test_metric_kind_absolute_to_float() {
     assert_eq!(absolute_metric.datasets[0].data[0], 50.0);
 
     // The metric kind is ABSOLUTE (1), which should map to Float
+    // TODO(A-3): once the poller wires the real value, replace with an
+    // assertion that the stored payload equals `50.0`.
     let expected_type = MetricType::Float(0.0);
     assert_eq!(expected_type, MetricType::Float(0.0));
 }
