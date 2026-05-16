@@ -1818,59 +1818,66 @@ impl OpcUa {
         }
     }
 
+    /// A-4: project the payload-bearing `MetricType` to an OPC UA `Variant`
+    /// by pattern-matching the typed payload directly.
+    ///
+    /// Post-A-4 the legacy `metric.value: String` field is NOT read by this
+    /// function — the real measurement comes from `metric.data_type`'s
+    /// payload-bearing variant. A regression that re-introduces a
+    /// `metric.value.parse::<…>()` call would silently fall back to the
+    /// legacy heterogeneous-lexeme contract (A-2-iter1-DEF1) and produce
+    /// wrong values for `set_metric` / `upsert_metric_value` /
+    /// `append_metric_history`-written rows where `value` is the
+    /// discriminant string, not the measurement.
+    ///
+    /// # Narrowing rules
+    ///
+    /// - `MetricType::Int(i)`: preserves A-1-iter1-DEF21 narrowing — uses
+    ///   `i32::try_from(i)` to fit `Variant::Int32`, else `Variant::Int64(i)`.
+    /// - `MetricType::Float(f)`: narrows f64 → f32 via `as f32`, then
+    ///   re-checks `is_finite()` (closes A-1-iter1-DEF17). On overflow to
+    ///   `±Inf` the function emits `event="metric_read"` `reason="narrowing_overflow"`
+    ///   warn and returns `Variant::Float(0.0)`.
+    ///
+    /// # Note on `metric.timestamp`
+    ///
+    /// The `metric.timestamp` field is available but not embedded in the
+    /// returned `Variant`. The caller (`get_value`) places the timestamp in
+    /// the `DataValue.source_timestamp` slot. Future enhancement: embed
+    /// timestamp in the OPC UA node's SourceTimestamp attribute for better
+    /// temporal accuracy in OPC UA clients.
     fn convert_metric_to_variant(metric: crate::storage::MetricValue) -> Variant {
-        // NOTE: The metric.timestamp field is available but not currently used in the OPC UA Variant.
-        // Future enhancement: embed timestamp in OPC UA node's SourceTimestamp attribute for better
-        // temporal accuracy in OPC UA clients.
-        // TODO(A-4): pattern-match the typed payload directly. A-1 keeps the
-        // existing parse-from-string logic and adds (_) discards.
         match metric.data_type {
-            crate::storage::MetricType::Int(_) => {
-                match metric.value.parse::<i64>() {
-                    Ok(value) => {
-                        match i32::try_from(value) {
-                            Ok(v) => Variant::Int32(v),
-                            Err(_) => {
-                                debug!(value = %value, "Int metric value out of i32 range, using Int64");
-                                Variant::Int64(value)
-                            }
-                        }
-                    }
+            crate::storage::MetricType::Int(i) => {
+                match i32::try_from(i) {
+                    Ok(v) => Variant::Int32(v),
                     Err(_) => {
-                        debug!("Failed to parse metric value as i64");
-                        Variant::Int32(0)
+                        debug!(value = %i, "Int metric value out of i32 range, using Int64");
+                        Variant::Int64(i)
                     }
                 }
             }
-            crate::storage::MetricType::Float(_) => {
-                match metric.value.parse::<f64>() {
-                    Ok(value) => {
-                        if !value.is_finite() {
-                            error!(value = %value, "Metric value is NaN or Infinity; using default 0.0");
-                            Variant::Float(0.0)
-                        } else {
-                            Variant::Float(value as f32)
-                        }
-                    }
-                    Err(_) => {
-                        debug!("Failed to parse metric value as f64");
-                        Variant::Float(0.0)
-                    }
+            crate::storage::MetricType::Float(f) => {
+                // A-1-iter1-DEF17: re-check is_finite() AFTER the f64 → f32
+                // narrowing. f64 finite values with |f| > f32::MAX (~3.4×10³⁸)
+                // narrow to ±Inf which is non-finite as an f32.
+                let narrowed = f as f32;
+                if !narrowed.is_finite() {
+                    warn!(
+                        event = "metric_read",
+                        reason = "narrowing_overflow",
+                        device_id = %metric.device_id,
+                        metric_name = %metric.metric_name,
+                        f64_value = %f,
+                        "f64 narrowed to non-finite f32; returning 0.0"
+                    );
+                    Variant::Float(0.0)
+                } else {
+                    Variant::Float(narrowed)
                 }
             }
-            crate::storage::MetricType::String(_) => Variant::String(metric.value.into()),
-            crate::storage::MetricType::Bool(_) => {
-                let lower_val = metric.value.to_lowercase();
-                let bool_value = match lower_val.as_str() {
-                    "true" => true,
-                    "false" => false,
-                    _ => {
-                        warn!(value = %metric.value, "Invalid bool metric value; defaulting to false");
-                        false
-                    }
-                };
-                Variant::Boolean(bool_value)
-            }
+            crate::storage::MetricType::Bool(b) => Variant::Boolean(b),
+            crate::storage::MetricType::String(s) => Variant::String(s.into()),
         }
     }
 
@@ -1987,16 +1994,22 @@ impl OpcUa {
         }
     }
 
-    /// Converts an OPC UA Variant to a `(value_string, MetricType)` tuple.
+    /// Converts an OPC UA Variant to a `(value_string, MetricType)` tuple,
+    /// with the typed half carrying the real inbound value.
     ///
-    /// Maps OPC UA scalar Variant subtypes to the internal `MetricType`
-    /// discriminant and returns the stringified value alongside it.
+    /// Maps OPC UA scalar Variant subtypes to the matching payload-bearing
+    /// `MetricType` variant and returns the stringified value alongside it.
+    /// Used by `set_command` to extract a numeric payload for the LoRaWAN
+    /// command queue; the caller currently discards the typed half but the
+    /// payload now carries the real value so future consumers can use it.
     ///
-    /// # Variant → MetricType discriminant mapping
-    /// * `Int32`, `Int64` → `MetricType::Int(_)`
-    /// * `Float`, `Double` → `MetricType::Float(_)`
-    /// * `String` → `MetricType::String(_)`
-    /// * `Boolean` → `MetricType::Bool(_)`
+    /// # Variant → MetricType payload mapping (post-A-4)
+    /// * `Int32(v)` → `MetricType::Int(v as i64)`
+    /// * `Int64(v)` → `MetricType::Int(v)`
+    /// * `Float(v)` → `MetricType::Float(v as f64)`
+    /// * `Double(v)` → `MetricType::Float(v)`
+    /// * `String(v)` → `MetricType::String(v.to_string())`
+    /// * `Boolean(v)` → `MetricType::Bool(v)`
     ///
     /// # Unsupported Variant subtypes
     ///
@@ -2009,37 +2022,24 @@ impl OpcUa {
     ///   `DiagnosticInfo`, and `Variant` (nested).
     /// - Sentinel: `Empty`.
     ///
-    /// A SCADA client writing a `UInt32` counter or an `Array` (both
-    /// legitimate OPC UA writes) will surface the error in the operator log;
-    /// Story A-4 will extend the mapping if those subtypes are needed in
-    /// production.
-    ///
-    /// **A-1 transitional contract:** the `MetricType` returned here carries a
-    /// zero-defaulted payload (`Int(0)` / `Float(0.0)` / `Bool(false)` /
-    /// `String(String::new())`). The actual measurement is carried by the
-    /// `String` half of the returned tuple via `value.to_string()`. Story A-4
-    /// will plumb the inbound `value` into the payload directly, eliminating
-    /// the dual-storage requirement.
+    /// A SCADA client writing a `UInt32` counter or an `Array` will surface
+    /// the error in the operator log; widening the mapping is out of A-4 scope.
     ///
     /// # Arguments
     /// * `variant` - Reference to the OPC UA Variant to be converted
     ///
     /// # Returns
-    /// * `Ok((value_string, MetricType))` - Stringified value + discriminant variant
+    /// * `Ok((value_string, MetricType))` - Stringified value + payload-bearing variant
     /// * `Err(String)` - Error message if the variant subtype is unmapped
     fn convert_variant_to_metric(variant: &Variant) -> Result<(String, crate::storage::MetricType), String> {
         trace!("Convert variant to metric");
-        // TODO(A-4/A-6): plumb the real payload into MetricType variants instead
-        // of constructing with zero defaults. A-1 keeps the existing string-encoded
-        // value alongside payload-bearing MetricType (with zero payload) until the
-        // downstream stories wire the typed path end-to-end.
         match variant {
-            Variant::Int32(value) => Ok((value.to_string(), crate::storage::MetricType::Int(0))),
-            Variant::Int64(value) => Ok((value.to_string(), crate::storage::MetricType::Int(0))),
-            Variant::Float(value) => Ok((value.to_string(), crate::storage::MetricType::Float(0.0))),
-            Variant::Double(value) => Ok((value.to_string(), crate::storage::MetricType::Float(0.0))),
-            Variant::String(value) => Ok((value.to_string(), crate::storage::MetricType::String(String::new()))),
-            Variant::Boolean(value) => Ok((value.to_string(), crate::storage::MetricType::Bool(false))),
+            Variant::Int32(value) => Ok((value.to_string(), crate::storage::MetricType::Int(*value as i64))),
+            Variant::Int64(value) => Ok((value.to_string(), crate::storage::MetricType::Int(*value))),
+            Variant::Float(value) => Ok((value.to_string(), crate::storage::MetricType::Float(*value as f64))),
+            Variant::Double(value) => Ok((value.to_string(), crate::storage::MetricType::Float(*value))),
+            Variant::String(value) => Ok((value.to_string(), crate::storage::MetricType::String(value.to_string()))),
+            Variant::Boolean(value) => Ok((value.to_string(), crate::storage::MetricType::Bool(*value))),
             _ => Err(format!("Unsupported variant type {:?}", variant)),
         }
     }
@@ -2877,6 +2877,167 @@ mod tests {
             logs_contain(crate::utils::REDACTED_PLACEHOLDER),
             "Debug redaction did not fire — test trivially passing without \
              confirming the redaction path"
+        );
+    }
+
+    // ===== Story A-4 tests: typed-payload Variant projection =====
+    //
+    // These tests pin the contract that `convert_metric_to_variant`
+    // pattern-matches the payload-bearing `MetricType` directly and no
+    // longer parses `metric.value: String`. The `value: "ignored"` literal
+    // in each test is load-bearing: a regression that re-introduces a
+    // `metric.value.parse::<…>()` call would silently fall back to the
+    // legacy heterogeneous-lexeme contract and produce wrong values.
+
+    fn make_metric_value(data_type: crate::storage::MetricType) -> crate::storage::MetricValue {
+        crate::storage::MetricValue {
+            device_id: "test-device".to_string(),
+            metric_name: "test-metric".to_string(),
+            value: "ignored".to_string(),
+            timestamp: Utc::now(),
+            data_type,
+        }
+    }
+
+    #[test]
+    fn test_convert_metric_to_variant_float_pattern_matches_payload() {
+        let mv = make_metric_value(crate::storage::MetricType::Float(23.5));
+        let v = OpcUa::convert_metric_to_variant(mv);
+        assert!(
+            matches!(v, opcua::types::Variant::Float(f) if (f - 23.5_f32).abs() < f32::EPSILON),
+            "A-4: Float payload must round-trip from MetricType::Float(f) into Variant::Float(f as f32); got {:?}",
+            v
+        );
+    }
+
+    #[test]
+    fn test_convert_metric_to_variant_int_in_i32_range_uses_int32() {
+        let mv = make_metric_value(crate::storage::MetricType::Int(42));
+        let v = OpcUa::convert_metric_to_variant(mv);
+        assert!(
+            matches!(v, opcua::types::Variant::Int32(42)),
+            "A-4: in-range Int payload must produce Variant::Int32; got {:?}",
+            v
+        );
+    }
+
+    #[test]
+    fn test_convert_metric_to_variant_int_out_of_i32_uses_int64() {
+        let big = (i32::MAX as i64) + 1;
+        let mv = make_metric_value(crate::storage::MetricType::Int(big));
+        let v = OpcUa::convert_metric_to_variant(mv);
+        match v {
+            opcua::types::Variant::Int64(n) => assert_eq!(n, big,
+                "A-1-iter1-DEF21 narrowing rule preserved: out-of-i32 Int must use Variant::Int64 carrying the real i64"),
+            other => panic!("expected Variant::Int64, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_convert_metric_to_variant_bool_pattern_matches_payload() {
+        let mv_true = make_metric_value(crate::storage::MetricType::Bool(true));
+        assert!(matches!(OpcUa::convert_metric_to_variant(mv_true), opcua::types::Variant::Boolean(true)));
+        let mv_false = make_metric_value(crate::storage::MetricType::Bool(false));
+        assert!(matches!(OpcUa::convert_metric_to_variant(mv_false), opcua::types::Variant::Boolean(false)));
+    }
+
+    #[test]
+    fn test_convert_metric_to_variant_string_pattern_matches_payload() {
+        let mv = make_metric_value(crate::storage::MetricType::String("hello".to_string()));
+        let v = OpcUa::convert_metric_to_variant(mv);
+        match v {
+            opcua::types::Variant::String(s) => {
+                assert_eq!(s.to_string(), "hello",
+                    "A-4: String payload must round-trip from MetricType::String(s) into Variant::String(s)");
+            }
+            other => panic!("expected Variant::String, got {:?}", other),
+        }
+    }
+
+    #[test]
+    #[traced_test]
+    fn test_float_narrowing_overflow_emits_metric_read_warn() {
+        // f64 that is finite but exceeds f32::MAX (~3.4×10³⁸) narrows to
+        // ±Inf. AC#4 / A-1-iter1-DEF17 closure: re-check is_finite() AFTER
+        // narrowing, emit metric_read warn, return Variant::Float(0.0).
+        let mv = make_metric_value(crate::storage::MetricType::Float(1e40));
+        let v = OpcUa::convert_metric_to_variant(mv);
+        match v {
+            opcua::types::Variant::Float(f) => assert_eq!(f, 0.0_f32,
+                "A-4: narrowing-overflow must return Variant::Float(0.0); got {}", f),
+            other => panic!("expected Variant::Float(0.0), got {:?}", other),
+        }
+        assert!(
+            logs_contain("event = \"metric_read\"") || logs_contain("event=\"metric_read\""),
+            "A-4 AC#10: narrowing-overflow must emit event=\"metric_read\" warn"
+        );
+        assert!(
+            logs_contain("narrowing_overflow"),
+            "A-4 AC#10: reason=\"narrowing_overflow\" must appear in the warn"
+        );
+    }
+
+    #[test]
+    fn test_convert_metric_to_variant_does_not_read_value_field() {
+        // Load-bearing regression test for AC#4: the `value: "ignored"`
+        // literal is wildly inconsistent with `data_type`. A regression
+        // that re-introduces `metric.value.parse::<f64>()` would produce
+        // Variant::Float(0.0) (parse error fallback), NOT the real payload.
+        // Asserting the real payload survives proves the function reads
+        // `data_type` exclusively.
+        let mv = crate::storage::MetricValue {
+            device_id: "d".to_string(),
+            metric_name: "m".to_string(),
+            value: "this string is not parseable as any type".to_string(),
+            timestamp: Utc::now(),
+            data_type: crate::storage::MetricType::Float(99.9),
+        };
+        let v = OpcUa::convert_metric_to_variant(mv);
+        match v {
+            opcua::types::Variant::Float(f) => assert!((f - 99.9_f32).abs() < 0.01_f32,
+                "A-4: convert_metric_to_variant must read data_type payload, NOT metric.value; got {}", f),
+            other => panic!("expected Variant::Float(99.9), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_get_value_returns_typed_float_payload_with_good_status() {
+        // Integration of AC#1 (typed-column reader) + AC#4 (typed-payload
+        // Variant projection): seed via batch_write_metrics with real
+        // MetricType::Float(7.7), call OpcUa::get_value, assert
+        // DataValue.value == Variant::Float(7.7) AND status == Good.
+        // Also pins AC#5 (Story 5-2 staleness on non-legacy rows) — a
+        // fresh metric gets Good, not Uncertain/Bad.
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        backend
+            .batch_write_metrics(vec![BatchMetricWrite {
+                device_id: "dev1".to_string(),
+                metric_name: "temp".to_string(),
+                value: "7.7".to_string(),
+                data_type: MetricType::Float(7.7),
+                timestamp: std::time::SystemTime::now(),
+            }])
+            .expect("seed");
+        let last_status = make_status_cache();
+        let result = OpcUa::get_value(
+            &backend,
+            &last_status,
+            "dev1".to_string(),
+            "temp".to_string(),
+            60u64,
+        );
+        let dv = result.expect("get_value should succeed for typed row");
+        let variant = dv.value.expect("DataValue must carry a Variant");
+        assert!(
+            matches!(variant, opcua::types::Variant::Float(f) if (f - 7.7_f32).abs() < f32::EPSILON),
+            "A-4 end-to-end: typed Float payload must reach the SCADA client; got {:?}",
+            variant
+        );
+        let status = dv.status.expect("DataValue must carry a status");
+        assert_eq!(
+            status,
+            opcua::types::StatusCode::Good.bits().into(),
+            "A-4 AC#5/AC#6: fresh non-legacy row must carry StatusCode::Good"
         );
     }
 }

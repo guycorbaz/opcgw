@@ -230,6 +230,68 @@ fn typed_value_columns(value: &MetricType) -> TypedValueColumns {
     }
 }
 
+/// A-4: read-side helper that projects the v007 typed columns + the
+/// `value_type` discriminant back into a payload-bearing `MetricType`. The
+/// reverse direction of [`typed_value_columns`].
+///
+/// Returns:
+/// - `Ok(Some(MetricType))` — non-legacy row with one of `value_type` ∈
+///   `{Float, Int, Bool, String}`. The corresponding typed column is
+///   non-NULL (guaranteed by the v008 cross-column CHECK constraint).
+/// - `Ok(None)` — legacy row (`value_type = 'legacy'`). The OPC UA reader
+///   maps `Ok(None)` to `BadDataUnavailable` per architecture.md:182.
+/// - `Err(OpcGwError::Database)` — schema drift (`value_type` outside the
+///   closed enum, or a non-legacy row with the discriminated column NULL).
+///   The Option-unwrap on the discriminated column is defensive — the v008
+///   CHECK constraint forbids the drift; the explicit error makes the
+///   diagnosis clear if a future maintainer breaks the invariant.
+fn metric_type_from_typed_columns(
+    value_type: &str,
+    value_real: Option<f64>,
+    value_int: Option<i64>,
+    value_bool: Option<i64>,
+    value_text: Option<String>,
+    device_id: &str,
+    metric_name: &str,
+) -> Result<Option<MetricType>, OpcGwError> {
+    match value_type {
+        "legacy" => Ok(None),
+        "Float" => value_real
+            .map(MetricType::Float)
+            .map(Some)
+            .ok_or_else(|| typed_column_drift_err("Float", "value_real", device_id, metric_name)),
+        "Int" => value_int
+            .map(MetricType::Int)
+            .map(Some)
+            .ok_or_else(|| typed_column_drift_err("Int", "value_int", device_id, metric_name)),
+        "Bool" => value_bool
+            .map(|b| MetricType::Bool(b != 0))
+            .map(Some)
+            .ok_or_else(|| typed_column_drift_err("Bool", "value_bool", device_id, metric_name)),
+        "String" => value_text
+            .map(MetricType::String)
+            .map(Some)
+            .ok_or_else(|| typed_column_drift_err("String", "value_text", device_id, metric_name)),
+        other => Err(OpcGwError::Database(format!(
+            "Unknown value_type '{}' for device {}, metric {} — schema drift (v007 CHECK constraint was bypassed)",
+            other, device_id, metric_name
+        ))),
+    }
+}
+
+fn typed_column_drift_err(
+    value_type: &str,
+    expected_column: &str,
+    device_id: &str,
+    metric_name: &str,
+) -> OpcGwError {
+    OpcGwError::Database(format!(
+        "Schema drift: value_type='{}' but {} IS NULL for device {}, metric {} \
+         (v008 cross-column CHECK constraint was bypassed)",
+        value_type, expected_column, device_id, metric_name
+    ))
+}
+
 impl SqliteBackend {
     /// Convert CommandStatus to database string representation.
     fn status_to_string(status: &CommandStatus) -> &'static str {
@@ -452,11 +514,22 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 e
             })?;
 
+        // A-4: project the v007 typed columns + value_type to build the
+        // payload-bearing MetricType. Legacy rows surface as Ok(None).
         let result = conn
             .query_row(
-                "SELECT data_type FROM metric_values WHERE device_id = ?1 AND metric_name = ?2",
+                "SELECT value_real, value_int, value_bool, value_text, value_type \
+                 FROM metric_values WHERE device_id = ?1 AND metric_name = ?2",
                 params![device_id, metric_name],
-                |row| row.get::<_, String>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, Option<f64>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|e| {
@@ -467,28 +540,24 @@ impl crate::storage::StorageBackend for SqliteBackend {
             })?;
 
         match result {
-            Some(data_type_str) => {
-                let metric_type: MetricType = data_type_str.parse()
-                    .map_err(|e| {
-                        tracing::warn!(
-                            device_id = %device_id,
-                            metric_name = %metric_name,
-                            corrupted_value = %data_type_str,
-                            error = %e,
-                            "Corrupted metric type in database"
-                        );
-                        OpcGwError::Database(format!(
-                            "Failed to parse metric type '{}' for {}.{}: {}",
-                            data_type_str, device_id, metric_name, e
-                        ))
-                    })?;
+            Some((value_real, value_int, value_bool, value_text, value_type)) => {
+                let metric_type = metric_type_from_typed_columns(
+                    &value_type,
+                    value_real,
+                    value_int,
+                    value_bool,
+                    value_text,
+                    device_id,
+                    metric_name,
+                )?;
                 trace!(
                     device_id = %device_id,
                     metric_name = %metric_name,
+                    value_type = %value_type,
                     "Retrieved metric"
                 );
                 __op.ok();
-                Ok(Some(metric_type))
+                Ok(metric_type)
             }
             None => {
                 trace!(
@@ -510,15 +579,26 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 e
             })?;
 
+        // A-4: project the v007 typed columns + value_type alongside the legacy
+        // `value` column (still kept for chirpstack monotonic-check fallback +
+        // MetricValue.value compat — A-5 retires `value: String` once HistoryRead
+        // migrates). Legacy rows surface as Ok(None), mapping transitively to
+        // BadDataUnavailable via OpcUa::get_value per architecture.md:182.
         let result = conn
             .query_row(
-                "SELECT value, data_type, timestamp FROM metric_values WHERE device_id = ?1 AND metric_name = ?2",
+                "SELECT value, timestamp, value_real, value_int, value_bool, value_text, value_type \
+                 FROM metric_values WHERE device_id = ?1 AND metric_name = ?2",
                 params![device_id, metric_name],
                 |row| {
-                    let value: String = row.get(0)?;
-                    let data_type_str: String = row.get(1)?;
-                    let timestamp_str: String = row.get(2)?;
-                    Ok((value, data_type_str, timestamp_str))
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<f64>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
                 },
             )
             .optional()
@@ -530,20 +610,33 @@ impl crate::storage::StorageBackend for SqliteBackend {
             })?;
 
         match result {
-            Some((value, data_type_str, timestamp_str)) => {
-                let data_type: MetricType = data_type_str.parse()
-                    .map_err(|e| {
-                        tracing::warn!(
+            Some((value, timestamp_str, value_real, value_int, value_bool, value_text, value_type)) => {
+                let metric_type_opt = metric_type_from_typed_columns(
+                    &value_type,
+                    value_real,
+                    value_int,
+                    value_bool,
+                    value_text,
+                    device_id,
+                    metric_name,
+                )?;
+
+                let data_type = match metric_type_opt {
+                    Some(mt) => mt,
+                    None => {
+                        // Legacy row: surface as Ok(None) per architecture.md:182.
+                        // OpcUa::get_value maps Ok(None) → BadDataUnavailable;
+                        // the legacy row gets replaced on the next poll cycle's
+                        // UPSERT (poller writes value_type='Float'/'Int'/etc).
+                        trace!(
                             device_id = %device_id,
                             metric_name = %metric_name,
-                            corrupted_type = %data_type_str,
-                            "Corrupted metric type in database"
+                            "Legacy row (value_type='legacy'); returning Ok(None) — BadDataUnavailable until next poll UPSERT"
                         );
-                        OpcGwError::Database(format!(
-                            "Failed to parse metric type '{}' for {}.{}: {}",
-                            data_type_str, device_id, metric_name, e
-                        ))
-                    })?;
+                        __op.ok();
+                        return Ok(None);
+                    }
+                };
 
                 let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
                     .map(|dt| dt.with_timezone(&Utc))
@@ -1214,8 +1307,13 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 e
             })?;
 
+        // A-4: project v007 typed columns; legacy rows are skipped silently
+        // (partial-success contract — startup restore skips rows with no
+        // real payload yet; the next poll cycle UPSERTs real values).
         let mut stmt = conn.prepare(
-            "SELECT device_id, metric_name, value, data_type, timestamp FROM metric_values ORDER BY device_id, metric_name"
+            "SELECT device_id, metric_name, value, timestamp, \
+                    value_real, value_int, value_bool, value_text, value_type \
+             FROM metric_values ORDER BY device_id, metric_name"
         )
             .map_err(|e| {
                 OpcGwError::Database(format!("Failed to prepare load_all_metrics query: {}", e))
@@ -1223,11 +1321,15 @@ impl crate::storage::StorageBackend for SqliteBackend {
 
         let metrics = stmt.query_map([], |row| {
             Ok((
-                row.get::<_, String>(0),  // device_id
-                row.get::<_, String>(1),  // metric_name
-                row.get::<_, String>(2),  // value
-                row.get::<_, String>(3),  // data_type_str
-                row.get::<_, String>(4),  // timestamp_str
+                row.get::<_, String>(0),         // device_id
+                row.get::<_, String>(1),         // metric_name
+                row.get::<_, String>(2),         // value (legacy)
+                row.get::<_, String>(3),         // timestamp
+                row.get::<_, Option<f64>>(4),    // value_real
+                row.get::<_, Option<i64>>(5),    // value_int
+                row.get::<_, Option<i64>>(6),    // value_bool
+                row.get::<_, Option<String>>(7), // value_text
+                row.get::<_, String>(8),         // value_type
             ))
         })
             .map_err(|e| {
@@ -1236,18 +1338,21 @@ impl crate::storage::StorageBackend for SqliteBackend {
 
         let mut result = Vec::new();
         let mut skipped_count = 0;
+        let mut legacy_skipped_count = 0;
         let mut valid_count = 0;
 
         for metric_result in metrics {
-            let (device_id_res, metric_name_res, value_res, data_type_str_res, timestamp_str_res) =
-                match metric_result {
-                    Ok(tuple) => tuple,
-                    Err(e) => {
-                        trace!(error = %e, "Failed to extract metric row columns");
-                        skipped_count += 1;
-                        continue;
-                    }
-                };
+            let row = match metric_result {
+                Ok(tuple) => tuple,
+                Err(e) => {
+                    trace!(error = %e, "Failed to extract metric row columns");
+                    skipped_count += 1;
+                    continue;
+                }
+            };
+
+            let (device_id_res, metric_name_res, value_res, timestamp_str_res,
+                 value_real_res, value_int_res, value_bool_res, value_text_res, value_type_res) = row;
 
             let device_id = match device_id_res {
                 Ok(id) => id,
@@ -1261,7 +1366,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
             let metric_name = match metric_name_res {
                 Ok(name) => name,
                 Err(e) => {
-                    trace!(error = %e, "Failed to extract metric_name from metric row");
+                    trace!(error = %e, device_id = %device_id, "Failed to extract metric_name from metric row");
                     skipped_count += 1;
                     continue;
                 }
@@ -1270,16 +1375,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
             let value = match value_res {
                 Ok(v) => v,
                 Err(e) => {
-                    trace!(error = %e, "Failed to extract value from metric row");
-                    skipped_count += 1;
-                    continue;
-                }
-            };
-
-            let data_type_str = match data_type_str_res {
-                Ok(s) => s,
-                Err(e) => {
-                    trace!(error = %e, "Failed to extract data_type from metric row");
+                    trace!(error = %e, device_id = %device_id, metric_name = %metric_name, "Failed to extract value from metric row");
                     skipped_count += 1;
                     continue;
                 }
@@ -1288,24 +1384,61 @@ impl crate::storage::StorageBackend for SqliteBackend {
             let timestamp_str = match timestamp_str_res {
                 Ok(s) => s,
                 Err(e) => {
-                    trace!(error = %e, "Failed to extract timestamp from metric row");
+                    trace!(error = %e, device_id = %device_id, metric_name = %metric_name, "Failed to extract timestamp from metric row");
                     skipped_count += 1;
                     continue;
                 }
             };
 
-            // Parse data_type: skip row if invalid (graceful degradation for corrupted type)
-            let data_type: MetricType = match data_type_str.parse() {
-                Ok(dt) => dt,
-                Err(_) => {
+            let value_real = value_real_res.ok();
+            let value_int = value_int_res.ok();
+            let value_bool = value_bool_res.ok();
+            let value_text = value_text_res.ok().flatten();
+
+            let value_type = match value_type_res {
+                Ok(s) => s,
+                Err(e) => {
+                    trace!(error = %e, device_id = %device_id, metric_name = %metric_name, "Failed to extract value_type from metric row");
+                    skipped_count += 1;
+                    continue;
+                }
+            };
+
+            // A-4: build payload-bearing MetricType from typed columns.
+            // Legacy rows skipped silently (no real payload yet).
+            let metric_type_opt = match metric_type_from_typed_columns(
+                &value_type,
+                value_real.flatten(),
+                value_int.flatten(),
+                value_bool.flatten(),
+                value_text,
+                &device_id,
+                &metric_name,
+            ) {
+                Ok(opt) => opt,
+                Err(e) => {
                     error!(
                         device_id = %device_id,
                         metric_name = %metric_name,
-                        invalid_type = %data_type_str,
-                        error = "invalid data type format",
-                        "Failed to restore metric; invalid data_type"
+                        value_type = %value_type,
+                        error = %e,
+                        "Failed to project typed columns to MetricType; row skipped"
                     );
                     skipped_count += 1;
+                    continue;
+                }
+            };
+
+            let data_type = match metric_type_opt {
+                Some(mt) => mt,
+                None => {
+                    // Legacy row — skipped silently with trace emission.
+                    trace!(
+                        device_id = %device_id,
+                        metric_name = %metric_name,
+                        "load_all_metrics: skipping legacy row (value_type='legacy')"
+                    );
+                    legacy_skipped_count += 1;
                     continue;
                 }
             };
@@ -1336,11 +1469,12 @@ impl crate::storage::StorageBackend for SqliteBackend {
             valid_count += 1;
         }
 
-        if skipped_count > 0 {
+        if skipped_count > 0 || legacy_skipped_count > 0 {
             trace!(
                 valid = valid_count,
                 skipped = skipped_count,
-                "Loaded metrics with graceful degradation: some rows skipped due to parse errors"
+                legacy_skipped = legacy_skipped_count,
+                "Loaded metrics with graceful degradation: some rows skipped due to parse errors or legacy schema"
             );
         } else {
             debug!(count = valid_count, "Loaded all metrics from storage");
@@ -2167,7 +2301,7 @@ impl SqliteBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::StorageBackend;
+    use crate::storage::{StorageBackend, BatchMetricWrite};
     use std::time::SystemTime;
     use std::fs;
     use tracing_test::traced_test;
@@ -3463,13 +3597,17 @@ mod tests {
         backend.upsert_metric_value("device_1", "metric_1", &MetricType::Float(0.0), now)
             .expect("Should upsert");
 
-        // Insert a metric with invalid timestamp
+        // Insert a metric with invalid timestamp. A-4: must set value_type
+        // + value_real explicitly because the v007 default 'legacy' would
+        // cause load_all_metrics to skip the row before reaching the
+        // timestamp-fallback path under test.
         {
             let conn = backend.pool.checkout(Duration::from_secs(5))
                 .expect("Should checkout");
             let now_rfc3339 = chrono::Utc::now().to_rfc3339();
             conn.execute(
-                "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, created_at, updated_at, value_real, value_type) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rusqlite::params![
                     "device_2",
                     "metric_2",
@@ -3478,6 +3616,8 @@ mod tests {
                     "not-a-valid-rfc3339-timestamp",  // Invalid timestamp
                     &now_rfc3339,
                     &now_rfc3339,
+                    456.78_f64,
+                    "Float",
                 ],
             ).expect("Should insert invalid timestamp");
         }
@@ -5167,5 +5307,288 @@ mod tests {
         assert_eq!(vi, Some(1000), "A-3 writer must populate typed value_int with the real i64 payload");
 
         let _ = fs::remove_file(&path);
+    }
+
+    // ===== Story A-4 tests: typed-column reader projection =====
+    //
+    // These tests pin the contract that `get_metric_value` / `get_metric` /
+    // `load_all_metrics` build a payload-bearing `MetricType` from the v007
+    // typed columns (`value_real` / `value_int` / `value_bool` / `value_text`)
+    // discriminated by `value_type`. Legacy rows (`value_type='legacy'`) are
+    // surfaced as `Ok(None)` from `get_metric_value` / `get_metric` (mapping
+    // transitively to `BadDataUnavailable` via `OpcUa::get_value`) and skipped
+    // silently by `load_all_metrics`.
+
+    #[test]
+    fn test_get_metric_value_returns_typed_float_payload() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("backend");
+        let now = SystemTime::now();
+        backend
+            .batch_write_metrics(vec![BatchMetricWrite {
+                device_id: "dev1".to_string(),
+                metric_name: "temp".to_string(),
+                value: "23.5".to_string(),
+                data_type: MetricType::Float(23.5),
+                timestamp: now,
+            }])
+            .expect("seed");
+        let mv = backend
+            .get_metric_value("dev1", "temp")
+            .expect("get_metric_value")
+            .expect("Some(MetricValue)");
+        assert_eq!(mv.data_type, MetricType::Float(23.5),
+            "A-4: get_metric_value must project value_real → MetricType::Float(payload)");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_get_metric_value_returns_typed_int_payload() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("backend");
+        let now = SystemTime::now();
+        backend
+            .batch_write_metrics(vec![BatchMetricWrite {
+                device_id: "dev1".to_string(),
+                metric_name: "counter".to_string(),
+                value: "42".to_string(),
+                data_type: MetricType::Int(42),
+                timestamp: now,
+            }])
+            .expect("seed");
+        let mv = backend
+            .get_metric_value("dev1", "counter")
+            .expect("get_metric_value")
+            .expect("Some(MetricValue)");
+        assert_eq!(mv.data_type, MetricType::Int(42));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_get_metric_value_returns_typed_bool_payload() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("backend");
+        let now = SystemTime::now();
+        backend
+            .batch_write_metrics(vec![BatchMetricWrite {
+                device_id: "dev1".to_string(),
+                metric_name: "online".to_string(),
+                value: "1".to_string(),
+                data_type: MetricType::Bool(true),
+                timestamp: now,
+            }])
+            .expect("seed");
+        let mv = backend
+            .get_metric_value("dev1", "online")
+            .expect("get_metric_value")
+            .expect("Some(MetricValue)");
+        assert_eq!(mv.data_type, MetricType::Bool(true));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_get_metric_value_returns_typed_string_payload() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("backend");
+        let now = SystemTime::now();
+        backend
+            .batch_write_metrics(vec![BatchMetricWrite {
+                device_id: "dev1".to_string(),
+                metric_name: "status".to_string(),
+                value: "OK".to_string(),
+                data_type: MetricType::String("OK".to_string()),
+                timestamp: now,
+            }])
+            .expect("seed");
+        let mv = backend
+            .get_metric_value("dev1", "status")
+            .expect("get_metric_value")
+            .expect("Some(MetricValue)");
+        assert_eq!(mv.data_type, MetricType::String("OK".to_string()));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_get_metric_value_legacy_row_returns_none() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("backend");
+        // Seed a legacy row directly via raw SQL — value_type='legacy',
+        // all typed columns NULL (pre-Epic-A shape).
+        {
+            let conn = backend.pool.checkout(Duration::from_secs(5)).expect("checkout");
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, created_at, updated_at, value_type) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params!["dev_legacy", "temp", "Float", "Float", &now, &now, &now, "legacy"],
+            )
+            .expect("seed legacy row");
+        }
+        let result = backend
+            .get_metric_value("dev_legacy", "temp")
+            .expect("get_metric_value");
+        assert!(
+            result.is_none(),
+            "A-4: legacy rows must surface as Ok(None) so OpcUa::get_value maps to BadDataUnavailable per architecture.md:182"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_get_metric_returns_typed_payload_for_each_variant() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("backend");
+        let now = SystemTime::now();
+        backend
+            .batch_write_metrics(vec![
+                BatchMetricWrite {
+                    device_id: "d1".to_string(),
+                    metric_name: "f".to_string(),
+                    value: "1.5".to_string(),
+                    data_type: MetricType::Float(1.5),
+                    timestamp: now,
+                },
+                BatchMetricWrite {
+                    device_id: "d1".to_string(),
+                    metric_name: "i".to_string(),
+                    value: "7".to_string(),
+                    data_type: MetricType::Int(7),
+                    timestamp: now,
+                },
+                BatchMetricWrite {
+                    device_id: "d1".to_string(),
+                    metric_name: "b".to_string(),
+                    value: "0".to_string(),
+                    data_type: MetricType::Bool(false),
+                    timestamp: now,
+                },
+                BatchMetricWrite {
+                    device_id: "d1".to_string(),
+                    metric_name: "s".to_string(),
+                    value: "hi".to_string(),
+                    data_type: MetricType::String("hi".to_string()),
+                    timestamp: now,
+                },
+            ])
+            .expect("seed");
+        assert_eq!(
+            backend.get_metric("d1", "f").expect("get_metric"),
+            Some(MetricType::Float(1.5))
+        );
+        assert_eq!(
+            backend.get_metric("d1", "i").expect("get_metric"),
+            Some(MetricType::Int(7))
+        );
+        assert_eq!(
+            backend.get_metric("d1", "b").expect("get_metric"),
+            Some(MetricType::Bool(false))
+        );
+        assert_eq!(
+            backend.get_metric("d1", "s").expect("get_metric"),
+            Some(MetricType::String("hi".to_string()))
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_get_metric_legacy_row_returns_none() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("backend");
+        {
+            let conn = backend.pool.checkout(Duration::from_secs(5)).expect("checkout");
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, created_at, updated_at, value_type) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params!["dev_l", "m", "Float", "Float", &now, &now, &now, "legacy"],
+            )
+            .expect("seed legacy row");
+        }
+        assert!(
+            backend.get_metric("dev_l", "m").expect("get_metric").is_none(),
+            "A-4: get_metric must return Ok(None) for legacy rows"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_all_metrics_skips_legacy_rows() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("backend");
+        let now = SystemTime::now();
+        // Two typed rows.
+        backend
+            .batch_write_metrics(vec![
+                BatchMetricWrite {
+                    device_id: "d1".to_string(),
+                    metric_name: "f".to_string(),
+                    value: "1.5".to_string(),
+                    data_type: MetricType::Float(1.5),
+                    timestamp: now,
+                },
+                BatchMetricWrite {
+                    device_id: "d1".to_string(),
+                    metric_name: "i".to_string(),
+                    value: "7".to_string(),
+                    data_type: MetricType::Int(7),
+                    timestamp: now,
+                },
+            ])
+            .expect("seed typed");
+        // Two legacy rows.
+        {
+            let conn = backend.pool.checkout(Duration::from_secs(5)).expect("checkout");
+            let now_rfc = chrono::Utc::now().to_rfc3339();
+            for (dev, met) in [("d_legacy_a", "x"), ("d_legacy_b", "y")] {
+                conn.execute(
+                    "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, created_at, updated_at, value_type) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    rusqlite::params![dev, met, "Float", "Float", &now_rfc, &now_rfc, &now_rfc, "legacy"],
+                )
+                .expect("seed legacy");
+            }
+        }
+        let all = backend.load_all_metrics().expect("load_all_metrics");
+        assert_eq!(
+            all.len(),
+            2,
+            "A-4: load_all_metrics must skip legacy rows; got {:?}",
+            all.iter().map(|m| (m.device_id.as_str(), m.metric_name.as_str())).collect::<Vec<_>>()
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_all_metrics_returns_typed_payload() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("backend");
+        let now = SystemTime::now();
+        backend
+            .batch_write_metrics(vec![BatchMetricWrite {
+                device_id: "d1".to_string(),
+                metric_name: "f".to_string(),
+                value: "9.9".to_string(),
+                data_type: MetricType::Float(9.9),
+                timestamp: now,
+            }])
+            .expect("seed");
+        let all = backend.load_all_metrics().expect("load_all_metrics");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].data_type, MetricType::Float(9.9));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_metric_type_from_typed_columns_schema_drift_returns_err() {
+        // value_type='Float' but value_real IS NULL — represents schema drift
+        // (v008 CHECK constraint would forbid this in practice, but the helper
+        // returns a clean OpcGwError::Database for defensive operator visibility).
+        let result = metric_type_from_typed_columns(
+            "Float", None, None, None, None, "d", "m",
+        );
+        assert!(result.is_err(), "Schema drift must yield Err, not silently default");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Schema drift") || err.contains("schema drift"),
+            "error message must indicate schema drift; got: {}", err);
     }
 }

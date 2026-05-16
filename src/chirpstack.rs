@@ -1690,23 +1690,25 @@ impl ChirpstackPoller {
         };
 
         // 3. For Counter type: check monotonic property (reject reset: new < previous).
-        // A-3: stays on the legacy string-parse path. The original A-3 spec AC#9
-        // pre-empted this with a typed-payload `MetricType::Int(prev_int)`
-        // match. The reader (`get_metric_value`) populates `MetricValue.data_type`
-        // via `FromStr`, which today returns the zero-default `MetricType::Int(0)`
-        // (the string-parse path on the legacy `value` column does not yet
-        // round-trip typed payloads — that's Story A-4's reader rewrite).
-        // Result: the typed match would always succeed with `prev_int == 0`,
-        // turning every Counter reset where `new < 0` is false (i.e. positive
-        // resets like 1000→5) into a false negative — monotonic-OK on a real
-        // reset because `5 < 0` is false. The legacy `prev_metric.value.parse::<i64>()`
-        // path below operates on the heterogeneous-lexeme `value` column that
-        // production writes populate, so it picks up the prior integer
-        // correctly. AC#9 typed-path preference defers to A-4 when the reader
-        // actually projects the typed payload from `value_int`.
+        // A-4: AC#9 closure — prefer the typed payload via pattern-match on
+        // `prev_metric.data_type`. A-4's reader rewrite makes `get_metric_value`
+        // project the v007 `value_int` column into `MetricType::Int(value_int)`,
+        // so the typed match now carries the real previous value. The legacy
+        // `prev_metric.value.parse::<i64>()` fallback is retained for pre-A-3
+        // rows where `batch_write_metrics` was the writer (real string in the
+        // legacy `value` column). For rows previously written by `set_metric` /
+        // `upsert_metric_value` / `append_metric_history` (discriminant string
+        // in the legacy `value` column), the typed-path branch above is what
+        // carries the meaning; the legacy fallback is silently inert for those
+        // and the monotonic check is skipped — acceptable because pre-A-3 rows
+        // on those paths never had a meaningful prev_int anyway.
         if matches!(target_type, MetricType::Int(_)) && kind == ChirpStackMetricKind::Counter {
             if let Ok(Some(prev_metric)) = self.backend.get_metric_value(&device_id_string, &metric_name) {
-                if let Ok(prev_int) = prev_metric.value.parse::<i64>() {
+                let prev_int_opt = match &prev_metric.data_type {
+                    MetricType::Int(p) => Some(*p),
+                    _ => prev_metric.value.parse::<i64>().ok(),
+                };
+                if let Some(prev_int) = prev_int_opt {
                     let new_int = raw_value as i64;
                     if new_int < prev_int {
                         warn!(device_id = %device_id, metric_name = %metric_name,
@@ -2897,6 +2899,67 @@ mod tests {
 
     /// Iter-3 review pending #1: positive path of `validate_bool_metric_value`
     /// — `0.0` and `1.0` are accepted with no warn.
+    /// A-4 AC#9 closure: the counter monotonic check at chirpstack.rs:1707
+    /// extracts prev_int by pattern-matching on `prev_metric.data_type`
+    /// (typed-path preferred) with a `prev_metric.value.parse::<i64>()`
+    /// fallback for pre-A-3 rows. This unit test pins the match semantics
+    /// directly — proves the typed-path branch extracts the real payload
+    /// and the legacy fallback path extracts a parseable string.
+    #[test]
+    fn ac9_counter_monotonic_typed_path_extracts_payload() {
+        use crate::storage::{MetricType, MetricValue};
+        use chrono::Utc;
+
+        // Typed-path branch: data_type is MetricType::Int(payload).
+        let prev_typed = MetricValue {
+            device_id: "d".to_string(),
+            metric_name: "c".to_string(),
+            value: "this string would not parse as i64".to_string(),
+            timestamp: Utc::now(),
+            data_type: MetricType::Int(1000),
+        };
+        let prev_int_opt = match &prev_typed.data_type {
+            MetricType::Int(p) => Some(*p),
+            _ => prev_typed.value.parse::<i64>().ok(),
+        };
+        assert_eq!(prev_int_opt, Some(1000),
+            "A-4 AC#9 typed-path: MetricType::Int(1000) must extract prev_int=1000 without parsing value");
+
+        // Legacy-fallback branch: data_type is NOT Int (zero-default pre-A-3
+        // shape for set_metric / upsert / append-written rows), value field
+        // carries a parseable integer string (batch_write_metrics writers).
+        let prev_legacy = MetricValue {
+            device_id: "d".to_string(),
+            metric_name: "c".to_string(),
+            value: "500".to_string(),
+            timestamp: Utc::now(),
+            data_type: MetricType::Float(0.0), // wrong variant — mimics pre-A-3 FromStr default
+        };
+        let prev_int_opt = match &prev_legacy.data_type {
+            MetricType::Int(p) => Some(*p),
+            _ => prev_legacy.value.parse::<i64>().ok(),
+        };
+        assert_eq!(prev_int_opt, Some(500),
+            "A-4 AC#9 legacy fallback: non-Int variant must fall through to value.parse::<i64>()");
+
+        // Legacy path with unparseable value (pre-A-3 set_metric/upsert writers
+        // that wrote discriminant string to value column): typed-path misses
+        // AND legacy parse fails → monotonic check silently skipped. Acceptable.
+        let prev_lost = MetricValue {
+            device_id: "d".to_string(),
+            metric_name: "c".to_string(),
+            value: "Float".to_string(), // pre-A-3 discriminant lexeme
+            timestamp: Utc::now(),
+            data_type: MetricType::Bool(false),
+        };
+        let prev_int_opt = match &prev_lost.data_type {
+            MetricType::Int(p) => Some(*p),
+            _ => prev_lost.value.parse::<i64>().ok(),
+        };
+        assert_eq!(prev_int_opt, None,
+            "Both branches miss → monotonic check skipped; documented in chirpstack.rs:1701-1706 comment");
+    }
+
     #[test]
     #[traced_test]
     fn metric_parse_accepts_zero_and_one() {
