@@ -1491,10 +1491,23 @@ impl OpcUa {
                 Ok(data_value)
             }
             Ok(None) => {
-                error!(
+                // A-4 iter-1 IR1 + iter-2 JR4: post-A-4 `Ok(None)` can mean
+                // either "metric absent" OR "legacy row awaiting first
+                // poll-cycle UPSERT" (architecture.md:182). Demoted to
+                // `info!` (was `error!`) — operators reading the log on
+                // first startup after upgrade see an info-level signal per
+                // metric rather than error-level spam. JR4 adds the
+                // canonical `event="metric_read"` + `reason="no_payload"`
+                // fields so log-grep pipelines that filter on the
+                // metric-event taxonomy (see docs/logging.md) capture this
+                // line consistently with the sibling `metric_parse` and
+                // `metric_read narrowing_*` events.
+                info!(
+                    event = "metric_read",
+                    reason = "no_payload",
                     device_id = %device_id,
                     metric_name = %metric_name,
-                    "Unknown metric for device"
+                    "No payload available for metric (absent or legacy row pending first poll)"
                 );
                 let duration_ms = start.elapsed().as_millis() as u64;
                 // Review patch P8: fill the `status_code` span field on every
@@ -1858,9 +1871,19 @@ impl OpcUa {
                 }
             }
             crate::storage::MetricType::Float(f) => {
-                // A-1-iter1-DEF17: re-check is_finite() AFTER the f64 → f32
-                // narrowing. f64 finite values with |f| > f32::MAX (~3.4×10³⁸)
-                // narrow to ±Inf which is non-finite as an f32.
+                // A-1-iter1-DEF17 / A-4 iter-1 IR7: re-check is_finite() AFTER
+                // the f64 → f32 narrowing, plus catch underflow-to-zero.
+                //
+                // - Overflow: f64 finite values with |f| > f32::MAX (~3.4×10³⁸)
+                //   narrow to ±Inf which is non-finite as an f32. Emit
+                //   reason="narrowing_overflow".
+                // - Underflow: f64 values below f32::MIN_POSITIVE (~1.18×10⁻³⁸)
+                //   narrow to 0.0 silently. is_finite(0.0) is true, but the
+                //   narrowing lost the data. Emit reason="narrowing_underflow"
+                //   when `narrowed == 0.0` but `f != 0.0`. (IR7 closure of
+                //   Edge F4 — silent precision loss for sub-f32 measurements
+                //   like industrial chemistry / low-current sensors / scientific
+                //   instruments below 1e-38.)
                 let narrowed = f as f32;
                 if !narrowed.is_finite() {
                     warn!(
@@ -1870,6 +1893,16 @@ impl OpcUa {
                         metric_name = %metric.metric_name,
                         f64_value = %f,
                         "f64 narrowed to non-finite f32; returning 0.0"
+                    );
+                    Variant::Float(0.0)
+                } else if narrowed == 0.0_f32 && f != 0.0_f64 {
+                    warn!(
+                        event = "metric_read",
+                        reason = "narrowing_underflow",
+                        device_id = %metric.device_id,
+                        metric_name = %metric.metric_name,
+                        f64_value = %f,
+                        "f64 narrowed to 0.0 f32 (subnormal/underflow); real value lost"
                     );
                     Variant::Float(0.0)
                 } else {
@@ -2960,7 +2993,18 @@ mod tests {
         // f64 that is finite but exceeds f32::MAX (~3.4×10³⁸) narrows to
         // ±Inf. AC#4 / A-1-iter1-DEF17 closure: re-check is_finite() AFTER
         // narrowing, emit metric_read warn, return Variant::Float(0.0).
-        let mv = make_metric_value(crate::storage::MetricType::Float(1e40));
+        //
+        // A-4 iter-1 IR12 hardening: use a unique device_id sentinel and
+        // assert BOTH the event= field AND the reason= field AND the
+        // device_id appear in the same log line, so an unrelated log
+        // mentioning either substring in isolation can't satisfy the test.
+        let mv = crate::storage::MetricValue {
+            device_id: "ir12_overflow_test_device".to_string(),
+            metric_name: "ir12_overflow_test_metric".to_string(),
+            value: "ignored".to_string(),
+            timestamp: Utc::now(),
+            data_type: crate::storage::MetricType::Float(1e40),
+        };
         let v = OpcUa::convert_metric_to_variant(mv);
         match v {
             opcua::types::Variant::Float(f) => assert_eq!(f, 0.0_f32,
@@ -2974,6 +3018,133 @@ mod tests {
         assert!(
             logs_contain("narrowing_overflow"),
             "A-4 AC#10: reason=\"narrowing_overflow\" must appear in the warn"
+        );
+        // IR12: pin the device_id sentinel in the same log so generic
+        // "metric_read" / "narrowing_overflow" substrings appearing elsewhere
+        // can't accidentally satisfy the assertion.
+        assert!(
+            logs_contain("ir12_overflow_test_device"),
+            "A-4 AC#10/IR12: warn must carry the device_id sentinel"
+        );
+    }
+
+    /// A-4 iter-2 JR13: pin the precise boundary of the underflow guard.
+    /// A subnormal-representable f64 value (1e-40_f64) narrows to a
+    /// non-zero subnormal f32 and MUST NOT trigger the underflow warn —
+    /// the data is preserved (with reduced precision), and we only
+    /// flag when narrowing produces true zero. A regression that
+    /// loosened the guard predicate to e.g. `f.abs() < f32::MIN_POSITIVE`
+    /// would WRONGLY flag this case.
+    #[test]
+    #[traced_test]
+    fn test_float_subnormal_passthrough_does_not_emit_warn() {
+        let mv = crate::storage::MetricValue {
+            device_id: "jr13_subnormal_test_device".to_string(),
+            metric_name: "jr13_subnormal_test_metric".to_string(),
+            value: "ignored".to_string(),
+            timestamp: Utc::now(),
+            // 1e-40_f64 narrows to a non-zero f32 subnormal (~1e-40_f32),
+            // which is finite and non-zero. The guard MUST NOT fire.
+            data_type: crate::storage::MetricType::Float(1e-40_f64),
+        };
+        let v = OpcUa::convert_metric_to_variant(mv);
+        match v {
+            opcua::types::Variant::Float(f) => {
+                assert!(f != 0.0_f32,
+                    "JR13: subnormal-representable f64 must pass through as non-zero f32; got {}", f);
+                assert!(f.is_finite(),
+                    "JR13: subnormal-representable f64 must pass through as finite f32; got {}", f);
+            }
+            other => panic!("expected Variant::Float, got {:?}", other),
+        }
+        // The narrowing_underflow warn MUST NOT have been emitted for this case.
+        assert!(
+            !logs_contain("narrowing_underflow"),
+            "JR13: narrowing_underflow warn must NOT fire for subnormal-representable f64 (1e-40_f64 narrows to a non-zero subnormal f32, which is valid data)"
+        );
+    }
+
+    /// A-4 iter-1 IR7 closure: f64 → f32 underflow to 0.0 emits a
+    /// `narrowing_underflow` warn (separate from overflow). Pinned with
+    /// a sub-f32 value (1e-50_f64) that narrows silently to 0.0_f32.
+    #[test]
+    #[traced_test]
+    fn test_float_narrowing_underflow_emits_metric_read_warn() {
+        // 1e-50_f64 is below the smallest f32 subnormal (~1.4e-45), so
+        // narrowing produces exactly 0.0_f32. 1e-40_f64 narrows to a
+        // subnormal f32 (non-zero), so it does NOT trigger the underflow
+        // guard — that's intentional, subnormal f32 still carries the
+        // measurement.
+        let mv = crate::storage::MetricValue {
+            device_id: "ir7_underflow_test_device".to_string(),
+            metric_name: "ir7_underflow_test_metric".to_string(),
+            value: "ignored".to_string(),
+            timestamp: Utc::now(),
+            data_type: crate::storage::MetricType::Float(1e-50_f64), // < f32 subnormal min (~1.4e-45)
+        };
+        let v = OpcUa::convert_metric_to_variant(mv);
+        match v {
+            opcua::types::Variant::Float(f) => assert_eq!(
+                f, 0.0_f32,
+                "A-4 IR7: narrowing-underflow must return Variant::Float(0.0); got {}", f
+            ),
+            other => panic!("expected Variant::Float(0.0), got {:?}", other),
+        }
+        assert!(
+            logs_contain("narrowing_underflow"),
+            "A-4 IR7: reason=\"narrowing_underflow\" must appear in the warn for sub-f32 values"
+        );
+        assert!(
+            logs_contain("ir7_underflow_test_device"),
+            "A-4 IR7: warn must carry the device_id sentinel"
+        );
+        // JR14: symmetry with IR12 — assert the canonical event= field too.
+        assert!(
+            logs_contain("event = \"metric_read\"") || logs_contain("event=\"metric_read\""),
+            "A-4 IR7/JR14: narrowing-underflow warn must carry event=\"metric_read\" field for log-taxonomy adherence"
+        );
+    }
+
+    /// A-4 iter-1 IR10 closure: AC#6 staleness contract on the new typed
+    /// read path. Story 5-2's `compute_status_code` is unchanged but must
+    /// continue producing Uncertain for stale-but-not-bad metrics, with
+    /// the typed payload preserved in the Variant.
+    #[test]
+    fn test_get_value_returns_uncertain_for_stale_typed_payload() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        // Seed at "now - 120s" so a 60s threshold marks it Uncertain.
+        let stale_time = SystemTime::now() - Duration::from_secs(120);
+        backend
+            .batch_write_metrics(vec![BatchMetricWrite {
+                device_id: "ir10_stale_device".to_string(),
+                metric_name: "ir10_stale_metric".to_string(),
+                value: "ignored".to_string(),
+                data_type: MetricType::Float(12.3),
+                timestamp: stale_time,
+            }])
+            .expect("seed stale typed row");
+        let last_status = make_status_cache();
+        let dv = OpcUa::get_value(
+            &backend,
+            &last_status,
+            "ir10_stale_device".to_string(),
+            "ir10_stale_metric".to_string(),
+            60u64,
+        )
+        .expect("get_value must succeed for stale-but-not-bad typed row");
+        // The Variant must carry the REAL payload (12.3), not a zero-default.
+        let variant = dv.value.expect("DataValue must carry value");
+        assert!(
+            matches!(variant, opcua::types::Variant::Float(f) if (f - 12.3_f32).abs() < 0.01_f32),
+            "A-4 AC#6: stale rows still carry the real typed payload; got {:?}",
+            variant
+        );
+        // Status must be Uncertain (Story 5-2 staleness contract preserved).
+        let status = dv.status.expect("DataValue must carry status");
+        assert_eq!(
+            status,
+            opcua::types::StatusCode::Uncertain.bits().into(),
+            "A-4 AC#6: Story 5-2 staleness rules continue to apply on the typed-column read path"
         );
     }
 
@@ -3008,6 +3179,11 @@ mod tests {
         // DataValue.value == Variant::Float(7.7) AND status == Good.
         // Also pins AC#5 (Story 5-2 staleness on non-legacy rows) — a
         // fresh metric gets Good, not Uncertain/Bad.
+        //
+        // A-4 iter-1 IR11: threshold raised to 3600s (1 hour) so the test
+        // is immune to CI wall-clock starvation between seed and assert.
+        // Original 60s was tight under heavy CI load + container resource
+        // throttling.
         let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
         backend
             .batch_write_metrics(vec![BatchMetricWrite {
@@ -3024,7 +3200,7 @@ mod tests {
             &last_status,
             "dev1".to_string(),
             "temp".to_string(),
-            60u64,
+            3600u64, // IR11: wall-clock-flake-immune threshold
         );
         let dv = result.expect("get_value should succeed for typed row");
         let variant = dv.value.expect("DataValue must carry a Variant");

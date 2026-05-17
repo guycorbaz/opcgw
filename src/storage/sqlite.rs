@@ -254,24 +254,95 @@ fn metric_type_from_typed_columns(
     device_id: &str,
     metric_name: &str,
 ) -> Result<Option<MetricType>, OpcGwError> {
+    // A-4 iter-1 IR2: exactly-one-non-NULL defensive guard. v008 CHECK
+    // forbids drift, but the helper validates independently so a future
+    // CHECK loosening or restored backup can't silently corrupt reads.
+    //
+    // A-4 iter-2 JR3: extend the symmetry to the 'legacy' arm. v008 CHECK
+    // also requires that value_type='legacy' rows have ALL typed columns
+    // NULL — a drifted legacy row with orphaned `value_real=Some(...)`
+    // would silently return Ok(None) and the real value would be lost.
+    // Reject it explicitly.
     match value_type {
-        "legacy" => Ok(None),
-        "Float" => value_real
-            .map(MetricType::Float)
-            .map(Some)
-            .ok_or_else(|| typed_column_drift_err("Float", "value_real", device_id, metric_name)),
-        "Int" => value_int
-            .map(MetricType::Int)
-            .map(Some)
-            .ok_or_else(|| typed_column_drift_err("Int", "value_int", device_id, metric_name)),
-        "Bool" => value_bool
-            .map(|b| MetricType::Bool(b != 0))
-            .map(Some)
-            .ok_or_else(|| typed_column_drift_err("Bool", "value_bool", device_id, metric_name)),
-        "String" => value_text
-            .map(MetricType::String)
-            .map(Some)
-            .ok_or_else(|| typed_column_drift_err("String", "value_text", device_id, metric_name)),
+        "legacy" => {
+            if value_real.is_some() || value_int.is_some() || value_bool.is_some() || value_text.is_some() {
+                return Err(typed_column_multi_set_err(
+                    "legacy", device_id, metric_name,
+                    value_real.is_some(), value_int.is_some(), value_bool.is_some(), value_text.is_some(),
+                ));
+            }
+            Ok(None)
+        }
+        "Float" => {
+            let f = value_real.ok_or_else(|| {
+                typed_column_drift_err("Float", "value_real", device_id, metric_name)
+            })?;
+            if value_int.is_some() || value_bool.is_some() || value_text.is_some() {
+                return Err(typed_column_multi_set_err(
+                    "Float", device_id, metric_name,
+                    false, value_int.is_some(), value_bool.is_some(), value_text.is_some(),
+                ));
+            }
+            // A-4 iter-1 IR9 + iter-2 JR8: defensive NaN/Inf guard with
+            // harmonized "Schema drift:" prefix matching the other guards.
+            // v007 schema has no finiteness CHECK on value_real (writer-side
+            // option-a filter at poller catches NaN/Inf, but a row could land
+            // via raw SQL / restored backup).
+            if !f.is_finite() {
+                return Err(OpcGwError::Database(format!(
+                    "Schema drift: value_type='Float' but value_real={} is non-finite \
+                     for device {}, metric {} (writer-side NaN/Inf filter was bypassed)",
+                    f, device_id, metric_name
+                )));
+            }
+            Ok(Some(MetricType::Float(f)))
+        }
+        "Int" => {
+            let i = value_int.ok_or_else(|| {
+                typed_column_drift_err("Int", "value_int", device_id, metric_name)
+            })?;
+            if value_real.is_some() || value_bool.is_some() || value_text.is_some() {
+                return Err(typed_column_multi_set_err(
+                    "Int", device_id, metric_name,
+                    value_real.is_some(), false, value_bool.is_some(), value_text.is_some(),
+                ));
+            }
+            Ok(Some(MetricType::Int(i)))
+        }
+        "Bool" => {
+            let b = value_bool.ok_or_else(|| {
+                typed_column_drift_err("Bool", "value_bool", device_id, metric_name)
+            })?;
+            if value_real.is_some() || value_int.is_some() || value_text.is_some() {
+                return Err(typed_column_multi_set_err(
+                    "Bool", device_id, metric_name,
+                    value_real.is_some(), value_int.is_some(), false, value_text.is_some(),
+                ));
+            }
+            // A-4 iter-1 IR8 + iter-2 JR8: defensive range guard with
+            // harmonized "Schema drift:" prefix. v007 CHECK enforces
+            // value_bool IN (0,1) but the helper validates independently.
+            if b != 0 && b != 1 {
+                return Err(OpcGwError::Database(format!(
+                    "Schema drift: value_type='Bool' but value_bool={} is out-of-range \
+                     for device {}, metric {} (v007 CHECK(value_bool IN (0,1)) was bypassed)",
+                    b, device_id, metric_name
+                )));
+            }
+            Ok(Some(MetricType::Bool(b != 0)))
+        }
+        "String" => {
+            let s = value_text.ok_or_else(|| {
+                typed_column_drift_err("String", "value_text", device_id, metric_name)
+            })?;
+            if value_real.is_some() || value_int.is_some() || value_bool.is_some() {
+                return Err(typed_column_multi_set_err(
+                    "String", device_id, metric_name,
+                    value_real.is_some(), value_int.is_some(), value_bool.is_some(), false,
+                ));
+            }
+            Ok(Some(MetricType::String(s)))
+        }
         other => Err(OpcGwError::Database(format!(
             "Unknown value_type '{}' for device {}, metric {} — schema drift (v007 CHECK constraint was bypassed)",
             other, device_id, metric_name
@@ -279,6 +350,13 @@ fn metric_type_from_typed_columns(
     }
 }
 
+/// Sibling-shaped schema-drift error helpers (iter-2 JR8 harmonization):
+/// all three helpers (`typed_column_drift_err`, `typed_column_multi_set_err`,
+/// the inline guards for Bool range / Float finiteness) produce
+/// `OpcGwError::Database` with a leading "Schema drift: " phrasing followed
+/// by the specific drift cause + device/metric context. Log-grep pipelines
+/// can filter on the leading "Schema drift" prefix to capture all schema-
+/// drift-class errors uniformly.
 fn typed_column_drift_err(
     value_type: &str,
     expected_column: &str,
@@ -286,9 +364,35 @@ fn typed_column_drift_err(
     metric_name: &str,
 ) -> OpcGwError {
     OpcGwError::Database(format!(
-        "Schema drift: value_type='{}' but {} IS NULL for device {}, metric {} \
-         (v008 cross-column CHECK constraint was bypassed)",
+        "Schema drift: value_type='{}' but discriminated column {} IS NULL \
+         for device {}, metric {} (v008 cross-column CHECK constraint was bypassed)",
         value_type, expected_column, device_id, metric_name
+    ))
+}
+
+/// A-4 iter-1 IR2 + iter-2 JR7: report a schema-drift row where multiple
+/// typed columns are non-NULL. v008 cross-column CHECK forbids this; the
+/// helper is the defensive-only error path. JR7 enhancement: name WHICH
+/// other columns are non-NULL so operators can locate the contamination
+/// without an extra SQL probe.
+fn typed_column_multi_set_err(
+    value_type: &str,
+    device_id: &str,
+    metric_name: &str,
+    real_set: bool,
+    int_set: bool,
+    bool_set: bool,
+    text_set: bool,
+) -> OpcGwError {
+    let mut set_cols = Vec::new();
+    if real_set { set_cols.push("value_real"); }
+    if int_set { set_cols.push("value_int"); }
+    if bool_set { set_cols.push("value_bool"); }
+    if text_set { set_cols.push("value_text"); }
+    OpcGwError::Database(format!(
+        "Schema drift: value_type='{}' but unexpected typed columns are non-NULL [{}] \
+         for device {}, metric {} (v008 cross-column CHECK constraint was bypassed)",
+        value_type, set_cols.join(", "), device_id, metric_name
     ))
 }
 
@@ -580,9 +684,14 @@ impl crate::storage::StorageBackend for SqliteBackend {
             })?;
 
         // A-4: project the v007 typed columns + value_type alongside the legacy
-        // `value` column (still kept for chirpstack monotonic-check fallback +
-        // MetricValue.value compat — A-5 retires `value: String` once HistoryRead
-        // migrates). Legacy rows surface as Ok(None), mapping transitively to
+        // `value` column. The legacy `value` is retained only for
+        // `MetricValue.value` field compatibility until A-5 retires the field
+        // when HistoryRead migrates to typed columns. (Iter-2 JR2 doc fix: the
+        // earlier iter-1 doc-comment also cited "chirpstack monotonic-check
+        // fallback" as a reason to keep `value` — that fallback was DROPPED
+        // by iter-1 IR4 at chirpstack.rs:1714-1726; chirpstack no longer reads
+        // `prev_metric.value`.)
+        // Legacy rows surface as Ok(None), mapping transitively to
         // BadDataUnavailable via OpcUa::get_value per architecture.md:182.
         let result = conn
             .query_row(
@@ -1469,12 +1578,23 @@ impl crate::storage::StorageBackend for SqliteBackend {
             valid_count += 1;
         }
 
-        if skipped_count > 0 || legacy_skipped_count > 0 {
-            trace!(
+        // A-4 iter-1 IR5 + iter-2 JR5: surface skipped-row counts at info!
+        // level when ANY rows were skipped (legacy OR schema-drift). The
+        // iter-1 IR5 hid schema-drift-only skips at trace level — a
+        // post-A-4 stabilized system where the only failures are real
+        // schema drift would have an operator-invisible signal. JR5
+        // coalesces: any skip > 0 → info! line with both counts so
+        // operators see both classes uniformly. Schema-drift skips are
+        // operationally MORE serious than legacy skips (the per-row
+        // `error!` above carries the canonical failure detail; this
+        // summary line is the aggregate signal).
+        if legacy_skipped_count > 0 || skipped_count > 0 {
+            info!(
+                event = "load_all_metrics",
                 valid = valid_count,
-                skipped = skipped_count,
                 legacy_skipped = legacy_skipped_count,
-                "Loaded metrics with graceful degradation: some rows skipped due to parse errors or legacy schema"
+                schema_drift_skipped = skipped_count,
+                "load_all_metrics: some rows skipped (legacy rows will be replaced on next poll-cycle UPSERT; schema-drift rows require operator intervention — see per-row error logs above)"
             );
         } else {
             debug!(count = valid_count, "Loaded all metrics from storage");
@@ -3597,10 +3717,22 @@ mod tests {
         backend.upsert_metric_value("device_1", "metric_1", &MetricType::Float(0.0), now)
             .expect("Should upsert");
 
-        // Insert a metric with invalid timestamp. A-4: must set value_type
-        // + value_real explicitly because the v007 default 'legacy' would
-        // cause load_all_metrics to skip the row before reaching the
-        // timestamp-fallback path under test.
+        // Insert a metric with invalid timestamp.
+        //
+        // A-4 LOAD-BEARING: must set value_type='Float' + value_real=456.78
+        // explicitly. The v007 column default is value_type='legacy'; without
+        // an explicit override here the row would be skipped by load_all_metrics
+        // (A-4 architecture.md:182 contract: legacy rows surface as Ok(None) /
+        // are filtered from the in-memory cache until the next poll UPSERT
+        // replaces them). The timestamp-fallback path under test would never
+        // fire and the test would silently pass for the wrong reason.
+        //
+        // DO NOT remove the value_type / value_real columns from this INSERT
+        // without first verifying that the post-load assertion still exercises
+        // the `parse_from_rfc3339 → Err → Utc::now() fallback` path. The right
+        // alternative is to use `upsert_metric_value` (which populates the
+        // typed columns automatically) but the test specifically needs the
+        // raw-SQL path to inject the bad timestamp string.
         {
             let conn = backend.pool.checkout(Duration::from_secs(5))
                 .expect("Should checkout");
@@ -5580,15 +5712,155 @@ mod tests {
 
     #[test]
     fn test_metric_type_from_typed_columns_schema_drift_returns_err() {
-        // value_type='Float' but value_real IS NULL — represents schema drift
-        // (v008 CHECK constraint would forbid this in practice, but the helper
-        // returns a clean OpcGwError::Database for defensive operator visibility).
+        // A-4 iter-1 IR3: cover all 4 discriminated arms (NULL-column drift) +
+        // Unknown value_type + multi-non-NULL drift (iter-1 IR2) + Bool out-of-
+        // range (IR8) + Float NaN/Inf (IR9). A regression that drops any of
+        // the defensive guards would be caught by the corresponding case here.
+
+        // -- (1) discriminated-column-NULL drift for all 4 variants --
+        for (vt, col) in [
+            ("Float",  "value_real"),
+            ("Int",    "value_int"),
+            ("Bool",   "value_bool"),
+            ("String", "value_text"),
+        ] {
+            let result = metric_type_from_typed_columns(vt, None, None, None, None, "d", "m");
+            assert!(result.is_err(),
+                "Schema drift must yield Err for value_type='{}' + all-NULL", vt);
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains(col),
+                "error must reference expected column '{}' for value_type='{}'; got: {}", col, vt, err);
+            assert!(err.contains("Schema drift") || err.contains("schema drift"),
+                "error must indicate schema drift; got: {}", err);
+        }
+
+        // -- (2) Unknown value_type --
+        let result = metric_type_from_typed_columns("Garbage", None, None, None, None, "d", "m");
+        assert!(result.is_err(), "Unknown value_type must yield Err");
+        assert!(result.unwrap_err().to_string().contains("Unknown value_type"));
+
+        // -- (2b) iter-2 JR9: near-miss value_type discriminators must also
+        // fall through to the Unknown arm. Catches regressions that loosen
+        // the exact-equality match (e.g. case-insensitive comparison, trim).
+        for near_miss in ["float", "FLOAT", "Float ", " Float", "", "Int32", "boolean", "Legacy"] {
+            let result = metric_type_from_typed_columns(near_miss, None, None, None, None, "d", "m");
+            assert!(result.is_err(),
+                "near-miss value_type '{}' must fall through to Unknown arm", near_miss);
+            assert!(result.unwrap_err().to_string().contains("Unknown value_type"),
+                "near-miss '{}' must produce Unknown-value_type error", near_miss);
+        }
+
+        // -- (3) multi-non-NULL drift (IR2): value_type='Float' but both
+        // value_real AND value_int set --
         let result = metric_type_from_typed_columns(
-            "Float", None, None, None, None, "d", "m",
+            "Float", Some(1.5), Some(42), None, None, "d", "m",
         );
-        assert!(result.is_err(), "Schema drift must yield Err, not silently default");
+        assert!(result.is_err(),
+            "Multi-non-NULL drift must yield Err — value_real=1.5 AND value_int=42 with value_type='Float'");
+        assert!(result.unwrap_err().to_string().contains("unexpected typed columns"));
+
+        // Mirror the multi-non-NULL check on the other 3 variants for symmetry.
+        for (vt, vr, vi, vb, vt_text) in [
+            ("Int",    Some(1.5_f64), Some(42),     None,      None),
+            ("Bool",   None,          Some(42),     Some(1),   None),
+            ("String", None,          None,         Some(1),   Some("hi".to_string())),
+        ] {
+            let result = metric_type_from_typed_columns(vt, vr, vi, vb, vt_text, "d", "m");
+            assert!(result.is_err(),
+                "Multi-non-NULL drift must yield Err for value_type='{}'", vt);
+            assert!(result.unwrap_err().to_string().contains("unexpected typed columns"));
+        }
+
+        // -- (4) Bool out-of-range (IR8): value_bool=42 with value_type='Bool' --
+        let result = metric_type_from_typed_columns(
+            "Bool", None, None, Some(42), None, "d", "m",
+        );
+        assert!(result.is_err(), "Out-of-range value_bool=42 must yield Err");
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Schema drift") || err.contains("schema drift"),
-            "error message must indicate schema drift; got: {}", err);
+        assert!(err.contains("Schema drift") && err.contains("out-of-range"),
+            "JR8 phrasing: error for out-of-range value_bool must start with 'Schema drift' + mention 'out-of-range'; got: {}", err);
+
+        // -- (5) Float NaN/Inf (IR9 + iter-2 JR10): cover the full
+        // non-finite f64 closed enum — NaN, +Inf, -Inf. JR10: iter-1 IR9
+        // test omitted NEG_INFINITY. A regression that narrowed the guard
+        // to e.g. `f.is_nan() || f == f64::INFINITY` (forgetting -Inf)
+        // would slip through without this case. JR8 harmonized phrasing:
+        // assert on "Schema drift" prefix instead of the old "Non-finite
+        // value_real" lead.
+        for non_finite in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let result = metric_type_from_typed_columns(
+                "Float", Some(non_finite), None, None, None, "d", "m",
+            );
+            assert!(result.is_err(),
+                "Non-finite f64 value_real={} must yield Err", non_finite);
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("Schema drift") && err.contains("non-finite"),
+                "JR8 phrasing: error for f64={} must start with 'Schema drift' + mention 'non-finite'; got: {}",
+                non_finite, err);
+        }
+
+        // -- (5b) iter-2 JR11: combined-condition cases — multi-set drift
+        // paired with out-of-range/NaN/Inf. The guard ordering checks
+        // multi-set FIRST then range/finiteness; this pin confirms a row
+        // that satisfies BOTH conditions surfaces the multi-set error
+        // (documented two-pass triage). A regression that swapped the
+        // ordering would change the surfaced error type.
+        let result = metric_type_from_typed_columns(
+            "Bool", None, Some(7), Some(42), None, "d", "m",
+        );
+        assert!(result.is_err(),
+            "Combined multi-set (value_int=7) + Bool out-of-range (value_bool=42) must yield Err");
+        assert!(result.unwrap_err().to_string().contains("unexpected typed columns"),
+            "Combined-condition error must surface multi-set FIRST (guard ordering pin)");
+
+        let result = metric_type_from_typed_columns(
+            "Float", Some(f64::NAN), Some(99), None, None, "d", "m",
+        );
+        assert!(result.is_err(),
+            "Combined multi-set (value_int=99) + Float NaN (value_real=NaN) must yield Err");
+        assert!(result.unwrap_err().to_string().contains("unexpected typed columns"),
+            "Combined-condition error must surface multi-set FIRST (guard ordering pin)");
+
+        // -- (6) Sanity: well-formed inputs SUCCEED on every arm --
+        assert_eq!(
+            metric_type_from_typed_columns("Float", Some(1.5), None, None, None, "d", "m").unwrap(),
+            Some(MetricType::Float(1.5))
+        );
+        assert_eq!(
+            metric_type_from_typed_columns("Int", None, Some(42), None, None, "d", "m").unwrap(),
+            Some(MetricType::Int(42))
+        );
+        assert_eq!(
+            metric_type_from_typed_columns("Bool", None, None, Some(1), None, "d", "m").unwrap(),
+            Some(MetricType::Bool(true))
+        );
+        assert_eq!(
+            metric_type_from_typed_columns("Bool", None, None, Some(0), None, "d", "m").unwrap(),
+            Some(MetricType::Bool(false))
+        );
+        assert_eq!(
+            metric_type_from_typed_columns("String", None, None, None, Some("hi".to_string()), "d", "m").unwrap(),
+            Some(MetricType::String("hi".to_string()))
+        );
+        assert_eq!(
+            metric_type_from_typed_columns("legacy", None, None, None, None, "d", "m").unwrap(),
+            None
+        );
+
+        // -- (7) iter-2 JR3: legacy arm symmetry — a 'legacy' row with any
+        // orphaned typed column must yield Err (not silently return Ok(None)).
+        for (vr, vi, vb, vt) in [
+            (Some(1.5_f64), None,         None,      None),
+            (None,          Some(42_i64), None,      None),
+            (None,          None,         Some(1),   None),
+            (None,          None,         None,      Some("orphan".to_string())),
+        ] {
+            let result = metric_type_from_typed_columns("legacy", vr, vi, vb, vt, "d", "m");
+            assert!(result.is_err(),
+                "JR3: 'legacy' row with orphaned typed column must yield Err (not silently skip)");
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("Schema drift") && err.contains("'legacy'"),
+                "JR3: legacy-drift error must carry 'Schema drift' prefix and value_type='legacy'; got: {}", err);
+        }
     }
 }

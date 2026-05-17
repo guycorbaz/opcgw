@@ -1690,25 +1690,44 @@ impl ChirpstackPoller {
         };
 
         // 3. For Counter type: check monotonic property (reject reset: new < previous).
-        // A-4: AC#9 closure — prefer the typed payload via pattern-match on
-        // `prev_metric.data_type`. A-4's reader rewrite makes `get_metric_value`
-        // project the v007 `value_int` column into `MetricType::Int(value_int)`,
-        // so the typed match now carries the real previous value. The legacy
-        // `prev_metric.value.parse::<i64>()` fallback is retained for pre-A-3
-        // rows where `batch_write_metrics` was the writer (real string in the
-        // legacy `value` column). For rows previously written by `set_metric` /
-        // `upsert_metric_value` / `append_metric_history` (discriminant string
-        // in the legacy `value` column), the typed-path branch above is what
-        // carries the meaning; the legacy fallback is silently inert for those
-        // and the monotonic check is skipped — acceptable because pre-A-3 rows
-        // on those paths never had a meaningful prev_int anyway.
+        // A-4 iter-1 IR4: typed-path ONLY (legacy `value.parse::<i64>()` fallback
+        // dropped). The post-A-4 reader rewrite (`get_metric_value` projects v007
+        // typed columns + `value_type`) guarantees that for any current Int row
+        // `prev_metric.data_type` is `MetricType::Int(real_value)`. The previous
+        // legacy fallback could produce wrong results under type-confusion:
+        // if (device_id, metric_name) was reconfigured Bool → Int Counter
+        // mid-stream, prev_metric was `Bool(true)` with `value="1"`, the legacy
+        // fallback returned Some(1), and the check would treat 1 as the prev
+        // counter — blocking any new counter <1 (e.g. legitimate roll-over to 0)
+        // as a false reset. Per A-4 iter-1 decision IR4 (user-accepted 2026-05-16):
+        // drop the fallback entirely. The narrow loss is pre-A-3 rows where
+        // `batch_write_metrics` was the writer with a zero-default `data_type`
+        // — those rows are vanishingly rare in production (poller writes via
+        // batch path always populated `data_type` consistently) and the
+        // upstream non_finite guard + int_overflow guard (the two guards
+        // earlier in this function — see the `int_target = matches!(kind,
+        // Counter) || ...` predicate above) catch NaN/Inf/saturating-cast
+        // before reaching this check anyway.
+        //
+        // Legacy rows (`value_type='legacy'`) surface as `Ok(None)` from
+        // `get_metric_value` post-A-4 (architecture.md:182), so the `if let
+        // Ok(Some(prev_metric))` already filters them out before we examine
+        // `prev_metric.data_type`. No additional guard needed.
+        //
+        // A-4 iter-2 JR12 reconfig-window note: when a metric is reconfigured
+        // FROM a different MetricType TO Int Counter mid-stream (e.g. Float
+        // Gauge → Int Counter, or Bool → Int Counter), `prev_metric.data_type`
+        // is still the OLD variant until the first Counter UPSERT replaces
+        // the row. The `if let MetricType::Int(prev_int) = ...` arm silently
+        // skips the monotonic check during that transition window — a
+        // legitimate Counter reset goes undetected for at most one poll cycle
+        // (after which the typed payload is in place). Acceptable: reconfig
+        // events are operator-driven and rare; the alternative (emitting a
+        // trace! on the reconfig window) would add noise without operator-
+        // actionable value.
         if matches!(target_type, MetricType::Int(_)) && kind == ChirpStackMetricKind::Counter {
             if let Ok(Some(prev_metric)) = self.backend.get_metric_value(&device_id_string, &metric_name) {
-                let prev_int_opt = match &prev_metric.data_type {
-                    MetricType::Int(p) => Some(*p),
-                    _ => prev_metric.value.parse::<i64>().ok(),
-                };
-                if let Some(prev_int) = prev_int_opt {
+                if let MetricType::Int(prev_int) = prev_metric.data_type {
                     let new_int = raw_value as i64;
                     if new_int < prev_int {
                         warn!(device_id = %device_id, metric_name = %metric_name,
@@ -2899,65 +2918,114 @@ mod tests {
 
     /// Iter-3 review pending #1: positive path of `validate_bool_metric_value`
     /// — `0.0` and `1.0` are accepted with no warn.
-    /// A-4 AC#9 closure: the counter monotonic check at chirpstack.rs:1707
-    /// extracts prev_int by pattern-matching on `prev_metric.data_type`
-    /// (typed-path preferred) with a `prev_metric.value.parse::<i64>()`
-    /// fallback for pre-A-3 rows. This unit test pins the match semantics
-    /// directly — proves the typed-path branch extracts the real payload
-    /// and the legacy fallback path extracts a parseable string.
-    #[test]
-    fn ac9_counter_monotonic_typed_path_extracts_payload() {
-        use crate::storage::{MetricType, MetricValue};
-        use chrono::Utc;
+    /// A-4 AC#9 closure (iter-1 IR6 rewrite): exercises the typed-path
+    /// counter monotonic check end-to-end through `prepare_metric_for_batch`
+    /// (the production call site at chirpstack.rs:1717-1729), not via inline
+    /// match-arm assertions. A regression at the production site (e.g. swapping
+    /// `MetricType::Int(p)` to a wrong variant, or accidentally restoring the
+    /// dropped legacy fallback) is caught here because the test reaches the
+    /// real call site, not a separate copy of the match.
+    ///
+    /// Test setup:
+    /// 1. Build a ChirpstackPoller fixture with InMemoryBackend.
+    /// 2. Seed a prior Counter row via `batch_write_metrics` carrying
+    ///    `MetricType::Int(100)` (the post-A-3 writer contract).
+    /// 3. Construct a mock_metric proto with `data[0] = 50.0` (a reset:
+    ///    50 < 100 → typed-path branch fires and returns None).
+    /// 4. Assert `prepare_metric_for_batch` returns None.
+    /// 5. Assert `tracing-test::logs_contain("Counter reset detected")`.
+    #[tokio::test]
+    #[traced_test]
+    async fn ac9_counter_monotonic_typed_path_extracts_payload() {
+        use crate::storage::{BatchMetricWrite, MetricType, StorageBackend};
+        use chirpstack_api::common::{Metric, MetricDataset};
+        use std::time::SystemTime;
 
-        // Typed-path branch: data_type is MetricType::Int(payload).
-        let prev_typed = MetricValue {
-            device_id: "d".to_string(),
-            metric_name: "c".to_string(),
-            value: "this string would not parse as i64".to_string(),
-            timestamp: Utc::now(),
-            data_type: MetricType::Int(1000),
-        };
-        let prev_int_opt = match &prev_typed.data_type {
-            MetricType::Int(p) => Some(*p),
-            _ => prev_typed.value.parse::<i64>().ok(),
-        };
-        assert_eq!(prev_int_opt, Some(1000),
-            "A-4 AC#9 typed-path: MetricType::Int(1000) must extract prev_int=1000 without parsing value");
+        // Step 1: build poller fixture.
+        let config = get_test_config();
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let cancel_token = CancellationToken::new();
+        let restore_barrier = Arc::new(std::sync::Barrier::new(2));
+        let poller = ChirpstackPoller::new(&config, backend.clone(), cancel_token, restore_barrier)
+            .await
+            .expect("poller fixture must build");
 
-        // Legacy-fallback branch: data_type is NOT Int (zero-default pre-A-3
-        // shape for set_metric / upsert / append-written rows), value field
-        // carries a parseable integer string (batch_write_metrics writers).
-        let prev_legacy = MetricValue {
-            device_id: "d".to_string(),
-            metric_name: "c".to_string(),
-            value: "500".to_string(),
-            timestamp: Utc::now(),
-            data_type: MetricType::Float(0.0), // wrong variant — mimics pre-A-3 FromStr default
-        };
-        let prev_int_opt = match &prev_legacy.data_type {
-            MetricType::Int(p) => Some(*p),
-            _ => prev_legacy.value.parse::<i64>().ok(),
-        };
-        assert_eq!(prev_int_opt, Some(500),
-            "A-4 AC#9 legacy fallback: non-Int variant must fall through to value.parse::<i64>()");
+        let device_id = "ac9_test_device";
+        let metric_name = "ac9_packet_count";
 
-        // Legacy path with unparseable value (pre-A-3 set_metric/upsert writers
-        // that wrote discriminant string to value column): typed-path misses
-        // AND legacy parse fails → monotonic check silently skipped. Acceptable.
-        let prev_lost = MetricValue {
-            device_id: "d".to_string(),
-            metric_name: "c".to_string(),
-            value: "Float".to_string(), // pre-A-3 discriminant lexeme
-            timestamp: Utc::now(),
-            data_type: MetricType::Bool(false),
+        // Step 2: seed prior Counter row with MetricType::Int(100) via
+        // batch_write_metrics (matches A-3 production writer contract).
+        //
+        // JR1 LOAD-BEARING: `value` field MUST be unparseable as i64. A prior
+        // iter-1 IR6 version of this test used `value: "100"` paired with
+        // `data_type: MetricType::Int(100)` — but if a regression restored the
+        // dropped legacy `prev_metric.value.parse::<i64>().ok()` fallback at
+        // chirpstack.rs:1714-1726, `"100".parse::<i64>() = Some(100)` and the
+        // test would PASS via the legacy path even though the typed-path
+        // branch was broken. The iter-2 fix sets `value` to a non-numeric
+        // sentinel so ONLY the typed-path branch can produce prev_int=100.
+        backend
+            .batch_write_metrics(vec![BatchMetricWrite {
+                device_id: device_id.to_string(),
+                metric_name: metric_name.to_string(),
+                value: "ir6_unparseable_sentinel".to_string(),
+                data_type: MetricType::Int(100),
+                timestamp: SystemTime::now(),
+            }])
+            .expect("seed prev Counter row");
+
+        // Sanity: confirm the storage layer returns the typed payload via
+        // get_metric_value — the production code path that A-4 IR4 relies on.
+        let prev = backend
+            .get_metric_value(device_id, metric_name)
+            .expect("get_metric_value")
+            .expect("Some(MetricValue)");
+        assert_eq!(
+            prev.data_type,
+            MetricType::Int(100),
+            "A-4 reader contract: get_metric_value must return typed MetricType::Int(100)"
+        );
+
+        // Step 3: construct a mock COUNTER metric with data[0] = 50.0 (reset).
+        let reset_metric = Metric {
+            name: metric_name.to_string(),
+            kind: 0, // COUNTER per chirpstack_api proto
+            timestamps: vec![],
+            datasets: vec![MetricDataset {
+                label: "test".to_string(),
+                data: vec![50.0_f32], // 50 < 100 → reset
+            }],
         };
-        let prev_int_opt = match &prev_lost.data_type {
-            MetricType::Int(p) => Some(*p),
-            _ => prev_lost.value.parse::<i64>().ok(),
-        };
-        assert_eq!(prev_int_opt, None,
-            "Both branches miss → monotonic check skipped; documented in chirpstack.rs:1701-1706 comment");
+
+        // Step 4: call the production code path. Must return None because
+        // the typed-path monotonic check at chirpstack.rs:1717-1729 detects
+        // the reset (50 < 100) via prev_metric.data_type == Int(100).
+        let result = poller.prepare_metric_for_batch(device_id, &reset_metric);
+        assert!(
+            result.is_none(),
+            "A-4 AC#9: Counter reset (50 < 100) must be detected via typed-path \
+             and prepare_metric_for_batch must return None"
+        );
+
+        // Step 5: confirm the typed-path produced the canonical "Counter reset"
+        // warn (the warn fires from the typed-path branch only; if the legacy
+        // fallback had fired by accident, the warn would still emit but the
+        // production code path that we want to regression-guard is the typed
+        // branch).
+        assert!(
+            logs_contain("Counter reset detected"),
+            "A-4 AC#9: typed-path branch must emit the canonical Counter reset warn"
+        );
+        // And confirm the warn carries the real previous value from the
+        // typed payload (not a zero-default or a string-parse result).
+        assert!(
+            logs_contain("prev_value=100"),
+            "A-4 AC#9: warn must carry prev_value=100 from typed payload (not 0 or parsed-string)"
+        );
+        assert!(
+            logs_contain("new_value=50"),
+            "A-4 AC#9: warn must carry new_value=50 from the new metric"
+        );
     }
 
     #[test]

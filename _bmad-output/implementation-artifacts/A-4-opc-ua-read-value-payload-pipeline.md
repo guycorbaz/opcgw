@@ -5,7 +5,7 @@
 | Story key     | `A-4-opc-ua-read-value-payload-pipeline`                                                              |
 | Epic          | A — Storage Payload Migration (Phase B Closure, gates v2.0 GA)                                        |
 | FRs           | FR51 (Epic-A umbrella)                                                                                |
-| Status        | review                                                                                                |
+| Status        | done                                                                                                  |
 | Created       | 2026-05-16                                                                                            |
 | Source epic   | `_bmad-output/planning-artifacts/epics.md § Epic A § Story A.4`                                       |
 | Sprint change | `_bmad-output/planning-artifacts/sprint-change-proposal-2026-05-14.md`                                |
@@ -565,9 +565,162 @@ Claude Opus 4.7 (1M context) — `claude-opus-4-7[1m]`. Implementation completed
 - `src/config_reload.rs`, `src/opcua_topology_apply.rs`
 - `migrations/` (no new migration in A-4; v008 from A-3 carries the CHECK invariant)
 
-### Review Findings
+### Review Findings (Iter-1, 2026-05-16)
 
-_To be filled by code-review iterations._
+Iter-1 code-review run on 2026-05-16 via `bmad-code-review A-4` on the same LLM (Claude Opus 4.7 1M context). 3 parallel adversarial layers: Blind Hunter (25 findings), Edge Case Hunter (11 findings), Acceptance Auditor (AC verdicts: 10 SATISFIED / 0 VIOLATED / 2 AMBIGUOUS / 2 NOT-VERIFIABLE; ELIGIBLE-FOR-DONE with 2 iter-2 follow-ups suggested).
+
+**Raw findings:** ~47 layer-level items. **After dedupe/triage:** 1 decision-needed, 12 patches, ~20 deferrals, ~14 dismissed (covered by other findings or false positives).
+
+#### Decision-needed (1)
+
+- [ ] [Review][Decision] **IR4 [HIGH convergent — Blind B-H3 + Edge F6]: Counter monotonic AC#9 type-confusion via legacy fallback** [src/chirpstack.rs:1707-1718] — The match arm `_ => prev_metric.value.parse::<i64>().ok()` fires for ANY non-Int previous variant whose legacy `value` column happens to parse as i64. If (device_id, metric_name) was reconfigured Bool → Int Counter mid-stream, prev_metric is Bool(true) with `value="1"` (the bool stringification). The fallback returns `Some(1)`, and the monotonic check treats 1 as the previous counter — blocking any new counter <1 (e.g. counter just rolled over to 0) as a false reset. The A-3 IR1 comment dismissed this case but the post-A-4 reader-rewrite makes the fallback's actual reach narrower than the comment claims (legacy rows are skipped entirely now). **Two options:**
+  - **(a) Drop the legacy fallback entirely.** Match arm becomes `match &prev_metric.data_type { MetricType::Int(p) => Some(*p), _ => None }`. The check fires only on real Int rows post-A-4. Pre-A-3 batch_write_metrics rows have data_type=Int(0) zero-default — those produce prev_int=0, and new_int < 0 is never true for a Counter (Counter raw_value is non-negative per chirpstack semantics + the upstream `int_overflow` guard at chirpstack.rs:1633-1646 catches < 0 cases) → check is silently inert for those rows but never produces wrong results.
+  - **(b) Keep the legacy fallback but narrow it.** Match arm checks if `data_type` is "Int-shaped" (FromStr zero-default `Int(0)`) AND value parses as i64. Catches more pre-A-3 batch_write_metrics rows but adds complexity.
+
+  **Recommended: (a).** Eliminates the type-confusion risk entirely. The narrow loss is the same loss A-3 IR1 already documented as acceptable. The fallback's actual production reach is near-zero post-A-3 (the only real-Int writer is batch_write_metrics, and A-3's writers now populate data_type with the real payload).
+
+#### Patches (12, to apply)
+
+- [ ] [Review][Patch] **IR1 [HIGH convergent — Blind B-H1 + Auditor AC#5]: `OpcUa::get_value` `Ok(None)` log misleading for legacy rows** [src/opc_ua.rs:1493-1509] — Post-A-4 the `Ok(None)` branch fires for both "metric absent" AND "legacy row awaiting first poll" but the log message is `error!("Unknown metric for device")`. Operators reading the log on first startup after upgrade will see error-level "unknown metric" spam for every device they configured. Change to a generic message at `info!` level (or keep `error!` with a rephrased message that doesn't conflate the two causes).
+
+- [ ] [Review][Patch] **IR2 [HIGH convergent — Blind B-H4 + Edge F2]: `metric_type_from_typed_columns` doesn't validate OTHER typed columns are NULL** [src/storage/sqlite.rs:240-280] — Helper docstring promises to enforce "exactly one of value_real/value_int/value_bool/value_text is non-NULL for non-legacy rows" but only checks the discriminated column. Schema-drift `value_type='Float'` + `value_real=Some(1.5)` + `value_int=Some(42)` silently returns `Float(1.5)` and discards the int half. Defensive-promise broken. Extend each arm to verify other typed columns are None; return `OpcGwError::Database("schema drift: multiple typed columns non-NULL")` if violated.
+
+- [ ] [Review][Patch] **IR3 [HIGH — Blind B-H5 + B-H15]: Schema-drift test coverage incomplete** [src/storage/sqlite.rs::tests::test_metric_type_from_typed_columns_schema_drift_returns_err] — Test only exercises `value_type="Float"` + `value_real=None`. The Int/Bool/String discriminated arms + `Unknown value_type` arm + the new multi-non-NULL arm (from IR2) are uncovered. A regression that drops `.ok_or_else` on (say) the String arm wouldn't be caught. Expand to 6 sub-cases (4 variants × NULL-discriminated + Unknown-value_type + multi-non-NULL).
+
+- [ ] [Review][Patch] **IR5 [HIGH convergent — Blind B-H2 + Edge F10]: `load_all_metrics` legacy-skipped signal at trace level** [src/storage/sqlite.rs:1465-1477] — On first startup after upgrade, an operator with a v006 DB will see `valid=0, legacy_skipped=N` at `trace!` level — meaning at production `info` log level there's ZERO operator-visible signal that the gateway started with an empty in-memory cache. Promote the legacy-skipped summary to `info!` when `legacy_skipped_count > 0` (separate from the schema-drift `error!` path).
+
+- [ ] [Review][Patch] **IR6 [MEDIUM — Auditor AC#9]: `ac9_counter_monotonic_typed_path_extracts_payload` is tautological** [src/chirpstack.rs:2906-2959] — Test inlines the literal match-arm expression 3 times and asserts on the inline expression. Does NOT call `prepare_metric_for_batch` (which the spec explicitly mandated at line 366 of A-4-spec.md). A regression at `chirpstack.rs:1707` that swapped the match-arm with a buggy expression would pass this test (the test's inline match-arm is independent of the production call site). Rewrite to call `prepare_metric_for_batch` with a `mock_metric` carrying `data[0] = 50.0` after seeding a prev Counter via `batch_write_metrics(MetricType::Int(100))`. Assert `prepare_metric_for_batch` returns `None` AND `tracing-test::logs_contain("Counter reset detected")` fires.
+
+- [ ] [Review][Patch] **IR7 [MEDIUM — Edge F4]: f64→f32 subnormal underflow silent (only overflow caught)** [src/opc_ua.rs:1858-1875] — `1e-40_f64 as f32 = 0.0_f32`. `is_finite(0.0) = true`, so no warning fires. SCADA client receives `Variant::Float(0.0)` indistinguishable from a real zero reading. Industrial chemistry / low-current sensors / scientific instruments below 1e-38 silently read as 0.0. Extend the guard: emit `event="metric_read"` `reason="narrowing_underflow"` warn when `narrowed == 0.0 && f != 0.0`. (Update docs/logging.md closed-enum + AC#10 grep contract documentation.)
+
+- [ ] [Review][Patch] **IR8 [MEDIUM convergent — Blind B-H16 + Edge F1]: Bool arm: silent loss of nonzero-not-1 mapping** [src/storage/sqlite.rs:263-266] — `value_bool.map(|b| MetricType::Bool(b != 0))` returns `Bool(true)` for ANY non-zero integer. v007 column-level CHECK `value_bool IN (0,1)` blocks this in normal operation, but if a future migration loosens the CHECK or schema-drift occurs, `value_bool=42` reads as `Bool(true)` with no warn. Add a defensive guard: warn on `value_bool` not in {0, 1} before constructing `MetricType::Bool`.
+
+- [ ] [Review][Patch] **IR9 [MEDIUM — Edge F8]: `value_real` NaN/Inf flows through reader unchecked** [src/storage/sqlite.rs:259-262] — v007 CHECK doesn't enforce finiteness on `value_real`. Poller-side filter (A-3 option-a) catches NaN/Inf at the writer boundary, but a row could land via raw SQL (manual operator edit, test fixture, restored backup from another tool). The helper returns `MetricType::Float(NaN)` and lets it flow through `get_metric_value` cleanly. Downstream consumers other than `OpcUa::convert_metric_to_variant` (e.g. InMemoryBackend cache, chirpstack monotonic check, future A-6 web UI) may not be NaN-aware. Add `is_finite()` defensive check in the Float arm with a `trace!`-level skip (return error or sentinel — TBD with user on which contract).
+
+- [ ] [Review][Patch] **IR10 [LOW — Auditor AC#6]: Missing `test_get_value_returns_uncertain_for_stale_typed_payload`** — spec line 351 explicitly mandated this pinning test. The new `test_get_value_returns_typed_float_payload_with_good_status` covers the Good path but not the Uncertain path on a typed row. Story 5-2 staleness logic is path-independent (unchanged `compute_status_code` operates on `metric_value.timestamp` regardless of payload) so the contract is structurally preserved, but the spec-promised test is missing. Add it.
+
+- [ ] [Review][Patch] **IR11 [MEDIUM — Blind B-H8]: `test_get_value_returns_typed_float_payload_with_good_status` is wall-clock-sensitive** [src/opc_ua.rs::tests] — Seeds with `SystemTime::now()`, uses `stale_threshold=60u64`. If CI is under load and >60s elapse between seed and assert, test fails with `Uncertain`. Raise threshold to a wall-clock-flake-immune value (e.g. `u64::MAX` or 3600).
+
+- [ ] [Review][Patch] **IR12 [MEDIUM — Blind B-H9]: `test_float_narrowing_overflow_emits_metric_read_warn` log substring assertion fragile** — Uses `logs_contain("narrowing_overflow")` which could match an unrelated log line that mentions the string in a comment or different event. Tighten to assert both `event="metric_read"` AND `reason="narrowing_overflow"` AND a unique device_id sentinel like "narrow_test_device".
+
+- [ ] [Review][Patch] **IR13 [MEDIUM — Blind B-H11]: `test_load_all_metrics_timestamp_fallback` retrofit semantics opaque** [src/storage/sqlite.rs:3591-3640] — Post-A-4 the test inserts `value_type='Float'` + `value_real=456.78` purely so the row survives the legacy-row skip and the timestamp-fallback path under test fires. A future maintainer might "simplify" away those columns thinking they're decorative. Add a `// A-4: value_type + value_real are LOAD-BEARING — without them the row is skipped before reaching the timestamp-fallback path` comment immediately above the raw-SQL INSERT.
+
+#### Deferred (~20 LOW + non-actionable)
+
+- [x] [Review][Defer] **DEF-iter1-A4-1 (Blind B-H7):** `convert_variant_to_metric` tuple-consistency design — function-return shape (String, MetricType) is internally consistent at construction; cross-version callers reading half from old-format and half from new-format is a hypothetical migration concern, not a regression. Defer.
+- [x] [Review][Defer] **DEF-iter1-A4-2 (Blind B-H10 + Edge F11):** Integration test seeds via bare `rusqlite::Connection`. Passes today; future PRAGMA-based connection-level CHECKs could create asymmetry. Defer.
+- [x] [Review][Defer] **DEF-iter1-A4-3 (Blind B-H13):** Chirpstack monotonic legacy fallback dead for SqliteBackend legacy rows. Architecture intent per architecture.md:182. Update chirpstack.rs:1699-1706 doc comment to acknowledge the legacy-row pre-filter. Defer (cosmetic).
+- [x] [Review][Defer] **DEF-iter1-A4-4 (Blind B-H14):** `metric_type_from_typed_columns` borrows device_id/metric_name for error messages only — minor API smell. Defer (no behavior change).
+- [x] [Review][Defer] **DEF-iter1-A4-5 (Blind B-H17):** `convert_metric_to_variant` no longer returns `Variant::Int32(0)` fallback — behavioral change but the previous fallback was a parse-error sentinel that's structurally impossible post-A-4. Defer.
+- [x] [Review][Defer] **DEF-iter1-A4-6 (Blind B-H18):** `prev_metric.value` parse + `.data_type` borrow under poll racing — both halves of the same owned struct snapshot, semantically consistent within the function. Defer.
+- [x] [Review][Defer] **DEF-iter1-A4-7 (Blind B-H19):** Test naming convention (test_ prefix vs not) cosmetic. Defer.
+- [x] [Review][Defer] **DEF-iter1-A4-8 (Blind B-H20):** `make_metric_value` test helper hides "value: ignored" magic — load-bearing for regression detection but the inline tests already document. Defer (cosmetic).
+- [x] [Review][Defer] **DEF-iter1-A4-9 (Blind B-H21):** `__op.ok()` not called on schema-drift Err path — semantically correct (Err = failure for storage op-log telemetry). Defer.
+- [x] [Review][Defer] **DEF-iter1-A4-10 (Blind B-H22):** `metric_read` event name too generic for single-reason enum — naming nit; future reasons (precision_loss, staleness_threshold_exceeded) would fit under same event name. Defer.
+- [x] [Review][Defer] **DEF-iter1-A4-11 (Blind B-H23):** Regression-doc warning not enforced by CI grep — out of A-4 scope; cross-cutting tooling concern. Defer.
+- [x] [Review][Defer] **DEF-iter1-A4-12 (Blind B-H24):** `value_type` stringly-typed; no compile-time enum — refactor opportunity. Defer to A-7 cleanup.
+- [x] [Review][Defer] **DEF-iter1-A4-13 (Blind B-H25):** `MetricType::Bool(b)` vs `String(s)` move/copy asymmetry — language idiom. Defer.
+- [x] [Review][Defer] **DEF-iter1-A4-14 (Blind B-H26):** `raw_value as i64` at chirpstack.rs:1712 lacks LOCAL defensive guard. Upstream int_overflow guard at chirpstack.rs:1633-1646 covers the case; future refactor risk only. Defer.
+- [x] [Review][Defer] **DEF-iter1-A4-15 (Edge F3):** Schema-drift `value_type='legacy'` with orphaned `value_real=Some(...)` silently dropped — hypothetical (CHECK forbids; manual SQL only). Defer.
+- [x] [Review][Defer] **DEF-iter1-A4-16 (Edge F5):** Silent f64→f32 precision loss for finite values — pre-existing OPC UA spec design (Variant::Float = f32). Not A-4-specific. Defer.
+- [x] [Review][Defer] **DEF-iter1-A4-17 (Edge F7):** `load_all_metrics` schema-drift skip returns Ok(result) with no caller-signal that the cache is incomplete — partial-success contract documented, but no row-count surfaces to caller. Defer (operator visibility via log levels covered by IR5).
+- [x] [Review][Defer] **DEF-iter1-A4-18 (Edge F9):** `get_metric_value` timestamp-parse error → `BadInternalError` vs `load_all_metrics` tolerates with `now()` fallback — asymmetric. Pre-existing behavior; A-4 didn't change the timestamp handling. Defer.
+- [x] [Review][Defer] **DEF-iter1-A4-19 (Auditor AC#7):** Missing `test_get_value_uses_post_reload_stale_threshold`. 9-7 carry-forward test at `tests/config_hot_reload.rs:504` (`AC#10 — stale_threshold_seconds is hot-reload-safe`) covers the contract. No A-4-specific test needed. Defer.
+- [x] [Review][Defer] **DEF-iter1-A4-20 (Auditor load-bearing-L6 / Blind via A-1-iter1-DEF10 carry-forward):** README "Current Version" line ~5000 chars. Pre-existing pattern. Defer.
+
+#### Dismissed (~14)
+
+- Auditor's "load-bearing design choice" L1-L5 entries are informational, not findings (no action required; documented for future-patch awareness).
+- Blind B-H6 (silent f64→f32 precision loss) folded into IR7 (subnormal underflow is the actionable subset; precision-loss is OPC UA spec design).
+- Other false-positives covered by the patches above.
+
+**Iter-1 verdict:** 1 decision-needed (IR4), 12 patches (IR1-IR3, IR5-IR13), ~20 deferrals. Convergent findings (multi-source agreement): IR1, IR2, IR4, IR5, IR8 — these carry the strongest signal per memory `feedback_iter3_validation`. Auditor verdict: ELIGIBLE-FOR-DONE-AFTER-PATCHES with IR4 + IR6 being the load-bearing iter-2 follow-ups. Same-LLM run — recommend iter-2 on a different LLM after applying patches.
+
+#### Iter-1 decision resolution + patch round (2026-05-16)
+
+**Decision IR4 resolved by user (option a):** drop the legacy fallback entirely. Match arm at `chirpstack.rs:1717-1729` becomes `match &prev_metric.data_type { MetricType::Int(p) => Some(*p), _ => None }`. The post-A-4 reader rewrite makes the typed-path correct in all real-world cases; the dropped fallback's actual production reach was near-zero (only pre-A-3 `batch_write_metrics` rows with zero-default `data_type` — a vanishingly rare combination). The doc comment at chirpstack.rs:1692-1707 was updated to document the IR4 decision rationale + the architecture.md:182 legacy-row pre-filter.
+
+**13 patches applied (all of IR1-IR13):**
+
+- [x] **IR1** [HIGH conv]: `OpcUa::get_value` `Ok(None)` log demoted from `error!("Unknown metric for device")` to `info!("No payload available for metric (absent or legacy row pending first poll)")` at src/opc_ua.rs:1503-1513.
+- [x] **IR2** [HIGH conv]: `metric_type_from_typed_columns` now defensively validates that ALL non-discriminated typed columns are NULL (rejects with new `typed_column_multi_set_err` helper); src/storage/sqlite.rs:138-218.
+- [x] **IR3** [HIGH]: schema-drift test expanded to 6 categories — discriminated-NULL drift on all 4 variants + Unknown value_type + multi-non-NULL drift on all 4 variants + Bool out-of-range + Float NaN/Inf + well-formed-sanity. ~75 lines, src/storage/sqlite.rs::tests.
+- [x] **IR4** [HIGH conv → user decision (a)]: legacy fallback dropped at chirpstack.rs:1717-1729. Doc comment expanded to document the IR4 decision + architecture.md:182 pre-filter.
+- [x] **IR5** [HIGH conv]: `load_all_metrics` legacy-skipped count surfaced at `info!` level when count > 0; schema-drift skip stays at `trace!` per the IR2 error! emission already covering it. src/storage/sqlite.rs:1495-1517.
+- [x] **IR6** [MEDIUM]: `ac9_counter_monotonic_typed_path_extracts_payload` rewritten to call `prepare_metric_for_batch` end-to-end through a real ChirpstackPoller fixture seeded via `batch_write_metrics(MetricType::Int(100))`. Test now reaches the production call site at chirpstack.rs:1717-1729 (not via an inline match-arm copy) and uses `tracing_test::logs_contain` to confirm the `Counter reset detected` warn fires with `prev_value=100` from typed payload (not zero or string-parsed). src/chirpstack.rs::tests.
+- [x] **IR7** [MEDIUM]: f64 → f32 narrowing-underflow guard added at src/opc_ua.rs:1864-1893. New closed-enum value `reason="narrowing_underflow"` fires when `narrowed == 0.0_f32 && f != 0.0_f64`. Pinned by `test_float_narrowing_underflow_emits_metric_read_warn` using `f = 1e-50_f64` (below f32 subnormal min ~1.4e-45). The mid-test discovery: `1e-40_f64` narrows to a subnormal f32 (non-zero) — the underflow guard correctly does NOT fire for subnormal-representable values, only for true zero-narrowed.
+- [x] **IR8** [MEDIUM conv]: Bool arm defensive range guard added — rejects `value_bool` outside `{0, 1}` with explicit error citing v007 CHECK bypass.
+- [x] **IR9** [MEDIUM]: Float arm defensive `is_finite()` guard added — rejects NaN/Inf with explicit error citing writer-side filter bypass. Closes the storage-layer half of the NaN/Inf hazard (A-3 closed the writer-side half).
+- [x] **IR10** [LOW]: new `test_get_value_returns_uncertain_for_stale_typed_payload` added at src/opc_ua.rs::tests. Closes the AC#6 staleness × typed-payload coverage gap (asserts both Variant::Float carries real payload AND StatusCode::Uncertain on a 120s-old row vs 60s threshold).
+- [x] **IR11** [MEDIUM]: wall-clock threshold in `test_get_value_returns_typed_float_payload_with_good_status` raised from 60u64 to 3600u64 — flake-immune to CI starvation.
+- [x] **IR12** [MEDIUM]: `test_float_narrowing_overflow_emits_metric_read_warn` now uses unique device_id sentinel `ir12_overflow_test_device` and asserts the sentinel appears in the same log line — generic substring `metric_read` / `narrowing_overflow` in an unrelated log can no longer accidentally satisfy the assertion.
+- [x] **IR13** [MEDIUM]: explicit LOAD-BEARING comment added above the raw-SQL INSERT in `test_load_all_metrics_timestamp_fallback` documenting that `value_type='Float'` + `value_real=456.78` are required for the test to reach the timestamp-fallback path under A-4's legacy-row skip.
+
+**Iter-1 patch round verification (2026-05-16):**
+
+- `cargo build --all-targets` — clean.
+- `cargo test --all-targets` — **1212 passed / 0 failed / 10 ignored** (+4 vs 1208 iter-0 baseline: +1 narrowing-underflow + +1 staleness-uncertain test, IR3 schema-drift expansion adds assertion-density not fn count, IR6 replaces ac9 test 1-for-1). Exceeds AC#12 target ≥1175 by 37.
+- `cargo clippy --all-targets -- -D warnings` — clean.
+- `cargo test --doc` — 0 failed / 55 ignored (AC#13 preserved).
+
+Mid-iter-1 fix: `test_float_narrowing_underflow_emits_metric_read_warn` initially used `1e-40_f64` which narrows to a subnormal f32 (≈1e-40, non-zero) — the underflow guard correctly did NOT fire. Adjusted to `1e-50_f64` (below f32 subnormal min ~1.4e-45) which narrows to true `0.0_f32` and triggers the guard. This confirms the IR7 guard is precise: subnormal-representable values pass through; only true underflow-to-zero is flagged.
+
+Per CLAUDE.md "Code Review & Story Validation Loop Discipline" + memory `feedback_iter3_validation` 9-story validated pattern + memory `feedback_review_iterations` ("extra review pass beats missing an issue; default to re-running review layers after patches") — **iter-1 was a heavy patch round (13 patches across multiple files including the HIGH IR4 production-logic narrowing + IR6 test rewrite + 3 new defensive guards in the helper). Iter-2 review on a different LLM is the natural next step.** Story status stays `review` pending iter-2 verdict; flipping to `done` after a single same-LLM iter-1 would violate the loop-discipline doctrine and the memory's stated preference.
+
+### Review Findings (Iter-2, 2026-05-16) — patches applied, test verification pending
+
+Iter-2 code-review run on 2026-05-16 via `bmad-code-review A-4` on the same LLM (Claude Opus 4.7) against the iter-1 patch diff. 3 parallel adversarial layers: Blind Hunter (16 findings — 1 HIGH-REG + 6 MEDIUM + 9 LOW), Edge Case Hunter (10 findings — mixed MEDIUM/LOW), Acceptance Auditor (13 SATISFIED / 0 VIOLATED / 2 AMBIGUOUS LOW / 0 REGRESSION → ELIGIBLE-FOR-DONE).
+
+**Strongest iter-2 catch (HIGH-REG) — IR6 test tautology:** iter-1's IR6 test seeded `value: "100"` paired with `data_type: MetricType::Int(100)`. If a future regression restored the dropped legacy fallback `prev_metric.value.parse::<i64>().ok()`, `"100".parse::<i64>() = Some(100)` and the test would still pass via the legacy path — defeating the very contract IR6 was supposed to pin. The test was structurally inadequate to regression-guard the typed-path-only contract IR4 established. New finding class identified: **"fake regression-guard test"** — tests that purport to pin a dropped-fallback contract but whose seed values would satisfy both the new path AND the dropped path if it were restored. Documented in memory `feedback_iter3_validation` as the 10th-story-validated pattern.
+
+#### Decision-needed (0)
+
+No decision-needed findings in iter-2 — all 14 findings have unambiguous fixes.
+
+#### Patches (14, all applied 2026-05-16)
+
+- [x] **JR1 [HIGH-REG — Blind iter-2 single-source]: IR6 test fake-regression-guard tautology** [src/chirpstack.rs::tests::ac9_counter_monotonic_typed_path_extracts_payload] — Seed `value: "100"` replaced with `value: "ir6_unparseable_sentinel"`. Only the typed-path branch can now produce `prev_int=100`; a regression that restored the dropped legacy fallback would observe `"ir6_unparseable_sentinel".parse::<i64>().ok() == None`, the monotonic check would not fire, the test would fail correctly. Comment block expanded to document the LOAD-BEARING constraint for future maintainers.
+- [x] **JR2 [HIGH-REG]: stale doc comment in `get_metric_value` about legacy `value` column purpose** [src/storage/sqlite.rs:640-649] — Iter-1 IR4 dropped the chirpstack monotonic-check legacy fallback but iter-1's doc comment still cited that fallback as a reason to keep `value: String` in the SELECT projection. Updated to cite only `MetricValue.value compat` (A-5 territory) + an iter-2 JR2 retrospective note.
+- [x] **JR3 [MEDIUM — Edge convergent]: asymmetric multi-set check on `legacy` arm** [src/storage/sqlite.rs:251-263] — Iter-1 IR2 added multi-set defensive guards to all 4 typed arms but NOT to the legacy arm. v008 CHECK requires `value_type='legacy'` rows have all typed columns NULL; a drifted legacy row with `value_real=Some(...)` would silently return `Ok(None)` and the real value would be lost. JR3 extends the multi-set check to the legacy arm via the same `typed_column_multi_set_err` helper (now widened with 4 column-set flags per JR7).
+- [x] **JR4 [MEDIUM]: IR1 info! log missing `event=` field** [src/opc_ua.rs:1495-1518] — Iter-1 IR1 demoted the `error!` to `info!` but didn't carry the canonical `event=` field used by the metric-event taxonomy. JR4 adds `event="metric_read"` `reason="no_payload"` so log-grep pipelines that filter on `event=` capture this line consistently with the sibling `metric_parse` and `metric_read narrowing_*` events. `docs/logging.md` `metric_read` row extended to document the `reason ∈ {no_payload, narrowing_overflow, narrowing_underflow}` closed enum.
+- [x] **JR5 [MEDIUM]: IR5 inverted log strategy hid schema-drift skips at trace level** [src/storage/sqlite.rs:1486-1505] — Iter-1 IR5 emitted info! only when `legacy_skipped_count > 0`. A post-A-4 stabilized system where the only failures are schema drift (more serious operationally) would have ZERO operator-visible signal. JR5 coalesces: info! fires when EITHER legacy OR schema-drift skip > 0, with both counts in the same line. Added `event="load_all_metrics"` field for grep-ability.
+- [x] **JR6 [MEDIUM]: IR4 comment cites wrong line ranges for upstream guards** [src/chirpstack.rs:1693-1727] — Iter-1 IR4 comment claimed "the upstream `int_overflow` guard at lines 1622-1668 catches NaN/Inf/saturating-cast". Actual ranges: non_finite guard at 1618-1629; int_overflow at 1633-1646. JR6 rewrites the comment to cite "the upstream non_finite guard + int_overflow guard (the two guards earlier in this function — see the `int_target = matches!(kind, Counter) || ...` predicate above)" — line-number-agnostic phrasing that won't drift on future refactors.
+- [x] **JR7 [MEDIUM]: `typed_column_multi_set_err` doesn't name which other columns are non-NULL** [src/storage/sqlite.rs:typed_column_multi_set_err] — Iter-1's helper said "multiple typed columns are non-NULL" without naming which. JR7 widens the signature to take 4 `bool` flags (`real_set`, `int_set`, `bool_set`, `text_set`) and emits `[value_int, value_bool]` (etc.) in the error message. Operators can now locate the contamination without an extra SQL probe.
+- [x] **JR8 [MEDIUM]: inconsistent error-message phrasing across 3 defensive guards** [src/storage/sqlite.rs:typed_column_drift_err + typed_column_multi_set_err + inline Bool/Float guards] — Iter-1 patches IR2/IR8/IR9 each had a different lead phrasing ("Schema drift:" vs "Non-finite value_real ..." vs "Out-of-range value_bool ..."). JR8 harmonizes all three to lead with "Schema drift: value_type='X' but ..." prefix so log-grep pipelines can filter on the common prefix.
+- [x] **JR9 [LOW]: IR3 test missing near-miss value_type cases** [src/storage/sqlite.rs::tests] — Test only exercised "Garbage" as the Unknown case. JR9 adds 8 near-miss cases ('float', 'FLOAT', 'Float ', ' Float', '', 'Int32', 'boolean', 'Legacy') — catches regressions that loosen exact-equality matching to case-insensitive or trim-based comparison.
+- [x] **JR10 [LOW]: IR3 test missing f64::NEG_INFINITY** [src/storage/sqlite.rs::tests] — Iter-1 IR9 test omitted -Inf. JR10 extends the non-finite loop to `[NaN, +Inf, -Inf]`. Also updated assertion to match JR8-harmonized phrasing ("Schema drift" + "non-finite").
+- [x] **JR11 [LOW]: IR3 test missing combined-condition cases** [src/storage/sqlite.rs::tests] — No test covered a row satisfying BOTH multi-set AND out-of-range/NaN. JR11 adds 2 combined cases pinning the documented guard-ordering (multi-set FIRST then range/finiteness); a regression that swapped the ordering would change which error surfaces.
+- [x] **JR12 [LOW]: IR4 comment missing Float→Int reconfig-window scenario** [src/chirpstack.rs:1709-1727] — Iter-1 IR4 comment only documented the Bool → Int reconfig case. JR12 expands to acknowledge the Float → Int / Bool → Int symmetric reconfig window where `prev_metric.data_type` is the OLD variant until first Counter UPSERT replaces the row. Acceptable-by-design (reconfig events are rare) but now documented.
+- [x] **JR13 [LOW]: narrowing-underflow boundary positive test** [src/opc_ua.rs::tests::test_float_subnormal_passthrough_does_not_emit_warn] — New negative test: `MetricType::Float(1e-40_f64)` narrows to a non-zero f32 subnormal and MUST NOT fire the `narrowing_underflow` warn. Catches regressions that loosen the guard predicate to e.g. `f.abs() < f32::MIN_POSITIVE` (which would wrongly flag subnormal-representable values).
+- [x] **JR14 [LOW]: IR7 test missing `event="metric_read"` assertion** [src/opc_ua.rs::tests::test_float_narrowing_underflow_emits_metric_read_warn] — IR12 overflow test asserts both `event=` AND `reason=` AND `device_id`. IR7 underflow test only asserted `reason=` + device_id. JR14 adds the `event=` assertion for symmetry — a regression that drops the `event=` field on the underflow warn is now caught.
+
+#### Deferred (LOW / not-blocking)
+
+- DEF-iter2-A4-1 (Edge ED6): `prev_int = i64::MIN` exotic case in monotonic check — silently disarms reset detection. Acceptable in practice; i64::MIN as a legitimate Counter value is exotic.
+- DEF-iter2-A4-2 (Edge ED7): operator can't distinguish "metric absent" from "legacy row pending" in the IR1 info! log. Would require a new storage trait return shape (`Ok(NoneReason)`). Out of A-4 scope; revisit in A-5 / A-7 cleanup.
+- DEF-iter2-A4-3 (Edge ED9): guard ordering in `metric_type_from_typed_columns` masks IR8 out-of-range signal whenever multi-set drift is ALSO present (two-pass triage). Documented behavior; JR11 test pins the ordering contract.
+- DEF-iter2-A4-4 (Edge ED10 partial): narrowing-underflow boundary test JR13 added the positive case; the ~1.4e-45 explicit-boundary case (e.g., `f64::from_bits(0x35a0000000000000)` ≈ smallest f64 that narrows to the smallest f32 subnormal) is not pinned. Hypothetical; defer.
+- Auditor AMBIGUOUS-LOW #1: IR4 spec-text update needed — AC#9 spec prose was renegotiated mid-iter-1 via user decision (a); the spec's AC#9 paragraph in the `## Acceptance Criteria` section still describes the legacy fallback. Update at iter-2-spec-cleanup time.
+- Auditor AMBIGUOUS-LOW #2: IR2 tightened read semantics — schema-drift rows that iter-0 contract would have silently returned now return Err. Strictly tighter; only matters under manual SQL / restored backup. Defer.
+- Blind LOW (~8 items): single-source style/cosmetic nits — defer to a future housekeeping pass.
+
+#### Iter-2 patch round verification — **STATUS: PENDING ON SESSION RESUME**
+
+All 14 patches applied to working tree (uncommitted). Build verified clean once via `TMPDIR=/home/gcorbaz/.cache/cargo-tmp cargo build --all-targets` (default /tmp blocked by tmpfs disk-quota — see memory `reference_cargo_tmpfs_workaround`). **The full cargo test --all-targets re-run + cargo clippy + cargo test --doc verification is PENDING — must be re-run on session resume.**
+
+Expected counts post-iter-2:
+- `cargo test --all-targets`: target ≥1213 passed / 0 failed / 10 ignored (+1 fn vs 1212 iter-1 baseline — JR13 subnormal-passthrough; JR9/JR10/JR11 add assertion-density not fn count; JR3 helper-arg widening preserves existing test sub-cases).
+- `cargo clippy --all-targets -- -D warnings`: clean (no new clippy-flagged constructs).
+- `cargo test --doc`: 0 failed / 55 ignored (preserved).
+
+**Resume actions:**
+1. Run: `TMPDIR=/home/gcorbaz/.cache/cargo-tmp cargo test --all-targets`. Verify count + 0 failures.
+2. Run: `TMPDIR=/home/gcorbaz/.cache/cargo-tmp cargo clippy --all-targets -- -D warnings`. Verify clean.
+3. Run: `TMPDIR=/home/gcorbaz/.cache/cargo-tmp cargo test --doc`. Verify 0 failed.
+4. If all green: update sprint-status.yaml + commit iter-1+iter-2 patches as a single end-of-review commit (CLAUDE.md Pattern A: "Story A-4: OPC UA Read Value-Payload Pipeline — Code Review Complete (2 iter, same LLM)").
+5. Decide: flip A-4 to `done` (loop terminates per CLAUDE.md condition #2 — only LOWs deferred after iter-2 patches) OR run iter-3 per memory `feedback_iter3_validation` 10-story pattern. Both are CLAUDE.md-conforming; user's `feedback_review_iterations` memory ("extra review pass beats missing an issue") leans toward iter-3.
+
+**Iter-2 verdict (pending verification):** ELIGIBLE-FOR-DONE if cargo gates pass clean. Same-LLM 10-story pattern says iter-3 typically surfaces 0-1 MED at this point (Stories 9-5/9-6/9-7 stopped at iter-3 with 0 HIGH + 0-2 MED). Iter-4 has never added value on this codebase. Story A-4 is structurally at the same iter-2-clean shape as those stories; iter-3 is the user's call.
 
 ### Change Log
 
