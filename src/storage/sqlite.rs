@@ -1777,13 +1777,18 @@ impl crate::storage::StorageBackend for SqliteBackend {
             };
 
             // Parse the ISO8601 timestamp back to SystemTime.
+            // A-5 P2 iter-1 review fix: `unparseable_timestamp` is now a
+            // first-class member of the metric_history_read closed reason
+            // enum (was previously a sub-field of reason=schema_drift via
+            // `reason_detail`, which violated the docs/logging.md closed-
+            // enum claim). Per the audit-event taxonomy, every distinct
+            // failure mode gets its own reason value.
             let timestamp = match chrono::DateTime::parse_from_rfc3339(&timestamp_str) {
                 Ok(dt) => std::time::SystemTime::from(dt.with_timezone(&Utc)),
                 Err(e) => {
                     warn!(
                         event = "metric_history_read",
-                        reason = "schema_drift",
-                        reason_detail = "unparseable_timestamp",
+                        reason = "unparseable_timestamp",
                         device_id = %device_id,
                         metric_name = %metric_name,
                         timestamp_str = %timestamp_str,
@@ -1801,15 +1806,18 @@ impl crate::storage::StorageBackend for SqliteBackend {
             });
         }
 
+        // A-5 P3 iter-1 review fix: aggregate-warn dropped. Per-row warns
+        // already cover each skip with full context; the aggregate emission
+        // double-emitted under reason=schema_drift even when only timestamp
+        // parse failures fired (misclassification). The cumulative counts
+        // remain as telemetry trace-level for ops dashboards.
         if schema_drift_skipped > 0 || unparseable_timestamp_skipped > 0 {
-            warn!(
-                event = "metric_history_read",
-                reason = "schema_drift",
+            trace!(
                 device_id = %device_id,
                 metric_name = %metric_name,
                 schema_drift_skipped,
                 unparseable_timestamp_skipped,
-                "query_metric_history: rows skipped due to schema drift"
+                "query_metric_history: row-skip telemetry"
             );
         }
 
@@ -5026,6 +5034,44 @@ mod tests {
         let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let ts_iso = chrono::DateTime::<Utc>::from(t0).to_rfc3339();
 
+        // A-5 P9 iter-1 review fix: cover ALL v008 CHECK arms, not just
+        // the Float arm. The prior single-arm test could miss a CHECK
+        // regression that weakened only the Bool/Int/String arms.
+        for (value_type, extra_col, extra_val) in [
+            // (value_type, drift cause)
+            ("Float", "value_real", "NULL"),
+            ("Int", "value_int", "NULL"),
+            ("Bool", "value_bool", "NULL"),
+            ("String", "value_text", "NULL"),
+        ] {
+            let conn = backend
+                .pool
+                .checkout(Duration::from_secs(5))
+                .expect("checkout");
+            // Drop the discriminated column (set NULL) — every typed arm
+            // requires its discriminated column NOT NULL.
+            let sql = format!(
+                "INSERT INTO metric_history \
+                 (device_id, metric_name, value, data_type, timestamp, created_at, value_type, {}) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, {})",
+                extra_col, extra_val
+            );
+            let result = conn.execute(&sql, params!["dev1", "m", "1.0", value_type, ts_iso, value_type]);
+            assert!(
+                result.is_err(),
+                "v008 cross-column CHECK must reject value_type='{}' with NULL {}",
+                value_type, extra_col
+            );
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("CHECK constraint failed"),
+                "expected CHECK constraint failure for value_type='{}' + NULL {}; got: {}",
+                value_type, extra_col, err_msg
+            );
+        }
+
+        // Bonus arm: value_type='legacy' with a non-NULL typed column
+        // must also fail (the legacy arm requires ALL typed columns NULL).
         let conn = backend
             .pool
             .checkout(Duration::from_secs(5))
@@ -5033,18 +5079,12 @@ mod tests {
         let result = conn.execute(
             "INSERT INTO metric_history \
              (device_id, metric_name, value, data_type, timestamp, created_at, value_type, value_real) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, NULL)",
-            params!["dev1", "m", "1.0", "Float", ts_iso, "Float"],
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)",
+            params!["dev1", "m", "legacy", "legacy", ts_iso, "legacy", 1.5_f64],
         );
         assert!(
             result.is_err(),
-            "v008 cross-column CHECK must reject value_type='Float' with NULL value_real"
-        );
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("CHECK constraint failed"),
-            "expected CHECK constraint failure on schema-drift INSERT; got: {}",
-            err_msg
+            "v008 cross-column CHECK must reject value_type='legacy' with non-NULL value_real"
         );
 
         let _ = fs::remove_file(&path);

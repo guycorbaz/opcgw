@@ -81,10 +81,15 @@ fn bench_history_read_7_day_full_retention() {
     for batch_start in (0..ROW_COUNT).step_by(SEED_BATCH_SIZE) {
         let batch_end = std::cmp::min(batch_start + SEED_BATCH_SIZE, ROW_COUNT);
         let batch: Vec<BatchMetricWrite> = (batch_start..batch_end)
+            // A-5 P6 iter-1 review fix: distinct payloads per row preserve
+            // the write-pipeline-preserves-row-identity coverage signal
+            // (pre-A-5 the legacy `value: String` field carried
+            // format!("{}.{}", i%100, i%10) sentinels; post-A-5 the typed
+            // payload encodes the sentinel directly).
             .map(|i| BatchMetricWrite {
                 device_id: BENCH_DEVICE_ID.to_string(),
                 metric_name: BENCH_METRIC_NAME.to_string(),
-                data_type: MetricType::Float(0.0),
+                data_type: MetricType::Float(i as f64),
                 timestamp: base + Duration::from_secs(i as u64),
             })
             .collect();

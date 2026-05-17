@@ -1853,24 +1853,29 @@ fn issue_99_regression_two_devices_same_metric_name_history_read_returns_device_
     // test pins that storage upholds its end of the contract.
     let t0 = SystemTime::now() - Duration::from_secs(60);
     let t1 = t0 + Duration::from_secs(30);
+    // A-5 P5 iter-1 review fix: distinct payloads per row so a future
+    // cross-device-leak regression (e.g. storage incorrectly keying by
+    // metric_name alone) would surface as content drift, not just
+    // cardinality drift. Pre-fix all 3 rows seeded MetricType::Float(0.0)
+    // (fake regression-guard hazard per A-1-iter1-DEF13 class).
     backend
         .batch_write_metrics(vec![
             BatchMetricWrite {
                 device_id: "dev-A".to_string(),
                 metric_name: "Moisture".to_string(),
-                data_type: MetricType::Float(0.0),
+                data_type: MetricType::Float(11.0),
                 timestamp: t0,
             },
             BatchMetricWrite {
                 device_id: "dev-A".to_string(),
                 metric_name: "Moisture".to_string(),
-                data_type: MetricType::Float(0.0),
+                data_type: MetricType::Float(11.5),
                 timestamp: t1,
             },
             BatchMetricWrite {
                 device_id: "dev-B".to_string(),
                 metric_name: "Moisture".to_string(),
-                data_type: MetricType::Float(0.0),
+                data_type: MetricType::Float(22.0),
                 timestamp: t0,
             },
         ])
@@ -1897,6 +1902,27 @@ fn issue_99_regression_two_devices_same_metric_name_history_read_returns_device_
         1,
         "dev-B must return 1 row for SHARED metric_name 'Moisture'; got {}",
         rows_b.len()
+    );
+    // A-5 P5 iter-1 review fix: content-level cross-device-leak detection.
+    // dev-A rows must carry Float(11.0) and Float(11.5); dev-B row must
+    // carry Float(22.0). A regression that misroutes rows by metric_name
+    // would surface here even if cardinalities happened to match.
+    let a_payloads: Vec<_> = rows_a.iter().map(|r| r.payload.clone()).collect();
+    assert!(
+        a_payloads.contains(&Some(MetricType::Float(11.0))),
+        "dev-A history must contain Float(11.0); got {:?}",
+        a_payloads
+    );
+    assert!(
+        a_payloads.contains(&Some(MetricType::Float(11.5))),
+        "dev-A history must contain Float(11.5); got {:?}",
+        a_payloads
+    );
+    assert_eq!(
+        rows_b[0].payload,
+        Some(MetricType::Float(22.0)),
+        "dev-B history must carry Float(22.0), not a dev-A value; got {:?}",
+        rows_b[0].payload
     );
     // Cross-key probe — querying for an unknown device_id must NOT
     // resolve to any real device's rows (storage MUST be keyed by

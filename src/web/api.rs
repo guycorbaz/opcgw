@@ -362,17 +362,23 @@ pub async fn api_devices(
                                 Some(row) => MetricView {
                                     metric_name: spec.metric_name.clone(),
                                     data_type: row.data_type.to_string(),
-                                    // A-5: derive the display string from the
-                                    // typed payload (no more `row.value: String`).
+                                    // A-5 P0-D4 (iter-1 review): preserve the
+                                    // pre-A-5 Story 9-3 dashboard wire contract.
+                                    //   - Bool: render `"0"` / `"1"` (matches
+                                    //     `validate_bool_metric_value` write side;
+                                    //     dashboard JS may compare against `"1"`).
+                                    //   - Float: narrow to f32 before stringify so
+                                    //     the precision matches the pre-A-5
+                                    //     chirpstack poller's `raw_value.to_string()`
+                                    //     output (raw_value is f32 from ChirpStack).
+                                    //   - Int / String: round-trip is unambiguous.
                                     // Story A-6 will widen this to a typed JSON
-                                    // shape (`{"value": 23.5, "type": "Float"}`);
-                                    // the stringified rendering is preserved
-                                    // here for Story 9-3 dashboard backwards-compat
-                                    // until A-6 lands.
+                                    // shape (`{"value": 23.5, "type": "Float"}`)
+                                    // and these rendering rules can be retired.
                                     value: Some(match &row.data_type {
-                                        crate::storage::MetricType::Float(f) => f.to_string(),
+                                        crate::storage::MetricType::Float(f) => (*f as f32).to_string(),
                                         crate::storage::MetricType::Int(i) => i.to_string(),
-                                        crate::storage::MetricType::Bool(b) => b.to_string(),
+                                        crate::storage::MetricType::Bool(b) => if *b { "1".to_string() } else { "0".to_string() },
                                         crate::storage::MetricType::String(s) => s.clone(),
                                     }),
                                     timestamp: Some(row.timestamp.to_rfc3339()),

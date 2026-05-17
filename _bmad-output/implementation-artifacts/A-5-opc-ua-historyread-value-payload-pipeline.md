@@ -232,6 +232,48 @@ A-5 must NOT touch (carry-forward strict-zero from A-1 / A-2 / A-3 / A-4):
   - [ ] 13.6 `grep -rn 'TODO(A-5)' src/` returns 0 hits (all transitional markers retired).
   - [ ] 13.7 Live OPC UA server end-to-end regression: `tests/opcua_history_read.rs` Story 8-3 tests pass + new `tests/opcua_historyread_typed_payload.rs` integration test passes.
 
+### Review Findings (iter-1, same-LLM 2026-05-17)
+
+**Reviewer layers:** Blind Hunter (15 findings: 0 HIGH-REG / 6 MEDIUM / 9 LOW), Edge Case Hunter (12 findings: 0 HIGH / 4 MEDIUM / 8 LOW), Acceptance Auditor (verdict: **ELIGIBLE-FOR-DONE** with 1 AMBIGUOUS-HIGH on AC#14 + 1 AMBIGUOUS-LOW on AC#13).
+
+#### decision-needed (4, all resolved 2026-05-17)
+
+- [x] **[Review][Decision] D1: AC#14 strict-zero file invariants — `src/web/api.rs` + `src/storage/schema.rs` touched despite MUST-NOT list** [src/web/api.rs:362-385, src/storage/schema.rs:729-735] — Auditor AMBIGUOUS-HIGH. **User decision (a): accepted as deferred** — DEF-iter1-A5-D1 in deferred-work.md. Compile-cascade necessities from AC#4 field removal.
+- [x] **[Review][Decision] D2: Narrowing-overflow/underflow returns `StatusCode::Good` with `Variant::Float(0.0)`** [src/opc_ua_history.rs:401-419] — Blind P4-MED. **User decision (a): accepted as deferred (mirrors A-4)** — DEF-iter1-A5-D2 in deferred-work.md. Paired A-4 + A-5 follow-up.
+- [x] **[Review][Decision] D3: Schema-drift rows silently dropped vs legacy rows visible** [src/storage/sqlite.rs:1775] — Edge MED. **User decision: keep current behavior** — DEF-iter1-A5-D3 in deferred-work.md. Schema-drift is structurally unreachable post-v008 CHECK; Story 8-3 silent-skip is correct.
+- [x] **[Review][Decision] D4: `MetricView` shim breaks Story 9-3 dashboard string contract** [src/web/api.rs:373-378] — Blind+Edge convergent MEDIUM. **User decision (a): preserve pre-A-5 strings** — promoted to patch **P0-D4** below.
+
+#### patch (15)
+
+- [x] **[Review][Patch] P0-D4: `MetricView` Bool/Float wire-format regression** [src/web/api.rs:373-378] — D4 promoted to patch. Pre-A-5 the JSON `value` field carried `"0"`/`"1"` for Bool (per `validate_bool_metric_value` write side) and f32-precision Float strings (per chirpstack poller). Post-A-5 `b.to_string()` → `"true"`/`"false"` and `f.to_string()` → f64 precision. **Fix:** Bool arm uses `(if *b { "1" } else { "0" }).to_string()`; Float arm uses `(*f as f32).to_string()` to preserve the Story 9-3 wire contract until A-6 ships the typed JSON shape.
+- [x] **[Review][Patch] P1: Compile-time field-shape pins don't prevent field re-introduction** [src/storage/types.rs:271-278, src/storage/mod.rs:1554-1583] — Blind+Edge convergent MEDIUM. The `const _: fn(&T)` pattern only validates referenced fields exist; adding a new `pub value: String` would compile. Spec/commit-message claim of "structural closure" of A-1 DEFs (DEF9/DEF15/DEF19) is FALSE. **Fix:** use a non-exhaustive destructure pattern (no `..`) like `let MetricValue { device_id, metric_name, timestamp, data_type } = v;` inside the const fn so a new field forces a compile error.
+- [x] **[Review][Patch] P2: `metric_history_read` `reason` enum violated by `reason_detail="unparseable_timestamp"`** [src/storage/sqlite.rs:1783-1792, docs/logging.md:152] — Blind MEDIUM. Closed-enum claim is `{schema_drift, narrowing_overflow, narrowing_underflow}`; adding `reason_detail` for unparseable_timestamp opens the enum. **Fix:** promote to 4-arm closed enum `{schema_drift, unparseable_timestamp, narrowing_overflow, narrowing_underflow}` OR fold `reason_detail` into a uniform `reason_detail` field on ALL emission sites.
+- [x] **[Review][Patch] P3: Aggregate warn double-emits + misclassifies under `reason="schema_drift"`** [src/storage/sqlite.rs:1804-1814] — Blind MEDIUM. When one row is skipped, per-row warn fires AND aggregate warn fires; when only `unparseable_timestamp_skipped > 0`, aggregate still says `reason="schema_drift"`. **Fix:** drop the aggregate warn (per-row warns already cover) OR rename to a non-canonical event (e.g., `event="metric_history_summary"`) outside the reason-enum contract.
+- [x] **[Review][Patch] P4: Narrowing-overflow/underflow warn omits `device_id` and `metric_name` fields** [src/opc_ua_history.rs:403-416] — Edge MEDIUM. `event="metric_history_read"` schema is non-uniform — only schema_drift carries device_id/metric_name; narrowing variants carry only `event`+`reason`+`f64_value`. Operators cannot pivot from narrowing-warn to offending node. **Fix:** thread `device_id` + `metric_name` through `build_data_values` (caller at `:329` has them).
+- [x] **[Review][Patch] P5: `issue_99_regression_two_devices_same_metric_name_history_read_returns_device_specific_data` test seeds all-zero Float payloads** [tests/web_device_crud.rs:1857-1876] — Edge MEDIUM, fake-regression-guard hazard (A-1-iter1-DEF13 class). Sister test at `:1758-1768` already uses Float(11.0)/Float(22.0); this one was missed during the A-5 fixture cascade. **Fix:** distinct payloads (Float(11.0), Float(11.5), Float(22.0)) so cross-device leak is content-detectable.
+- [x] **[Review][Patch] P6: `tests/opcua_history_bench.rs` 7-day bench seeds 604800 rows with identical `Float(0.0)`** [tests/opcua_history_bench.rs:84-90] — Blind+Edge convergent MEDIUM. Pre-A-5 the value sentinel encoded `format!("{}.{}", i%100, i%10)`; post-A-5 the typed payload is zero-defaulted. **Fix:** `Float(i as f64)` for write-pipeline parity (closes A-1-iter1-DEF13 hazard for the bench surface).
+- [x] **[Review][Patch] P7: `mixed_typed_and_legacy_rows_in_one_history_range` ordering brittle** [tests/opcua_historyread_typed_payload.rs:204-218] — Blind MEDIUM. Legacy seed uses `chrono.to_rfc3339()` (second precision); typed seeds use `SystemTime::from(base)` (potentially nanos). Run-to-run flake risk on ordering. **Fix:** second-aligned `base` via explicit `SystemTime::UNIX_EPOCH + Duration::from_secs(N)`.
+- [x] **[Review][Patch] P8: Stale aggregate-warn counter field-name overlap with `reason` value** [src/storage/sqlite.rs:1810-1811] — Blind LOW. `schema_drift_skipped` field name overlaps with `reason="schema_drift"` value. **Fix:** rename to `count_typed_rejected` and `count_timestamp_rejected` (and apply alongside P3).
+- [x] **[Review][Patch] P9: Helper-only Bool=2 boundary coverage** [src/storage/sqlite.rs:5010+] — Edge LOW. The post-A-5 v008 CHECK test only covers `value_type='Float' + value_real=NULL`. **Fix:** add `value_type='Bool' + value_bool=2` and `value_type='Int' + value_int=NULL` sibling tests.
+- [x] **[Review][Patch] P10: `validate_bool_metric_value` doc dropped load-bearing widening warning during phrase harmonization** [src/chirpstack.rs:1748-1762] — Blind LOW. Commit dropped the "If the helper's return alphabet ever widens, this caller silently writes Bool(false)" warning. **Fix:** restore the warning paragraph.
+- [x] **[Review][Patch] P11: Narrowing-underflow guard lacks negative-zero test pin** [src/opc_ua_history.rs:410] — Blind LOW. `*f == 0.0_f64` treats `-0.0 == 0.0` as true. **Fix:** add `f64::from_bits(0x8000000000000000)` (negative zero) regression test.
+- [x] **[Review][Patch] P12: Drifted-legacy hazard test seeds `data_type='Float'` for a `value_type='legacy'` row** [tests/opcua_historyread_typed_payload.rs:111-130] — Edge LOW. CHECK doesn't enforce `data_type='legacy'` for legacy rows today; a future hardening would break this test for unobvious reasons. **Fix:** seed `data_type='legacy'`.
+- [x] **[Review][Patch] P13: No integration test for `MetricType::Bool(false)` round-trip via SQLite HistoryRead** [tests/opcua_historyread_typed_payload.rs:69-73] — Edge LOW. The 4-variant test exercises `Bool(true)` (`value_bool=1`); the `b != 0` projection check is not pinned at integration level. **Fix:** add a `Bool(false)` row to the round-trip set.
+- [x] **[Review][Patch] P14: No test for consecutive legacy rows preserving order/count** [tests/opcua_historyread_typed_payload.rs:152-218] — Edge LOW. Tests exercise exactly 1 legacy row. **Fix:** add a 3-consecutive-legacy-rows test.
+- [x] **[Review][Patch] P15: No test for `i64::MAX` / `i64::MIN` round-trip through HistoryRead** [tests/opcua_historyread_typed_payload.rs:64] — Edge LOW. Only `Int(42)` is exercised. **Fix:** add `Int(i64::MAX)` and `Int(i64::MIN)` rows + assert exact round-trip.
+
+#### defer (5)
+
+- [x] [Review][Defer] W1: `query_metric_history` no longer reads `data_type` column [src/storage/sqlite.rs:1709-1710] — deferred to A-7 (column drop migration).
+- [x] [Review][Defer] W2: Int32 → Int64 silent widening on round-trip [src/opc_ua.rs:2074-2075] — pre-existing OPC UA design; not introduced by A-5.
+- [x] [Review][Defer] W3: `leg_v_f` assertion bakes in soon-to-rot fact about legacy `value` column [src/storage/sqlite.rs:5337] — A-7 cleanup territory; transitional.
+- [x] [Review][Defer] W4: `InMemoryBackend::load_all_metrics` stamps `Utc::now()` (pre-A-5 was equally bogus) [src/storage/memory.rs:218] — pre-existing semantic; warm-restart timestamp meaning unchanged by A-5.
+- [x] [Review][Defer] W5: `convert_variant_to_metric` rejects `UInt32`/`UInt64`/`Byte` variants [src/opc_ua.rs:2072-2085] — pre-existing, not A-5 scope; OPC UA implicit conversion is an interop hazard but unchanged by this story.
+
+#### dismiss (1)
+
+- AC#13 spec target `≥1230 passed` vs actual `1217 passed` — dev log explicitly rebalanced (2 pre-A-3 tests retired as structurally unreachable post-v008 CHECK + 3 new integration tests + ~13 fewer than spec estimate). Auditor verdict AMBIGUOUS-LOW with sufficient justification.
+
 ---
 
 ## Dev Notes

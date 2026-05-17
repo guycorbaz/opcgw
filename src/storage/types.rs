@@ -268,16 +268,21 @@ pub struct ChirpstackStatus {
     pub error_count: i32,
 }
 
-// A-5 Task 9 (AC#7): compile-time field-shape pin for MetricValue. The
-// transitional `value: String` field was removed in A-5; this const fn
-// surfaces a compile error if a future refactor reintroduces the field
-// or renames the typed payload.
+// A-5 Task 9 (AC#7) + P1 iter-1 review fix: compile-time field-shape pin
+// for MetricValue. The transitional `value: String` field was removed in
+// A-5; this destructure (without `..`) surfaces a compile error if a
+// future refactor (a) renames an existing field, (b) changes a field's
+// type, OR (c) RE-INTRODUCES the dropped `value: String` field — the
+// non-exhaustive destructure forces every struct field to appear here.
+// P1 iter-1 fix: prior version used `let _: &Type = &v.field;` which only
+// validated referenced fields exist; field RE-introduction would compile.
 #[allow(dead_code)]
 const _ASSERT_METRIC_VALUE_SHAPE: fn(&MetricValue) = |v| {
-    let _: &String = &v.device_id;
-    let _: &String = &v.metric_name;
-    let _: &chrono::DateTime<chrono::Utc> = &v.timestamp;
-    let _: &MetricType = &v.data_type;
+    let MetricValue { device_id, metric_name, timestamp, data_type } = v;
+    let _: &String = device_id;
+    let _: &String = metric_name;
+    let _: &chrono::DateTime<chrono::Utc> = timestamp;
+    let _: &MetricType = data_type;
 };
 
 #[cfg(test)]

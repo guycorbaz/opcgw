@@ -326,7 +326,7 @@ impl InMemoryNodeManagerImpl for OpcgwHistoryNodeManagerImpl {
             ) {
                 Ok(rows) => {
                     let row_count = rows.len();
-                    let data_values = build_data_values(&rows);
+                    let data_values = build_data_values(&rows, &device_id, &metric_name);
                     let history_data = HistoryData {
                         data_values: Some(data_values),
                     };
@@ -366,7 +366,19 @@ impl InMemoryNodeManagerImpl for OpcgwHistoryNodeManagerImpl {
 /// for OPC UA `HistoryData.data_values`. Rows whose typed parse fails
 /// (e.g. Bool with garbage value) are skipped with a `trace!` log per
 /// AC#1's partial-success contract.
-fn build_data_values(rows: &[HistoricalMetricRow]) -> Vec<DataValue> {
+// A-5 P4 iter-1 review fix: signature widened to take `device_id` +
+// `metric_name` so the narrowing-overflow / narrowing-underflow warns
+// can carry uniform `device_id` + `metric_name` fields (matching the
+// schema_drift / unparseable_timestamp emissions in query_metric_history).
+// The metric_history_read closed-enum audit-event schema is now uniform
+// across all reasons: every emission carries (event, reason, device_id,
+// metric_name) at minimum, plus reason-specific fields (f64_value for
+// narrowing_*, value_type for schema_drift, timestamp_str for unparseable_timestamp).
+fn build_data_values(
+    rows: &[HistoricalMetricRow],
+    device_id: &str,
+    metric_name: &str,
+) -> Vec<DataValue> {
     let mut out = Vec::with_capacity(rows.len());
     let now = DateTime::now();
     for row in rows {
@@ -403,6 +415,8 @@ fn build_data_values(rows: &[HistoricalMetricRow]) -> Vec<DataValue> {
                     warn!(
                         event = "metric_history_read",
                         reason = "narrowing_overflow",
+                        device_id = %device_id,
+                        metric_name = %metric_name,
                         f64_value = *f,
                         "history: f64 narrowed to non-finite f32; returning 0.0"
                     );
@@ -411,6 +425,8 @@ fn build_data_values(rows: &[HistoricalMetricRow]) -> Vec<DataValue> {
                     warn!(
                         event = "metric_history_read",
                         reason = "narrowing_underflow",
+                        device_id = %device_id,
+                        metric_name = %metric_name,
                         f64_value = *f,
                         "history: f64 narrowed to 0.0_f32 (sub-f32 magnitude); returning 0.0"
                     );
@@ -633,7 +649,7 @@ mod tests {
             timestamp: std::time::SystemTime::UNIX_EPOCH
                 + std::time::Duration::from_secs(1_700_000_000),
         }];
-        let dvs = build_data_values(&rows);
+        let dvs = build_data_values(&rows, "test_device", "test_metric");
         assert_eq!(dvs.len(), 1);
         match dvs[0].value.as_ref().expect("variant") {
             Variant::Float(f) => assert!((f - 20.5_f32).abs() < 1e-6),
@@ -654,7 +670,7 @@ mod tests {
                 timestamp: std::time::SystemTime::UNIX_EPOCH,
             },
         ];
-        let dvs = build_data_values(&rows);
+        let dvs = build_data_values(&rows, "test_device", "test_metric");
         assert_eq!(dvs.len(), 2);
         assert!(matches!(dvs[0].value, Some(Variant::Boolean(true))));
         assert!(matches!(dvs[1].value, Some(Variant::Boolean(false))));
@@ -679,7 +695,7 @@ mod tests {
                 timestamp: std::time::SystemTime::UNIX_EPOCH,
             },
         ];
-        let dvs = build_data_values(&rows);
+        let dvs = build_data_values(&rows, "test_device", "test_metric");
         assert_eq!(dvs.len(), 3, "legacy row must appear in the output, not be silently dropped");
         assert!(matches!(dvs[0].value, Some(Variant::Boolean(true))));
         assert!(dvs[1].value.is_none(), "legacy row must have NULL Variant");
@@ -689,6 +705,29 @@ mod tests {
             "legacy row must surface as BadDataUnavailable"
         );
         assert!(matches!(dvs[2].value, Some(Variant::Boolean(false))));
+    }
+
+    // A-5 P11 iter-1 review fix: pin the negative-zero underflow guard
+    // boundary. IEEE 754 says `-0.0 == 0.0`, so `*f != 0.0_f64` is FALSE
+    // for `-0.0_f64`; the underflow branch must NOT fire for negative
+    // zero (treat as ordinary zero passthrough).
+    #[test]
+    fn test_build_data_values_negative_zero_passes_through_without_underflow_warn() {
+        let rows = vec![HistoricalMetricRow {
+            payload: Some(MetricType::Float(f64::from_bits(0x8000_0000_0000_0000))), // -0.0_f64
+            timestamp: std::time::SystemTime::UNIX_EPOCH,
+        }];
+        let dvs = build_data_values(&rows, "negzero_dev", "negzero_metric");
+        assert_eq!(dvs.len(), 1);
+        // Negative zero narrows to negative zero (or zero) — both are
+        // valid Variant::Float values; the underflow branch must NOT fire.
+        match dvs[0].value.as_ref().expect("variant set") {
+            Variant::Float(f) => {
+                assert_eq!(*f, 0.0_f32, "negative zero narrows to zero (IEEE 754)");
+                assert!(f.is_finite(), "must remain finite");
+            }
+            other => panic!("expected Variant::Float, got {:?}", other),
+        }
     }
 
     /// AC#2 sanity: the wrapper exposes the InMemoryBackend (which returns

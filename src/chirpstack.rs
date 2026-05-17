@@ -1754,7 +1754,13 @@ impl ChirpstackPoller {
                 // Iter-1 IR12 contract pin: `validate_bool_metric_value`
                 // returns `Some("0")` for `false` / `Some("1")` for `true` /
                 // `None` for invalid input. The caller maps `"1"` → true /
-                // anything else → false.
+                // anything else → false. **LOAD-BEARING** (A-1-iter1 doctrine
+                // restored at A-5 P10 iter-1 review fix): if the helper's
+                // return alphabet ever widens (e.g. it starts returning
+                // `Some("true")` for legacy compatibility), this caller
+                // silently writes `Bool(false)` for every input — ensure
+                // helper changes update both call sites here and at
+                // `store_metric`.
                 match validate_bool_metric_value(raw_value, device_id, &metric_name, kind) {
                     Some(s) => MetricType::Bool(s == "1"),
                     None => return None,

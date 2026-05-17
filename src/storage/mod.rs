@@ -1546,32 +1546,39 @@ impl Storage {
 /// including device management, metric operations, and status tracking.
 /// Tests use a dedicated test configuration to ensure isolation from
 /// production settings.
-// A-5 Task 9 (AC#7): compile-time field-shape pins for the three structs
-// that lost their transitional `value: String` field. These compile-time
-// const fns force the compiler to verify field names + types at every
-// build; a future refactor that renames a field or drops one will surface
-// as a compile error. Closes A-1-iter1-DEF7 / DEF9 / DEF19, A-1-iter2-DEF5,
-// A-1-iter3-DEF11 as a single structural fix (no new crate dependency).
+// A-5 Task 9 (AC#7) + P1 iter-1 review fix: compile-time field-shape pins
+// for the three structs that lost their transitional `value: String` field.
+// Each const fn destructures the struct WITHOUT a `..` rest pattern, so a
+// future refactor that (a) renames an existing field, (b) changes a field's
+// type, OR (c) RE-INTRODUCES the dropped `value: String` field surfaces as
+// a compile error. P1 iter-1 fix: prior versions used `let _: &Type = &v.field;`
+// which only validated referenced fields exist; field RE-introduction would
+// compile cleanly because the const fn never asserted struct-field-set closure.
+// Closes A-1-iter1-DEF7 / DEF9 / DEF19, A-1-iter2-DEF5, A-1-iter3-DEF11 as
+// a single structural fix (no new crate dependency).
 #[allow(dead_code)]
 const _ASSERT_METRIC_VALUE_INTERNAL_SHAPE: fn(&MetricValueInternal) = |v| {
-    let _: &String = &v.device_id;
-    let _: &String = &v.metric_name;
-    let _: &MetricType = &v.data_type;
-    let _: &chrono::DateTime<chrono::Utc> = &v.timestamp;
+    let MetricValueInternal { device_id, metric_name, timestamp, data_type } = v;
+    let _: &String = device_id;
+    let _: &String = metric_name;
+    let _: &chrono::DateTime<chrono::Utc> = timestamp;
+    let _: &MetricType = data_type;
 };
 
 #[allow(dead_code)]
 const _ASSERT_HISTORICAL_METRIC_ROW_SHAPE: fn(&HistoricalMetricRow) = |r| {
-    let _: &Option<MetricType> = &r.payload;
-    let _: &std::time::SystemTime = &r.timestamp;
+    let HistoricalMetricRow { payload, timestamp } = r;
+    let _: &Option<MetricType> = payload;
+    let _: &std::time::SystemTime = timestamp;
 };
 
 #[allow(dead_code)]
 const _ASSERT_BATCH_METRIC_WRITE_SHAPE: fn(&BatchMetricWrite) = |b| {
-    let _: &String = &b.device_id;
-    let _: &String = &b.metric_name;
-    let _: &MetricType = &b.data_type;
-    let _: &std::time::SystemTime = &b.timestamp;
+    let BatchMetricWrite { device_id, metric_name, timestamp, data_type } = b;
+    let _: &String = device_id;
+    let _: &String = metric_name;
+    let _: &MetricType = data_type;
+    let _: &std::time::SystemTime = timestamp;
 };
 
 #[cfg(test)]
