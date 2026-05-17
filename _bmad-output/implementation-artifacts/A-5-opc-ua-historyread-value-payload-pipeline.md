@@ -5,7 +5,7 @@
 | Story key     | `A-5-opc-ua-historyread-value-payload-pipeline`                                                       |
 | Epic          | A — Storage Payload Migration (Phase B Closure, gates v2.0 GA)                                        |
 | FRs           | FR51 (Epic-A umbrella) — closes the LAST read-path consumer of typed payloads. **Fully closes [issue #108](https://github.com/guycorbaz/opcgw/issues/108).** |
-| Status        | review                                                                                                |
+| Status        | done                                                                                                  |
 | Created       | 2026-05-17                                                                                            |
 | Source epic   | `_bmad-output/planning-artifacts/epics.md § Epic A § Story A.5`                                       |
 | Sprint change | `_bmad-output/planning-artifacts/sprint-change-proposal-2026-05-14.md`                                |
@@ -130,9 +130,9 @@ event = "metric_read"
 **AC#11 — Promoted log level for HistoryRead row-skip emissions:** `src/storage/sqlite.rs::query_metric_history` (lines ~1755-1801) currently emits `trace!("query_metric_history: skipping row with unknown data_type" / "skipping non-finite Float row" / "skipping unparseable Float row" / "skipping row with unparseable timestamp")`. A-5 promotes these to `warn!(event = "metric_history_read", reason = ...)`:
 
 - `skipping row with unknown data_type` → `reason = "schema_drift"` + `value_type = <offending value>` (matches A-4 IR2 schema-drift pattern; should be unreachable post-A-3 thanks to v007 CHECK constraints, but the warn is defensive — closes **A-1-iter1-DEF16**)
-- `skipping non-finite Float row` → not reachable post-A-3 (the option-(a) NaN/Inf filter at the poller — `chirpstack.rs::store_metric` body — already rejects non-finite f64 before write). The skip path remains as a defensive guard with `warn!(event = "metric_history_read", reason = "schema_drift", reason_detail = "non_finite_value_real", …)`.
+- `skipping non-finite Float row` → not reachable post-A-3 (the option-(a) NaN/Inf filter at the poller — `chirpstack.rs::store_metric` body — already rejects non-finite f64 before write). The skip path remains as a defensive guard with `warn!(event = "metric_history_read", reason = "schema_drift", …)` (the non-finite drift surfaces via the `metric_type_from_typed_columns` helper's defensive guard — same `reason="schema_drift"` umbrella as the multi-set / unknown-discriminator drift classes).
 - `skipping unparseable Float row` → not reachable post-A-3 (the writer pipeline populates `value_real REAL` natively; there's no string-parse step on the read path post-A-1 typed-payload removal). The skip path is **deleted** (along with the `value: String` projection it depended on).
-- `skipping row with unparseable timestamp` → preserved as `warn!(event = "metric_history_read", reason = "schema_drift", reason_detail = "unparseable_timestamp", …)` (Story 5-2 staleness-detection sibling — timestamps are still parsed from RFC3339 strings).
+- `skipping row with unparseable timestamp` → preserved as `warn!(event = "metric_history_read", reason = "unparseable_timestamp", …)` per iter-1 P2 closed-enum promotion (Story 5-2 staleness-detection sibling — timestamps are still parsed from RFC3339 strings; pre-iter-1 emission used `reason="schema_drift" reason_detail="unparseable_timestamp"` but the closed-enum contract was widened to 4 first-class reasons during iter-1 review).
 
 **AC#12 — All four payload variants are covered by integration tests + legacy outcome is pinned:** a new `tests/opcua_historyread_typed_payload.rs` integration test:
 
@@ -227,7 +227,7 @@ A-5 must NOT touch (carry-forward strict-zero from A-1 / A-2 / A-3 / A-4):
   - [ ] 13.1 `TMPDIR=/home/gcorbaz/.cache/cargo-tmp cargo test --all-targets` ≥1230 passed / 0 failed / ≤10 ignored.
   - [ ] 13.2 `TMPDIR=/home/gcorbaz/.cache/cargo-tmp cargo clippy --all-targets -- -D warnings` clean.
   - [ ] 13.3 `TMPDIR=/home/gcorbaz/.cache/cargo-tmp cargo test --doc` 0 failed / ≥55 ignored.
-  - [ ] 13.4 `git grep -hoE 'event = "metric_[a-z_]+"' src/ | sort -u` returns exactly 3 lines (`metric_history_read` + `metric_parse` + `metric_read`).
+  - [ ] 13.4 `git grep -hoE 'event = "metric_[a-z_]+"' src/ | sort -u` returns exactly 4 lines (`metric_history_read` + `metric_history_summary` + `metric_parse` + `metric_read`) — iter-2 K6 review fix added the `metric_history_summary` aggregate-skip-telemetry event so ops dashboards filtering on `event="metric_history_*"` can grep-recover cumulative skip counts at trace level.
   - [ ] 13.5 `git grep -nE 'MetricValue.*value: *"|BatchMetricWrite.*value: *"|HistoricalMetricRow.*value:' src/ tests/` returns **zero** hits (post-A-5 the field is structurally gone).
   - [ ] 13.6 `grep -rn 'TODO(A-5)' src/` returns 0 hits (all transitional markers retired).
   - [ ] 13.7 Live OPC UA server end-to-end regression: `tests/opcua_history_read.rs` Story 8-3 tests pass + new `tests/opcua_historyread_typed_payload.rs` integration test passes.
@@ -273,6 +273,35 @@ A-5 must NOT touch (carry-forward strict-zero from A-1 / A-2 / A-3 / A-4):
 #### dismiss (1)
 
 - AC#13 spec target `≥1230 passed` vs actual `1217 passed` — dev log explicitly rebalanced (2 pre-A-3 tests retired as structurally unreachable post-v008 CHECK + 3 new integration tests + ~13 fewer than spec estimate). Auditor verdict AMBIGUOUS-LOW with sufficient justification.
+
+### Review Findings — iter-2 (same-LLM 2026-05-17)
+
+**Reviewer layers:** Blind Hunter (9 findings: 2 HIGH-REG / 4 MEDIUM / 3 LOW), Edge Case Hunter (13 findings: 2 MEDIUM / 11 LOW), Acceptance Auditor (verdict: **ELIGIBLE-FOR-DONE** — all 16 iter-1 patches PATCH-DELIVERS). Iter-2 surfaced the predicted HIGH-REGs in iter-1 patches per memory `feedback_iter3_validation` 10-story pattern (A-5 extends to 11).
+
+#### patch (7, all applied 2026-05-17)
+
+- [x] **[Review][Patch] K1 [HIGH-REG, Blind+Edge convergent]: P15 i64-extremes test is fake-regression-guard** [tests/opcua_historyread_typed_payload.rs:int_extremes_round_trip_through_history_reader] — Test docstring claims "regression to `Variant::Int32(*i as i32)` in `build_data_values` would wrap these — caught here", but the test only asserts on `rows[i].payload` from `query_metric_history`. It NEVER invokes `build_data_values` or asserts on `Variant::Int64`. **Fix:** rewrite the test to call `build_data_values` on the queried rows and assert on `Variant::Int64(i64::MAX)` / `Variant::Int64(i64::MIN)`.
+- [x] **[Review][Patch] K2 [HIGH-REG, Blind]: P14 3-consecutive-legacy test is fake-regression-guard** [tests/opcua_historyread_typed_payload.rs:three_consecutive_legacy_rows_preserve_count_and_order] — Test docstring claims "regression that collapsed N consecutive `payload: None` rows would be caught", but the test only asserts on `rows.len() == 3` from `query_metric_history`. A regression INSIDE `build_data_values` that collapsed rows would NOT be caught. **Fix:** route through `build_data_values` and assert `Vec<DataValue>` length + each carries `value: None, status: BadDataUnavailable`.
+- [x] **[Review][Patch] K3 [MEDIUM, Blind+Edge convergent]: P11 negative-zero test cannot distinguish underflow-fired vs passthrough** [src/opc_ua_history.rs::tests::test_build_data_values_negative_zero_passes_through_without_underflow_warn] — Both code paths produce `Variant::Float(0.0_f32)`. Path-ambiguous (A-4 JR1 class). **Fix:** add `#[traced_test]` + `assert!(!logs_contain("narrowing_underflow"))` to verify the absence of the underflow warn.
+- [x] **[Review][Patch] K4 [MEDIUM, Blind]: P13 docstring is factually wrong** [tests/opcua_historyread_typed_payload.rs:bool_false_round_trips_through_history_reader] — Docstring claims "the 4-variant test only exercises Bool(true)" but `test_build_data_values_bool_round_trip` seeds both. **Fix:** correct the docstring to reflect actual SQLite-layer coverage gap.
+- [x] **[Review][Patch] K5 [MEDIUM, Blind]: Spec orphan reference at iter-1 K5** — Phrase-harmonization downstream drift (A-4 JR8 class). **Fix:** update spec orphan to reflect the post-P2 first-class `reason="unparseable_timestamp"` shape.
+- [x] **[Review][Patch] K6 [LOW, Blind]: P3 trace! emission dropped `event=` field** [src/storage/sqlite.rs:1816-1820] — Ops dashboards filtering on `event="metric_history_read"` for aggregate skip counts get zero matches. **Fix:** add `event = "metric_history_summary"` distinct from per-row event.
+- [x] **[Review][Patch] K7 [LOW, Blind]: P0-D4 NaN/Inf wire-format unguarded** [src/web/api.rs:380] — `(*f as f32).to_string()` produces `"NaN"`/`"inf"`/`"-inf"`. **Fix:** add unit test pinning wire format for non-finite f64 → narrowed strings.
+
+#### defer (iter-2, captured but not patching)
+
+- [x] Pool checkout exhaustion risk in P9 (Edge MEDIUM) — pool size sufficient; sequential checkout works.
+- [x] Positional `&str` order guard for `build_data_values` (Blind LOW) — newtype refactor deferred to A-6/A-7.
+- [x] AC#9 grep contract reason-enum widening (Edge LOW) — verified safe.
+- [x] Bench `i as f64` representability (Edge LOW) — verified safe for 604800 rows.
+- [x] Empty-string device_id contract (Edge LOW) — pre-existing API contract.
+- [x] Sub-epoch clock cast (Edge LOW) — operationally impossible.
+- [x] Connection-pool leak on test panic (Edge LOW) — pre-existing pattern.
+
+#### dismiss (iter-2)
+
+- P9 test cleanup-via-panic (Edge LOW) — pre-existing pattern across test suite.
+- P14 ASC ordering sufficiency (Edge LOW) — Edge struck its own finding.
 
 ---
 
@@ -389,7 +418,7 @@ The `metric_type_from_typed_columns` helper introduced in A-4 is **reused by A-5
 - [ ] `cargo test --all-targets` ≥1230 passed / 0 failed / ≤10 ignored.
 - [ ] `cargo clippy --all-targets -- -D warnings` clean.
 - [ ] `cargo test --doc` 0 failed.
-- [ ] AC#9 grep contract returns exactly 3 lines (`metric_history_read` + `metric_parse` + `metric_read`).
+- [ ] AC#9 grep contract returns exactly 4 lines post-iter-2 (`metric_history_read` + `metric_history_summary` + `metric_parse` + `metric_read`).
 - [ ] `grep -rn 'TODO(A-5)' src/` returns 0 hits.
 - [ ] `bmad-code-review A-5` loop terminates per CLAUDE.md condition #2 (only LOW remains) — recommended different-LLM run.
 - [ ] `README.md` Current Version + Planning table updated.

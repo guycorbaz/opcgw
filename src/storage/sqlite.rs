@@ -1806,13 +1806,16 @@ impl crate::storage::StorageBackend for SqliteBackend {
             });
         }
 
-        // A-5 P3 iter-1 review fix: aggregate-warn dropped. Per-row warns
-        // already cover each skip with full context; the aggregate emission
-        // double-emitted under reason=schema_drift even when only timestamp
-        // parse failures fired (misclassification). The cumulative counts
-        // remain as telemetry trace-level for ops dashboards.
+        // A-5 P3 iter-1 review fix: aggregate-warn dropped (per-row warns
+        // already cover each skip with full context).
+        // A-5 K6 iter-2 review fix: restore the `event=` field at trace
+        // level under a DISTINCT event name `metric_history_summary` so
+        // ops dashboards filtering for aggregate skip counts can still
+        // grep-recover the cumulative numbers without confusing them
+        // with per-row `event=metric_history_read` emissions.
         if schema_drift_skipped > 0 || unparseable_timestamp_skipped > 0 {
             trace!(
+                event = "metric_history_summary",
                 device_id = %device_id,
                 metric_name = %metric_name,
                 schema_drift_skipped,

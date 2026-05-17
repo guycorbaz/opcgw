@@ -637,6 +637,7 @@ mod tests {
     use super::*;
     use crate::storage::memory::InMemoryBackend;
     use crate::storage::MetricType;
+    use tracing_test::traced_test;
 
     /// Story 8-3 AC#1: `build_data_values` round-trips Float rows from
     /// `HistoricalMetricRow` to `DataValue` with `Variant::Float` (f32) —
@@ -707,11 +708,19 @@ mod tests {
         assert!(matches!(dvs[2].value, Some(Variant::Boolean(false))));
     }
 
-    // A-5 P11 iter-1 review fix: pin the negative-zero underflow guard
-    // boundary. IEEE 754 says `-0.0 == 0.0`, so `*f != 0.0_f64` is FALSE
-    // for `-0.0_f64`; the underflow branch must NOT fire for negative
-    // zero (treat as ordinary zero passthrough).
+    // A-5 P11 iter-1 + K3 iter-2 review fix: pin the negative-zero
+    // underflow guard boundary. IEEE 754 says `-0.0 == 0.0`, so
+    // `*f != 0.0_f64` is FALSE for `-0.0_f64`; the underflow branch
+    // must NOT fire for negative zero (treat as ordinary zero passthrough).
+    //
+    // K3 iter-2 fix: the prior version was path-ambiguous — both the
+    // underflow branch (`Variant::Float(0.0_f32)` + warn fires) and the
+    // passthrough branch (`Variant::Float(narrowed)` where narrowed == 0.0)
+    // produce the SAME observable `Variant::Float(0.0_f32)`. The added
+    // `#[traced_test]` + `logs_contain` assertion verifies the absence
+    // of the narrowing_underflow warn — distinguishing the two paths.
     #[test]
+    #[traced_test]
     fn test_build_data_values_negative_zero_passes_through_without_underflow_warn() {
         let rows = vec![HistoricalMetricRow {
             payload: Some(MetricType::Float(f64::from_bits(0x8000_0000_0000_0000))), // -0.0_f64
@@ -719,14 +728,84 @@ mod tests {
         }];
         let dvs = build_data_values(&rows, "negzero_dev", "negzero_metric");
         assert_eq!(dvs.len(), 1);
-        // Negative zero narrows to negative zero (or zero) — both are
-        // valid Variant::Float values; the underflow branch must NOT fire.
         match dvs[0].value.as_ref().expect("variant set") {
             Variant::Float(f) => {
                 assert_eq!(*f, 0.0_f32, "negative zero narrows to zero (IEEE 754)");
                 assert!(f.is_finite(), "must remain finite");
             }
             other => panic!("expected Variant::Float, got {:?}", other),
+        }
+        // K3 iter-2 LOAD-BEARING: the underflow branch must NOT fire for
+        // negative-zero input. Path-distinguishing assertion.
+        assert!(
+            !logs_contain("narrowing_underflow"),
+            "K3 iter-2: narrowing_underflow warn must NOT fire for -0.0_f64 (passthrough branch is the correct path)"
+        );
+    }
+
+    // A-5 K1 iter-2 review fix: pin the build_data_values Int arm
+    // projection. The companion integration test
+    // `tests/opcua_historyread_typed_payload.rs::int_extremes_round_trip_through_history_reader`
+    // pins the SQLite layer; this unit test pins the build_data_values
+    // boundary. A regression that swapped `Variant::Int64(*i)` for
+    // `Variant::Int32(*i as i32)` would wrap i64::MAX/MIN to -1/0
+    // respectively — caught here.
+    #[test]
+    fn test_build_data_values_int_extremes_narrow_to_int64() {
+        let rows = vec![
+            HistoricalMetricRow {
+                payload: Some(MetricType::Int(i64::MAX)),
+                timestamp: std::time::SystemTime::UNIX_EPOCH,
+            },
+            HistoricalMetricRow {
+                payload: Some(MetricType::Int(i64::MIN)),
+                timestamp: std::time::SystemTime::UNIX_EPOCH,
+            },
+        ];
+        let dvs = build_data_values(&rows, "int_extremes_dev", "i_ext");
+        assert_eq!(dvs.len(), 2);
+        match dvs[0].value.as_ref().expect("variant 0") {
+            Variant::Int64(i) => assert_eq!(*i, i64::MAX, "K1: i64::MAX must round-trip exactly"),
+            other => panic!("expected Variant::Int64(i64::MAX), got {:?}", other),
+        }
+        match dvs[1].value.as_ref().expect("variant 1") {
+            Variant::Int64(i) => assert_eq!(*i, i64::MIN, "K1: i64::MIN must round-trip exactly"),
+            other => panic!("expected Variant::Int64(i64::MIN), got {:?}", other),
+        }
+    }
+
+    // A-5 K2 iter-2 review fix: pin the build_data_values legacy-row
+    // 1-to-1 emission contract. The companion integration test
+    // `tests/opcua_historyread_typed_payload.rs::three_consecutive_legacy_rows_preserve_count_and_order`
+    // pins the SQLite layer; this unit test pins the build_data_values
+    // boundary. A regression that collapsed N consecutive `payload: None`
+    // rows into a single DataValue (or skipped them entirely) — caught here.
+    #[test]
+    fn test_build_data_values_three_consecutive_legacy_rows_preserve_count() {
+        let rows = vec![
+            HistoricalMetricRow {
+                payload: None,
+                timestamp: std::time::SystemTime::UNIX_EPOCH,
+            },
+            HistoricalMetricRow {
+                payload: None,
+                timestamp: std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(5),
+            },
+            HistoricalMetricRow {
+                payload: None,
+                timestamp: std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10),
+            },
+        ];
+        let dvs = build_data_values(&rows, "leg_dev", "leg_metric");
+        assert_eq!(dvs.len(), 3, "K2: 3 consecutive legacy rows MUST emit 3 DataValues (not collapsed)");
+        for (i, dv) in dvs.iter().enumerate() {
+            assert!(dv.value.is_none(), "K2: legacy DataValue[{}] must have value=None", i);
+            assert_eq!(
+                dv.status,
+                Some(StatusCode::BadDataUnavailable.bits().into()),
+                "K2: legacy DataValue[{}] must have status=BadDataUnavailable",
+                i
+            );
         }
     }
 

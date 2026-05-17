@@ -196,6 +196,30 @@ pub const BAD_THRESHOLD_SECS: u64 = 86_400;
 /// matching the `MetricType::Display` impl from `src/storage/types.rs`
 /// so the JSON `data_type` field is identical whether sourced from the
 /// configured type or the storage row's type.
+// A-5 P0-D4 + K7 iter-2 review fix: stringify a typed MetricType payload
+// for the /api/metrics dashboard wire contract (Story 9-3). Pre-A-5 the
+// JSON `value` field came from the legacy `MetricValue.value: String`
+// column; post-A-5 the typed payload is the source of truth and this
+// helper preserves the pre-A-5 alphabet:
+//   - Bool → "1" / "0" (matches `validate_bool_metric_value` write side).
+//   - Float → f32-precision via `(*f as f32).to_string()` (matches the
+//     pre-A-5 ChirpStack poller's `raw_value.to_string()` since raw_value
+//     was already f32). Non-finite f64 narrows to "inf"/"-inf"/"NaN"
+//     literals — documented wire-domain expansion (the pre-A-5 contract
+//     relied on the poller filtering NaN/Inf at ingest; A-5 makes the
+//     read-side resilient to a future writer path that admits non-finite
+//     values).
+//   - Int / String → direct stringification.
+// Story A-6 will widen this helper to a typed JSON shape and retire it.
+pub(crate) fn metric_view_display_string(data_type: &crate::storage::MetricType) -> String {
+    match data_type {
+        crate::storage::MetricType::Float(f) => (*f as f32).to_string(),
+        crate::storage::MetricType::Int(i) => i.to_string(),
+        crate::storage::MetricType::Bool(b) => if *b { "1".to_string() } else { "0".to_string() },
+        crate::storage::MetricType::String(s) => s.clone(),
+    }
+}
+
 fn config_type_to_display(t: &OpcMetricTypeConfig) -> &'static str {
     match t {
         OpcMetricTypeConfig::Bool => "Bool",
@@ -362,25 +386,10 @@ pub async fn api_devices(
                                 Some(row) => MetricView {
                                     metric_name: spec.metric_name.clone(),
                                     data_type: row.data_type.to_string(),
-                                    // A-5 P0-D4 (iter-1 review): preserve the
-                                    // pre-A-5 Story 9-3 dashboard wire contract.
-                                    //   - Bool: render `"0"` / `"1"` (matches
-                                    //     `validate_bool_metric_value` write side;
-                                    //     dashboard JS may compare against `"1"`).
-                                    //   - Float: narrow to f32 before stringify so
-                                    //     the precision matches the pre-A-5
-                                    //     chirpstack poller's `raw_value.to_string()`
-                                    //     output (raw_value is f32 from ChirpStack).
-                                    //   - Int / String: round-trip is unambiguous.
-                                    // Story A-6 will widen this to a typed JSON
-                                    // shape (`{"value": 23.5, "type": "Float"}`)
-                                    // and these rendering rules can be retired.
-                                    value: Some(match &row.data_type {
-                                        crate::storage::MetricType::Float(f) => (*f as f32).to_string(),
-                                        crate::storage::MetricType::Int(i) => i.to_string(),
-                                        crate::storage::MetricType::Bool(b) => if *b { "1".to_string() } else { "0".to_string() },
-                                        crate::storage::MetricType::String(s) => s.clone(),
-                                    }),
+                                    // A-5 P0-D4 + K7 iter-2 review fix: see
+                                    // `metric_view_display_string` for the full
+                                    // wire-contract specification + unit tests.
+                                    value: Some(metric_view_display_string(&row.data_type)),
                                     timestamp: Some(row.timestamp.to_rfc3339()),
                                 },
                                 None => MetricView {
@@ -4927,13 +4936,52 @@ mod tests {
     use super::*;
     use crate::storage::memory::InMemoryBackend;
     use crate::storage::types::ChirpstackStatus;
-    use crate::storage::StorageBackend;
+    use crate::storage::{MetricType, StorageBackend};
     use crate::utils::OpcGwError;
     use crate::web::auth::WebAuthState;
     use crate::web::{ApplicationSummary, DashboardConfigSnapshot};
     use chrono::Utc;
     use std::sync::Arc;
     use std::time::Instant;
+
+    // A-5 K7 iter-2 review fix: pin the post-A-5 Story 9-3 dashboard
+    // wire-format contract for `metric_view_display_string` across all
+    // 4 MetricType variants + the f64→f32 non-finite boundary cases.
+    // Pre-fix the wire format was unguarded for NaN/Inf inputs.
+    #[test]
+    fn metric_view_display_string_typed_payloads() {
+        // Float — typical case f32-precision round-trip.
+        assert_eq!(metric_view_display_string(&MetricType::Float(23.5)), "23.5");
+        // Float — small magnitude exact in f32.
+        assert_eq!(metric_view_display_string(&MetricType::Float(0.0)), "0");
+        // Int.
+        assert_eq!(metric_view_display_string(&MetricType::Int(42)), "42");
+        assert_eq!(metric_view_display_string(&MetricType::Int(i64::MAX)), i64::MAX.to_string());
+        assert_eq!(metric_view_display_string(&MetricType::Int(i64::MIN)), i64::MIN.to_string());
+        // Bool — pre-A-5 dashboard contract expects "0" / "1", NOT "true" / "false".
+        assert_eq!(metric_view_display_string(&MetricType::Bool(true)), "1");
+        assert_eq!(metric_view_display_string(&MetricType::Bool(false)), "0");
+        // String — direct round-trip.
+        assert_eq!(metric_view_display_string(&MetricType::String("OK".to_string())), "OK");
+        assert_eq!(metric_view_display_string(&MetricType::String(String::new())), "");
+    }
+
+    #[test]
+    fn metric_view_display_string_non_finite_float_wire_format() {
+        // Document the post-A-5 wire-domain expansion: non-finite f64
+        // inputs reach the dashboard as the f32 Display alphabet rather
+        // than being filtered. Pre-A-5 the upstream poller rejected
+        // non-finite values; post-A-5 the read side is resilient to a
+        // hypothetical future writer that admits them.
+        assert_eq!(metric_view_display_string(&MetricType::Float(f64::NAN)), "NaN");
+        assert_eq!(metric_view_display_string(&MetricType::Float(f64::INFINITY)), "inf");
+        assert_eq!(metric_view_display_string(&MetricType::Float(f64::NEG_INFINITY)), "-inf");
+        // f64 magnitudes beyond f32::MAX narrow to ±Inf and surface
+        // identically — pinned as wire-format contract.
+        let beyond_f32 = f64::from(f32::MAX) * 2.0;
+        assert_eq!(metric_view_display_string(&MetricType::Float(beyond_f32)), "inf");
+        assert_eq!(metric_view_display_string(&MetricType::Float(-beyond_f32)), "-inf");
+    }
     use tracing_test::traced_test;
 
     /// Minimal `AppState` builder for the API tests. Backend is an

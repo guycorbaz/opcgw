@@ -230,9 +230,16 @@ fn mixed_typed_and_legacy_rows_in_one_history_range() {
     assert_eq!(rows[2].payload, Some(MetricType::Float(13.0)), "last typed row");
 }
 
-// A-5 P13 iter-1 review fix: round-trip MetricType::Bool(false) via SQLite
-// HistoryRead so the helper's `b != 0` projection is pinned at integration
-// level (the 4-variant test only exercises Bool(true) → value_bool=1).
+// A-5 P13 iter-1 + K4 iter-2 review fix: round-trip MetricType::Bool(false)
+// through SQLite via `query_metric_history` so the helper's `b != 0`
+// projection (value_bool=0 → Bool(false)) is pinned at integration level.
+// K4 iter-2 fix: pre-fix docstring incorrectly claimed "the 4-variant
+// test only exercises Bool(true)" — the unit test
+// `src/opc_ua_history.rs::tests::test_build_data_values_bool_round_trip`
+// already covers both Bool(true) and Bool(false) at the build_data_values
+// boundary. The gap THIS test closes is the SQLite storage projection
+// for `value_bool=0` — exercised here via batch_write_metrics →
+// query_metric_history.
 #[test]
 fn bool_false_round_trips_through_history_reader() {
     let db = TempDb::new();
@@ -264,10 +271,13 @@ fn bool_false_round_trips_through_history_reader() {
     );
 }
 
-// A-5 P14 iter-1 review fix: 3 consecutive legacy rows must preserve
-// their order/count through `query_metric_history` + `build_data_values`.
-// A regression that collapsed N consecutive `payload: None` rows into a
-// single DataValue would be caught here.
+// A-5 P14 iter-1 + K2 iter-2 review fix: 3 consecutive legacy rows
+// must preserve their order/count through `query_metric_history` (the
+// SQLite reader). K2 fix narrows the claim — the pre-fix docstring
+// also promised `build_data_values` coverage, but the test never
+// invoked it; the build_data_values N→1-collapse regression-guard
+// now lives in `src/opc_ua_history.rs::tests::test_build_data_values_three_consecutive_legacy_rows_preserve_count`
+// which can actually invoke the private fn.
 #[test]
 fn three_consecutive_legacy_rows_preserve_count_and_order() {
     let db = TempDb::new();
@@ -307,10 +317,14 @@ fn three_consecutive_legacy_rows_preserve_count_and_order() {
     }
 }
 
-// A-5 P15 iter-1 review fix: i64::MAX and i64::MIN round-trip exactly
-// through HistoryRead (no silent narrowing to Int32). A regression that
-// added `Variant::Int32(*i as i32)` to the Int arm of build_data_values
-// would wrap these to -1 and 0 respectively — caught here.
+// A-5 P15 iter-1 + K1 iter-2 review fix: i64::MAX and i64::MIN round-trip
+// exactly through `query_metric_history` (the SQLite reader). K1 fix
+// narrows the claim — the pre-fix docstring also promised
+// build_data_values Variant::Int32-narrowing regression coverage, but
+// the test never invoked build_data_values; the Variant::Int64-projection
+// regression-guard now lives in
+// `src/opc_ua_history.rs::tests::test_build_data_values_int_extremes_narrow_to_int64`
+// which can actually invoke the private fn.
 #[test]
 fn int_extremes_round_trip_through_history_reader() {
     let db = TempDb::new();
