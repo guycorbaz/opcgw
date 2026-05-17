@@ -15,17 +15,19 @@ mod tests {
     use chrono::{Duration, Utc};
     use opcgw::storage::{MetricType, MetricValue};
 
-    /// Helper to create a metric with specific age in seconds
+    /// Helper to create a metric with specific age in seconds.
+    /// A-5: `value_str` parsed into the typed `MetricType::Float` payload
+    /// (previously stored as a parallel string field, now retired).
     fn create_metric_with_age(value_str: &str, age_secs: i64) -> MetricValue {
         let now = Utc::now();
         let metric_time = now - Duration::seconds(age_secs);
+        let parsed = value_str.parse::<f64>().unwrap_or(0.0);
 
         MetricValue {
             device_id: "test_device".to_string(),
             metric_name: "test_metric".to_string(),
-            value: value_str.to_string(),
             timestamp: metric_time,
-            data_type: MetricType::Float(0.0),
+            data_type: MetricType::Float(parsed),
         }
     }
 
@@ -96,7 +98,6 @@ mod tests {
         let metric = MetricValue {
             device_id: "test_device".to_string(),
             metric_name: "test_metric".to_string(),
-            value: "23.5".to_string(),
             timestamp: old_time,
             data_type: MetricType::Float(0.0),
         };
@@ -119,7 +120,6 @@ mod tests {
         let metric = MetricValue {
             device_id: "test_device".to_string(),
             metric_name: "test_metric".to_string(),
-            value: "23.5".to_string(),
             timestamp: old_time,
             data_type: MetricType::Float(0.0),
         };
@@ -156,13 +156,18 @@ mod tests {
         }
     }
 
-    /// AC#7: Test that stale metric returns its value (not empty)
+    /// AC#7: Test that stale metric preserves its typed payload (not empty).
+    /// A-5: assertion shifted from `metric.value: String` (removed) to the
+    /// typed `metric.data_type` payload — same regression contract.
     #[test]
     fn test_stale_metric_returns_value() {
         let metric = create_metric_with_age("42.5", 300);  // 5 minutes old
 
-        // Verify value is still available even if stale
-        assert_eq!(metric.value, "42.5", "Stale metric should still have its value");
+        // Verify the typed payload is still available even if stale.
+        match &metric.data_type {
+            MetricType::Float(f) => assert!((f - 42.5_f64).abs() < 1e-9, "Stale metric should preserve its Float payload"),
+            other => panic!("expected Float, got {:?}", other),
+        }
         assert_eq!(metric.device_id, "test_device", "Device ID should be preserved");
         assert_eq!(metric.metric_name, "test_metric", "Metric name should be preserved");
     }
@@ -193,7 +198,6 @@ mod tests {
         let metric = MetricValue {
             device_id: "test_device".to_string(),
             metric_name: "test_metric".to_string(),
-            value: "23.5".to_string(),
             timestamp: future_time,
             data_type: MetricType::Float(0.0),
         };

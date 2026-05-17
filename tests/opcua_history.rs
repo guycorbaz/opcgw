@@ -298,8 +298,7 @@ fn seed_rows(
             .batch_write_metrics(vec![BatchMetricWrite {
                 device_id: TEST_DEVICE_ID.to_string(),
                 metric_name: TEST_METRIC_NAME.to_string(),
-                value: format!("{}.0", 20 + i),
-                data_type: MetricType::Float(0.0),
+                data_type: MetricType::Float(20.0 + i as f64),
                 timestamp: ts,
             }])
             .expect("seed");
@@ -885,8 +884,7 @@ async fn test_history_read_multi_device_no_node_id_collision_issue_99() {
             .batch_write_metrics(vec![BatchMetricWrite {
                 device_id: DEVICE_A_ID.to_string(),
                 metric_name: DEVICE_A_METRIC_NAME.to_string(),
-                value: format!("{}.0", 10 + i),
-                data_type: MetricType::Float(0.0),
+                data_type: MetricType::Float(10.0 + i as f64),
                 timestamp: ts,
             }])
             .expect("seed device A");
@@ -894,8 +892,7 @@ async fn test_history_read_multi_device_no_node_id_collision_issue_99() {
             .batch_write_metrics(vec![BatchMetricWrite {
                 device_id: DEVICE_B_ID.to_string(),
                 metric_name: DEVICE_B_METRIC_NAME.to_string(),
-                value: format!("{}.0", 20 + i),
-                data_type: MetricType::Float(0.0),
+                data_type: MetricType::Float(20.0 + i as f64),
                 timestamp: ts,
             }])
             .expect("seed device B");

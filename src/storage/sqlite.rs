@@ -683,30 +683,24 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 e
             })?;
 
-        // A-4: project the v007 typed columns + value_type alongside the legacy
-        // `value` column. The legacy `value` is retained only for
-        // `MetricValue.value` field compatibility until A-5 retires the field
-        // when HistoryRead migrates to typed columns. (Iter-2 JR2 doc fix: the
-        // earlier iter-1 doc-comment also cited "chirpstack monotonic-check
-        // fallback" as a reason to keep `value` — that fallback was DROPPED
-        // by iter-1 IR4 at chirpstack.rs:1714-1726; chirpstack no longer reads
-        // `prev_metric.value`.)
-        // Legacy rows surface as Ok(None), mapping transitively to
-        // BadDataUnavailable via OpcUa::get_value per architecture.md:182.
+        // A-5: project only v007 typed columns + value_type + timestamp.
+        // The legacy `value` column is no longer needed since A-5 removed
+        // `MetricValue.value: String`. Legacy rows (value_type='legacy')
+        // surface as Ok(None) → BadDataUnavailable via OpcUa::get_value
+        // per architecture.md:182.
         let result = conn
             .query_row(
-                "SELECT value, timestamp, value_real, value_int, value_bool, value_text, value_type \
+                "SELECT timestamp, value_real, value_int, value_bool, value_text, value_type \
                  FROM metric_values WHERE device_id = ?1 AND metric_name = ?2",
                 params![device_id, metric_name],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<f64>>(2)?,
+                        row.get::<_, Option<f64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
                         row.get::<_, Option<i64>>(3)?,
-                        row.get::<_, Option<i64>>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                        row.get::<_, String>(6)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
                     ))
                 },
             )
@@ -719,7 +713,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
             })?;
 
         match result {
-            Some((value, timestamp_str, value_real, value_int, value_bool, value_text, value_type)) => {
+            Some((timestamp_str, value_real, value_int, value_bool, value_text, value_type)) => {
                 let metric_type_opt = metric_type_from_typed_columns(
                     &value_type,
                     value_real,
@@ -760,7 +754,6 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 Ok(Some(MetricValue {
                     device_id: device_id.to_string(),
                     metric_name: metric_name.to_string(),
-                    value,
                     timestamp,
                     data_type,
                 }))
@@ -1319,7 +1312,10 @@ impl crate::storage::StorageBackend for SqliteBackend {
             // A-3 (AC#4) + iter-1 IR6: derive typed-column payload via the
             // shared `typed_value_columns` helper (single source of truth
             // across all 4 writer sites). Legacy `value`/`data_type` columns
-            // retained per A-2-iter1-DEF1 heterogeneous-lexeme staging.
+            // remain in the v007/v008 schema until A-7 drops them; A-5
+            // populates both with the discriminant string (`Float`/`Int`/etc)
+            // to satisfy the NOT NULL constraints. Readers in A-4/A-5 no
+            // longer consult these columns.
             let data_type_str = metric.data_type.to_string();
             let timestamp_rfc3339 = chrono::DateTime::<Utc>::from(metric.timestamp).to_rfc3339();
             let tc = typed_value_columns(&metric.data_type);
@@ -1331,7 +1327,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
             let upsert_start = Instant::now();
             conn.execute(
                 upsert_query,
-                params![&metric.device_id, &metric.metric_name, &metric.value, data_type_str, timestamp_rfc3339, timestamp_rfc3339, tc.value_real, tc.value_int, tc.value_bool, tc.value_text, tc.value_type],
+                params![&metric.device_id, &metric.metric_name, &data_type_str, &data_type_str, timestamp_rfc3339, timestamp_rfc3339, tc.value_real, tc.value_int, tc.value_bool, tc.value_text, tc.value_type],
             )
             .map_err(|e| {
                 log_sqlite_busy_if_applicable(
@@ -1367,7 +1363,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
 
             conn.execute(
                 insert_query,
-                params![&metric.device_id, &metric.metric_name, &metric.value, data_type_str, timestamp_rfc3339, history_timestamp, tc.value_real, tc.value_int, tc.value_bool, tc.value_text, tc.value_type],
+                params![&metric.device_id, &metric.metric_name, &data_type_str, &data_type_str, timestamp_rfc3339, history_timestamp, tc.value_real, tc.value_int, tc.value_bool, tc.value_text, tc.value_type],
             )
             .map_err(|e| {
                 // Review patch P17: see upsert site above for rationale.
@@ -1416,11 +1412,12 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 e
             })?;
 
-        // A-4: project v007 typed columns; legacy rows are skipped silently
-        // (partial-success contract — startup restore skips rows with no
-        // real payload yet; the next poll cycle UPSERTs real values).
+        // A-5: project v007 typed columns only; legacy `value` column no
+        // longer needed since MetricValue.value: String was removed. Legacy
+        // rows skipped silently (partial-success contract — startup restore
+        // skips rows with no real payload yet; the next poll cycle UPSERTs).
         let mut stmt = conn.prepare(
-            "SELECT device_id, metric_name, value, timestamp, \
+            "SELECT device_id, metric_name, timestamp, \
                     value_real, value_int, value_bool, value_text, value_type \
              FROM metric_values ORDER BY device_id, metric_name"
         )
@@ -1432,13 +1429,12 @@ impl crate::storage::StorageBackend for SqliteBackend {
             Ok((
                 row.get::<_, String>(0),         // device_id
                 row.get::<_, String>(1),         // metric_name
-                row.get::<_, String>(2),         // value (legacy)
-                row.get::<_, String>(3),         // timestamp
-                row.get::<_, Option<f64>>(4),    // value_real
-                row.get::<_, Option<i64>>(5),    // value_int
-                row.get::<_, Option<i64>>(6),    // value_bool
-                row.get::<_, Option<String>>(7), // value_text
-                row.get::<_, String>(8),         // value_type
+                row.get::<_, String>(2),         // timestamp
+                row.get::<_, Option<f64>>(3),    // value_real
+                row.get::<_, Option<i64>>(4),    // value_int
+                row.get::<_, Option<i64>>(5),    // value_bool
+                row.get::<_, Option<String>>(6), // value_text
+                row.get::<_, String>(7),         // value_type
             ))
         })
             .map_err(|e| {
@@ -1460,7 +1456,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 }
             };
 
-            let (device_id_res, metric_name_res, value_res, timestamp_str_res,
+            let (device_id_res, metric_name_res, timestamp_str_res,
                  value_real_res, value_int_res, value_bool_res, value_text_res, value_type_res) = row;
 
             let device_id = match device_id_res {
@@ -1476,15 +1472,6 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 Ok(name) => name,
                 Err(e) => {
                     trace!(error = %e, device_id = %device_id, "Failed to extract metric_name from metric row");
-                    skipped_count += 1;
-                    continue;
-                }
-            };
-
-            let value = match value_res {
-                Ok(v) => v,
-                Err(e) => {
-                    trace!(error = %e, device_id = %device_id, metric_name = %metric_name, "Failed to extract value from metric row");
                     skipped_count += 1;
                     continue;
                 }
@@ -1571,7 +1558,6 @@ impl crate::storage::StorageBackend for SqliteBackend {
             result.push(MetricValue {
                 device_id,
                 metric_name,
-                value,
                 timestamp,
                 data_type,
             });
@@ -1691,7 +1677,6 @@ impl crate::storage::StorageBackend for SqliteBackend {
         end: std::time::SystemTime,
         max_results: usize,
     ) -> Result<Vec<crate::storage::HistoricalMetricRow>, OpcGwError> {
-        use std::str::FromStr;
         let mut __op = StorageOpLog::start("query_metric_history");
 
         // Format timestamps to match the production write path
@@ -1708,10 +1693,20 @@ impl crate::storage::StorageBackend for SqliteBackend {
 
         let conn = self.pool.checkout(Duration::from_secs(5))?;
 
+        // A-5: project v007 typed columns + value_type. The legacy `value,
+        // data_type` projection is gone since A-3's writer pipeline populates
+        // the typed columns natively. The shared helper `metric_type_from_typed_columns`
+        // (A-4) builds the payload-bearing `MetricType`; legacy rows
+        // (`value_type='legacy'`) surface as `Ok(None)` and the row stores
+        // `payload: None` so `OpcgwHistoryNodeManagerImpl::build_data_values`
+        // can emit `BadDataUnavailable` per epic AC#1 (legacy rows are NOT
+        // silently dropped — they appear in the response stream).
+        //
         // Half-open interval `start <= timestamp < end`. Uses the
         // `idx_metric_history_device_timestamp` composite index for time-range
         // seeks; LIMIT is a hard cap on response size.
-        let query = "SELECT value, data_type, timestamp FROM metric_history \
+        let query = "SELECT value_real, value_int, value_bool, value_text, value_type, timestamp \
+                     FROM metric_history \
                      WHERE device_id = ?1 AND metric_name = ?2 \
                      AND timestamp >= ?3 AND timestamp < ?4 \
                      ORDER BY timestamp ASC LIMIT ?5";
@@ -1729,10 +1724,14 @@ impl crate::storage::StorageBackend for SqliteBackend {
             .query_map(
                 params![device_id, metric_name, start_iso, end_iso, max_results_i64],
                 |row| {
-                    let value: String = row.get(0)?;
-                    let data_type_str: String = row.get(1)?;
-                    let timestamp_str: String = row.get(2)?;
-                    Ok((value, data_type_str, timestamp_str))
+                    Ok((
+                        row.get::<_, Option<f64>>(0)?,    // value_real
+                        row.get::<_, Option<i64>>(1)?,    // value_int
+                        row.get::<_, Option<i64>>(2)?,    // value_bool
+                        row.get::<_, Option<String>>(3)?, // value_text
+                        row.get::<_, String>(4)?,         // value_type
+                        row.get::<_, String>(5)?,         // timestamp
+                    ))
                 },
             )
             .map_err(|e| {
@@ -1740,75 +1739,78 @@ impl crate::storage::StorageBackend for SqliteBackend {
             })?;
 
         let mut results: Vec<crate::storage::HistoricalMetricRow> = Vec::new();
+        let mut schema_drift_skipped = 0;
+        let mut unparseable_timestamp_skipped = 0;
         for row in rows {
-            let (value, data_type_str, timestamp_str) = row.map_err(|e| {
-                OpcGwError::Storage(format!("Failed to read query_metric_history row: {e}"))
-            })?;
+            let (value_real, value_int, value_bool, value_text, value_type, timestamp_str) =
+                row.map_err(|e| {
+                    OpcGwError::Storage(format!("Failed to read query_metric_history row: {e}"))
+                })?;
 
-            // Partial-success: skip rows with unknown data_type rather than
-            // terminating the iterator on a single bad row.
-            let data_type = match crate::storage::MetricType::from_str(&data_type_str) {
-                Ok(t) => t,
+            // A-5: build payload-bearing MetricType from typed columns via
+            // the A-4-shared helper. Legacy rows → `Ok(None)` → `payload: None`
+            // → BadDataUnavailable DataValue emitted by build_data_values.
+            // Schema-drift rows → `Err(_)` → row-skip with warn (AC#11).
+            let payload = match metric_type_from_typed_columns(
+                &value_type,
+                value_real,
+                value_int,
+                value_bool,
+                value_text,
+                device_id,
+                metric_name,
+            ) {
+                Ok(opt) => opt,
                 Err(e) => {
-                    trace!(
+                    warn!(
+                        event = "metric_history_read",
+                        reason = "schema_drift",
                         device_id = %device_id,
                         metric_name = %metric_name,
-                        data_type_str = %data_type_str,
+                        value_type = %value_type,
                         error = %e,
-                        "query_metric_history: skipping row with unknown data_type"
+                        "query_metric_history: skipping row due to schema drift"
                     );
+                    schema_drift_skipped += 1;
                     continue;
                 }
             };
-
-            // Partial-success: skip rows whose Float values are NaN/Infinity
-            // (OPC UA Variant::Float requires finite f32). Other types pass
-            // through unparsed — the OPC UA layer parses on demand.
-            if matches!(data_type, crate::storage::MetricType::Float(_)) {
-                match value.parse::<f64>() {
-                    Ok(f) if !f.is_finite() => {
-                        trace!(
-                            device_id = %device_id,
-                            metric_name = %metric_name,
-                            value = %value,
-                            "query_metric_history: skipping non-finite Float row"
-                        );
-                        continue;
-                    }
-                    Err(e) => {
-                        trace!(
-                            device_id = %device_id,
-                            metric_name = %metric_name,
-                            value = %value,
-                            error = %e,
-                            "query_metric_history: skipping unparseable Float row"
-                        );
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
 
             // Parse the ISO8601 timestamp back to SystemTime.
             let timestamp = match chrono::DateTime::parse_from_rfc3339(&timestamp_str) {
                 Ok(dt) => std::time::SystemTime::from(dt.with_timezone(&Utc)),
                 Err(e) => {
-                    trace!(
+                    warn!(
+                        event = "metric_history_read",
+                        reason = "schema_drift",
+                        reason_detail = "unparseable_timestamp",
                         device_id = %device_id,
                         metric_name = %metric_name,
                         timestamp_str = %timestamp_str,
                         error = %e,
                         "query_metric_history: skipping row with unparseable timestamp"
                     );
+                    unparseable_timestamp_skipped += 1;
                     continue;
                 }
             };
 
             results.push(crate::storage::HistoricalMetricRow {
-                value,
-                data_type,
+                payload,
                 timestamp,
             });
+        }
+
+        if schema_drift_skipped > 0 || unparseable_timestamp_skipped > 0 {
+            warn!(
+                event = "metric_history_read",
+                reason = "schema_drift",
+                device_id = %device_id,
+                metric_name = %metric_name,
+                schema_drift_skipped,
+                unparseable_timestamp_skipped,
+                "query_metric_history: rows skipped due to schema drift"
+            );
         }
 
         trace!(
@@ -2787,18 +2789,17 @@ mod tests {
         let backend = SqliteBackend::new(&path).expect("Should create backend");
         let now = std::time::SystemTime::now();
 
-        // Create batch of 10 metrics
+        // Create batch of 10 metrics — A-5: typed payload carries the real value.
         let batch: Vec<crate::storage::BatchMetricWrite> = (0..10)
             .map(|i| {
-                let (value, data_type) = if i % 2 == 0 {
-                    (format!("{}.5", i), MetricType::Float(0.0))
+                let data_type = if i % 2 == 0 {
+                    MetricType::Float(i as f64 + 0.5)
                 } else {
-                    (format!("{}", i), MetricType::Int(0))
+                    MetricType::Int(i as i64)
                 };
                 crate::storage::BatchMetricWrite {
                     device_id: "device_batch_test".to_string(),
                     metric_name: format!("metric_{}", i),
-                    value,
                     data_type,
                     timestamp: now,
                 }
@@ -2825,13 +2826,12 @@ mod tests {
         let backend = SqliteBackend::new(&path).expect("Should create backend");
         let now = std::time::SystemTime::now();
 
-        // Create batch with valid metrics
+        // Create batch with valid metrics — A-5 typed payload.
         let batch: Vec<crate::storage::BatchMetricWrite> = (0..5)
             .map(|i| crate::storage::BatchMetricWrite {
                 device_id: "device_atomic_test".to_string(),
                 metric_name: format!("metric_{}", i),
-                value: format!("{}.5", i),
-                data_type: MetricType::Float(0.0),
+                data_type: MetricType::Float(i as f64 + 0.5),
                 timestamp: now,
             })
             .collect();
@@ -2868,21 +2868,20 @@ mod tests {
         let backend = SqliteBackend::new(&path).expect("Should create backend");
         let now = std::time::SystemTime::now();
 
-        // Create batch of 400 metrics (100 of each type)
+        // Create batch of 400 metrics (100 of each type) — A-5 typed payload.
         let mut batch = Vec::new();
         for device_num in 0..100 {
             for type_num in 0..4 {
-                let (value, data_type) = match type_num {
-                    0 => (format!("{}.5", device_num), MetricType::Float(0.0)),
-                    1 => (format!("{}", device_num), MetricType::Int(0)),
-                    2 => ("1".to_string(), MetricType::Bool(false)),
-                    3 => (format!("text_{}", device_num), MetricType::String(String::new())),
-                    _ => (format!("{}.5", device_num), MetricType::Float(0.0)),
+                let data_type = match type_num {
+                    0 => MetricType::Float(device_num as f64 + 0.5),
+                    1 => MetricType::Int(device_num as i64),
+                    2 => MetricType::Bool(true),
+                    3 => MetricType::String(format!("text_{}", device_num)),
+                    _ => MetricType::Float(device_num as f64 + 0.5),
                 };
                 batch.push(crate::storage::BatchMetricWrite {
                     device_id: format!("device_{}", device_num),
                     metric_name: format!("metric_{}", type_num),
-                    value,
                     data_type,
                     timestamp: now,
                 });
@@ -2946,13 +2945,12 @@ mod tests {
         assert_eq!(initial_count, 1, "Should have 1 initial metric");
         drop(conn);
 
-        // Create batch with 5 metrics (all should succeed if transaction is healthy)
+        // Create batch with 5 metrics — A-5 typed payload.
         let batch: Vec<crate::storage::BatchMetricWrite> = (0..5)
             .map(|i| crate::storage::BatchMetricWrite {
                 device_id: "device_batch_rollback".to_string(),
                 metric_name: format!("metric_{}", i),
-                value: format!("{}.5", i),
-                data_type: MetricType::Float(0.0),
+                data_type: MetricType::Float(i as f64 + 0.5),
                 timestamp: now,
             })
             .collect();
@@ -4784,13 +4782,19 @@ mod tests {
     ) {
         for i in 0..count {
             let ts = base_ts + Duration::from_secs(i as u64);
-            let value = format!("v{i}");
+            // A-5: encode the iteration sentinel in the typed String payload
+            // so existing v0/v1/... assertions can read `row.payload` directly.
+            // For non-String data_types, the seed payload is data_type as-is.
+            let row_payload = if matches!(data_type, MetricType::String(_)) {
+                MetricType::String(format!("v{i}"))
+            } else {
+                data_type.clone()
+            };
             backend
                 .batch_write_metrics(vec![crate::storage::BatchMetricWrite {
                     device_id: device_id.to_string(),
                     metric_name: metric_name.to_string(),
-                    value,
-                    data_type: data_type.clone(),
+                    data_type: row_payload,
                     timestamp: ts,
                 }])
                 .expect("seed batch_write_metrics");
@@ -4830,7 +4834,7 @@ mod tests {
             )
             .expect("query single");
         assert_eq!(result.len(), 1, "single seeded row must be returned");
-        assert_eq!(result[0].value, "v0");
+        assert_eq!(result[0].payload, Some(MetricType::String("v0".to_string())));
 
         let _ = fs::remove_file(&path);
     }
@@ -4894,8 +4898,8 @@ mod tests {
             .expect("query");
         assert_eq!(result.len(), 10, "max_results must truncate at 10");
         // Earliest 10 timestamps in ASC order
-        assert_eq!(result[0].value, "v0", "first row must be earliest seed");
-        assert_eq!(result[9].value, "v9", "10th row must be 10th earliest seed");
+        assert_eq!(result[0].payload, Some(MetricType::String("v0".to_string())), "first row must be earliest seed");
+        assert_eq!(result[9].payload, Some(MetricType::String("v9".to_string())), "10th row must be 10th earliest seed");
 
         let _ = fs::remove_file(&path);
     }
@@ -4912,8 +4916,7 @@ mod tests {
                 .batch_write_metrics(vec![crate::storage::BatchMetricWrite {
                     device_id: "dev1".to_string(),
                     metric_name: "m".to_string(),
-                    value: format!("v{i}"),
-                    data_type: MetricType::String(String::new()),
+                    data_type: MetricType::String(format!("v{i}")),
                     timestamp: ts,
                 }])
                 .expect("seed");
@@ -4938,34 +4941,33 @@ mod tests {
         let backend = SqliteBackend::new(&path).expect("create backend");
         let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
 
-        // Seed a NaN Float row directly (bypassing batch_write_metrics, which
-        // would store the literal "NaN" string).
-        backend
-            .batch_write_metrics(vec![crate::storage::BatchMetricWrite {
-                device_id: "dev1".to_string(),
-                metric_name: "m".to_string(),
-                value: "NaN".to_string(),
-                data_type: MetricType::Float(0.0),
-                timestamp: t0,
-            }])
-            .expect("seed NaN");
-
-        let result = backend
-            .query_metric_history("dev1", "m", t0, t0 + Duration::from_secs(60), 100)
-            .expect("query");
-        assert_eq!(
-            result.len(),
-            0,
-            "NaN Float row must be skipped (partial-success)"
-        );
-
-        // Review patch P15: pin the spec's partial-success contract by
-        // asserting the trace! log line was emitted. A regression that
-        // silently drops the trace! (e.g., refactor to eprintln!, or no
-        // log at all) will now fail this test.
+        // A-5: NaN Float rows are rejected at the v008 cross-column CHECK
+        // (SQLite stores NaN as NULL in a REAL column, which violates
+        // `value_type='Float' AND value_real IS NOT NULL`). The writer
+        // returns Storage("CHECK constraint failed: ...") for the row;
+        // the writer-side guard is the structural enforcement and the
+        // query_metric_history-side row-skip path is therefore unreachable
+        // in production for NaN rows. The helper-level schema-drift
+        // coverage is pinned by
+        // `test_metric_type_from_typed_columns_schema_drift_returns_err`
+        // (A-4 IR3 + iter-2 JR8/JR9/JR10/JR11 — exhaustive NaN/Inf/multi-set/
+        // value_type-discriminator coverage). This test now pins the
+        // writer-side CHECK enforcement.
+        let result = backend.batch_write_metrics(vec![crate::storage::BatchMetricWrite {
+            device_id: "dev1".to_string(),
+            metric_name: "m".to_string(),
+            data_type: MetricType::Float(f64::NAN),
+            timestamp: t0,
+        }]);
         assert!(
-            logs_contain("query_metric_history: skipping non-finite Float row"),
-            "expected partial-success trace! log on NaN Float skip"
+            result.is_err(),
+            "v008 CHECK must reject NaN Float row at the writer boundary"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("CHECK constraint failed"),
+            "expected CHECK constraint failure on NaN Float; got: {}",
+            err_msg
         );
 
         let _ = fs::remove_file(&path);
@@ -5004,47 +5006,45 @@ mod tests {
     }
 
     #[test]
-    #[traced_test]
-    fn test_query_metric_history_skips_unknown_data_type() {
-        // AC#1 partial-success: a row whose `data_type` column is not a
-        // recognised `MetricType` variant must be silently skipped (with a
-        // `trace!` log) rather than aborting the iterator. We bypass
-        // `batch_write_metrics` (which only accepts typed `MetricType`) and
-        // insert directly to seed an invalid row, then issue
-        // `query_metric_history` and expect zero rows.
+    fn test_query_metric_history_v008_check_blocks_schema_drift_seed() {
+        // A-5: the pre-A-3 partial-success "skip unknown data_type" path
+        // is now structurally unreachable. The v008 cross-column CHECK
+        // constraint (added by A-3 migrations/v008_typed_value_constraints.sql)
+        // forbids invalid `(value_type, value_*)` combinations at the
+        // table level — any attempt to seed schema-drift via raw SQL
+        // gets rejected at INSERT time. This test pins the v008
+        // enforcement so a future weakening of the CHECK (or a v009
+        // migration that drops it) would fail this test before the
+        // query_metric_history skip path could ever fire.
+        //
+        // Helper-level schema-drift coverage (NaN, multi-set typed columns,
+        // unknown value_type discriminator, near-miss case variants,
+        // negative-infinity, combined-condition guard ordering) is pinned
+        // by `test_metric_type_from_typed_columns_schema_drift_returns_err`.
         let path = temp_backend_path();
         let backend = SqliteBackend::new(&path).expect("create backend");
         let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let ts_iso = chrono::DateTime::<Utc>::from(t0).to_rfc3339();
 
-        {
-            let conn = backend
-                .pool
-                .checkout(Duration::from_secs(5))
-                .expect("checkout");
-            conn.execute(
-                "INSERT INTO metric_history \
-                 (device_id, metric_name, value, data_type, timestamp, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-                params!["dev1", "m", "1.0", "Frobnicator", ts_iso],
-            )
-            .expect("seed bad row");
-        }
-
-        let result = backend
-            .query_metric_history("dev1", "m", t0, t0 + Duration::from_secs(60), 100)
-            .expect("query");
-        assert_eq!(
-            result.len(),
-            0,
-            "row with unknown data_type must be skipped"
+        let conn = backend
+            .pool
+            .checkout(Duration::from_secs(5))
+            .expect("checkout");
+        let result = conn.execute(
+            "INSERT INTO metric_history \
+             (device_id, metric_name, value, data_type, timestamp, created_at, value_type, value_real) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, NULL)",
+            params!["dev1", "m", "1.0", "Float", ts_iso, "Float"],
         );
-
-        // Review patch P15: pin the spec's partial-success contract by
-        // asserting the trace! log was emitted on the unknown-data_type path.
         assert!(
-            logs_contain("query_metric_history: skipping row with unknown data_type"),
-            "expected partial-success trace! log on unknown data_type skip"
+            result.is_err(),
+            "v008 cross-column CHECK must reject value_type='Float' with NULL value_real"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("CHECK constraint failed"),
+            "expected CHECK constraint failure on schema-drift INSERT; got: {}",
+            err_msg
         );
 
         let _ = fs::remove_file(&path);
@@ -5303,28 +5303,24 @@ mod tests {
             BatchMetricWrite {
                 device_id: "dev_f".into(),
                 metric_name: "m".into(),
-                value: "1.5".into(),
                 data_type: MetricType::Float(1.5),
                 timestamp: now,
             },
             BatchMetricWrite {
                 device_id: "dev_i".into(),
                 metric_name: "m".into(),
-                value: "99".into(),
                 data_type: MetricType::Int(99),
                 timestamp: now,
             },
             BatchMetricWrite {
                 device_id: "dev_b".into(),
                 metric_name: "m".into(),
-                value: "true".into(),
                 data_type: MetricType::Bool(true),
                 timestamp: now,
             },
             BatchMetricWrite {
                 device_id: "dev_s".into(),
                 metric_name: "m".into(),
-                value: "ok".into(),
                 data_type: MetricType::String("ok".into()),
                 timestamp: now,
             },
@@ -5335,7 +5331,10 @@ mod tests {
         let (vr, _, _, _, vty_f, leg_v_f, _) = read_typed_columns(&path, "dev_f", "m");
         assert_eq!(vr, Some(1.5));
         assert_eq!(vty_f, "Float");
-        assert_eq!(leg_v_f, "1.5", "legacy `value` carries real string-encoded sensor reading via BatchMetricWrite.value");
+        // A-5: BatchMetricWrite.value: String retired; the legacy `value`
+        // column is now populated with the discriminant string to satisfy
+        // NOT NULL until A-7 drops the column at the schema level.
+        assert_eq!(leg_v_f, "Float", "post-A-5: legacy `value` column carries the discriminant string");
 
         let (_, vi, _, _, vty_i, _, _) = read_typed_columns(&path, "dev_i", "m");
         assert_eq!(vi, Some(99));
@@ -5460,7 +5459,6 @@ mod tests {
             .batch_write_metrics(vec![BatchMetricWrite {
                 device_id: "dev1".to_string(),
                 metric_name: "temp".to_string(),
-                value: "23.5".to_string(),
                 data_type: MetricType::Float(23.5),
                 timestamp: now,
             }])
@@ -5483,7 +5481,6 @@ mod tests {
             .batch_write_metrics(vec![BatchMetricWrite {
                 device_id: "dev1".to_string(),
                 metric_name: "counter".to_string(),
-                value: "42".to_string(),
                 data_type: MetricType::Int(42),
                 timestamp: now,
             }])
@@ -5505,7 +5502,6 @@ mod tests {
             .batch_write_metrics(vec![BatchMetricWrite {
                 device_id: "dev1".to_string(),
                 metric_name: "online".to_string(),
-                value: "1".to_string(),
                 data_type: MetricType::Bool(true),
                 timestamp: now,
             }])
@@ -5527,7 +5523,6 @@ mod tests {
             .batch_write_metrics(vec![BatchMetricWrite {
                 device_id: "dev1".to_string(),
                 metric_name: "status".to_string(),
-                value: "OK".to_string(),
                 data_type: MetricType::String("OK".to_string()),
                 timestamp: now,
             }])
@@ -5576,28 +5571,24 @@ mod tests {
                 BatchMetricWrite {
                     device_id: "d1".to_string(),
                     metric_name: "f".to_string(),
-                    value: "1.5".to_string(),
                     data_type: MetricType::Float(1.5),
                     timestamp: now,
                 },
                 BatchMetricWrite {
                     device_id: "d1".to_string(),
                     metric_name: "i".to_string(),
-                    value: "7".to_string(),
                     data_type: MetricType::Int(7),
                     timestamp: now,
                 },
                 BatchMetricWrite {
                     device_id: "d1".to_string(),
                     metric_name: "b".to_string(),
-                    value: "0".to_string(),
                     data_type: MetricType::Bool(false),
                     timestamp: now,
                 },
                 BatchMetricWrite {
                     device_id: "d1".to_string(),
                     metric_name: "s".to_string(),
-                    value: "hi".to_string(),
                     data_type: MetricType::String("hi".to_string()),
                     timestamp: now,
                 },
@@ -5654,14 +5645,12 @@ mod tests {
                 BatchMetricWrite {
                     device_id: "d1".to_string(),
                     metric_name: "f".to_string(),
-                    value: "1.5".to_string(),
                     data_type: MetricType::Float(1.5),
                     timestamp: now,
                 },
                 BatchMetricWrite {
                     device_id: "d1".to_string(),
                     metric_name: "i".to_string(),
-                    value: "7".to_string(),
                     data_type: MetricType::Int(7),
                     timestamp: now,
                 },
@@ -5699,7 +5688,6 @@ mod tests {
             .batch_write_metrics(vec![BatchMetricWrite {
                 device_id: "d1".to_string(),
                 metric_name: "f".to_string(),
-                value: "9.9".to_string(),
                 data_type: MetricType::Float(9.9),
                 timestamp: now,
             }])

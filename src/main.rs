@@ -577,7 +577,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let metric_value_internal = MetricValueInternal {
                     device_id: metric.device_id.clone(),
                     metric_name: metric.metric_name.clone(),
-                    value: metric.value,
                     timestamp: metric.timestamp,
                     data_type: metric.data_type,
                 };

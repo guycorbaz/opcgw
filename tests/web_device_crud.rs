@@ -1758,15 +1758,13 @@ fn issue_99_regression_two_devices_same_metric_name_read_returns_device_specific
             BatchMetricWrite {
                 device_id: "dev-A".to_string(),
                 metric_name: "Moisture".to_string(),
-                value: "11.0".to_string(),
-                data_type: MetricType::Float(0.0),
+                data_type: MetricType::Float(11.0),
                 timestamp: SystemTime::now(),
             },
             BatchMetricWrite {
                 device_id: "dev-B".to_string(),
                 metric_name: "Moisture".to_string(),
-                value: "22.0".to_string(),
-                data_type: MetricType::Float(0.0),
+                data_type: MetricType::Float(22.0),
                 timestamp: SystemTime::now(),
             },
         ])
@@ -1860,21 +1858,18 @@ fn issue_99_regression_two_devices_same_metric_name_history_read_returns_device_
             BatchMetricWrite {
                 device_id: "dev-A".to_string(),
                 metric_name: "Moisture".to_string(),
-                value: "11.0".to_string(),
                 data_type: MetricType::Float(0.0),
                 timestamp: t0,
             },
             BatchMetricWrite {
                 device_id: "dev-A".to_string(),
                 metric_name: "Moisture".to_string(),
-                value: "11.5".to_string(),
                 data_type: MetricType::Float(0.0),
                 timestamp: t1,
             },
             BatchMetricWrite {
                 device_id: "dev-B".to_string(),
                 metric_name: "Moisture".to_string(),
-                value: "22.0".to_string(),
                 data_type: MetricType::Float(0.0),
                 timestamp: t0,
             },

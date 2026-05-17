@@ -57,28 +57,24 @@ fn all_four_variants_round_trip_through_sqlite_reader() {
             BatchMetricWrite {
                 device_id: "d1".to_string(),
                 metric_name: "f".to_string(),
-                value: "23.5".to_string(),
                 data_type: MetricType::Float(23.5),
                 timestamp: now,
             },
             BatchMetricWrite {
                 device_id: "d1".to_string(),
                 metric_name: "i".to_string(),
-                value: "42".to_string(),
                 data_type: MetricType::Int(42),
                 timestamp: now,
             },
             BatchMetricWrite {
                 device_id: "d1".to_string(),
                 metric_name: "b".to_string(),
-                value: "1".to_string(),
                 data_type: MetricType::Bool(true),
                 timestamp: now,
             },
             BatchMetricWrite {
                 device_id: "d1".to_string(),
                 metric_name: "s".to_string(),
-                value: "OK".to_string(),
                 data_type: MetricType::String("OK".to_string()),
                 timestamp: now,
             },
@@ -183,14 +179,12 @@ fn load_all_metrics_skips_legacy_and_returns_typed_rows() {
             BatchMetricWrite {
                 device_id: "d1".to_string(),
                 metric_name: "f".to_string(),
-                value: "1.0".to_string(),
                 data_type: MetricType::Float(1.0),
                 timestamp: now,
             },
             BatchMetricWrite {
                 device_id: "d1".to_string(),
                 metric_name: "i".to_string(),
-                value: "2".to_string(),
                 data_type: MetricType::Int(2),
                 timestamp: now,
             },

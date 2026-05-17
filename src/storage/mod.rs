@@ -133,29 +133,16 @@ use rusqlite::Result as SqliteResult;
 /// into a single atomic transaction. Includes both the current metric value
 /// (for UPSERT) and the historical record (for append-only audit log).
 ///
-/// **Story A-1 / Epic A — Storage Payload Migration:** during the A-1 → A-5
-/// transition window, `value: String` carries the real string-encoded sensor
-/// reading (Float/Int/Bool/String formatted via the poller) while
-/// `data_type: MetricType` is type-level payload-bearing but its payload is
-/// zero-defaulted on every production caller (historical staging marker — pre-A-3 sites in
-/// `chirpstack.rs`). A-2's schema migration replaces the dual-storage with
-/// a typed-payload write; **TODO(A-5)** removes the `value: String` field
-/// once consumers pattern-match the typed payload directly. Mirrors the
-/// transitional caveat on [`MetricValue`](crate::storage::MetricValue) and
-/// [`MetricValueInternal`].
+/// **Story A-5 / Epic A:** the transitional `value: String` field was removed;
+/// `data_type: MetricType` carries the real measurement payload directly
+/// (Float(f64) / Int(i64) / Bool(bool) / String(String)).
 #[derive(Clone, Debug)]
 pub struct BatchMetricWrite {
     /// Unique device identifier from ChirpStack
     pub device_id: String,
     /// Metric name as defined in ChirpStack
     pub metric_name: String,
-    /// Real string-encoded sensor reading (`"23.5"` / `"42"` / `"true"` / `"hello"`).
-    /// TODO(A-5): remove once `BatchMetricWrite.data_type` carries the typed payload
-    /// and consumers pattern-match it directly.
-    pub value: String,
-    /// Metric type, type-level payload-bearing (post-A-1). Production callers
-    /// currently stamp a zero-defaulted payload; the real measurement is in
-    /// `value: String` until A-3 plumbs the typed payload end-to-end.
+    /// Metric type — payload-bearing (post-A-1 + A-5 retire of dual-storage).
     pub data_type: MetricType,
     /// Timestamp when this metric was measured (system time)
     pub timestamp: std::time::SystemTime,
@@ -164,36 +151,21 @@ pub struct BatchMetricWrite {
 /// One row of historical metric data, as stored in the `metric_history` table.
 ///
 /// Returned by `StorageBackend::query_metric_history` for OPC UA HistoryRead
-/// service support (Story 8-3, FR22).
+/// service support (Story 8-3, FR22) — post-A-5 carries the typed payload directly.
 ///
-/// **Note on `value`:** this is the actual sensor reading as a string —
-/// numeric for Float/Int (e.g. `"3.14"`), `"true"`/`"false"` for Bool, raw
-/// text for String. The metric_history table's `batch_write_metrics` write
-/// path stores the actual value here, not the type variant name. The
-/// legacy single-row `append_metric_history` method (only used by tests)
-/// stores the variant name; production code uses the batch path.
-///
-/// **Review patch P16 contract clarification**: legacy test-only rows
-/// produced by `append_metric_history` (which stored the literal variant
-/// names `"Float"` / `"Int"` / `"Bool"` / `"String"` in the `value`
-/// column) are tolerated by `query_metric_history` only because the
-/// per-type partial-success skips them: Float rows fail the
-/// `value.parse::<f64>()` step and are dropped with a `trace!`. Bool
-/// rows fail `bool::from_str("Float")` and are dropped at
-/// `build_data_values` time. Production deployments never hit this
-/// because production code always uses the batch path. If a future
-/// change re-enables `append_metric_history` for production data, the
-/// type-name-as-value rows must be migrated or filtered explicitly.
+/// **Story A-5 legacy-row contract (architecture.md:182):** pre-Epic-A rows
+/// tagged `value_type='legacy'` surface as `payload: None`. The OPC UA layer
+/// (`OpcgwHistoryNodeManagerImpl::build_data_values`) emits these as
+/// `DataValue { value: None, status: Some(BadDataUnavailable), ... }` — the
+/// row appears in the response stream, satisfying the "legacy rows visible
+/// to clients" epic AC (NOT silently dropped). Typed rows produce
+/// `Some(MetricType::*)` carrying the real measurement payload.
 #[derive(Clone, Debug)]
 pub struct HistoricalMetricRow {
-    /// Original value as stored — the actual sensor reading.
-    /// NOT the MetricType variant name. See `storage/sqlite.rs::batch_write_metrics`
-    /// for the production write path that populates this field correctly.
-    pub value: String,
-    /// MetricType variant (Float, Int, Bool, String). Stored separately from
-    /// `value` so the OPC UA layer can construct a typed Variant without
-    /// re-parsing the value string twice.
-    pub data_type: MetricType,
+    /// `Some(typed_payload)` for v007/v008 rows; `None` for legacy rows
+    /// (`value_type='legacy'`, pre-Epic-A schema). The OPC UA layer maps
+    /// `None` to `StatusCode::BadDataUnavailable` per architecture.md:182.
+    pub payload: Option<MetricType>,
     /// Timestamp when the metric was measured at the device (NOT when the
     /// row was inserted — that's `created_at`, not exposed here).
     pub timestamp: std::time::SystemTime,
@@ -816,21 +788,13 @@ pub struct Device {
 /// Internal metric value representation with full metadata.
 /// Harmonized with types.rs `MetricValue` for easier SQL persistence.
 ///
-/// **Story A-1 / Epic A — Storage Payload Migration:** like
-/// `crate::storage::MetricValue`, this struct mirrors the dual-storage
-/// transition state — `data_type: MetricType` carries the typed payload
-/// (post-A-1) but production write paths currently zero-default the payload
-/// and rely on `value: String` for the real measurement.
-///
-/// **TODO(A-5):** remove `value: String` once `crate::storage::MetricValue`'s
-/// equivalent field is removed; the two structs must move together to
-/// preserve the harmonisation contract.
+/// **Story A-5 / Epic A:** the transitional `value: String` field was removed;
+/// `data_type: MetricType` carries the real measurement payload directly.
+/// Mirror of [`crate::storage::MetricValue`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MetricValueInternal {
     pub device_id: String,
     pub metric_name: String,
-    /// TODO(A-5): remove once typed-payload reads land — see `MetricValue.value`.
-    pub value: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub data_type: MetricType,
 }
@@ -1068,12 +1032,6 @@ impl Storage {
                     let default_value = MetricValueInternal {
                         device_id: device.device_id.clone(),
                         metric_name: metric.chirpstack_metric_name.clone(),
-                        value: match &metric_type {
-                            MetricType::Bool(_) => "false".to_string(),
-                            MetricType::Int(_) => "0".to_string(),
-                            MetricType::Float(_) => "0.0".to_string(),
-                            MetricType::String(_) => String::new(),
-                        },
                         timestamp: chrono::Utc::now(),
                         data_type: metric_type,
                     };
@@ -1511,8 +1469,7 @@ impl Storage {
             for (metric_name, metric) in device.device_metrics.iter() {
                 trace!(
                     metric_name = %metric_name,
-                    metric_value = %metric.value,
-                    data_type = %metric.data_type,
+                    data_type = ?metric.data_type,
                     timestamp = %metric.timestamp,
                     "Metric"
                 );
@@ -1589,10 +1546,38 @@ impl Storage {
 /// including device management, metric operations, and status tracking.
 /// Tests use a dedicated test configuration to ensure isolation from
 /// production settings.
+// A-5 Task 9 (AC#7): compile-time field-shape pins for the three structs
+// that lost their transitional `value: String` field. These compile-time
+// const fns force the compiler to verify field names + types at every
+// build; a future refactor that renames a field or drops one will surface
+// as a compile error. Closes A-1-iter1-DEF7 / DEF9 / DEF19, A-1-iter2-DEF5,
+// A-1-iter3-DEF11 as a single structural fix (no new crate dependency).
+#[allow(dead_code)]
+const _ASSERT_METRIC_VALUE_INTERNAL_SHAPE: fn(&MetricValueInternal) = |v| {
+    let _: &String = &v.device_id;
+    let _: &String = &v.metric_name;
+    let _: &MetricType = &v.data_type;
+    let _: &chrono::DateTime<chrono::Utc> = &v.timestamp;
+};
+
+#[allow(dead_code)]
+const _ASSERT_HISTORICAL_METRIC_ROW_SHAPE: fn(&HistoricalMetricRow) = |r| {
+    let _: &Option<MetricType> = &r.payload;
+    let _: &std::time::SystemTime = &r.timestamp;
+};
+
+#[allow(dead_code)]
+const _ASSERT_BATCH_METRIC_WRITE_SHAPE: fn(&BatchMetricWrite) = |b| {
+    let _: &String = &b.device_id;
+    let _: &String = &b.metric_name;
+    let _: &MetricType = &b.data_type;
+    let _: &std::time::SystemTime = &b.timestamp;
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use std::sync::Arc;
     use figment::{
         providers::{Format, Toml},
@@ -1761,7 +1746,6 @@ mod tests {
         let value = MetricValueInternal {
             device_id: no_device_id.clone(),
             metric_name: no_metric.clone(),
-            value: "10.0".to_string(),
             timestamp: Utc::now(),
             data_type: MetricType::Float(0.0),
         };
@@ -1801,7 +1785,6 @@ mod tests {
         let value = MetricValueInternal {
             device_id: device_id.clone(),
             metric_name: metric.clone(),
-            value: "10.0".to_string(),
             timestamp: Utc::now(),
             data_type: MetricType::Float(0.0),
         };
@@ -1813,7 +1796,6 @@ mod tests {
         let retrieved_val = retrieved.unwrap();
         assert_eq!(retrieved_val.device_id, device_id);
         assert_eq!(retrieved_val.metric_name, metric);
-        assert_eq!(retrieved_val.value, "10.0");
         assert_eq!(retrieved_val.data_type, MetricType::Float(0.0));
 
         // Test error cases

@@ -1740,8 +1740,11 @@ impl ChirpstackPoller {
         }
 
         // 4. Validate and convert value based on target type.
-        // A-3: wrap validated/converted value into the typed MetricType payload.
-        let (value_str, metric_type) = match target_type {
+        // A-3 + A-5: wrap validated/converted value into the typed MetricType
+        // payload. A-5 dropped the parallel `value: String` projection since
+        // BatchMetricWrite.value was removed — the typed `data_type` carries
+        // the real measurement directly.
+        let metric_type = match target_type {
             MetricType::Bool(_) => {
                 // Iter-3 review pending #1: helper-extracted to
                 // `validate_bool_metric_value` so tests drive the production
@@ -1750,14 +1753,10 @@ impl ChirpstackPoller {
                 // canonical `metric_parse` warn on invalid input.
                 // Iter-1 IR12 contract pin: `validate_bool_metric_value`
                 // returns `Some("0")` for `false` / `Some("1")` for `true` /
-                // `None` for invalid input (chirpstack.rs:294-323). The
-                // caller maps `"1"` → true / anything else → false. If the
-                // helper's return alphabet ever widens (e.g. `Some("true")`),
-                // this caller silently writes `Bool(false)` for every input —
-                // ensure helper changes update both call sites here and at
-                // `store_metric`.
+                // `None` for invalid input. The caller maps `"1"` → true /
+                // anything else → false.
                 match validate_bool_metric_value(raw_value, device_id, &metric_name, kind) {
-                    Some(s) => (s.to_string(), MetricType::Bool(s == "1")),
+                    Some(s) => MetricType::Bool(s == "1"),
                     None => return None,
                 }
             }
@@ -1767,9 +1766,9 @@ impl ChirpstackPoller {
                     warn!(value = %raw_value, metric_name = %metric_name, device_id = %device_id,
                           metric_kind = ?kind, "Counter metric has fractional value; precision lost");
                 }
-                (int_val.to_string(), MetricType::Int(int_val))
+                MetricType::Int(int_val)
             }
-            MetricType::Float(_) => (raw_value.to_string(), MetricType::Float(raw_value as f64)),
+            MetricType::Float(_) => MetricType::Float(raw_value as f64),
             MetricType::String(_) => {
                 warn!(metric_name = %metric_name, device_id = %device_id, metric_kind = ?kind, "Reading string metrics from ChirpStack server is not implemented");
                 return None;
@@ -1781,7 +1780,6 @@ impl ChirpstackPoller {
         Some(crate::storage::BatchMetricWrite {
             device_id: device_id.to_string(),
             metric_name,
-            value: value_str,
             data_type: metric_type,
             timestamp: now_ts,
         })
@@ -2956,19 +2954,15 @@ mod tests {
         // Step 2: seed prior Counter row with MetricType::Int(100) via
         // batch_write_metrics (matches A-3 production writer contract).
         //
-        // JR1 LOAD-BEARING: `value` field MUST be unparseable as i64. A prior
-        // iter-1 IR6 version of this test used `value: "100"` paired with
-        // `data_type: MetricType::Int(100)` — but if a regression restored the
-        // dropped legacy `prev_metric.value.parse::<i64>().ok()` fallback at
-        // chirpstack.rs:1714-1726, `"100".parse::<i64>() = Some(100)` and the
-        // test would PASS via the legacy path even though the typed-path
-        // branch was broken. The iter-2 fix sets `value` to a non-numeric
-        // sentinel so ONLY the typed-path branch can produce prev_int=100.
+        // A-5: BatchMetricWrite.value: String field retired; only typed
+        // `data_type` carries the measurement. The legacy-fallback hazard
+        // pinned by JR1 (path-ambiguous seed values) is now structurally
+        // impossible since the legacy `value` column is no longer read by
+        // any production path.
         backend
             .batch_write_metrics(vec![BatchMetricWrite {
                 device_id: device_id.to_string(),
                 metric_name: metric_name.to_string(),
-                value: "ir6_unparseable_sentinel".to_string(),
                 data_type: MetricType::Int(100),
                 timestamp: SystemTime::now(),
             }])

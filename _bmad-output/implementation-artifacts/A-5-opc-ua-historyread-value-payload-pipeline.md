@@ -5,7 +5,7 @@
 | Story key     | `A-5-opc-ua-historyread-value-payload-pipeline`                                                       |
 | Epic          | A — Storage Payload Migration (Phase B Closure, gates v2.0 GA)                                        |
 | FRs           | FR51 (Epic-A umbrella) — closes the LAST read-path consumer of typed payloads. **Fully closes [issue #108](https://github.com/guycorbaz/opcgw/issues/108).** |
-| Status        | ready-for-dev                                                                                         |
+| Status        | review                                                                                                |
 | Created       | 2026-05-17                                                                                            |
 | Source epic   | `_bmad-output/planning-artifacts/epics.md § Epic A § Story A.5`                                       |
 | Sprint change | `_bmad-output/planning-artifacts/sprint-change-proposal-2026-05-14.md`                                |
@@ -361,11 +361,15 @@ The `metric_type_from_typed_columns` helper introduced in A-4 is **reused by A-5
 
 ### Agent Model Used
 
-_(to be populated by dev agent on implementation start)_
+Opus 4.7 (1M context) — same-LLM run per CLAUDE.md flexibility; recommend `bmad-code-review A-5` on a different LLM.
 
 ### Debug Log References
 
-_(to be populated)_
+- `tmpfs disk-quota workaround`: `TMPDIR=/home/gcorbaz/.cache/cargo-tmp` used for all cargo commands (per [[reference_cargo_tmpfs_workaround]]).
+- Iteration arc: foundational struct changes first (Tasks 4/5/2) triggered ~100 compile errors which surfaced every call site mechanically. Bulk perl substitution for trivial `value: "X".to_string(),` line removal cut the error count to ~22, then targeted edits cleared the rest.
+- Compile errors successfully surfaced 1 production code path that needed real attention: `src/web/api.rs::MetricView.value` (Story 9-3 dashboard) — switched to deriving the display string from the typed `data_type` payload as a transitional shim until Story A-6 ships the typed JSON shape.
+- Two pre-A-5 tests retired as no-longer-meaningful: `test_query_metric_history_skips_nan` and `test_query_metric_history_skips_unknown_data_type` — both relied on pre-A-3 partial-success behaviour that's now structurally unreachable (v008 cross-column CHECK constraint rejects schema-drift seeds at INSERT time). Replaced with regression tests that pin the v008 enforcement.
+- Three test fixtures had to shift from string-encoded sentinels (`value: "v0"`, `format!("{}.0", i)`) to typed-payload sentinels (`MetricType::String(format!("v{i}"))`, `MetricType::Float(10.0 + i as f64)`) — closes A-1-iter1-DEF13 "tests passing for wrong reason" hazard for these surfaces.
 
 ### Completion Notes List
 
@@ -373,4 +377,34 @@ _(to be populated)_
 
 ### File List
 
-_(to be populated by dev agent — expected list per AC#14 MUTABLE files)_
+**Modified (production code):**
+- `src/storage/types.rs` — removed `MetricValue.value: String`; added compile-time field-shape pin `_ASSERT_METRIC_VALUE_SHAPE`.
+- `src/storage/mod.rs` — removed `value: String` from `MetricValueInternal` + `BatchMetricWrite`; restructured `HistoricalMetricRow` to `payload: Option<MetricType>`; added 3 compile-time field-shape pins; updated `Storage::new` default-value initialization; updated `dump_storage` log fields.
+- `src/storage/memory.rs` — simplified `InMemoryBackend::load_all_metrics` (dropped degenerate discriminant-rebuild); updated `batch_write_metrics` to drop the `.value` field.
+- `src/storage/sqlite.rs` — rewired `get_metric_value` SELECT to project typed columns only (no legacy `value`); rewired `load_all_metrics` similarly; rewrote `query_metric_history` to project v007 typed columns + use `metric_type_from_typed_columns` helper + emit `event="metric_history_read"` warns on row-skip; updated `batch_write_metrics` writer to populate legacy `value` column with discriminant string (NOT NULL constraint until A-7 drops the column); updated multiple test fixtures.
+- `src/storage/schema.rs` — updated `test_v007_readers_still_read_legacy_columns` to remove obsolete `metric.value` assertion.
+- `src/opc_ua_history.rs` — rewrote `build_data_values` to pattern-match `row.payload` directly; legacy rows emit `DataValue { value: None, status: BadDataUnavailable }`; Float narrowing-overflow/underflow guard mirrors A-4's `convert_metric_to_variant`; added unit test `test_build_data_values_legacy_emits_bad_data_unavailable`; removed `use std::str::FromStr` (no longer needed); added `use tracing::warn`.
+- `src/opc_ua.rs` — simplified `convert_variant_to_metric` signature to `Result<MetricType, OpcGwError>` (dropped string half); updated caller `set_command` accordingly.
+- `src/chirpstack.rs` — `prepare_metric_for_batch` drops parallel `value_str` string construction (typed `data_type` carries the measurement); updated `ac9_counter_monotonic_typed_path_extracts_payload` test seed (the JR1 unparseable-sentinel pattern is structurally moot post-A-5).
+- `src/web/api.rs` — `MetricView` JSON shape derives the display `value: String` from the typed payload (transitional until Story A-6 ships typed JSON).
+- `src/main.rs` — updated `MetricValueInternal` construction at startup-restore site.
+
+**Modified (tests):**
+- `tests/opcua_subscription_spike.rs` — bulk removal of `.value` field literals from `BatchMetricWrite` fixtures (perl-driven).
+- `tests/opcua_history.rs` — updated seed payloads to carry real Float values in `data_type` (was `Float(0.0)` placeholder previously).
+- `tests/opcua_history_bench.rs` — removed obsolete `.value` field literal.
+- `tests/staleness_detection_tests.rs` — updated helper to parse the seed value into `MetricType::Float` payload (instead of carrying the parallel string field); regression assertion shifted from `metric.value` to `metric.data_type`.
+- `tests/web_device_crud.rs` — updated issue-#99 regression test seed payloads to encode the real values (11.0, 22.0) per device.
+
+**Created:**
+- `tests/opcua_historyread_typed_payload.rs` (NEW) — 3 integration tests pinning Story A-5's storage-to-Variant contract: 4-variant round-trip, legacy row Ok(payload=None), mixed typed-and-legacy stream.
+
+**Documentation:**
+- `docs/logging.md` — added `metric_history_read` row with closed reason enum `{schema_drift, narrowing_overflow, narrowing_underflow}` and legacy-row note.
+- `README.md` — updated `Current Version` narrative + Planning table Epic A row (A-5 now `review`).
+- `_bmad-output/implementation-artifacts/A-5-opc-ua-historyread-value-payload-pipeline.md` — this story spec, Dev Agent Record populated.
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — A-5 status flipped `ready-for-dev → in-progress → review`.
+
+### Completion Notes List
+
+- 2026-05-17: Implementation complete via `bmad-dev-story A-5`. All 14 ACs SATISFIED. **Issue #108 functionally closed** (the last storage-trait read path now consumes typed payloads end-to-end; the legacy `MetricValue.value: String` field is gone). cargo test --all-targets **1217 passed / 0 failed / 10 ignored** (was 1214 A-4-review baseline); cargo clippy --all-targets -- -D warnings clean; cargo test --doc 0 failed / 55 ignored. AC#9 grep contract verified: 3 lines (`metric_history_read` + `metric_parse` + `metric_read`). `grep -rn 'TODO(A-5)' src/` returns 0 hits. Compile-time field-shape pins added per AC#7 close 5 cross-field-invariant DEFs as a single structural fix. Two pre-A-3 partial-success tests retired (`test_query_metric_history_skips_nan` + `test_query_metric_history_skips_unknown_data_type`) — replaced with v008 CHECK enforcement regression tests since the schema-drift seed path is now structurally unreachable. Strict-zero invariants honoured: `src/storage/pool.rs` + `src/storage/schema.rs` (except a single docfix on the legacy-readers test) + `src/web/auth.rs` + `src/web/csrf.rs` + `src/web/config_writer.rs` + the broader `src/opc_ua.rs` (except the narrow `convert_variant_to_metric` signature change band) + `src/opc_ua_auth.rs` + `src/opc_ua_session_monitor.rs` + `src/security*` + `src/main.rs::initialise_tracing` + `src/config_reload.rs` + `src/opcua_topology_apply.rs` all preserved per AC#14. Tracking issue Task 0 deferred to user (gh CLI not authenticated for write — A-1/A-2/A-3/A-4 precedent). Recommend `bmad-code-review A-5` on a different LLM per CLAUDE.md doctrine + memory `feedback_iter3_validation` 10-story pattern (A-5 extends to 11).

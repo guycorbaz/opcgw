@@ -31,7 +31,6 @@
 //! `docs/security.md#historical-data-access` for the manual-paging recipe.
 
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -55,7 +54,7 @@ use opcua::types::{
     DataValue, DateTime, MonitoringMode, NodeId, ReadRawModifiedDetails, StatusCode,
     TimestampsToReturn, Variant,
 };
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::storage::{HistoricalMetricRow, MetricType, StorageBackend};
 
@@ -371,56 +370,67 @@ fn build_data_values(rows: &[HistoricalMetricRow]) -> Vec<DataValue> {
     let mut out = Vec::with_capacity(rows.len());
     let now = DateTime::now();
     for row in rows {
-        let variant = match row.data_type {
-            // Review patch P10: align with the live read path
-            // (`OpcUa::convert_metric_to_variant`) which emits
-            // `Variant::Float` (f32) for `MetricType::Float(0.0)`. The variable's
-            // declared DataType (set in `OpcUa::add_nodes` from
-            // `OpcMetricTypeConfig::Float`) is also Float (f32) — using
-            // Variant::Double here would mean the historized DataType
-            // diverges from the variable's DataType (Part 11 §6.4.2 violation).
-            // Parse as f64 first to detect non-finite values, then narrow to
-            // f32 with a finite-after-narrowing check (an f64 in (f32::MAX,
-            // f64::MAX) overflows to f32::INFINITY, which we skip).
-            // TODO(A-5): pattern-match the typed payload directly instead of
-            // re-parsing row.value. A-1 keeps the existing parse-from-string
-            // logic working by adding (_) discards to the discriminant arms;
-            // A-5 owns the actual payload-aware refactor.
-            MetricType::Float(_) => match row.value.parse::<f64>() {
-                Ok(f) if f.is_finite() => {
-                    let narrowed = f as f32;
-                    if narrowed.is_finite() {
-                        Variant::Float(narrowed)
-                    } else {
-                        trace!(value = %row.value, "history: skipping Float row that overflows f32");
-                        continue;
-                    }
-                }
-                _ => {
-                    trace!(value = %row.value, "history: skipping unparseable Float row");
-                    continue;
-                }
-            },
-            MetricType::Int(_) => match row.value.parse::<i64>() {
-                Ok(i) => Variant::Int64(i),
-                Err(_) => {
-                    trace!(value = %row.value, "history: skipping unparseable Int row");
-                    continue;
-                }
-            },
-            MetricType::Bool(_) => match bool::from_str(&row.value) {
-                Ok(b) => Variant::Boolean(b),
-                Err(_) => {
-                    trace!(value = %row.value, "history: skipping unparseable Bool row");
-                    continue;
-                }
-            },
-            MetricType::String(_) => Variant::String(row.value.clone().into()),
-        };
         let dt = DateTime::from(chrono::DateTime::<Utc>::from(row.timestamp));
+        // A-5: pattern-match the typed payload directly. No more
+        // `row.value.parse::<…>()` — the typed-column projection in
+        // `query_metric_history` already produced a payload-bearing
+        // `MetricType`. Legacy rows (pre-Epic-A `value_type='legacy'`)
+        // surface as `payload: None` and we emit a `BadDataUnavailable`
+        // DataValue (NOT silently dropped — they appear in the response
+        // stream per epic AC#1).
+        let (variant, status) = match &row.payload {
+            None => {
+                // Legacy row — visible to clients as BadDataUnavailable.
+                (None, StatusCode::BadDataUnavailable)
+            }
+            Some(MetricType::Float(f)) => {
+                // Review patch P10: align with the live read path
+                // (`OpcUa::convert_metric_to_variant`) which emits
+                // `Variant::Float` (f32) for `MetricType::Float(0.0)`. The
+                // variable's declared DataType (set in `OpcUa::add_nodes`)
+                // is Float (f32) — Variant::Double here would diverge from
+                // the variable's DataType (Part 11 §6.4.2 violation).
+                //
+                // A-5 narrowing guard mirrors A-4's `convert_metric_to_variant`
+                // IR7/JR13/JR14 logic for the live-Read path:
+                //   - overflow: f64 outside f32 range → narrows to ±Inf →
+                //     emit warn + Variant::Float(0.0)
+                //   - underflow: |f64| below f32 subnormal min (~1.4e-45)
+                //     narrows silently to 0.0 → emit warn + Variant::Float(0.0)
+                //     (subnormal-representable values pass through)
+                let narrowed = *f as f32;
+                if !narrowed.is_finite() {
+                    warn!(
+                        event = "metric_history_read",
+                        reason = "narrowing_overflow",
+                        f64_value = *f,
+                        "history: f64 narrowed to non-finite f32; returning 0.0"
+                    );
+                    (Some(Variant::Float(0.0_f32)), StatusCode::Good)
+                } else if narrowed == 0.0_f32 && *f != 0.0_f64 {
+                    warn!(
+                        event = "metric_history_read",
+                        reason = "narrowing_underflow",
+                        f64_value = *f,
+                        "history: f64 narrowed to 0.0_f32 (sub-f32 magnitude); returning 0.0"
+                    );
+                    (Some(Variant::Float(0.0_f32)), StatusCode::Good)
+                } else {
+                    (Some(Variant::Float(narrowed)), StatusCode::Good)
+                }
+            }
+            Some(MetricType::Int(i)) => {
+                // Variant::Int64 for HistoryRead (variable DataType is Int64);
+                // unlike the live-Read path which uses Int32 narrowing per
+                // A-1-iter1-DEF21.
+                (Some(Variant::Int64(*i)), StatusCode::Good)
+            }
+            Some(MetricType::Bool(b)) => (Some(Variant::Boolean(*b)), StatusCode::Good),
+            Some(MetricType::String(s)) => (Some(Variant::String(s.clone().into())), StatusCode::Good),
+        };
         out.push(DataValue {
-            value: Some(variant),
-            status: Some(StatusCode::Good.bits().into()),
+            value: variant,
+            status: Some(status.bits().into()),
             source_timestamp: Some(dt),
             source_picoseconds: None,
             server_timestamp: Some(now),
@@ -619,8 +629,7 @@ mod tests {
     #[test]
     fn test_build_data_values_float_round_trip() {
         let rows = vec![HistoricalMetricRow {
-            value: "20.5".to_string(),
-            data_type: MetricType::Float(0.0),
+            payload: Some(MetricType::Float(20.5)),
             timestamp: std::time::SystemTime::UNIX_EPOCH
                 + std::time::Duration::from_secs(1_700_000_000),
         }];
@@ -637,13 +646,11 @@ mod tests {
     fn test_build_data_values_bool_round_trip() {
         let rows = vec![
             HistoricalMetricRow {
-                value: "true".to_string(),
-                data_type: MetricType::Bool(false),
+                payload: Some(MetricType::Bool(true)),
                 timestamp: std::time::SystemTime::UNIX_EPOCH,
             },
             HistoricalMetricRow {
-                value: "false".to_string(),
-                data_type: MetricType::Bool(false),
+                payload: Some(MetricType::Bool(false)),
                 timestamp: std::time::SystemTime::UNIX_EPOCH,
             },
         ];
@@ -653,29 +660,35 @@ mod tests {
         assert!(matches!(dvs[1].value, Some(Variant::Boolean(false))));
     }
 
-    /// AC#1 partial-success: rows whose typed parse fails are skipped, not
-    /// errored. A garbage Bool value drops out of the result silently.
+    /// A-5 AC#3 legacy-row contract: rows with `payload: None` emit a
+    /// `DataValue { value: None, status: BadDataUnavailable }` — they appear
+    /// in the response stream (NOT silently dropped per epic AC#1).
     #[test]
-    fn test_build_data_values_skips_unparseable_bool() {
+    fn test_build_data_values_legacy_emits_bad_data_unavailable() {
         let rows = vec![
             HistoricalMetricRow {
-                value: "true".to_string(),
-                data_type: MetricType::Bool(false),
+                payload: Some(MetricType::Bool(true)),
                 timestamp: std::time::SystemTime::UNIX_EPOCH,
             },
             HistoricalMetricRow {
-                value: "garbage".to_string(),
-                data_type: MetricType::Bool(false),
+                payload: None, // legacy row (pre-Epic-A schema)
                 timestamp: std::time::SystemTime::UNIX_EPOCH,
             },
             HistoricalMetricRow {
-                value: "false".to_string(),
-                data_type: MetricType::Bool(false),
+                payload: Some(MetricType::Bool(false)),
                 timestamp: std::time::SystemTime::UNIX_EPOCH,
             },
         ];
         let dvs = build_data_values(&rows);
-        assert_eq!(dvs.len(), 2, "garbage Bool row must be skipped");
+        assert_eq!(dvs.len(), 3, "legacy row must appear in the output, not be silently dropped");
+        assert!(matches!(dvs[0].value, Some(Variant::Boolean(true))));
+        assert!(dvs[1].value.is_none(), "legacy row must have NULL Variant");
+        assert_eq!(
+            dvs[1].status,
+            Some(StatusCode::BadDataUnavailable.bits().into()),
+            "legacy row must surface as BadDataUnavailable"
+        );
+        assert!(matches!(dvs[2].value, Some(Variant::Boolean(false))));
     }
 
     /// AC#2 sanity: the wrapper exposes the InMemoryBackend (which returns

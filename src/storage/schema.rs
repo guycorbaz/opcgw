@@ -726,13 +726,9 @@ mod tests {
             .expect("get_metric_value must succeed")
             .expect("row must exist");
 
-        // The reader reconstructs MetricValue from legacy columns only.
-        // The `value` field carries the legacy stringified discriminant
-        // (`upsert_metric_value` writes `value.to_string()` which is "Float").
-        assert_eq!(
-            metric.value, "Float",
-            "Reader must project legacy `value` column unchanged in A-2"
-        );
+        // A-5: MetricValue.value: String removed. The typed `data_type`
+        // payload carries the measurement; legacy discriminant-string
+        // projection is no longer part of the wire contract.
         assert_eq!(metric.data_type, MetricType::Float(0.0));
 
         let _ = fs::remove_file(&db_path);

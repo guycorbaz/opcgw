@@ -1027,7 +1027,6 @@ async fn test_subscription_datavalue_payload_carries_seeded_value() {
         .batch_write_metrics(vec![BatchMetricWrite {
             device_id: SPIKE_DEVICE_ID.to_string(),
             metric_name: SPIKE_METRIC_NAME.to_string(),
-            value: "42.5".to_string(),
             data_type: MetricType::Float(42.5),
             timestamp: std::time::SystemTime::now(),
         }])
@@ -1201,7 +1200,6 @@ async fn test_subscription_survives_sibling_session_disconnect() {
         .batch_write_metrics(vec![BatchMetricWrite {
             device_id: SPIKE_DEVICE_ID.to_string(),
             metric_name: SPIKE_METRIC_NAME.to_string(),
-            value: "1.0".to_string(),
             data_type: MetricType::Float(1.0),
             timestamp: std::time::SystemTime::now(),
         }])
@@ -1297,8 +1295,7 @@ async fn test_subscription_survives_sibling_session_disconnect() {
         .batch_write_metrics(vec![BatchMetricWrite {
             device_id: SPIKE_DEVICE_ID.to_string(),
             metric_name: SPIKE_METRIC_NAME.to_string(),
-            value: "2.0".to_string(), // different from the seed
-            data_type: MetricType::Float(2.0),
+            data_type: MetricType::Float(2.0), // different from the seed
             timestamp: std::time::SystemTime::now(),
         }])
         .expect("post-disconnect seed change");
@@ -1728,7 +1725,6 @@ async fn test_subscription_survives_chirpstack_outage_with_stale_status() {
         .batch_write_metrics(vec![BatchMetricWrite {
             device_id: SPIKE_DEVICE_ID.to_string(),
             metric_name: SPIKE_METRIC_NAME.to_string(),
-            value: "42.0".to_string(),
             data_type: MetricType::Float(42.0),
             timestamp: std::time::SystemTime::now(),
         }])
@@ -1882,7 +1878,6 @@ async fn test_subscription_survives_chirpstack_outage_with_stale_status() {
         .batch_write_metrics(vec![BatchMetricWrite {
             device_id: SPIKE_DEVICE_ID.to_string(),
             metric_name: SPIKE_METRIC_NAME.to_string(),
-            value: "84.0".to_string(),
             data_type: MetricType::Float(84.0),
             timestamp: std::time::SystemTime::now(),
         }])
@@ -1974,7 +1969,6 @@ async fn test_subscription_unfiltered_dedupes_status_only_transitions() {
         .batch_write_metrics(vec![BatchMetricWrite {
             device_id: SPIKE_DEVICE_ID.to_string(),
             metric_name: SPIKE_METRIC_NAME.to_string(),
-            value: "42.0".to_string(),
             data_type: MetricType::Float(42.0),
             timestamp: std::time::SystemTime::now(),
         }])

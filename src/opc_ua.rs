@@ -1960,12 +1960,13 @@ impl OpcUa {
                         return opcua::types::StatusCode::BadTypeMismatch;
                     }
                 }
-                let (value_str, _value_type) = match Self::convert_variant_to_metric(&variant) {
-                    Ok(result) => result,
-                    Err(_) => return opcua::types::StatusCode::BadTypeMismatch,
-                };
-                let value = match value_str.parse::<i64>() {
-                    Ok(v) => v,
+                // A-5: convert_variant_to_metric now returns the typed
+                // MetricType directly. Commands require an integer payload
+                // (Int32 / Int64 narrowed); Float / Bool / String are
+                // rejected as BadTypeMismatch.
+                let value = match Self::convert_variant_to_metric(&variant) {
+                    Ok(crate::storage::MetricType::Int(v)) => v,
+                    Ok(_) => return opcua::types::StatusCode::BadTypeMismatch,
                     Err(_) => return opcua::types::StatusCode::BadTypeMismatch,
                 };
                 debug!(
@@ -2062,17 +2063,21 @@ impl OpcUa {
     /// * `variant` - Reference to the OPC UA Variant to be converted
     ///
     /// # Returns
-    /// * `Ok((value_string, MetricType))` - Stringified value + payload-bearing variant
+    /// * `Ok(MetricType)` - Payload-bearing typed `MetricType`
     /// * `Err(String)` - Error message if the variant subtype is unmapped
-    fn convert_variant_to_metric(variant: &Variant) -> Result<(String, crate::storage::MetricType), String> {
+    ///
+    /// A-5: signature simplified — pre-A-5 returned `(String, MetricType)` so
+    /// the caller could store the string projection into `MetricValue.value`.
+    /// That field was retired in A-5 along with the dual-storage staging.
+    fn convert_variant_to_metric(variant: &Variant) -> Result<crate::storage::MetricType, String> {
         trace!("Convert variant to metric");
         match variant {
-            Variant::Int32(value) => Ok((value.to_string(), crate::storage::MetricType::Int(*value as i64))),
-            Variant::Int64(value) => Ok((value.to_string(), crate::storage::MetricType::Int(*value))),
-            Variant::Float(value) => Ok((value.to_string(), crate::storage::MetricType::Float(*value as f64))),
-            Variant::Double(value) => Ok((value.to_string(), crate::storage::MetricType::Float(*value))),
-            Variant::String(value) => Ok((value.to_string(), crate::storage::MetricType::String(value.to_string()))),
-            Variant::Boolean(value) => Ok((value.to_string(), crate::storage::MetricType::Bool(*value))),
+            Variant::Int32(value) => Ok(crate::storage::MetricType::Int(*value as i64)),
+            Variant::Int64(value) => Ok(crate::storage::MetricType::Int(*value)),
+            Variant::Float(value) => Ok(crate::storage::MetricType::Float(*value as f64)),
+            Variant::Double(value) => Ok(crate::storage::MetricType::Float(*value)),
+            Variant::String(value) => Ok(crate::storage::MetricType::String(value.to_string())),
+            Variant::Boolean(value) => Ok(crate::storage::MetricType::Bool(*value)),
             _ => Err(format!("Unsupported variant type {:?}", variant)),
         }
     }
@@ -2107,7 +2112,6 @@ mod tests {
             .batch_write_metrics(vec![BatchMetricWrite {
                 device_id: device_id.clone(),
                 metric_name: metric_name.clone(),
-                value: "21.5".to_string(),
                 data_type: MetricType::Float(0.0),
                 timestamp: SystemTime::now(),
             }])
@@ -2128,7 +2132,6 @@ mod tests {
             .batch_write_metrics(vec![BatchMetricWrite {
                 device_id: device_id.clone(),
                 metric_name: metric_name.clone(),
-                value: "21.5".to_string(),
                 data_type: MetricType::Float(0.0),
                 timestamp: old,
             }])
@@ -2278,7 +2281,6 @@ mod tests {
             .batch_write_metrics(vec![BatchMetricWrite {
                 device_id: device_id.clone(),
                 metric_name: metric_name.clone(),
-                value: "21.5".to_string(),
                 data_type: MetricType::Float(0.0),
                 timestamp: near,
             }])
@@ -2364,7 +2366,6 @@ mod tests {
             .batch_write_metrics(vec![BatchMetricWrite {
                 device_id: "dev-e2e".to_string(),
                 metric_name: "pressure".to_string(),
-                value: "1013.25".to_string(),
                 data_type: MetricType::Float(0.0),
                 timestamp: SystemTime::now(),
             }])
@@ -2438,7 +2439,6 @@ mod tests {
             .batch_write_metrics(vec![BatchMetricWrite {
                 device_id: "dev-corr".to_string(),
                 metric_name: "humidity".to_string(),
-                value: "55.0".to_string(),
                 data_type: MetricType::Float(0.0),
                 timestamp: SystemTime::now(),
             }])
@@ -2490,7 +2490,6 @@ mod tests {
             .batch_write_metrics(vec![BatchMetricWrite {
                 device_id: "dev-fields".to_string(),
                 metric_name: "pressure".to_string(),
-                value: "1013.25".to_string(),
                 data_type: MetricType::Float(0.0),
                 timestamp: SystemTime::now(),
             }])
@@ -2536,7 +2535,6 @@ mod tests {
             .batch_write_metrics(vec![BatchMetricWrite {
                 device_id: "dev-sec".to_string(),
                 metric_name: "secret_marker".to_string(),
-                value: "TESTSECRET-DO-NOT-LOG".to_string(),
                 data_type: MetricType::String(String::new()),
                 timestamp: SystemTime::now(),
             }])
@@ -2593,7 +2591,6 @@ mod tests {
             .batch_write_metrics(vec![BatchMetricWrite {
                 device_id: DEVICE_ID.to_string(),
                 metric_name: METRIC_NAME.to_string(),
-                value: "42.0".to_string(),
                 data_type: MetricType::Float(0.0),
                 timestamp: SystemTime::now(),
             }])
@@ -2926,7 +2923,6 @@ mod tests {
         crate::storage::MetricValue {
             device_id: "test-device".to_string(),
             metric_name: "test-metric".to_string(),
-            value: "ignored".to_string(),
             timestamp: Utc::now(),
             data_type,
         }
@@ -3001,7 +2997,6 @@ mod tests {
         let mv = crate::storage::MetricValue {
             device_id: "ir12_overflow_test_device".to_string(),
             metric_name: "ir12_overflow_test_metric".to_string(),
-            value: "ignored".to_string(),
             timestamp: Utc::now(),
             data_type: crate::storage::MetricType::Float(1e40),
         };
@@ -3041,7 +3036,6 @@ mod tests {
         let mv = crate::storage::MetricValue {
             device_id: "jr13_subnormal_test_device".to_string(),
             metric_name: "jr13_subnormal_test_metric".to_string(),
-            value: "ignored".to_string(),
             timestamp: Utc::now(),
             // 1e-40_f64 narrows to a non-zero f32 subnormal (~1e-40_f32),
             // which is finite and non-zero. The guard MUST NOT fire.
@@ -3078,7 +3072,6 @@ mod tests {
         let mv = crate::storage::MetricValue {
             device_id: "ir7_underflow_test_device".to_string(),
             metric_name: "ir7_underflow_test_metric".to_string(),
-            value: "ignored".to_string(),
             timestamp: Utc::now(),
             data_type: crate::storage::MetricType::Float(1e-50_f64), // < f32 subnormal min (~1.4e-45)
         };
@@ -3118,7 +3111,6 @@ mod tests {
             .batch_write_metrics(vec![BatchMetricWrite {
                 device_id: "ir10_stale_device".to_string(),
                 metric_name: "ir10_stale_metric".to_string(),
-                value: "ignored".to_string(),
                 data_type: MetricType::Float(12.3),
                 timestamp: stale_time,
             }])
@@ -3159,7 +3151,6 @@ mod tests {
         let mv = crate::storage::MetricValue {
             device_id: "d".to_string(),
             metric_name: "m".to_string(),
-            value: "this string is not parseable as any type".to_string(),
             timestamp: Utc::now(),
             data_type: crate::storage::MetricType::Float(99.9),
         };
@@ -3189,7 +3180,6 @@ mod tests {
             .batch_write_metrics(vec![BatchMetricWrite {
                 device_id: "dev1".to_string(),
                 metric_name: "temp".to_string(),
-                value: "7.7".to_string(),
                 data_type: MetricType::Float(7.7),
                 timestamp: std::time::SystemTime::now(),
             }])

@@ -80,43 +80,21 @@ impl std::str::FromStr for MetricType {
 ///
 /// Stores a single device metric with its type information and timestamp.
 ///
-/// **Story A-1 / Epic A note:** Post-A-1, `data_type: MetricType` carries the
-/// real measurement payload (`Float(f64)` / `Int(i64)` / `Bool(bool)` /
-/// `String(String)`). The legacy `value: String` field below is currently
-/// dual-storage with the payload — kept temporarily to allow the existing
-/// parse-from-string reads in `src/opc_ua_history.rs` and `src/opc_ua.rs` to
-/// continue working until those read paths are rewritten to pattern-match the
-/// typed payload. **TODO(A-5):** remove `value: String` once `OpcUa::get_value`
-/// and `OpcgwHistoryNodeManagerImpl::history_read_raw_modified` consume the
-/// typed payload directly.
+/// **Story A-5 / Epic A:** the transitional `value: String` field was removed
+/// in Story A-5 (the post-Epic-A read paths in `src/opc_ua.rs` and
+/// `src/opc_ua_history.rs` consume the typed payload directly via
+/// `data_type: MetricType`). This is a **SemVer-major break** vs the v2.0-rc
+/// dual-storage shape (closes [issue #108](https://github.com/guycorbaz/opcgw/issues/108)).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MetricValue {
     /// Device identifier
     pub device_id: String,
     /// Metric name
     pub metric_name: String,
-    /// Value stored as text (legacy; parse based on data_type).
-    /// TODO(A-5): remove once typed-payload reads land.
-    pub value: String,
     /// Timestamp of when the metric was collected
     pub timestamp: DateTime<Utc>,
-    /// Data type of the metric, type-level payload-bearing (post-A-1, Story
-    /// A-1 / Epic A — Storage Payload Migration).
-    ///
-    /// **Transitional dual-storage caveat (A-1 → A-5):** during the A-1
-    /// staging window the typed payload is zero-defaulted at most production
-    /// write sites (SqliteBackend `set_metric`/`upsert_metric_value`/
-    /// `append_metric_history` use `value.to_string()` = discriminant; OPC UA
-    /// Variant→Metric conversion in `src/opc_ua.rs` zero-defaults; ChirpStack
-    /// poller arms in `src/chirpstack.rs` stamp `Float(0.0)`/`Int(0)`/etc. —
-    /// search `A-3 / A-4` TODOs in earlier revisions of those files). Until those staging gaps are closed,
-    /// the **real** measurement is carried by the sibling `value: String`
-    /// field. The single exception is the production poller's
-    /// `batch_write_metrics` path, which writes `BatchMetricWrite.value`
-    /// (real string) — but its `data_type` payload is still discriminant-
-    /// flavoured. **TODO(A-5):** once read sites in `src/opc_ua.rs` and
-    /// `src/opc_ua_history.rs` are rewritten to consume the typed payload,
-    /// this caveat goes away.
+    /// Data type of the metric — payload-bearing (`Float(f64)` / `Int(i64)` /
+    /// `Bool(bool)` / `String(String)`) per Story A-1 + post-A-5 reads.
     pub data_type: MetricType,
 }
 
@@ -289,6 +267,18 @@ pub struct ChirpstackStatus {
     /// Number of errors encountered since last successful connection (wraps at i32::MAX)
     pub error_count: i32,
 }
+
+// A-5 Task 9 (AC#7): compile-time field-shape pin for MetricValue. The
+// transitional `value: String` field was removed in A-5; this const fn
+// surfaces a compile error if a future refactor reintroduces the field
+// or renames the typed payload.
+#[allow(dead_code)]
+const _ASSERT_METRIC_VALUE_SHAPE: fn(&MetricValue) = |v| {
+    let _: &String = &v.device_id;
+    let _: &String = &v.metric_name;
+    let _: &chrono::DateTime<chrono::Utc> = &v.timestamp;
+    let _: &MetricType = &v.data_type;
+};
 
 #[cfg(test)]
 mod tests {
@@ -482,14 +472,12 @@ mod tests {
         let metric = MetricValue {
             device_id: "device_123".to_string(),
             metric_name: "temperature".to_string(),
-            value: "23.5".to_string(),
             timestamp: now,
             data_type: MetricType::Float(23.5),
         };
 
         assert_eq!(metric.device_id, "device_123");
         assert_eq!(metric.metric_name, "temperature");
-        assert_eq!(metric.value, "23.5");
         assert_eq!(metric.data_type, MetricType::Float(23.5));
     }
 

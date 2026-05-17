@@ -362,7 +362,19 @@ pub async fn api_devices(
                                 Some(row) => MetricView {
                                     metric_name: spec.metric_name.clone(),
                                     data_type: row.data_type.to_string(),
-                                    value: Some(row.value.clone()),
+                                    // A-5: derive the display string from the
+                                    // typed payload (no more `row.value: String`).
+                                    // Story A-6 will widen this to a typed JSON
+                                    // shape (`{"value": 23.5, "type": "Float"}`);
+                                    // the stringified rendering is preserved
+                                    // here for Story 9-3 dashboard backwards-compat
+                                    // until A-6 lands.
+                                    value: Some(match &row.data_type {
+                                        crate::storage::MetricType::Float(f) => f.to_string(),
+                                        crate::storage::MetricType::Int(i) => i.to_string(),
+                                        crate::storage::MetricType::Bool(b) => b.to_string(),
+                                        crate::storage::MetricType::String(s) => s.clone(),
+                                    }),
                                     timestamp: Some(row.timestamp.to_rfc3339()),
                                 },
                                 None => MetricView {

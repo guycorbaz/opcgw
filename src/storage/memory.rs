@@ -189,7 +189,6 @@ impl StorageBackend for InMemoryBackend {
             let metric_value = MetricValue {
                 device_id: metric.device_id.clone(),
                 metric_name: metric.metric_name.clone(),
-                value: metric.value,
                 timestamp: chrono::DateTime::<chrono::Utc>::from(metric.timestamp),
                 data_type: metric.data_type,
             };
@@ -202,7 +201,12 @@ impl StorageBackend for InMemoryBackend {
     }
 
     fn load_all_metrics(&self) -> Result<Vec<MetricValue>, OpcGwError> {
-        // InMemoryBackend: reconstruct metrics from internal storage
+        // InMemoryBackend: reconstruct metrics from internal storage.
+        // A-5: previously the degenerate `value: metric_type.to_string()` line
+        // rebuilt the legacy discriminant string into `MetricValue.value`
+        // (A-1-iter1-DEF1 — produced "Float"/"Int"/etc as a "value"). Post-A-5
+        // the field is gone; warm-restart recovery returns the typed payload
+        // directly.
         let metrics = self.metrics.lock().map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
         let mut result = Vec::new();
 
@@ -211,7 +215,6 @@ impl StorageBackend for InMemoryBackend {
                 result.push(MetricValue {
                     device_id: device_id.clone(),
                     metric_name: metric_name.clone(),
-                    value: metric_type.to_string(),
                     timestamp: Utc::now(),
                     data_type: metric_type.clone(),
                 });
