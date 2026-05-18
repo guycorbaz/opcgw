@@ -863,16 +863,27 @@ async fn api_devices_emits_typed_value_and_unit_per_variant() {
     assert_eq!(m["value"].as_str(), Some("OK"));
     assert_eq!(m["unit"].as_str(), Some("lvl"));
 
-    // P7: i64::MAX row — assert via RAW response body grep (not
-    // `as_i64()`, which round-trips through serde_json's own parser
-    // and would mask a wire-format bug). The bit-exact JSON string
-    // 9223372036854775807 must appear in the HTTP body literally.
+    // P7 + iter-2 K9 review fix — i64::MAX row asserted via PATH-
+    // SPECIFIC raw-body grep so the test cannot pass for the wrong
+    // reason. The pre-K9 `body.contains("9223372036854775807")` would
+    // match the substring appearing anywhere (audit log line, debug
+    // serialization, future timestamp_ns field, etc.); the path-
+    // specific assertion pins the substring to the JSON `"value"`
+    // field of the bignum row. The `as_i64()` check round-trips
+    // through serde_json's parser (which would mask a wire-format
+    // bug); the raw-body check inspects the actual bytes-on-wire.
     let m = &metrics[4];
     assert_eq!(m["metric_name"].as_str(), Some("bignum"));
     assert_eq!(m["data_type"].as_str(), Some("Int"));
+    assert_eq!(
+        m["value"].as_i64(),
+        Some(i64::MAX),
+        "P7: bignum row value field must equal i64::MAX after JSON round-trip"
+    );
     assert!(
-        body.contains("9223372036854775807"),
-        "P7: i64::MAX must appear bit-exact in the /api/devices response body; got {body}"
+        body.contains("\"value\":9223372036854775807"),
+        "P7 + K9: i64::MAX must appear in the bignum row's `\"value\":` field bit-exact; \
+         got {body}"
     );
 
     cancel.cancel();
@@ -930,45 +941,21 @@ async fn metrics_js_references_unit_and_data_type_fields() {
         .expect("web::run task panicked or was cancelled abnormally");
 }
 
-/// Story A-6 P12 review fix — guard against future code accidentally
-/// reintroducing equality comparisons on `MetricView` / `DevicesResponse`
-/// / `ApplicationView` / `DeviceView`. These derives were dropped in A-6
-/// because `serde_json::Value` does not implement `Eq` (NaN axis); a
-/// future contributor adding an `assert_eq!(a, b)` between two of these
-/// structs would re-trigger the broken derive cascade.
-///
-/// This is a grep-style guard mirroring the AC#7 retired-symbol
-/// zero-hits contract — cheap, brittle-but-effective, fails the build
-/// before the breakage lands.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial_test::serial]
-async fn dropped_partialeq_eq_structs_have_no_equality_call_sites() {
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let output = std::process::Command::new("git")
-        .arg("grep")
-        .arg("-nE")
-        // Equality comparisons OR assert_eq! / assert_ne! macros on the
-        // dropped-derive types. The pattern is restricted to the type
-        // names in the same line; struct-construction `Type { ... }` is
-        // not matched.
-        .arg(r"(MetricView|DevicesResponse|ApplicationView|DeviceView)\s*[!=]=|assert_(eq|ne)!\([^)]*\b(MetricView|DevicesResponse|ApplicationView|DeviceView)\b")
-        .arg("--")
-        .arg("src/")
-        .arg("tests/")
-        .current_dir(&manifest)
-        .output()
-        .expect("git grep");
-
-    // exit 1 = zero matches (expected). exit 0 = matches found (bad).
-    let exit_code = output.status.code().unwrap_or(-1);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_ne!(
-        exit_code, 0,
-        "Story A-6 P12: dropped-derive structs (MetricView / DevicesResponse / \
-         ApplicationView / DeviceView) must not be used with == / != / assert_eq! / \
-         assert_ne!. Found:\n{stdout}"
-    );
-}
+// Story A-6 P12 + iter-2 K6 review fix: the iter-1 P12 grep guard
+// against accidental `==` / `!=` / `assert_eq!` on `MetricView` /
+// `DevicesResponse` / `ApplicationView` / `DeviceView` was DELETED
+// because the absence of `#[derive(PartialEq, Eq)]` on these structs
+// is itself a compile-time guard — any future `==` between values of
+// these types fails the build at the usage site, not at the derive
+// site. The grep test was also brittle (regex false positives on
+// comments, false negatives on multi-line macros, silent-pass when
+// `git grep` errors with exit 2) so it added churn without adding
+// real protection. The compile-time invariant is the actual guard.
+//
+// If you find yourself wanting to add `#[derive(PartialEq, Eq)]` back
+// to one of these structs: note that `value: Option<serde_json::Value>`
+// blocks `Eq` outright (NaN axis). Use field-by-field projection in
+// assertions instead.
 
 /// Story 9-3 AC#4: metrics.html ships the viewport meta + the DOM
 /// IDs the JS hooks into. Pinning these makes a future rename a

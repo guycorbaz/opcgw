@@ -190,10 +190,15 @@
     // because the missing-check is on metric.value, not on the format
     // output — so an em-dash string value is distinct from a null one.
     var formattedValue = formatValue(metric.value, metric.data_type);
+    // iter-2 K5 review fix: empty string is treated as missing
+    // regardless of data_type. The pre-K5 check restricted the empty-
+    // string-as-missing rule to data_type === "String", which left a
+    // server-side wire-contract bug (Float row with value: "") falling
+    // through to formatValue's Float arm — `"".toString() === ""` then
+    // ` + " °C"` produced ` °C` (leading-space artifact). Defensive
+    // collapse here closes the cross-arm hazard once and for all.
     var valueMissing =
-      metric.value === null ||
-      metric.value === undefined ||
-      (metric.data_type === "String" && metric.value === "");
+      metric.value === null || metric.value === undefined || metric.value === "";
     var valueText = valueMissing
       ? "—"
       : metric.unit

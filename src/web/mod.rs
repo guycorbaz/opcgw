@@ -172,15 +172,23 @@ impl DashboardConfigSnapshot {
                             .map(|m| MetricSpec {
                                 metric_name: m.metric_name.clone(),
                                 metric_type: m.metric_type.clone(),
-                                // Story A-6 P11 review fix: trim
-                                // whitespace at the snapshot boundary
-                                // so a TOML edit like `metric_unit = " °C"`
-                                // doesn't render as `"23.5  °C"` (double
-                                // space). Whitespace-only strings normalise
-                                // to None (operator clearly meant "no unit"
-                                // when they typed `metric_unit = "   "`).
+                                // Story A-6 P11 + iter-2 K4 review fix:
+                                // trim ASCII-only whitespace at the
+                                // snapshot boundary so a TOML edit like
+                                // `metric_unit = " °C"` doesn't render
+                                // as `"23.5  °C"` (double space).
+                                // Whitespace-only strings normalise to
+                                // None. **ASCII-only** per K4: industrial
+                                // locale conventions (French, Spanish)
+                                // routinely place U+00A0 NBSP between
+                                // value and unit (`"\u{00A0}°C"`);
+                                // `str::trim()` would silently strip it
+                                // and break the operator's intentional
+                                // typography. We restrict to ASCII
+                                // whitespace (space, tab, CR, LF) which
+                                // is what TOML round-tripping introduces.
                                 metric_unit: m.metric_unit.as_ref().and_then(|s| {
-                                    let t = s.trim();
+                                    let t = s.trim_matches(|c: char| c.is_ascii_whitespace());
                                     if t.is_empty() {
                                         None
                                     } else if t.len() == s.len() {
@@ -836,6 +844,16 @@ mod tests {
                         metric_type: OpcMetricTypeConfig::Float,
                         metric_unit: Some("°C".to_string()),
                     },
+                    // iter-2 K4: NBSP (U+00A0) is locale-significant
+                    // whitespace; ASCII-only trim must preserve it.
+                    // French/Spanish typography routinely uses NBSP
+                    // between value and unit (`"23.5\u{00A0}°C"`).
+                    ReadMetric {
+                        metric_name: "raw_nbsp".to_string(),
+                        chirpstack_metric_name: "raw".to_string(),
+                        metric_type: OpcMetricTypeConfig::Float,
+                        metric_unit: Some("\u{00A0}°C".to_string()),
+                    },
                 ],
                 device_command_list: None,
             }],
@@ -853,6 +871,14 @@ mod tests {
             metrics[3].metric_unit,
             Some("°C".to_string()),
             "pristine value preserved exactly"
+        );
+        // iter-2 K4: NBSP-leading unit preserved unchanged (not trimmed
+        // by ASCII-only trim). Otherwise French/Spanish locale typography
+        // is silently broken.
+        assert_eq!(
+            metrics[4].metric_unit,
+            Some("\u{00A0}°C".to_string()),
+            "NBSP-leading unit preserved (ASCII-only trim)"
         );
     }
 

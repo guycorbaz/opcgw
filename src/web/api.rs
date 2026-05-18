@@ -197,6 +197,8 @@ pub const BAD_THRESHOLD_SECS: u64 = 86_400;
 /// drift, sibling pattern to `metric_parse` / `metric_read` reasons).
 pub(crate) const REASON_NON_FINITE: &str = "non_finite";
 pub(crate) const REASON_INT_PRECISION_LOSSY: &str = "int_precision_lossy";
+pub(crate) const REASON_F32_OVERFLOW: &str = "f32_overflow";
+pub(crate) const REASON_F32_UNDERFLOW: &str = "f32_underflow";
 
 /// Map a configured `OpcMetricTypeConfig` to its display string,
 /// matching the `MetricType::Display` impl from `src/storage/types.rs`
@@ -245,11 +247,10 @@ pub(crate) fn metric_type_to_json_value(
             // the shortest round-trip string at f32 precision (e.g.
             // `23.6`), then parse it as f64 (giving the *f64 closest to
             // 23.6*, distinct from the f32-back-cast value) and emit.
-            //
-            // Non-finite inputs short-circuit BEFORE the string detour
-            // because f32::NAN.to_string() yields "NaN" which would
-            // re-parse as a non-finite f64, triggering the defensive
-            // guard. Test by handling non-finite explicitly first.
+
+            // Step 1: non-finite f64 input — A-3 poller-filtered;
+            // unreachable in production. Per-row debug; aggregate warn
+            // fires once per request at the api_devices boundary (P2).
             if !f.is_finite() {
                 tracing::debug!(
                     event = "metric_view_serialize",
@@ -261,33 +262,60 @@ pub(crate) fn metric_type_to_json_value(
                 );
                 return None;
             }
+
+            // Step 2: narrowing-overflow guard (iter-2 K3 review fix).
+            // |f64| > f32::MAX (~3.4e38) silently casts to f32::INFINITY,
+            // whose Display is "inf" → re-parses to f64::INFINITY → would
+            // dead-end at the from_f64 None arm. Promote to an explicit
+            // warn with full identifiers (operator-actionable; this is
+            // the "huge legitimate counter" case, not the A-3-filtered
+            // unreachable path).
             let narrowed = *f as f32;
-            // f32 Display produces shortest round-trip at f32 precision.
-            // Parse back to f64 to get the f64-closest-to-that-string.
-            // Both steps are total over finite f32 inputs.
+            if !narrowed.is_finite() {
+                tracing::warn!(
+                    event = "metric_view_serialize",
+                    reason = REASON_F32_OVERFLOW,
+                    device_id = %device_id,
+                    metric_name = %metric_name,
+                    f64_value = %f,
+                    "Finite f64 magnitude exceeds f32::MAX; cannot narrow without losing the value entirely. Emitting JSON null."
+                );
+                return None;
+            }
+
+            // Step 3: subnormal-underflow guard (iter-2 K2 review fix).
+            // |f64| < f32::MIN_POSITIVE (~1.18e-38) but > 0 narrows to a
+            // subnormal f32 (or zero). Subnormal f32::to_string() emits
+            // 40+ character decimal strings ("0.00000…117549435") which
+            // are unreadable on the dashboard. Clamp to 0 with an info
+            // signal — the operator-visible loss is the same as the
+            // non-finite case (value disappears) but at a defined edge
+            // of the f32 representable range.
+            if *f != 0.0 && !narrowed.is_normal() {
+                tracing::info!(
+                    event = "metric_view_serialize",
+                    reason = REASON_F32_UNDERFLOW,
+                    device_id = %device_id,
+                    metric_name = %metric_name,
+                    f64_value = %f,
+                    "Finite f64 magnitude below f32::MIN_POSITIVE; narrowing produces subnormal/zero f32. Emitting 0.0."
+                );
+                return Some(serde_json::Value::Number(
+                    serde_json::Number::from_f64(0.0).expect("0.0 is a valid JSON number"),
+                ));
+            }
+
+            // Step 4: nominal path — f32 Display produces shortest
+            // round-trip at f32 precision. Parse back to f64 to get the
+            // f64-closest-to-that-string. Both steps are total over
+            // finite normal-or-zero f32 inputs (zero is allowed).
             let s = narrowed.to_string();
             let f64_at_f32_precision = s
                 .parse::<f64>()
-                .expect("f32 Display always parses as finite f64");
-            match serde_json::Number::from_f64(f64_at_f32_precision) {
-                Some(n) => Some(serde_json::Value::Number(n)),
-                None => {
-                    // Reachable only if the f32 Display somehow produces
-                    // a non-finite string (e.g. f32::MAX cast from a huge
-                    // f64 narrows to f32::INFINITY, whose Display is "inf"
-                    // which parses to f64::INFINITY — guard against that).
-                    tracing::debug!(
-                        event = "metric_view_serialize",
-                        reason = REASON_NON_FINITE,
-                        device_id = %device_id,
-                        metric_name = %metric_name,
-                        f64_value = %f,
-                        f32_narrowed = %narrowed,
-                        "Float narrows to non-finite f32; emitting JSON null"
-                    );
-                    None
-                }
-            }
+                .expect("f32 Display of finite normal-or-zero f32 always parses as finite f64");
+            // Defensive: from_f64 rejects only non-finite f64; the
+            // earlier guards make this branch structurally unreachable.
+            serde_json::Number::from_f64(f64_at_f32_precision).map(serde_json::Value::Number)
         }
         crate::storage::MetricType::Int(i) => {
             // P8: surface precision-lossy Int values for JS-client
@@ -473,9 +501,13 @@ pub async fn api_devices(
             e.into_inner().clone()
         });
 
-    // P2: count Some(row) Float arms where the helper returned None,
-    // emit ONE aggregate warn per request rather than N per-row warns.
-    let mut non_finite_count: u32 = 0;
+    // P2 + K8 iter-2 review fix: count Some(row) Float arms where the
+    // helper returned None (covers both `non_finite` and `f32_overflow`
+    // reasons), emit ONE aggregate warn per request rather than N
+    // per-row warns. usize matches `Vec::len()` semantics + insulates
+    // against future overflow on a pathological large response (K8
+    // iter-2 review fix).
+    let mut float_emitted_null_count: usize = 0;
 
     let applications: Vec<ApplicationView> = snapshot
         .applications
@@ -510,7 +542,7 @@ pub async fn api_devices(
                                     if matches!(row.data_type, crate::storage::MetricType::Float(_))
                                         && value.is_none()
                                     {
-                                        non_finite_count += 1;
+                                        float_emitted_null_count += 1;
                                     }
                                     MetricView {
                                         metric_name: spec.metric_name.clone(),
@@ -546,16 +578,20 @@ pub async fn api_devices(
         })
         .collect();
 
-    // P2: one aggregate warn per request when any non-finite Float
-    // reached the dashboard — bounded log-volume even on a regressed
-    // sensor producing N non-finites per poll cycle. Per-row forensics
-    // are still emitted at `debug!` by the helper.
-    if non_finite_count > 0 {
+    // P2 + iter-2 K3 review fix: one aggregate warn per request when
+    // any Float emitted JSON null at the dashboard (covers BOTH
+    // `non_finite` and `f32_overflow` reasons). Bounded log-volume on
+    // a regressed sensor producing N nulls per poll tick. Per-row
+    // forensics still emitted at `debug!` (non_finite) / `warn!`
+    // (f32_overflow) by the helper for triage. The aggregate `reason`
+    // field is `non_finite` as the umbrella label; f32_overflow is
+    // documented as a sibling per-row reason at `docs/logging.md`.
+    if float_emitted_null_count > 0 {
         tracing::warn!(
             event = "metric_view_serialize",
             reason = REASON_NON_FINITE,
-            non_finite_count = %non_finite_count,
-            "Non-finite Float(s) reached the dashboard JSON; rows emitted as null"
+            float_emitted_null_count = %float_emitted_null_count,
+            "Float row(s) emitted as JSON null; check per-row debug!/warn! lines for device_id + metric_name correlation"
         );
     }
 
@@ -5117,21 +5153,28 @@ mod tests {
         assert_eq!(f, 0.0);
         assert!(f.is_sign_negative(), "-0.0 must round-trip with negative sign bit");
 
-        // P0-D1 wire-precision contract: `23.6` survives the f32 cast
-        // cleanly. Without the cast we'd see the f64 representation of
-        // f32(23.6) (~23.600000381469727) which is the UX regression
-        // the P0-D1 decision avoids.
+        // P0-D1 + iter-2 K7 review fix — wire-precision contract pinned
+        // by EXACT equality, not a tolerance check (the previous 1e-5
+        // tolerance passed for both pre-fix and post-fix code because
+        // the f64-from-f32 artifact 23.600000381469727 - 23.6 = 3.8e-7
+        // is below 1e-5; iter-2 review caught this as docstring-vs-body
+        // drift).
+        //
+        // Post-P0-D1 the f32 Display alphabet produces shortest round-
+        // trip at f32 precision: `23.6_f32.to_string() = "23.6"`.
+        // `.parse::<f64>()` lands on the f64-closest-to-"23.6" which is
+        // 23.6_f64 EXACTLY (the bit pattern of `23.6` as a literal f64).
+        // This is distinct from `23.6_f64 as f32 as f64`
+        // (= 23.600000381469727) — the string round-trip is the only
+        // way to land on the operator-friendly value.
         let v = metric_type_to_json_value(&MetricType::Float(23.6), "dev", "m").unwrap();
         let f = v.as_f64().expect("Float JSON value");
-        // Within f32 precision of 23.6 (~1.2µ at this magnitude).
-        assert!((f - 23.6_f64).abs() < 1e-5, "Float(23.6) should narrow to f32 then round-trip: got {f}");
-        // Wire-format check (Display contract per P3): the stringified
-        // value should be short (≤ 10 chars) confirming the cast worked.
-        let wire = serde_json::to_string(&v).unwrap();
-        assert!(
-            wire.len() <= 6,
-            "P0-D1 contract: 23.6 must serialise short (got {wire:?}, {} chars)",
-            wire.len()
+        assert_eq!(
+            f, 23.6_f64,
+            "P0-D1 contract: Float(23.6) must round-trip through f32 Display \
+             to land EXACTLY on 23.6_f64; got {f}. Pre-fix code yielded \
+             ~23.600000381469727 (the f64-from-f32 artifact); a regression \
+             reverting to `*f as f32 as f64` is caught here."
         );
     }
 
@@ -5209,38 +5252,50 @@ mod tests {
         assert_eq!(v, serde_json::json!("emoji 🎉"));
     }
 
-    /// P5 review fix — pin AC#1's "the `unit` field is always present"
-    /// contract at the serde layer. A future clippy-silencing edit adding
-    /// `#[serde(skip_serializing_if = "Option::is_none")]` would silently
-    /// break the wire contract; this test fails the build before such an
-    /// edit lands.
+    /// P5 + iter-2 K10 review fix — pin AC#1's "the `unit` / `value` /
+    /// `timestamp` fields are always present in the JSON output"
+    /// contract at the serde layer. A future clippy-silencing edit
+    /// adding `#[serde(skip_serializing_if = "Option::is_none")]` to
+    /// ANY of the three Option fields would silently break the wire
+    /// contract — the JS renderer treats a missing `value` key as
+    /// `undefined`, which the existing valueMissing logic handles, but
+    /// the documented A-6 wire contract is `null` not omission. K10
+    /// extends the test from `unit` alone to all three optional fields
+    /// (the dev-story pre-K10 version pinned only `unit`).
     #[test]
-    fn metric_view_serialises_unit_field_even_when_none() {
+    fn metric_view_serialises_all_option_fields_even_when_none() {
+        // Most-pessimistic shape: ALL three Option fields are None.
         let view = MetricView {
             metric_name: "m".to_string(),
             data_type: "Float".to_string(),
-            value: Some(serde_json::json!(23.5)),
+            value: None,
             unit: None,
-            timestamp: Some("2026-05-18T12:00:00Z".to_string()),
+            timestamp: None,
         };
         let v = serde_json::to_value(&view).expect("MetricView serializes");
         let obj = v.as_object().expect("MetricView -> JSON object");
-        assert!(
-            obj.contains_key("unit"),
-            "Story A-6 AC#1: the unit key must be present even when None; got {obj:?}"
-        );
-        assert!(obj["unit"].is_null());
+        for key in ["value", "unit", "timestamp"] {
+            assert!(
+                obj.contains_key(key),
+                "Story A-6 AC#1 + K10: the {key:?} key must be present even when None; \
+                 got {obj:?}. A `skip_serializing_if = Option::is_none` edit must NOT \
+                 land on this struct."
+            );
+            assert!(obj[key].is_null(), "field {key:?} must serialise as JSON null when None");
+        }
 
-        // Sanity: Some("°C") round-trips as a JSON string.
-        let view_with_unit = MetricView {
+        // Sanity: Some(...) round-trips as expected JSON types.
+        let view_populated = MetricView {
             metric_name: "m".to_string(),
             data_type: "Float".to_string(),
             value: Some(serde_json::json!(23.5)),
             unit: Some("°C".to_string()),
             timestamp: Some("2026-05-18T12:00:00Z".to_string()),
         };
-        let v = serde_json::to_value(&view_with_unit).unwrap();
+        let v = serde_json::to_value(&view_populated).unwrap();
+        assert_eq!(v["value"].as_f64(), Some(23.5));
         assert_eq!(v["unit"].as_str(), Some("°C"));
+        assert_eq!(v["timestamp"].as_str(), Some("2026-05-18T12:00:00Z"));
     }
 
     /// P8 review fix — Int magnitude > 2^53 emits an `info!` audit event
