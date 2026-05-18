@@ -83,6 +83,16 @@
   // the variant when the JSON primitive alone is ambiguous (e.g. an Int
   // and a Float both come over the wire as JSON numbers, but only Int is
   // displayed without decimals).
+  //
+  // P10 review fix: empty String "" produces "—" so the missing-value
+  // detection at renderMetricRow doesn't append a unit to a blank cell
+  // (e.g. avoid rendering " °C" with a leading space).
+  //
+  // P9 review fix: an unrecognised data_type discriminant (forward-compat
+  // hazard if a future MetricType variant ships before the renderer is
+  // updated) emits a console.warn and renders the sentinel "?" so the
+  // operator sees a crisp signal rather than `[object Object]` or
+  // arbitrary stringification.
   function formatValue(value, dataType) {
     if (value === null || value === undefined) {
       return "—";
@@ -93,12 +103,25 @@
     if (dataType === "Float" || dataType === "Int") {
       // V8's Number.prototype.toString already produces a reasonable
       // representation (23.5 / 0 / 1e-12); no manual rounding here.
+      // Note: the server-side helper casts Float via f32 (Story A-6 P0-D1)
+      // so f32-from-f64-cast artifacts are stripped before the wire.
       return value.toString();
     }
     if (dataType === "String") {
-      return value;
+      // P10: collapse empty String to the missing sentinel so the
+      // unit suffix isn't appended to a blank cell.
+      return value === "" ? "—" : value;
     }
-    return String(value);
+    // P9: unknown discriminant — visible client-side signal.
+    if (typeof console !== "undefined" && console.warn) {
+      console.warn(
+        "opcgw/metrics.js: unknown data_type discriminant",
+        dataType,
+        "for value",
+        value
+      );
+    }
+    return "?";
   }
 
   // Returns one of: "good" / "uncertain" / "bad" / "missing".
@@ -158,13 +181,24 @@
     var parsed = parseTimestamp(metric.timestamp);
     // Story A-6: typed value + optional unit. metric.unit empty string
     // and null both coalesce to "no unit suffix" via the truthy check.
+    //
+    // P1 + P10 review fix: the "is the value present?" decision keys
+    // off `metric.value` directly, with empty String treated as missing
+    // (industrial sensors rarely emit a meaningful "" string; treating
+    // it as missing avoids rendering " unit" with a leading space).
+    // A legitimate String value of "—" is still rendered with its unit
+    // because the missing-check is on metric.value, not on the format
+    // output — so an em-dash string value is distinct from a null one.
     var formattedValue = formatValue(metric.value, metric.data_type);
-    var valueText =
-      formattedValue === "—"
-        ? "—"
-        : metric.unit
-          ? formattedValue + " " + metric.unit
-          : formattedValue;
+    var valueMissing =
+      metric.value === null ||
+      metric.value === undefined ||
+      (metric.data_type === "String" && metric.value === "");
+    var valueText = valueMissing
+      ? "—"
+      : metric.unit
+        ? formattedValue + " " + metric.unit
+        : formattedValue;
 
     var statusLabel = status.charAt(0).toUpperCase() + status.slice(1);
 

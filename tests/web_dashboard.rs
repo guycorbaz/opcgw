@@ -745,6 +745,16 @@ async fn api_devices_emits_typed_value_and_unit_per_variant() {
                         metric_type: opcgw::config::OpcMetricTypeConfig::String,
                         metric_unit: Some("lvl".to_string()),
                     },
+                    // P7 review fix: seed i64::MAX so the integration
+                    // test exercises bit-exact Int wire emission through
+                    // the full MetricView -> DeviceView -> DevicesResponse
+                    // -> serde_json::to_string ladder, not just the unit
+                    // test that calls the helper directly.
+                    opcgw::web::MetricSpec {
+                        metric_name: "bignum".to_string(),
+                        metric_type: opcgw::config::OpcMetricTypeConfig::Int,
+                        metric_unit: None,
+                    },
                 ],
             }],
         }],
@@ -772,6 +782,10 @@ async fn api_devices_emits_typed_value_and_unit_per_variant() {
     backend
         .set_metric("dev-a6", "label", MetricType::String("OK".to_string()))
         .expect("seed String");
+    // P7: i64::MAX seeded for the end-to-end bit-exact-wire test.
+    backend
+        .set_metric("dev-a6", "bignum", MetricType::Int(i64::MAX))
+        .expect("seed Int i64::MAX");
     let backend: Arc<dyn StorageBackend> = Arc::new(backend);
     let (config_reload, config_writer, dir) =
         opcgw::web::test_support::make_test_reload_handle_and_writer();
@@ -818,7 +832,7 @@ async fn api_devices_emits_typed_value_and_unit_per_variant() {
     let metrics = json["applications"][0]["devices"][0]["metrics"]
         .as_array()
         .expect("metrics array");
-    assert_eq!(metrics.len(), 4);
+    assert_eq!(metrics.len(), 5);
 
     // Float row — value as native JSON number, unit "°C".
     let m = &metrics[0];
@@ -848,6 +862,18 @@ async fn api_devices_emits_typed_value_and_unit_per_variant() {
     assert_eq!(m["data_type"].as_str(), Some("String"));
     assert_eq!(m["value"].as_str(), Some("OK"));
     assert_eq!(m["unit"].as_str(), Some("lvl"));
+
+    // P7: i64::MAX row — assert via RAW response body grep (not
+    // `as_i64()`, which round-trips through serde_json's own parser
+    // and would mask a wire-format bug). The bit-exact JSON string
+    // 9223372036854775807 must appear in the HTTP body literally.
+    let m = &metrics[4];
+    assert_eq!(m["metric_name"].as_str(), Some("bignum"));
+    assert_eq!(m["data_type"].as_str(), Some("Int"));
+    assert!(
+        body.contains("9223372036854775807"),
+        "P7: i64::MAX must appear bit-exact in the /api/devices response body; got {body}"
+    );
 
     cancel.cancel();
     handle
@@ -902,6 +928,46 @@ async fn metrics_js_references_unit_and_data_type_fields() {
     handle
         .await
         .expect("web::run task panicked or was cancelled abnormally");
+}
+
+/// Story A-6 P12 review fix — guard against future code accidentally
+/// reintroducing equality comparisons on `MetricView` / `DevicesResponse`
+/// / `ApplicationView` / `DeviceView`. These derives were dropped in A-6
+/// because `serde_json::Value` does not implement `Eq` (NaN axis); a
+/// future contributor adding an `assert_eq!(a, b)` between two of these
+/// structs would re-trigger the broken derive cascade.
+///
+/// This is a grep-style guard mirroring the AC#7 retired-symbol
+/// zero-hits contract — cheap, brittle-but-effective, fails the build
+/// before the breakage lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn dropped_partialeq_eq_structs_have_no_equality_call_sites() {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let output = std::process::Command::new("git")
+        .arg("grep")
+        .arg("-nE")
+        // Equality comparisons OR assert_eq! / assert_ne! macros on the
+        // dropped-derive types. The pattern is restricted to the type
+        // names in the same line; struct-construction `Type { ... }` is
+        // not matched.
+        .arg(r"(MetricView|DevicesResponse|ApplicationView|DeviceView)\s*[!=]=|assert_(eq|ne)!\([^)]*\b(MetricView|DevicesResponse|ApplicationView|DeviceView)\b")
+        .arg("--")
+        .arg("src/")
+        .arg("tests/")
+        .current_dir(&manifest)
+        .output()
+        .expect("git grep");
+
+    // exit 1 = zero matches (expected). exit 0 = matches found (bad).
+    let exit_code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_ne!(
+        exit_code, 0,
+        "Story A-6 P12: dropped-derive structs (MetricView / DevicesResponse / \
+         ApplicationView / DeviceView) must not be used with == / != / assert_eq! / \
+         assert_ne!. Found:\n{stdout}"
+    );
 }
 
 /// Story 9-3 AC#4: metrics.html ships the viewport meta + the DOM

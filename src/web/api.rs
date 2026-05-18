@@ -192,6 +192,12 @@ pub const DEFAULT_STALE_THRESHOLD_SECS: u64 = 120;
 /// this site needs to change and main.rs stays in sync automatically.
 pub const BAD_THRESHOLD_SECS: u64 = 86_400;
 
+/// Closed-enum `reason` values for the `metric_view_serialize` audit
+/// event (Story A-6 P6 review fix — compile-time pin against literal
+/// drift, sibling pattern to `metric_parse` / `metric_read` reasons).
+pub(crate) const REASON_NON_FINITE: &str = "non_finite";
+pub(crate) const REASON_INT_PRECISION_LOSSY: &str = "int_precision_lossy";
+
 /// Map a configured `OpcMetricTypeConfig` to its display string,
 /// matching the `MetricType::Display` impl from `src/storage/types.rs`
 /// so the JSON `data_type` field is identical whether sourced from the
@@ -199,15 +205,27 @@ pub const BAD_THRESHOLD_SECS: u64 = 86_400;
 ///
 /// Story A-6 widens the dashboard wire contract: emit typed JSON
 /// primitives (number / bool / string / null) sourced from the
-/// payload-bearing [`crate::storage::MetricType`]. Native JSON forbids
-/// non-finite IEEE-754 (NaN / ±Inf), so a non-finite Float yields
-/// `Ok(None)` and emits a `warn!(event = "metric_view_serialize",
-/// reason = "non_finite", …)` audit event (defensive — Story A-3's
-/// poller-side filter makes this path unreachable in production).
+/// payload-bearing [`crate::storage::MetricType`].
 ///
-/// Int variants larger than 2^53 lose precision when consumed by a
-/// JavaScript client (IEEE-754 double), but the wire shape is bit-exact
-/// JSON; documented operator caveat.
+/// **Float precision contract (P0-D1):** Float is cast through `f32`
+/// before JSON emission so the dashboard shows `23.6` rather than the
+/// f64-from-f32-cast artifact `23.600000381469727`. Today every Float
+/// originates from ChirpStack as f32 (see `src/chirpstack.rs::prepare_metric_for_batch`
+/// Float arm); the cast is information-preserving. A future native-f64
+/// source would lose precision here and would warrant a revisit.
+///
+/// **Non-finite Float defensive path:** native JSON forbids
+/// IEEE-754 NaN / ±Inf, so a non-finite Float yields `None` and emits a
+/// `warn!(event = "metric_view_serialize", reason = "non_finite", …)`
+/// audit event. A-3's poller-side filter makes this path unreachable
+/// in production.
+///
+/// **Int precision telemetry (P8):** Int variants with `|i| > 2^53`
+/// lose precision when consumed by JavaScript clients (IEEE-754
+/// double). The wire shape stays bit-exact JSON; an operator-facing
+/// `info!(event = "metric_view_serialize", reason = "int_precision_lossy", …)`
+/// surfaces the condition so operators can switch the SCADA renderer
+/// to a string-typed JSON parser if needed.
 ///
 /// `device_id` + `metric_name` thread through to the warn emission so
 /// operators can correlate the warn to a specific row.
@@ -218,25 +236,77 @@ pub(crate) fn metric_type_to_json_value(
 ) -> Option<serde_json::Value> {
     match data_type {
         crate::storage::MetricType::Float(f) => {
-            match serde_json::Number::from_f64(*f) {
+            // P0-D1: produce the f32-Display-precision wire string so
+            // the dashboard shows `23.6` rather than the f64-from-f32
+            // artifact `23.600000381469727`. The cast `*f as f32 as f64`
+            // alone does NOT achieve this — the f64 retains all 53
+            // significand bits of the f32's representation. We therefore
+            // round-trip through the f32 Display alphabet which finds
+            // the shortest round-trip string at f32 precision (e.g.
+            // `23.6`), then parse it as f64 (giving the *f64 closest to
+            // 23.6*, distinct from the f32-back-cast value) and emit.
+            //
+            // Non-finite inputs short-circuit BEFORE the string detour
+            // because f32::NAN.to_string() yields "NaN" which would
+            // re-parse as a non-finite f64, triggering the defensive
+            // guard. Test by handling non-finite explicitly first.
+            if !f.is_finite() {
+                tracing::debug!(
+                    event = "metric_view_serialize",
+                    reason = REASON_NON_FINITE,
+                    device_id = %device_id,
+                    metric_name = %metric_name,
+                    f64_value = %f,
+                    "Non-finite Float reached the dashboard; emitting JSON null"
+                );
+                return None;
+            }
+            let narrowed = *f as f32;
+            // f32 Display produces shortest round-trip at f32 precision.
+            // Parse back to f64 to get the f64-closest-to-that-string.
+            // Both steps are total over finite f32 inputs.
+            let s = narrowed.to_string();
+            let f64_at_f32_precision = s
+                .parse::<f64>()
+                .expect("f32 Display always parses as finite f64");
+            match serde_json::Number::from_f64(f64_at_f32_precision) {
                 Some(n) => Some(serde_json::Value::Number(n)),
                 None => {
-                    // NaN / ±Inf — not representable as a bare JSON number.
-                    // Defensive log; A-3 poller filter makes this unreachable
-                    // in production.
-                    tracing::warn!(
+                    // Reachable only if the f32 Display somehow produces
+                    // a non-finite string (e.g. f32::MAX cast from a huge
+                    // f64 narrows to f32::INFINITY, whose Display is "inf"
+                    // which parses to f64::INFINITY — guard against that).
+                    tracing::debug!(
                         event = "metric_view_serialize",
-                        reason = "non_finite",
+                        reason = REASON_NON_FINITE,
                         device_id = %device_id,
                         metric_name = %metric_name,
                         f64_value = %f,
-                        "Non-finite Float reached the dashboard; emitting JSON null"
+                        f32_narrowed = %narrowed,
+                        "Float narrows to non-finite f32; emitting JSON null"
                     );
                     None
                 }
             }
         }
         crate::storage::MetricType::Int(i) => {
+            // P8: surface precision-lossy Int values for JS-client
+            // operators. 2^53 = 9_007_199_254_740_992; values beyond
+            // this lose precision when parsed as IEEE-754 double.
+            // Use unsigned_abs to handle i64::MIN cleanly (its absolute
+            // value overflows i64). Info-level: legitimate counters can
+            // legitimately exceed 2^53; this is operator-informational,
+            // not a defect.
+            if i.unsigned_abs() > (1u64 << 53) {
+                tracing::info!(
+                    event = "metric_view_serialize",
+                    reason = REASON_INT_PRECISION_LOSSY,
+                    device_id = %device_id,
+                    metric_name = %metric_name,
+                    i64_value = %i,
+                    "Int magnitude exceeds 2^53; JS clients will lose precision"
+                );
+            }
             Some(serde_json::Value::Number(serde_json::Number::from(*i)))
         }
         crate::storage::MetricType::Bool(b) => Some(serde_json::Value::Bool(*b)),
@@ -403,6 +473,10 @@ pub async fn api_devices(
             e.into_inner().clone()
         });
 
+    // P2: count Some(row) Float arms where the helper returned None,
+    // emit ONE aggregate warn per request rather than N per-row warns.
+    let mut non_finite_count: u32 = 0;
+
     let applications: Vec<ApplicationView> = snapshot
         .applications
         .iter()
@@ -421,19 +495,31 @@ pub async fn api_devices(
                         .map(|spec| {
                             let key = (dev.device_id.clone(), spec.metric_name.clone());
                             match metric_by_key.get(&key) {
-                                Some(row) => MetricView {
-                                    metric_name: spec.metric_name.clone(),
-                                    data_type: row.data_type.to_string(),
-                                    // A-6: typed JSON via metric_type_to_json_value;
-                                    // non-finite Float yields None + warn.
-                                    value: metric_type_to_json_value(
+                                Some(row) => {
+                                    let value = metric_type_to_json_value(
                                         &row.data_type,
                                         &dev.device_id,
                                         &spec.metric_name,
-                                    ),
-                                    unit: spec.metric_unit.clone(),
-                                    timestamp: Some(row.timestamp.to_rfc3339()),
-                                },
+                                    );
+                                    // P2: detect the non-finite Float path
+                                    // (Float input, None output) for the
+                                    // aggregate warn. Non-Float arms always
+                                    // return Some for typed payloads, so a
+                                    // None here means the helper rejected
+                                    // a non-finite Float.
+                                    if matches!(row.data_type, crate::storage::MetricType::Float(_))
+                                        && value.is_none()
+                                    {
+                                        non_finite_count += 1;
+                                    }
+                                    MetricView {
+                                        metric_name: spec.metric_name.clone(),
+                                        data_type: row.data_type.to_string(),
+                                        value,
+                                        unit: spec.metric_unit.clone(),
+                                        timestamp: Some(row.timestamp.to_rfc3339()),
+                                    }
+                                }
                                 None => MetricView {
                                     metric_name: spec.metric_name.clone(),
                                     data_type: config_type_to_display(&spec.metric_type)
@@ -459,6 +545,19 @@ pub async fn api_devices(
             }
         })
         .collect();
+
+    // P2: one aggregate warn per request when any non-finite Float
+    // reached the dashboard — bounded log-volume even on a regressed
+    // sensor producing N non-finites per poll cycle. Per-row forensics
+    // are still emitted at `debug!` by the helper.
+    if non_finite_count > 0 {
+        tracing::warn!(
+            event = "metric_view_serialize",
+            reason = REASON_NON_FINITE,
+            non_finite_count = %non_finite_count,
+            "Non-finite Float(s) reached the dashboard JSON; rows emitted as null"
+        );
+    }
 
     Ok(Json(DevicesResponse {
         as_of,
@@ -4997,34 +5096,78 @@ mod tests {
     // that was retired in this story (closes DEF-iter1-A5-D1).
     // ----------------------------------------------------------------------
 
-    /// AC#10 item 1 — Float finite values produce native JSON numbers.
+    /// AC#10 item 1 — Float finite values produce native JSON numbers
+    /// AND the P0-D1 f32 cast strips f64-from-f32 precision artifacts
+    /// so the dashboard shows `23.6`, not `23.600000381469727`.
     #[test]
     fn metric_type_to_json_value_float_finite() {
+        // Round value: f32 cast is exact.
         let v = metric_type_to_json_value(&MetricType::Float(23.5), "dev", "m").unwrap();
         assert_eq!(v, serde_json::json!(23.5));
+
+        // Plain zero — float-equality is fine here.
         let v = metric_type_to_json_value(&MetricType::Float(0.0), "dev", "m").unwrap();
-        assert_eq!(v, serde_json::json!(0.0));
-        // Preserve sign-of-zero through the JSON Number layer.
+        assert_eq!(v.as_f64(), Some(0.0));
+
+        // P3 review fix: preserve sign-of-zero via the IEEE-754
+        // semantics test instead of pinning serde_json's stringification
+        // (which is outside the library's documented stability surface).
         let v = metric_type_to_json_value(&MetricType::Float(-0.0), "dev", "m").unwrap();
-        // serde_json normalises -0.0 to a Number whose stringified form
-        // is "-0.0"; assert by inspecting the wire-format string.
-        assert_eq!(serde_json::to_string(&v).unwrap(), "-0.0");
+        let f = v.as_f64().expect("Float JSON value");
+        assert_eq!(f, 0.0);
+        assert!(f.is_sign_negative(), "-0.0 must round-trip with negative sign bit");
+
+        // P0-D1 wire-precision contract: `23.6` survives the f32 cast
+        // cleanly. Without the cast we'd see the f64 representation of
+        // f32(23.6) (~23.600000381469727) which is the UX regression
+        // the P0-D1 decision avoids.
+        let v = metric_type_to_json_value(&MetricType::Float(23.6), "dev", "m").unwrap();
+        let f = v.as_f64().expect("Float JSON value");
+        // Within f32 precision of 23.6 (~1.2µ at this magnitude).
+        assert!((f - 23.6_f64).abs() < 1e-5, "Float(23.6) should narrow to f32 then round-trip: got {f}");
+        // Wire-format check (Display contract per P3): the stringified
+        // value should be short (≤ 10 chars) confirming the cast worked.
+        let wire = serde_json::to_string(&v).unwrap();
+        assert!(
+            wire.len() <= 6,
+            "P0-D1 contract: 23.6 must serialise short (got {wire:?}, {} chars)",
+            wire.len()
+        );
     }
 
-    /// AC#10 item 2 — non-finite Float (NaN / ±Inf) maps to JSON null
-    /// AND emits the defensive `metric_view_serialize` warn event.
+    // AC#10 item 2 — split per-call to harden log correlation (P4 review
+    // fix). Three separate #[traced_test] functions so the per-call
+    // identifiers cannot get matched against a *different* call's log
+    // line in a shared buffer.
+
     #[test]
     #[traced_test]
-    fn metric_type_to_json_value_float_non_finite() {
-        assert!(metric_type_to_json_value(&MetricType::Float(f64::NAN), "dev-x", "m-nan").is_none());
-        assert!(metric_type_to_json_value(&MetricType::Float(f64::INFINITY), "dev-y", "m-inf").is_none());
-        assert!(metric_type_to_json_value(&MetricType::Float(f64::NEG_INFINITY), "dev-z", "m-ninf").is_none());
+    fn metric_type_to_json_value_float_nan_emits_debug_with_identifiers() {
+        assert!(metric_type_to_json_value(&MetricType::Float(f64::NAN), "dev-nan", "m-nan").is_none());
         assert!(logs_contain("event=\"metric_view_serialize\""));
         assert!(logs_contain("reason=\"non_finite\""));
-        // Per-row identifiers thread through to the warn so the operator
-        // can correlate the warn to a specific row.
-        assert!(logs_contain("dev-x"));
+        assert!(logs_contain("dev-nan"));
         assert!(logs_contain("m-nan"));
+    }
+
+    #[test]
+    #[traced_test]
+    fn metric_type_to_json_value_float_pos_inf_emits_debug_with_identifiers() {
+        assert!(metric_type_to_json_value(&MetricType::Float(f64::INFINITY), "dev-pi", "m-pi").is_none());
+        assert!(logs_contain("event=\"metric_view_serialize\""));
+        assert!(logs_contain("reason=\"non_finite\""));
+        assert!(logs_contain("dev-pi"));
+        assert!(logs_contain("m-pi"));
+    }
+
+    #[test]
+    #[traced_test]
+    fn metric_type_to_json_value_float_neg_inf_emits_debug_with_identifiers() {
+        assert!(metric_type_to_json_value(&MetricType::Float(f64::NEG_INFINITY), "dev-ni", "m-ni").is_none());
+        assert!(logs_contain("event=\"metric_view_serialize\""));
+        assert!(logs_contain("reason=\"non_finite\""));
+        assert!(logs_contain("dev-ni"));
+        assert!(logs_contain("m-ni"));
     }
 
     /// AC#10 item 3 — Int extremes round-trip bit-exact as JSON numbers.
@@ -5064,6 +5207,87 @@ mod tests {
             "m",
         ).unwrap();
         assert_eq!(v, serde_json::json!("emoji 🎉"));
+    }
+
+    /// P5 review fix — pin AC#1's "the `unit` field is always present"
+    /// contract at the serde layer. A future clippy-silencing edit adding
+    /// `#[serde(skip_serializing_if = "Option::is_none")]` would silently
+    /// break the wire contract; this test fails the build before such an
+    /// edit lands.
+    #[test]
+    fn metric_view_serialises_unit_field_even_when_none() {
+        let view = MetricView {
+            metric_name: "m".to_string(),
+            data_type: "Float".to_string(),
+            value: Some(serde_json::json!(23.5)),
+            unit: None,
+            timestamp: Some("2026-05-18T12:00:00Z".to_string()),
+        };
+        let v = serde_json::to_value(&view).expect("MetricView serializes");
+        let obj = v.as_object().expect("MetricView -> JSON object");
+        assert!(
+            obj.contains_key("unit"),
+            "Story A-6 AC#1: the unit key must be present even when None; got {obj:?}"
+        );
+        assert!(obj["unit"].is_null());
+
+        // Sanity: Some("°C") round-trips as a JSON string.
+        let view_with_unit = MetricView {
+            metric_name: "m".to_string(),
+            data_type: "Float".to_string(),
+            value: Some(serde_json::json!(23.5)),
+            unit: Some("°C".to_string()),
+            timestamp: Some("2026-05-18T12:00:00Z".to_string()),
+        };
+        let v = serde_json::to_value(&view_with_unit).unwrap();
+        assert_eq!(v["unit"].as_str(), Some("°C"));
+    }
+
+    /// P8 review fix — Int magnitude > 2^53 emits an `info!` audit event
+    /// with `reason="int_precision_lossy"` so operators can detect when
+    /// JS clients will silently truncate to IEEE-754 double precision.
+    #[test]
+    #[traced_test]
+    fn metric_type_to_json_value_int_above_2pow53_emits_precision_warn() {
+        // 2^53 + 1 — just past the IEEE-754 double safe-integer range.
+        let v = metric_type_to_json_value(
+            &MetricType::Int((1i64 << 53) + 1),
+            "dev-bignum",
+            "m-bignum",
+        )
+        .unwrap();
+        // Wire is still bit-exact JSON.
+        let wire = serde_json::to_string(&v).unwrap();
+        assert_eq!(wire, "9007199254740993");
+        // But the operator-facing telemetry fires.
+        assert!(logs_contain("event=\"metric_view_serialize\""));
+        assert!(logs_contain("reason=\"int_precision_lossy\""));
+        assert!(logs_contain("dev-bignum"));
+    }
+
+    /// P8 sibling — i64::MIN (negative extreme) also emits via
+    /// `unsigned_abs` to avoid i64::MIN.abs() overflow.
+    #[test]
+    #[traced_test]
+    fn metric_type_to_json_value_int_min_emits_precision_warn() {
+        let v = metric_type_to_json_value(&MetricType::Int(i64::MIN), "dev-min", "m-min").unwrap();
+        let wire = serde_json::to_string(&v).unwrap();
+        assert_eq!(wire, "-9223372036854775808");
+        assert!(logs_contain("reason=\"int_precision_lossy\""));
+    }
+
+    /// P8 inverse — Int magnitudes within 2^53 must NOT emit the warn.
+    #[test]
+    #[traced_test]
+    fn metric_type_to_json_value_int_safe_does_not_emit_precision_warn() {
+        let _ = metric_type_to_json_value(&MetricType::Int(42), "dev-safe", "m-safe").unwrap();
+        let _ = metric_type_to_json_value(&MetricType::Int(1i64 << 53), "dev-edge", "m-edge").unwrap();
+        // -2^53 is also safe (the boundary is `|i| > 2^53`, strict greater-than).
+        let _ = metric_type_to_json_value(&MetricType::Int(-(1i64 << 53)), "dev-neg", "m-neg").unwrap();
+        assert!(
+            !logs_contain("int_precision_lossy"),
+            "P8 contract: |i| <= 2^53 must NOT emit the precision warn"
+        );
     }
 
     /// Minimal `AppState` builder for the API tests. Backend is an

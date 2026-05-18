@@ -172,7 +172,23 @@ impl DashboardConfigSnapshot {
                             .map(|m| MetricSpec {
                                 metric_name: m.metric_name.clone(),
                                 metric_type: m.metric_type.clone(),
-                                metric_unit: m.metric_unit.clone(),
+                                // Story A-6 P11 review fix: trim
+                                // whitespace at the snapshot boundary
+                                // so a TOML edit like `metric_unit = " °C"`
+                                // doesn't render as `"23.5  °C"` (double
+                                // space). Whitespace-only strings normalise
+                                // to None (operator clearly meant "no unit"
+                                // when they typed `metric_unit = "   "`).
+                                metric_unit: m.metric_unit.as_ref().and_then(|s| {
+                                    let t = s.trim();
+                                    if t.is_empty() {
+                                        None
+                                    } else if t.len() == s.len() {
+                                        Some(s.clone())
+                                    } else {
+                                        Some(t.to_string())
+                                    }
+                                }),
                             })
                             .collect();
                         DeviceSummary {
@@ -775,13 +791,14 @@ mod tests {
         assert_eq!(metrics[1].metric_unit, None);
     }
 
-    /// Story A-6 — `MetricSpec::metric_unit: Some("")` round-trips
-    /// distinctly from `None` at the type level (closes the 9-5-iter1-D4
-    /// deferral's read-side: the renderer coalesces both to "no unit
-    /// suffix" — see static/metrics.js — but the snapshot preserves the
-    /// distinction in case a future story decides to differentiate).
+    /// Story A-6 P11 review fix — `MetricSpec::metric_unit` is normalised
+    /// at the `from_config` boundary: empty strings and whitespace-only
+    /// strings collapse to `None`; leading/trailing whitespace is trimmed.
+    /// Closes deferred-work W2 (the orphaned `Some("")` vs `None`
+    /// distinction had no JS consumer; normalising at the boundary is
+    /// simpler than carrying the distinction through dead code paths).
     #[test]
-    fn dashboard_snapshot_preserves_empty_unit_string_distinct_from_none() {
+    fn dashboard_snapshot_normalises_empty_and_whitespace_unit_to_none() {
         let mut config = snapshot_test_config(vec![]);
         config.application_list = vec![ChirpStackApplications {
             application_name: "App".to_string(),
@@ -789,19 +806,53 @@ mod tests {
             device_list: vec![ChirpstackDevice {
                 device_id: "dev-1".to_string(),
                 device_name: "Device 1".to_string(),
-                read_metric_list: vec![ReadMetric {
-                    metric_name: "raw".to_string(),
-                    chirpstack_metric_name: "raw".to_string(),
-                    metric_type: OpcMetricTypeConfig::Float,
-                    metric_unit: Some(String::new()),
-                }],
+                read_metric_list: vec![
+                    // Empty string -> None.
+                    ReadMetric {
+                        metric_name: "raw_empty".to_string(),
+                        chirpstack_metric_name: "raw".to_string(),
+                        metric_type: OpcMetricTypeConfig::Float,
+                        metric_unit: Some(String::new()),
+                    },
+                    // Whitespace-only -> None (operator clearly meant
+                    // "no unit" when they typed `metric_unit = "   "`).
+                    ReadMetric {
+                        metric_name: "raw_ws".to_string(),
+                        chirpstack_metric_name: "raw".to_string(),
+                        metric_type: OpcMetricTypeConfig::Float,
+                        metric_unit: Some("   ".to_string()),
+                    },
+                    // Leading/trailing whitespace -> trimmed.
+                    ReadMetric {
+                        metric_name: "raw_padded".to_string(),
+                        chirpstack_metric_name: "raw".to_string(),
+                        metric_type: OpcMetricTypeConfig::Float,
+                        metric_unit: Some("  °C  ".to_string()),
+                    },
+                    // Pristine value -> preserved exactly.
+                    ReadMetric {
+                        metric_name: "raw_clean".to_string(),
+                        chirpstack_metric_name: "raw".to_string(),
+                        metric_type: OpcMetricTypeConfig::Float,
+                        metric_unit: Some("°C".to_string()),
+                    },
+                ],
                 device_command_list: None,
             }],
         }];
         let snapshot = DashboardConfigSnapshot::from_config(&config);
+        let metrics = &snapshot.applications[0].devices[0].metrics;
+        assert_eq!(metrics[0].metric_unit, None, "empty string normalises to None");
+        assert_eq!(metrics[1].metric_unit, None, "whitespace-only normalises to None");
         assert_eq!(
-            snapshot.applications[0].devices[0].metrics[0].metric_unit,
-            Some(String::new())
+            metrics[2].metric_unit,
+            Some("°C".to_string()),
+            "leading/trailing whitespace trimmed"
+        );
+        assert_eq!(
+            metrics[3].metric_unit,
+            Some("°C".to_string()),
+            "pristine value preserved exactly"
         );
     }
 
