@@ -1331,4 +1331,214 @@ mod tests {
 
         let _ = fs::remove_file(&path);
     }
+
+    /// Story A-7 AC#5 — end-to-end regression test for the **chained v006 → v007
+    /// → v008 auto-migration path** that real operator upgrades exercise.
+    ///
+    /// The existing `test_v007_migration_under_5s_for_10k_rows` and
+    /// `test_v008_migration_under_30s_for_10k_rows` each cover ONE migration in
+    /// isolation (the latter manually `execute_batch`s v007 first, then times
+    /// v008 alone). This test calls `run_migrations(&conn)` **once** against a
+    /// fresh v006-baseline database — the same production code path that fires
+    /// on the first startup of the v2.0 binary against a v2.0-rc database.
+    ///
+    /// Coverage rationale: the per-migration tests prove each migration works
+    /// in isolation; this test proves they work **chained** through the runner.
+    /// A future regression that breaks the runner's chaining logic (e.g. the
+    /// `if current_version < N` guards drifting out of sync) would be caught
+    /// here but NOT by the per-migration siblings.
+    ///
+    /// SLA: per the Story A-7 runbook's "5s for typical residential / small-
+    /// scale deployments" target, the chained migration on a 10 000-row baseline
+    /// must complete in under 5 seconds. Larger databases (≥100MB ≈ 500k rows)
+    /// scale roughly linearly with the v008 CREATE TABLE … AS SELECT cost and
+    /// may take multiple minutes — documented as a known limitation in
+    /// `docs/deployment-guide.md § "Epic A migration" § "SLA expectation"`.
+    /// The dev-agent decision D1 (story spec) accepted this as the
+    /// operator-realistic SLA target rather than tuning v008 (which would
+    /// re-open A-3's review loop).
+    #[test]
+    fn test_v006_to_v008_full_upgrade_path_under_5s() {
+        let (conn, path) = create_v006_baseline_db();
+
+        // Sanity: the helper landed us at v006 exactly.
+        let starting_version: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(starting_version, 6, "create_v006_baseline_db must land at v006");
+
+        // Seed 5000 + 5000 = 10 000 pre-Epic-A rows using ONLY the v006-shaped
+        // columns (`value` TEXT + `data_type` TEXT). The v007 typed columns
+        // don't exist at v006; they'll be added by the migration runner.
+        conn.execute_batch("BEGIN TRANSACTION").unwrap();
+        let mv_stmt = "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at) \
+                       VALUES (?1, ?2, 'Float', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')";
+        let mh_stmt = "INSERT INTO metric_history (device_id, metric_name, value, data_type, timestamp, created_at) \
+                       VALUES (?1, ?2, 'Float', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')";
+        let mut mv_prep = conn.prepare(mv_stmt).unwrap();
+        let mut mh_prep = conn.prepare(mh_stmt).unwrap();
+        for i in 0..5000 {
+            let device_id = format!("dev_{}", i % 100);
+            let metric_name = format!("m_{}", i);
+            mv_prep
+                .execute(rusqlite::params![&device_id, &metric_name])
+                .unwrap();
+            mh_prep
+                .execute(rusqlite::params![&device_id, &metric_name])
+                .unwrap();
+        }
+        drop(mv_prep);
+        drop(mh_prep);
+        conn.execute_batch("COMMIT").unwrap();
+
+        // Time the chained v007 + v008 application through a SINGLE
+        // `run_migrations()` call — the production code path.
+        let start = std::time::Instant::now();
+        run_migrations(&conn).expect("chained v006 -> v008 migration must succeed");
+        let elapsed = start.elapsed();
+
+        // SLA assertion per Story A-7 AC#5 + AC#1 § "SLA expectation":
+        // 5 seconds for typical small-scale deployments (≤10k rows). Larger
+        // databases are documented to take longer — see runbook.
+        assert!(
+            elapsed.as_secs_f64() < 5.0,
+            "Chained v006 -> v008 migration took {:?} on 10 000-row DB; Story A-7 \
+             SLA ceiling is 5 s. Larger databases may legitimately exceed this — \
+             see docs/deployment-guide.md § 'SLA expectation'.",
+            elapsed
+        );
+
+        // Prove the runner actually advanced to v008 (NOT a silent-no-op
+        // fallthrough — same iter-2 F-E pin as test_v008_migration_under_30s).
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            version, 8,
+            "run_migrations must advance v006 -> v008 in a single call (real \
+             operator upgrade path)"
+        );
+
+        // Row counts survive the full chain (v007 ADD COLUMN is metadata-only;
+        // v008 CREATE TABLE … AS SELECT preserves rows verbatim).
+        let mv_count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM metric_values", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mv_count, 5000, "metric_values row count preserved through v006 -> v008 chain");
+
+        let mh_count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM metric_history", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mh_count, 5000, "metric_history row count preserved through v006 -> v008 chain");
+
+        // Per Story A-7 AC#5: all pre-existing rows must be tagged
+        // value_type='legacy' (the v007 column default) and the typed columns
+        // (value_real, value_int, value_bool, value_text) must all be NULL —
+        // the Story A-4 / A-5 contract for legacy-row surfacing as
+        // BadDataUnavailable in OPC UA.
+        let mv_legacy_with_null_typed: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM metric_values \
+                 WHERE value_type = 'legacy' \
+                 AND value_real IS NULL \
+                 AND value_int IS NULL \
+                 AND value_bool IS NULL \
+                 AND value_text IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            mv_legacy_with_null_typed, 5000,
+            "All metric_values rows must be tagged 'legacy' with all typed columns NULL \
+             (Story A-7 AC#5 + A-4 BadDataUnavailable contract)"
+        );
+
+        let mh_legacy_with_null_typed: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM metric_history \
+                 WHERE value_type = 'legacy' \
+                 AND value_real IS NULL \
+                 AND value_int IS NULL \
+                 AND value_bool IS NULL \
+                 AND value_text IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            mh_legacy_with_null_typed, 5000,
+            "All metric_history rows must be tagged 'legacy' with all typed columns NULL \
+             (Story A-5 HistoryRead BadDataUnavailable contract)"
+        );
+
+        // Per Story A-7 AC#5: the v008 exactly-one-non-NULL CHECK constraint
+        // must be enforceable on the post-migration schema. Insert a row with
+        // TWO non-NULL typed columns should fail with a CHECK error — proving
+        // v008 actually ran (vs a silent fallthrough at v007).
+        //
+        // iter-1 K4 review fix + iter-2 L5 comment clarification: pair the
+        // negative case with a POSITIVE case to prove v008's CHECK is
+        // ENFORCEABLE in both directions (rejects invalid + accepts valid).
+        //
+        // What constraints fire on the negative-case insert below?
+        //   * v007 adds two column-level CHECKs: `value_bool IN (0, 1)` and
+        //     `value_type IN ('legacy', 'Float', 'Int', 'Bool', 'String')`.
+        //   * v008 adds the cross-column CHECK enforcing "exactly one of
+        //     {value_real, value_int, value_bool, value_text} non-NULL,
+        //     matching value_type discriminant".
+        // The negative insert uses `value_type='Float'` (allowed by v007's
+        // value_type enum), `value_bool=NULL` (passes v007's value_bool
+        // CHECK), and both `value_real=1.0` AND `value_int=2` non-NULL.
+        // ONLY v008's cross-column CHECK can fire here — v007 has no
+        // cross-column CHECK. So the negative case unambiguously pins v008.
+        // The positive case (single value_real non-NULL with matching
+        // value_type='Float') proves v008's CHECK isn't over-broad
+        // (rejecting valid rows). Together the pair pins "enforceable" in
+        // both directions per AC#5's plain reading.
+
+        // Negative case: multi-non-NULL must FAIL with SQLITE_CONSTRAINT_CHECK.
+        let multi_non_null = conn.execute(
+            "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_type, value_real, value_int) \
+             VALUES ('check_test_neg', 'dual', 'Float', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'Float', 1.0, 2)",
+            [],
+        );
+        assert!(
+            multi_non_null.is_err(),
+            "v008 CHECK must reject multi-non-NULL typed-column inserts; got Ok — v008 \
+             may not have actually applied"
+        );
+        if let Err(rusqlite::Error::SqliteFailure(sqlite_err, _)) = multi_non_null {
+            assert_eq!(
+                sqlite_err.extended_code,
+                rusqlite::ffi::SQLITE_CONSTRAINT_CHECK,
+                "v008 multi-non-NULL insert must fail with SQLITE_CONSTRAINT_CHECK; \
+                 got extended_code={}",
+                sqlite_err.extended_code
+            );
+        } else {
+            panic!(
+                "v008 multi-non-NULL insert must fail with rusqlite::Error::SqliteFailure \
+                 (got non-Sqlite error: {multi_non_null:?})"
+            );
+        }
+
+        // Positive case (iter-1 K4 review fix): exactly-one-non-NULL with
+        // value_type matching the populated column must SUCCEED. If this fails,
+        // v008's CHECK is over-broad (rejects valid rows too) — a different
+        // regression class than the negative-case test catches.
+        let exactly_one_non_null = conn.execute(
+            "INSERT INTO metric_values (device_id, metric_name, value, data_type, timestamp, updated_at, created_at, value_type, value_real) \
+             VALUES ('check_test_pos', 'single', 'Float', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'Float', 1.5)",
+            [],
+        );
+        assert!(
+            exactly_one_non_null.is_ok(),
+            "v008 CHECK must ACCEPT exactly-one-non-NULL typed-column inserts; got Err \
+             — v008's CHECK is over-broad and rejects valid rows: {:?}",
+            exactly_one_non_null.err()
+        );
+
+        let _ = fs::remove_file(&path);
+    }
 }
