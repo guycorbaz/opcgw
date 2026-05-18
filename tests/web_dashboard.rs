@@ -609,6 +609,7 @@ async fn api_devices_returns_json_with_expected_shape_when_authed() {
                     metrics: vec![opcgw::web::MetricSpec {
                         metric_name: "temperature".to_string(),
                         metric_type: opcgw::config::OpcMetricTypeConfig::Float,
+                        metric_unit: None,
                     }],
                 },
                 opcgw::web::DeviceSummary {
@@ -680,9 +681,222 @@ async fn api_devices_returns_json_with_expected_shape_when_authed() {
     assert!(metrics[0]["value"].is_null());
     assert!(metrics[0]["timestamp"].is_null());
     assert_eq!(metrics[0]["data_type"].as_str(), Some("Float"));
+    // Story A-6: the `unit` field is always present (per AC#1 wire
+    // contract); null here because the snapshot's MetricSpec carried
+    // metric_unit: None.
+    assert!(
+        metrics[0].get("unit").is_some(),
+        "Story A-6: MetricView must include the unit field; got {metrics:?}"
+    );
+    assert!(metrics[0]["unit"].is_null());
     // Second device has empty metrics array — must serialise as [].
     let m2 = devs[1]["metrics"].as_array().expect("metrics array on d2");
     assert!(m2.is_empty());
+
+    cancel.cancel();
+    handle
+        .await
+        .expect("web::run task panicked or was cancelled abnormally");
+}
+
+/// Story A-6 AC#10 item 6: GET /api/devices emits typed value + unit
+/// per variant when the backend has seeded MetricType payloads.
+///
+/// Seeds 4 metrics (Float / Int / Bool / String) via the per-task
+/// InMemoryBackend, builds a matching snapshot whose `MetricSpec` carries
+/// the configured `metric_unit`, and asserts:
+///   - `MetricView.value` is the NATIVE JSON primitive (number / bool /
+///     string), NOT the A-5 stringified shim.
+///   - `MetricView.unit` matches the configured unit (Some("°C") etc.).
+///   - `MetricView.data_type` matches the storage row's discriminant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn api_devices_emits_typed_value_and_unit_per_variant() {
+    init_test_subscriber();
+
+    let snapshot = DashboardConfigSnapshot {
+        application_count: 1,
+        device_count: 1,
+        applications: vec![opcgw::web::ApplicationSummary {
+            application_id: "app-a6".to_string(),
+            application_name: "A-6 App".to_string(),
+            device_count: 1,
+            devices: vec![opcgw::web::DeviceSummary {
+                device_id: "dev-a6".to_string(),
+                device_name: "A-6 Device".to_string(),
+                metrics: vec![
+                    opcgw::web::MetricSpec {
+                        metric_name: "temperature".to_string(),
+                        metric_type: opcgw::config::OpcMetricTypeConfig::Float,
+                        metric_unit: Some("°C".to_string()),
+                    },
+                    opcgw::web::MetricSpec {
+                        metric_name: "count".to_string(),
+                        metric_type: opcgw::config::OpcMetricTypeConfig::Int,
+                        metric_unit: None,
+                    },
+                    opcgw::web::MetricSpec {
+                        metric_name: "online".to_string(),
+                        metric_type: opcgw::config::OpcMetricTypeConfig::Bool,
+                        metric_unit: Some("%".to_string()),
+                    },
+                    opcgw::web::MetricSpec {
+                        metric_name: "label".to_string(),
+                        metric_type: opcgw::config::OpcMetricTypeConfig::String,
+                        metric_unit: Some("lvl".to_string()),
+                    },
+                ],
+            }],
+        }],
+    };
+
+    // Build a custom AppState whose backend has 4 typed payloads seeded
+    // so /api/devices returns the typed JSON wire shape (not the null
+    // fallthrough from the "configured but never polled" arm).
+    let auth = Arc::new(WebAuthState::new_with_fresh_key(
+        TEST_USER,
+        TEST_PASSWORD,
+        TEST_REALM.to_string(),
+    ));
+    let backend = InMemoryBackend::new();
+    use opcgw::storage::MetricType;
+    backend
+        .set_metric("dev-a6", "temperature", MetricType::Float(23.5))
+        .expect("seed Float");
+    backend
+        .set_metric("dev-a6", "count", MetricType::Int(42))
+        .expect("seed Int");
+    backend
+        .set_metric("dev-a6", "online", MetricType::Bool(true))
+        .expect("seed Bool");
+    backend
+        .set_metric("dev-a6", "label", MetricType::String("OK".to_string()))
+        .expect("seed String");
+    let backend: Arc<dyn StorageBackend> = Arc::new(backend);
+    let (config_reload, config_writer, dir) =
+        opcgw::web::test_support::make_test_reload_handle_and_writer();
+    std::mem::forget(dir);
+    let state = Arc::new(AppState {
+        auth: auth.clone(),
+        backend,
+        dashboard_snapshot: std::sync::RwLock::new(Arc::new(snapshot)),
+        start_time: std::time::Instant::now(),
+        stale_threshold_secs: std::sync::atomic::AtomicU64::new(120),
+        config_reload,
+        config_writer,
+    });
+
+    let static_tmp = build_production_static_dir().await;
+    let listener = web_bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .await
+        .expect("bind 127.0.0.1:0");
+    let addr = listener.local_addr().expect("local_addr");
+    let router = build_router(state, static_tmp.path().to_path_buf());
+    let cancel = CancellationToken::new();
+    let cancel_for_run = cancel.clone();
+    let realm = TEST_REALM.to_string();
+    let handle = tokio::spawn(async move {
+        let _ = web_run(listener, router, &realm, cancel_for_run).await;
+    });
+
+    let client = common::build_http_client(Duration::from_secs(5));
+    let resp = client
+        .get(format!("http://{addr}/api/devices"))
+        .header(
+            header::AUTHORIZATION,
+            build_basic_auth(TEST_USER, TEST_PASSWORD),
+        )
+        .send()
+        .await
+        .expect("GET /api/devices (auth'd)");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = resp.text().await.expect("response body");
+    let json: Value =
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("body not JSON: {e}; body={body}"));
+
+    let metrics = json["applications"][0]["devices"][0]["metrics"]
+        .as_array()
+        .expect("metrics array");
+    assert_eq!(metrics.len(), 4);
+
+    // Float row — value as native JSON number, unit "°C".
+    let m = &metrics[0];
+    assert_eq!(m["metric_name"].as_str(), Some("temperature"));
+    assert_eq!(m["data_type"].as_str(), Some("Float"));
+    assert_eq!(m["value"].as_f64(), Some(23.5));
+    assert_eq!(m["unit"].as_str(), Some("°C"));
+    assert!(m["timestamp"].is_string());
+
+    // Int row — value as native JSON number, no unit.
+    let m = &metrics[1];
+    assert_eq!(m["metric_name"].as_str(), Some("count"));
+    assert_eq!(m["data_type"].as_str(), Some("Int"));
+    assert_eq!(m["value"].as_i64(), Some(42));
+    assert!(m["unit"].is_null());
+
+    // Bool row — value as native JSON boolean, unit "%".
+    let m = &metrics[2];
+    assert_eq!(m["metric_name"].as_str(), Some("online"));
+    assert_eq!(m["data_type"].as_str(), Some("Bool"));
+    assert_eq!(m["value"].as_bool(), Some(true));
+    assert_eq!(m["unit"].as_str(), Some("%"));
+
+    // String row — value as native JSON string, unit "lvl".
+    let m = &metrics[3];
+    assert_eq!(m["metric_name"].as_str(), Some("label"));
+    assert_eq!(m["data_type"].as_str(), Some("String"));
+    assert_eq!(m["value"].as_str(), Some("OK"));
+    assert_eq!(m["unit"].as_str(), Some("lvl"));
+
+    cancel.cancel();
+    handle
+        .await
+        .expect("web::run task panicked or was cancelled abnormally");
+}
+
+/// Story A-6 AC#11: metrics.js gained the `formatValue` helper +
+/// references the new `metric.unit` / `metric.data_type` fields. This
+/// is a cheap content-grep guard against a future renderer regression
+/// that silently strips the unit suffix — same pattern as
+/// `metrics_js_is_served_and_references_api_devices`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn metrics_js_references_unit_and_data_type_fields() {
+    init_test_subscriber();
+
+    let (addr, cancel, handle, _static_tmp) = spawn_test_server(DashboardConfigSnapshot {
+        application_count: 0,
+        device_count: 0,
+        applications: vec![],
+    })
+    .await;
+
+    let client = common::build_http_client(Duration::from_secs(5));
+    let resp = client
+        .get(format!("http://{addr}/metrics.js"))
+        .header(
+            header::AUTHORIZATION,
+            build_basic_auth(TEST_USER, TEST_PASSWORD),
+        )
+        .send()
+        .await
+        .expect("GET /metrics.js (auth'd)");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.text().await.expect("js body");
+
+    assert!(
+        body.contains("formatValue"),
+        "Story A-6: metrics.js must define formatValue helper"
+    );
+    assert!(
+        body.contains("metric.unit"),
+        "Story A-6: metrics.js must read metric.unit from the wire"
+    );
+    assert!(
+        body.contains("metric.data_type"),
+        "Story A-6: metrics.js must consume the data_type field"
+    );
 
     cancel.cancel();
     handle

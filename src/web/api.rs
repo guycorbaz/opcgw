@@ -196,27 +196,51 @@ pub const BAD_THRESHOLD_SECS: u64 = 86_400;
 /// matching the `MetricType::Display` impl from `src/storage/types.rs`
 /// so the JSON `data_type` field is identical whether sourced from the
 /// configured type or the storage row's type.
-// A-5 P0-D4 + K7 iter-2 review fix: stringify a typed MetricType payload
-// for the /api/metrics dashboard wire contract (Story 9-3). Pre-A-5 the
-// JSON `value` field came from the legacy `MetricValue.value: String`
-// column; post-A-5 the typed payload is the source of truth and this
-// helper preserves the pre-A-5 alphabet:
-//   - Bool → "1" / "0" (matches `validate_bool_metric_value` write side).
-//   - Float → f32-precision via `(*f as f32).to_string()` (matches the
-//     pre-A-5 ChirpStack poller's `raw_value.to_string()` since raw_value
-//     was already f32). Non-finite f64 narrows to "inf"/"-inf"/"NaN"
-//     literals — documented wire-domain expansion (the pre-A-5 contract
-//     relied on the poller filtering NaN/Inf at ingest; A-5 makes the
-//     read-side resilient to a future writer path that admits non-finite
-//     values).
-//   - Int / String → direct stringification.
-// Story A-6 will widen this helper to a typed JSON shape and retire it.
-pub(crate) fn metric_view_display_string(data_type: &crate::storage::MetricType) -> String {
+///
+/// Story A-6 widens the dashboard wire contract: emit typed JSON
+/// primitives (number / bool / string / null) sourced from the
+/// payload-bearing [`crate::storage::MetricType`]. Native JSON forbids
+/// non-finite IEEE-754 (NaN / ±Inf), so a non-finite Float yields
+/// `Ok(None)` and emits a `warn!(event = "metric_view_serialize",
+/// reason = "non_finite", …)` audit event (defensive — Story A-3's
+/// poller-side filter makes this path unreachable in production).
+///
+/// Int variants larger than 2^53 lose precision when consumed by a
+/// JavaScript client (IEEE-754 double), but the wire shape is bit-exact
+/// JSON; documented operator caveat.
+///
+/// `device_id` + `metric_name` thread through to the warn emission so
+/// operators can correlate the warn to a specific row.
+pub(crate) fn metric_type_to_json_value(
+    data_type: &crate::storage::MetricType,
+    device_id: &str,
+    metric_name: &str,
+) -> Option<serde_json::Value> {
     match data_type {
-        crate::storage::MetricType::Float(f) => (*f as f32).to_string(),
-        crate::storage::MetricType::Int(i) => i.to_string(),
-        crate::storage::MetricType::Bool(b) => if *b { "1".to_string() } else { "0".to_string() },
-        crate::storage::MetricType::String(s) => s.clone(),
+        crate::storage::MetricType::Float(f) => {
+            match serde_json::Number::from_f64(*f) {
+                Some(n) => Some(serde_json::Value::Number(n)),
+                None => {
+                    // NaN / ±Inf — not representable as a bare JSON number.
+                    // Defensive log; A-3 poller filter makes this unreachable
+                    // in production.
+                    tracing::warn!(
+                        event = "metric_view_serialize",
+                        reason = "non_finite",
+                        device_id = %device_id,
+                        metric_name = %metric_name,
+                        f64_value = %f,
+                        "Non-finite Float reached the dashboard; emitting JSON null"
+                    );
+                    None
+                }
+            }
+        }
+        crate::storage::MetricType::Int(i) => {
+            Some(serde_json::Value::Number(serde_json::Number::from(*i)))
+        }
+        crate::storage::MetricType::Bool(b) => Some(serde_json::Value::Bool(*b)),
+        crate::storage::MetricType::String(s) => Some(serde_json::Value::String(s.clone())),
     }
 }
 
@@ -237,7 +261,7 @@ fn config_type_to_display(t: &OpcMetricTypeConfig) -> &'static str {
 ///
 /// Both `stale_threshold_secs` and `bad_threshold_secs` are returned so
 /// the JS branching logic doesn't need to hard-code either boundary.
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize)]
 pub struct DevicesResponse {
     pub as_of: String,
     pub stale_threshold_secs: u64,
@@ -246,7 +270,7 @@ pub struct DevicesResponse {
 }
 
 /// Per-application section in the live-metrics grid.
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize)]
 pub struct ApplicationView {
     pub application_id: String,
     pub application_name: String,
@@ -255,7 +279,7 @@ pub struct ApplicationView {
 
 /// Per-device section — identifies the device + lists its configured
 /// metrics in TOML-declaration order.
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize)]
 pub struct DeviceView {
     pub device_id: String,
     pub device_name: String,
@@ -268,11 +292,25 @@ pub struct DeviceView {
 /// from the storage row when present, otherwise from the configured
 /// type so the dashboard can display "(Int) — never reported" rather
 /// than "(?) — never reported".
-#[derive(Debug, Serialize, PartialEq, Eq)]
+///
+/// Story A-6 widens `value` from `Option<String>` to a typed
+/// `Option<serde_json::Value>` so the dashboard JSON carries native
+/// JSON numbers / booleans / strings instead of stringified
+/// discriminants. Non-finite Float (NaN / ±Inf) emits `null` and a
+/// `metric_view_serialize` warn event. Adds `unit: Option<String>`
+/// sourced from `OpcMetric.metric_unit` so the dashboard renders
+/// `23.5 °C` instead of just `23.5`.
+///
+/// `PartialEq` / `Eq` were dropped because `serde_json::Value`'s
+/// `Eq` impl is not total over floats — equality comparisons on
+/// `MetricView` were never needed by production code (tests use field
+/// projections), so removing the derives is the simplest correct fix.
+#[derive(Debug, Serialize)]
 pub struct MetricView {
     pub metric_name: String,
     pub data_type: String,
-    pub value: Option<String>,
+    pub value: Option<serde_json::Value>,
+    pub unit: Option<String>,
     pub timestamp: Option<String>,
 }
 
@@ -386,10 +424,14 @@ pub async fn api_devices(
                                 Some(row) => MetricView {
                                     metric_name: spec.metric_name.clone(),
                                     data_type: row.data_type.to_string(),
-                                    // A-5 P0-D4 + K7 iter-2 review fix: see
-                                    // `metric_view_display_string` for the full
-                                    // wire-contract specification + unit tests.
-                                    value: Some(metric_view_display_string(&row.data_type)),
+                                    // A-6: typed JSON via metric_type_to_json_value;
+                                    // non-finite Float yields None + warn.
+                                    value: metric_type_to_json_value(
+                                        &row.data_type,
+                                        &dev.device_id,
+                                        &spec.metric_name,
+                                    ),
+                                    unit: spec.metric_unit.clone(),
                                     timestamp: Some(row.timestamp.to_rfc3339()),
                                 },
                                 None => MetricView {
@@ -397,6 +439,7 @@ pub async fn api_devices(
                                     data_type: config_type_to_display(&spec.metric_type)
                                         .to_string(),
                                     value: None,
+                                    unit: spec.metric_unit.clone(),
                                     timestamp: None,
                                 },
                             }
@@ -4944,45 +4987,84 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
-    // A-5 K7 iter-2 review fix: pin the post-A-5 Story 9-3 dashboard
-    // wire-format contract for `metric_view_display_string` across all
-    // 4 MetricType variants + the f64→f32 non-finite boundary cases.
-    // Pre-fix the wire format was unguarded for NaN/Inf inputs.
+    use tracing_test::traced_test;
+
+    // ----------------------------------------------------------------------
+    // Story A-6 — metric_type_to_json_value wire-contract tests.
+    //
+    // Pin the typed-JSON wire shape per variant, plus the non-finite Float
+    // defensive path. Replaces the A-5 transitional stringification shim
+    // that was retired in this story (closes DEF-iter1-A5-D1).
+    // ----------------------------------------------------------------------
+
+    /// AC#10 item 1 — Float finite values produce native JSON numbers.
     #[test]
-    fn metric_view_display_string_typed_payloads() {
-        // Float — typical case f32-precision round-trip.
-        assert_eq!(metric_view_display_string(&MetricType::Float(23.5)), "23.5");
-        // Float — small magnitude exact in f32.
-        assert_eq!(metric_view_display_string(&MetricType::Float(0.0)), "0");
-        // Int.
-        assert_eq!(metric_view_display_string(&MetricType::Int(42)), "42");
-        assert_eq!(metric_view_display_string(&MetricType::Int(i64::MAX)), i64::MAX.to_string());
-        assert_eq!(metric_view_display_string(&MetricType::Int(i64::MIN)), i64::MIN.to_string());
-        // Bool — pre-A-5 dashboard contract expects "0" / "1", NOT "true" / "false".
-        assert_eq!(metric_view_display_string(&MetricType::Bool(true)), "1");
-        assert_eq!(metric_view_display_string(&MetricType::Bool(false)), "0");
-        // String — direct round-trip.
-        assert_eq!(metric_view_display_string(&MetricType::String("OK".to_string())), "OK");
-        assert_eq!(metric_view_display_string(&MetricType::String(String::new())), "");
+    fn metric_type_to_json_value_float_finite() {
+        let v = metric_type_to_json_value(&MetricType::Float(23.5), "dev", "m").unwrap();
+        assert_eq!(v, serde_json::json!(23.5));
+        let v = metric_type_to_json_value(&MetricType::Float(0.0), "dev", "m").unwrap();
+        assert_eq!(v, serde_json::json!(0.0));
+        // Preserve sign-of-zero through the JSON Number layer.
+        let v = metric_type_to_json_value(&MetricType::Float(-0.0), "dev", "m").unwrap();
+        // serde_json normalises -0.0 to a Number whose stringified form
+        // is "-0.0"; assert by inspecting the wire-format string.
+        assert_eq!(serde_json::to_string(&v).unwrap(), "-0.0");
     }
 
+    /// AC#10 item 2 — non-finite Float (NaN / ±Inf) maps to JSON null
+    /// AND emits the defensive `metric_view_serialize` warn event.
     #[test]
-    fn metric_view_display_string_non_finite_float_wire_format() {
-        // Document the post-A-5 wire-domain expansion: non-finite f64
-        // inputs reach the dashboard as the f32 Display alphabet rather
-        // than being filtered. Pre-A-5 the upstream poller rejected
-        // non-finite values; post-A-5 the read side is resilient to a
-        // hypothetical future writer that admits them.
-        assert_eq!(metric_view_display_string(&MetricType::Float(f64::NAN)), "NaN");
-        assert_eq!(metric_view_display_string(&MetricType::Float(f64::INFINITY)), "inf");
-        assert_eq!(metric_view_display_string(&MetricType::Float(f64::NEG_INFINITY)), "-inf");
-        // f64 magnitudes beyond f32::MAX narrow to ±Inf and surface
-        // identically — pinned as wire-format contract.
-        let beyond_f32 = f64::from(f32::MAX) * 2.0;
-        assert_eq!(metric_view_display_string(&MetricType::Float(beyond_f32)), "inf");
-        assert_eq!(metric_view_display_string(&MetricType::Float(-beyond_f32)), "-inf");
+    #[traced_test]
+    fn metric_type_to_json_value_float_non_finite() {
+        assert!(metric_type_to_json_value(&MetricType::Float(f64::NAN), "dev-x", "m-nan").is_none());
+        assert!(metric_type_to_json_value(&MetricType::Float(f64::INFINITY), "dev-y", "m-inf").is_none());
+        assert!(metric_type_to_json_value(&MetricType::Float(f64::NEG_INFINITY), "dev-z", "m-ninf").is_none());
+        assert!(logs_contain("event=\"metric_view_serialize\""));
+        assert!(logs_contain("reason=\"non_finite\""));
+        // Per-row identifiers thread through to the warn so the operator
+        // can correlate the warn to a specific row.
+        assert!(logs_contain("dev-x"));
+        assert!(logs_contain("m-nan"));
     }
-    use tracing_test::traced_test;
+
+    /// AC#10 item 3 — Int extremes round-trip bit-exact as JSON numbers.
+    /// Note: JS clients (IEEE-754 double) lose precision above 2^53; this
+    /// is a documented operator caveat, not a defect.
+    #[test]
+    fn metric_type_to_json_value_int_extremes() {
+        let v = metric_type_to_json_value(&MetricType::Int(42), "dev", "m").unwrap();
+        assert_eq!(v, serde_json::json!(42));
+        let v = metric_type_to_json_value(&MetricType::Int(i64::MAX), "dev", "m").unwrap();
+        assert_eq!(serde_json::to_string(&v).unwrap(), "9223372036854775807");
+        let v = metric_type_to_json_value(&MetricType::Int(i64::MIN), "dev", "m").unwrap();
+        assert_eq!(serde_json::to_string(&v).unwrap(), "-9223372036854775808");
+    }
+
+    /// AC#10 item 4 — Bool variants map to native JSON booleans (no more
+    /// "0"/"1" stringification from the A-5 transitional shim).
+    #[test]
+    fn metric_type_to_json_value_bool() {
+        let v = metric_type_to_json_value(&MetricType::Bool(true), "dev", "m").unwrap();
+        assert_eq!(v, serde_json::Value::Bool(true));
+        let v = metric_type_to_json_value(&MetricType::Bool(false), "dev", "m").unwrap();
+        assert_eq!(v, serde_json::Value::Bool(false));
+    }
+
+    /// AC#10 item 5 — String variants round-trip with UTF-8 preservation
+    /// (empty, ASCII, multi-byte).
+    #[test]
+    fn metric_type_to_json_value_string() {
+        let v = metric_type_to_json_value(&MetricType::String("OK".to_string()), "dev", "m").unwrap();
+        assert_eq!(v, serde_json::json!("OK"));
+        let v = metric_type_to_json_value(&MetricType::String(String::new()), "dev", "m").unwrap();
+        assert_eq!(v, serde_json::json!(""));
+        let v = metric_type_to_json_value(
+            &MetricType::String("emoji 🎉".to_string()),
+            "dev",
+            "m",
+        ).unwrap();
+        assert_eq!(v, serde_json::json!("emoji 🎉"));
+    }
 
     /// Minimal `AppState` builder for the API tests. Backend is an
     /// `InMemoryBackend` populated as the test demands; snapshot is
@@ -5379,6 +5461,7 @@ mod tests {
                 .map(|(n, t)| crate::web::MetricSpec {
                     metric_name: n.to_string(),
                     metric_type: t.clone(),
+                    metric_unit: None,
                 })
                 .collect(),
         }

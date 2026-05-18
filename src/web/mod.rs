@@ -113,13 +113,20 @@ pub struct DeviceSummary {
     pub metrics: Vec<MetricSpec>,
 }
 
-/// Configured metric: name + data type, in 1-to-1 correspondence by
+/// Configured metric: name + data type + optional unit, in 1-to-1
+/// correspondence with the TOML `read_metric_list` entries by
 /// construction. Ships as a sibling to `DeviceSummary` so external
 /// callers can walk the list without juggling parallel Vecs.
+///
+/// Story A-6 added `metric_unit: Option<String>` so the dashboard can
+/// render `34.2 °C` instead of just `34.2`. The field is sourced from
+/// `OpcMetric.metric_unit` in [`DashboardConfigSnapshot::from_config`];
+/// Story 9-7's hot-reload rebuild flows through automatically.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MetricSpec {
     pub metric_name: String,
     pub metric_type: crate::config::OpcMetricTypeConfig,
+    pub metric_unit: Option<String>,
 }
 
 /// Frozen-at-startup snapshot of the gateway's configured topology.
@@ -165,6 +172,7 @@ impl DashboardConfigSnapshot {
                             .map(|m| MetricSpec {
                                 metric_name: m.metric_name.clone(),
                                 metric_type: m.metric_type.clone(),
+                                metric_unit: m.metric_unit.clone(),
                             })
                             .collect();
                         DeviceSummary {
@@ -728,6 +736,73 @@ mod tests {
         assert_eq!(snapshot.device_count, 1);
         assert_eq!(snapshot.applications[0].devices.len(), 1);
         assert!(snapshot.applications[0].devices[0].metrics.is_empty());
+    }
+
+    /// Story A-6 AC#3 — `from_config` propagates `metric_unit` from
+    /// the configured `ReadMetric` into the snapshot's `MetricSpec`.
+    /// Pre-A-6 the snapshot dropped this field; the dashboard renderer
+    /// has no way to show "23.5 °C" without it.
+    #[test]
+    fn dashboard_snapshot_from_config_propagates_metric_unit() {
+        let mut config = snapshot_test_config(vec![]);
+        config.application_list = vec![ChirpStackApplications {
+            application_name: "App".to_string(),
+            application_id: "id-1".to_string(),
+            device_list: vec![ChirpstackDevice {
+                device_id: "dev-1".to_string(),
+                device_name: "Device 1".to_string(),
+                read_metric_list: vec![
+                    ReadMetric {
+                        metric_name: "temperature".to_string(),
+                        chirpstack_metric_name: "temp".to_string(),
+                        metric_type: OpcMetricTypeConfig::Float,
+                        metric_unit: Some("°C".to_string()),
+                    },
+                    ReadMetric {
+                        metric_name: "count".to_string(),
+                        chirpstack_metric_name: "cnt".to_string(),
+                        metric_type: OpcMetricTypeConfig::Int,
+                        metric_unit: None,
+                    },
+                ],
+                device_command_list: None,
+            }],
+        }];
+        let snapshot = DashboardConfigSnapshot::from_config(&config);
+        let metrics = &snapshot.applications[0].devices[0].metrics;
+        assert_eq!(metrics.len(), 2);
+        assert_eq!(metrics[0].metric_unit, Some("°C".to_string()));
+        assert_eq!(metrics[1].metric_unit, None);
+    }
+
+    /// Story A-6 — `MetricSpec::metric_unit: Some("")` round-trips
+    /// distinctly from `None` at the type level (closes the 9-5-iter1-D4
+    /// deferral's read-side: the renderer coalesces both to "no unit
+    /// suffix" — see static/metrics.js — but the snapshot preserves the
+    /// distinction in case a future story decides to differentiate).
+    #[test]
+    fn dashboard_snapshot_preserves_empty_unit_string_distinct_from_none() {
+        let mut config = snapshot_test_config(vec![]);
+        config.application_list = vec![ChirpStackApplications {
+            application_name: "App".to_string(),
+            application_id: "id-1".to_string(),
+            device_list: vec![ChirpstackDevice {
+                device_id: "dev-1".to_string(),
+                device_name: "Device 1".to_string(),
+                read_metric_list: vec![ReadMetric {
+                    metric_name: "raw".to_string(),
+                    chirpstack_metric_name: "raw".to_string(),
+                    metric_type: OpcMetricTypeConfig::Float,
+                    metric_unit: Some(String::new()),
+                }],
+                device_command_list: None,
+            }],
+        }];
+        let snapshot = DashboardConfigSnapshot::from_config(&config);
+        assert_eq!(
+            snapshot.applications[0].devices[0].metrics[0].metric_unit,
+            Some(String::new())
+        );
     }
 
     /// Story 9-2 AC#1 — empty application list produces all-zeros.

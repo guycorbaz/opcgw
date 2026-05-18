@@ -78,6 +78,29 @@
     return Math.floor(deltaSecs / 86400) + " d ago";
   }
 
+  // Story A-6: format a typed JSON value (number / bool / string / null)
+  // into the dashboard display string. The data_type field disambiguates
+  // the variant when the JSON primitive alone is ambiguous (e.g. an Int
+  // and a Float both come over the wire as JSON numbers, but only Int is
+  // displayed without decimals).
+  function formatValue(value, dataType) {
+    if (value === null || value === undefined) {
+      return "—";
+    }
+    if (dataType === "Bool") {
+      return value ? "true" : "false";
+    }
+    if (dataType === "Float" || dataType === "Int") {
+      // V8's Number.prototype.toString already produces a reasonable
+      // representation (23.5 / 0 / 1e-12); no manual rounding here.
+      return value.toString();
+    }
+    if (dataType === "String") {
+      return value;
+    }
+    return String(value);
+  }
+
   // Returns one of: "good" / "uncertain" / "bad" / "missing".
   function statusFor(metric, asOfMs, staleThresholdSecs, badThresholdSecs) {
     if (metric.value === null || metric.value === undefined) {
@@ -133,7 +156,15 @@
   function renderMetricRow(metric, asOfMs, staleThresholdSecs, badThresholdSecs) {
     var status = statusFor(metric, asOfMs, staleThresholdSecs, badThresholdSecs);
     var parsed = parseTimestamp(metric.timestamp);
-    var valueText = metric.value === null || metric.value === undefined ? "—" : metric.value;
+    // Story A-6: typed value + optional unit. metric.unit empty string
+    // and null both coalesce to "no unit suffix" via the truthy check.
+    var formattedValue = formatValue(metric.value, metric.data_type);
+    var valueText =
+      formattedValue === "—"
+        ? "—"
+        : metric.unit
+          ? formattedValue + " " + metric.unit
+          : formattedValue;
 
     var statusLabel = status.charAt(0).toUpperCase() + status.slice(1);
 
