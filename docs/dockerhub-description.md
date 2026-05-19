@@ -87,17 +87,38 @@ The most commonly overridden values:
 | Variable | Required | Description |
 |---|---|---|
 | `OPCGW_CHIRPSTACK__API_TOKEN` | **Yes** | ChirpStack API token. Generate at ChirpStack → API Keys. |
-| `OPCGW_OPCUA__USER_PASSWORD` | **Yes** | Password for OPC UA basic-auth user (Story 7-2 secure store). |
-| `OPCGW_WEB__USER_PASSWORD` | If `[web].enabled = true` | Password for the embedded web UI. |
+| `OPCGW_OPCUA__USER_PASSWORD` | **Yes** | Password for OPC UA basic-auth user (Story 7-2 secure store). The embedded Web UI shares these credentials — there is no separate `OPCGW_WEB__USER_PASSWORD`. |
+| `OPCGW_OPCUA__USER_NAME` | No | Username for OPC UA / Web UI basic auth (default `opcua-user`). |
 | `OPCGW_CHIRPSTACK__SERVER_ADDRESS` | No | ChirpStack gRPC endpoint (default per config.toml). |
-| `OPCGW_OPCUA__ENDPOINT` | No | OPC UA endpoint URL the server binds (default `opc.tcp://0.0.0.0:4855/`). |
+| `OPCGW_OPCUA__HOST_IP_ADDRESS` | No | OPC UA listen address (default `0.0.0.0`). |
+| `OPCGW_OPCUA__HOST_PORT` | No | OPC UA TCP port (default `4855`). |
 
 The `:?err` shell guard in `docker-compose.yml` causes Compose parsing to fail fast if required env-vars are unset — see the security guide.
 
 ## Exposed ports
 
 - **4855** — OPC UA endpoint (`opc.tcp://`). Configurable via `[opcua].endpoint` in `config.toml`.
-- **(configurable)** — Embedded web UI port if `[web].enabled = true`. Bind explicitly with `-p <host-port>:<container-port>`.
+- **8080** — Embedded Axum web UI (informational; only bound when `[web].enabled = true`; configurable via `[web].port`). Publish with an additional `-p 8080:8080` flag on `docker run` if you intend to expose it on the host.
+
+### Quick-start variant: with the Web UI
+
+```sh
+docker run -d \
+  --name opcgw \
+  --restart unless-stopped \
+  -p 4855:4855 \
+  -p 8080:8080 \
+  -e OPCGW_CHIRPSTACK__API_TOKEN='<your-chirpstack-api-token>' \
+  -e OPCGW_OPCUA__USER_PASSWORD='<shared-opcua-and-web-password>' \
+  -e OPCGW_WEB__ENABLED=true \
+  -v "$(pwd)/config:/usr/local/bin/config" \
+  -v "$(pwd)/pki:/usr/local/bin/pki" \
+  -v "$(pwd)/log:/usr/local/bin/log" \
+  -v "$(pwd)/data:/usr/local/bin/data" \
+  gcorbaz/opcgw:2.0
+```
+
+The web UI shares OPC UA credentials (single source of truth — `OPCGW_OPCUA__USER_NAME` + `OPCGW_OPCUA__USER_PASSWORD`). Place it behind a TLS-terminating reverse proxy in production deployments.
 
 ## Volume mounts
 
@@ -116,9 +137,11 @@ opcgw runs as user **`opcgw` (UID 10001)**, NOT root. Bind-mounted host director
 
 ```sh
 # One-time host-side ownership fix before first start:
+sudo mkdir -p ./config ./pki/{own,private,trusted,rejected} ./log ./data
 sudo chown -R 10001:10001 ./config ./pki ./log ./data
-sudo chmod 700 ./pki/private    # NFR9 — OPC UA private key requires 0o700 parent dir
-sudo chmod 600 ./pki/private/*  # NFR9 — OPC UA private key file requires 0o600
+sudo chmod 700 ./pki/private    # NFR9 - OPC UA private key parent dir
+# Tighten any pre-existing private key files (no-op on a fresh install):
+sudo find ./pki/private -type f -name '*.pem' -exec chmod 600 {} +
 ```
 
 ## Configuration
@@ -140,7 +163,7 @@ nc -z localhost 4855 && echo "OPC UA endpoint reachable"
 docker logs -f opcgw
 ```
 
-Look for the structured-log event `chirpstack_poll_start` within ~30 seconds of startup, followed by `chirpstack_poll_end` on each successful cycle.
+Look for the structured-log event `operation="poll_cycle_start"` within ~30 seconds of startup, followed by `operation="poll_cycle_end"` on each successful cycle. `event="opcua_session_count"` (gauge fired every ~5 s) confirms the OPC UA server is listening.
 
 ## Upgrading from v2.0-rc
 

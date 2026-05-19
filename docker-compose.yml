@@ -10,7 +10,7 @@
 #
 # Pull the published v2.0 image instead of building locally by either:
 #   * `docker compose pull` (uses the `image:` declared below), or
-#   * `docker pull docker.io/gcorbaz/opcgw:2.0 && docker tag … opcgw`
+#   * `docker pull docker.io/gcorbaz/opcgw:2.0 && docker tag docker.io/gcorbaz/opcgw:2.0 opcgw`
 # For local-dev builds against the working tree, run `docker build -t opcgw .`
 # first and Compose will pick up the local tag.
 
@@ -28,8 +28,8 @@ services:
     # passing an empty string through to the gateway. See docs/security.md
     # and `.env.example` for the canonical recipe.
     environment:
-      - OPCGW_CHIRPSTACK__API_TOKEN=${OPCGW_CHIRPSTACK__API_TOKEN:?missing — copy .env.example to .env and set this variable, see docs/security.md}
-      - OPCGW_OPCUA__USER_PASSWORD=${OPCGW_OPCUA__USER_PASSWORD:?missing — copy .env.example to .env and set this variable, see docs/security.md}
+      - OPCGW_CHIRPSTACK__API_TOKEN=${OPCGW_CHIRPSTACK__API_TOKEN:?missing - copy .env.example to .env and set this variable, see docs/security.md}
+      - OPCGW_OPCUA__USER_PASSWORD=${OPCGW_OPCUA__USER_PASSWORD:?missing - copy .env.example to .env and set this variable, see docs/security.md}
     volumes:
       - ./log:/usr/local/bin/log
       - ./config:/usr/local/bin/config

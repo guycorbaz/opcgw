@@ -20,7 +20,11 @@
 MANUAL    := opcgw-user-manual.xml
 OUT_DIR   := out
 HTML_DIR  := $(OUT_DIR)/html
-HTML_SINGLE := $(OUT_DIR)/opcgw-user-manual.html
+# Single-page HTML lives in its own subdir so the logo's `../logo/…` fileref
+# resolves to `$(OUT_DIR)/logo/` (parent of the HTML file), matching the
+# chunked output's resolution path.
+HTML_SINGLE_DIR := $(OUT_DIR)/html-single
+HTML_SINGLE     := $(HTML_SINGLE_DIR)/opcgw-user-manual.html
 PDF_OUT   := $(OUT_DIR)/opcgw-user-manual.pdf
 
 # Standard Debian/Ubuntu install path for DocBook XSL stylesheets.
@@ -48,18 +52,20 @@ html: $(MANUAL) | $(HTML_DIR)
 	    --stringparam use.id.as.filename 1 \
 	    $(DOCBOOK_XSL_DIR)/html/chunk.xsl \
 	    $(MANUAL)
-	@mkdir -p $(HTML_DIR)/../logo && cp -r $(LOGO_SRC)/*.svg $(HTML_DIR)/../logo/ 2>/dev/null || true
+	@mkdir -p $(OUT_DIR)/logo
+	cp $(LOGO_SRC)/opcgw-horizontal.svg $(LOGO_SRC)/opcgw-mark.svg $(LOGO_SRC)/opcgw-favicon.svg $(OUT_DIR)/logo/
 	@echo "✓ HTML manual:  $(HTML_DIR)/index.html"
 
 # ── HTML (single-page) ─────────────────────────────────────────────────────
-html-single: $(MANUAL) | $(OUT_DIR)
+html-single: $(MANUAL) | $(HTML_SINGLE_DIR)
 	@echo "→ Building single-page HTML to $(HTML_SINGLE)"
 	xsltproc \
 	    --output $(HTML_SINGLE) \
 	    --xinclude \
 	    $(DOCBOOK_XSL_DIR)/html/docbook.xsl \
 	    $(MANUAL)
-	@mkdir -p $(OUT_DIR)/logo && cp -r $(LOGO_SRC)/*.svg $(OUT_DIR)/logo/ 2>/dev/null || true
+	@mkdir -p $(OUT_DIR)/logo
+	cp $(LOGO_SRC)/opcgw-horizontal.svg $(LOGO_SRC)/opcgw-mark.svg $(LOGO_SRC)/opcgw-favicon.svg $(OUT_DIR)/logo/
 	@echo "✓ Single-page:  $(HTML_SINGLE)"
 
 # ── PDF (via dblatex; preferred for SVG support) ───────────────────────────
@@ -91,3 +97,6 @@ $(OUT_DIR):
 
 $(HTML_DIR): | $(OUT_DIR)
 	@mkdir -p $(HTML_DIR)
+
+$(HTML_SINGLE_DIR): | $(OUT_DIR)
+	@mkdir -p $(HTML_SINGLE_DIR)

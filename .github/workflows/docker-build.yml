@@ -37,11 +37,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
+        # Skipped (without failing the workflow) if the Docker Hub secrets are
+        # not set on the repo. This preserves the GHCR-only fallback so a
+        # missing/rotated Docker Hub token cannot block a release.
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
         uses: docker/login-action@v3
         with:
-          # Note: secrets.DOCKERHUB_USERNAME = "gcorbaz" (not "guycorbaz" — Docker Hub username differs from GitHub username).
+          # Note: secrets.DOCKERHUB_USERNAME = "gcorbaz" (not "guycorbaz" - Docker Hub username differs from GitHub username).
           # secrets.DOCKERHUB_TOKEN is a Personal Access Token with Read/Write/Delete scope generated at
-          # hub.docker.com → Account Settings → Security → Personal Access Tokens.
+          # hub.docker.com -> Account Settings -> Security -> Personal Access Tokens.
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
@@ -60,6 +64,9 @@ jobs:
             type=sha
 
       - name: Build and push Docker image
+        # docker/build-push-action pinned at @v5 deliberately; @v6 has not been
+        # validated against this workflow's multi-arch (amd64 + arm64) manifest
+        # shape on a real `v*` tag push. Bump tracked as a v2.x follow-up.
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -76,10 +83,16 @@ jobs:
       - name: Sync Docker Hub repository description
         # D1 (Story B-1 Dev Notes): auto-sync hub.docker.com Overview page from docs/dockerhub-description.md.
         # Keeps the live Docker Hub page version-controlled in git and updated on every v* tag push.
+        # Gated on Docker Hub secrets being set; `continue-on-error` so a flaky
+        # third-party action or rate-limit cannot fail an otherwise-green release
+        # (the image is already pushed by the prior build-push step).
+        # short-description is capped at 100 chars by Docker Hub's API.
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        continue-on-error: true
         uses: peter-evans/dockerhub-description@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ env.DOCKERHUB_IMAGE_NAME }}
           readme-filepath: ./docs/dockerhub-description.md
-          short-description: "ChirpStack-to-OPC-UA gateway for industrial LoRaWAN deployments. Multi-arch (amd64/arm64), non-root."
+          short-description: "ChirpStack to OPC UA gateway. Multi-arch amd64/arm64, non-root, industrial LoRaWAN."

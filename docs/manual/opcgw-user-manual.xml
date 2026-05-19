@@ -13,7 +13,7 @@
       </textobject>
     </mediaobject>
     <title>opcgw User Manual</title>
-    <subtitle>Chirpstack LoRaWAN to OPC UA Gateway</subtitle>
+    <subtitle>ChirpStack LoRaWAN to OPC UA Gateway</subtitle>
     <author>
       <firstname>Guy</firstname>
       <surname>Corbaz</surname>
@@ -570,7 +570,7 @@
             <screen>mkdir -p ./config ./pki/own ./pki/private ./pki/trusted ./pki/rejected ./log
 chown -R 10001:10001 ./config ./pki ./log
 chmod 700 ./pki/private
-chmod 600 ./pki/private/*.pem    # if private-key files already exist</screen>
+find ./pki/private -type f -name '*.pem' -exec chmod 600 {} +    # no-op on fresh install</screen>
           </step>
           <step>
             <para>Author <filename>./config/config.toml</filename> (see
@@ -591,6 +591,7 @@ chmod 600 ./pki/private/*.pem    # if private-key files already exist</screen>
   -v "$(pwd)/config:/usr/local/bin/config" \
   -v "$(pwd)/pki:/usr/local/bin/pki" \
   -v "$(pwd)/log:/usr/local/bin/log" \
+  -v "$(pwd)/data:/usr/local/bin/data" \
   docker.io/gcorbaz/opcgw:2.0</screen>
           </step>
           <step>
@@ -619,9 +620,15 @@ chmod 600 ./pki/private/*.pem    # if private-key files already exist</screen>
               <filename>trusted/</filename>,
               <filename>rejected/</filename>). Required unless OPC UA
               security is set to <literal>None</literal> for both modes
-              and policies. The SQLite database file
-              <filename>opcgw.db</filename> lives next to the binary at
-              <filename>/usr/local/bin</filename> by default.</para>
+              and policies.</para>
+            </listitem>
+            <listitem>
+              <para><filename>/usr/local/bin/data</filename> — SQLite
+              database file (<filename>opcgw.db</filename>) plus its WAL +
+              SHM sidecars. <emphasis>Required</emphasis> — without this
+              bind mount the database lives in the ephemeral container layer
+              and every <command>docker rm</command> destroys persisted
+              metrics and the 7-day history table.</para>
             </listitem>
             <listitem>
               <para><filename>/usr/local/bin/log</filename> — daily-rolling
@@ -685,6 +692,7 @@ docker run -d \
   -v "$(pwd)/config:/usr/local/bin/config" \
   -v "$(pwd)/pki:/usr/local/bin/pki" \
   -v "$(pwd)/log:/usr/local/bin/log" \
+  -v "$(pwd)/data:/usr/local/bin/data" \
   ghcr.io/guycorbaz/opcgw:2.0</screen>
       </section>
 
@@ -718,10 +726,10 @@ OPCGW_OPCUA__USER_PASSWORD=&lt;your-opc-ua-user-password&gt;</programlisting>
             <para>Prepare the host-side bind-mount directories with UID
             10001 ownership and the NFR9 PKI permission shape — same as
             the Docker Hub path:</para>
-            <screen>mkdir -p ./config ./pki/own ./pki/private ./pki/trusted ./pki/rejected ./log
-chown -R 10001:10001 ./config ./pki ./log
+            <screen>mkdir -p ./config ./pki/own ./pki/private ./pki/trusted ./pki/rejected ./log ./data
+chown -R 10001:10001 ./config ./pki ./log ./data
 chmod 700 ./pki/private
-chmod 600 ./pki/private/*.pem    # if private-key files already exist</screen>
+find ./pki/private -type f -name '*.pem' -exec chmod 600 {} +    # no-op on fresh install</screen>
           </step>
           <step>
             <para>Start the gateway in detached mode:</para>
@@ -729,8 +737,15 @@ chmod 600 ./pki/private/*.pem    # if private-key files already exist</screen>
             <para>Compose's <literal>:?err</literal> env-var guard pattern
             in <filename>docker-compose.yml</filename> causes
             <command>docker compose up</command> to fail fast with a
-            clear error message if either required variable is unset —
-            no silent empty-string passthrough to the gateway.</para>
+            clear error message if either required variable is
+            <emphasis>unset or empty</emphasis> — no silent empty-string
+            passthrough to the gateway. Note that <literal>:?err</literal>
+            does <emphasis>not</emphasis> detect a literal placeholder
+            string like <literal>REPLACE_ME_WITH_…</literal>; if you copy
+            <filename>.env.example</filename> without editing it, Compose
+            will start the container and the gateway's own
+            startup-validation (Story 7-1) catches the placeholder one
+            layer later with a clear error in the logs.</para>
           </step>
           <step>
             <para>Tail the startup logs to watch the first ChirpStack poll
@@ -790,8 +805,32 @@ sudo install -d -m 0755 -o opcgw -g opcgw /var/log/opcgw</screen>
 OPCGW_OPCUA__USER_PASSWORD=&lt;your-opc-ua-user-password&gt;
 OPCGW_OPCUA__PKI_DIR=/var/lib/opcgw/pki
 OPCGW_LOG_DIR=/var/log/opcgw</programlisting>
+            <warning>
+              <title>systemd <literal>EnvironmentFile</literal> syntax</title>
+              <para>systemd does not interpret shell quotes or escapes in
+              <literal>EnvironmentFile=</literal>. Avoid <literal>=</literal>,
+              leading or trailing whitespace, and embedded newlines in values.
+              Tokens containing <literal>$</literal> are passed through
+              literally (no variable expansion); single-quoted or
+              double-quoted values are not stripped of their quote
+              characters — the quotes become part of the value.</para>
+            </warning>
             <screen>sudo chmod 600 /etc/opcgw/env
 sudo chown opcgw:opcgw /etc/opcgw/env</screen>
+          </step>
+          <step>
+            <para>If you intend to enable the embedded Web UI
+            (<literal>[web].enabled = true</literal>), also deploy the
+            <filename>static/</filename> directory under
+            <filename>WorkingDirectory</filename> so Axum's
+            <literal>ServeDir</literal> can dispatch the pages — the
+            gateway resolves <filename>static/</filename> relative to its
+            CWD:</para>
+            <screen>sudo install -d -m 0755 -o opcgw -g opcgw /var/lib/opcgw/static
+sudo install -m 0644 -o opcgw -g opcgw -t /var/lib/opcgw/static/ \
+    static/*.html static/*.js static/*.css</screen>
+            <para>Skip this step for OPC-UA-only deployments — the static
+            payload is only needed when the web UI is enabled.</para>
           </step>
           <step>
             <para>Write the unit file at
@@ -909,25 +948,25 @@ cd opcgw</screen>
             <para>Confirm the gateway has logged its startup checkpoints.
             Pick the recipe matching your deployment shape:</para>
             <screen># Docker
-docker logs opcgw 2&gt;&amp;1 | grep -E '(logging_init|chirpstack_connect|OPC UA server started)'
+docker logs opcgw 2&gt;&amp;1 | grep -E '(logging_init|chirpstack_connect|opcua_limits_configured)'
 
 # Docker Compose
-docker compose logs opcgw 2&gt;&amp;1 | grep -E '(logging_init|chirpstack_connect|OPC UA server started)'
+docker compose logs opcgw 2&gt;&amp;1 | grep -E '(logging_init|chirpstack_connect|opcua_limits_configured)'
 
 # systemd
-journalctl -u opcgw -n 200 | grep -E '(logging_init|chirpstack_connect|OPC UA server started)'
+journalctl -u opcgw -n 200 | grep -E '(logging_init|chirpstack_connect|opcua_limits_configured)'
 
 # Foreground binary writing to ./log/opc_ua_gw.log
-tail -n 200 log/opc_ua_gw.log | grep -E '(logging_init|chirpstack_connect|OPC UA server started)'</screen>
+tail -n 200 log/opc_ua_gw.log | grep -E '(logging_init|chirpstack_connect|opcua_limits_configured)'</screen>
           </step>
           <step>
             <para>Confirm the first ChirpStack poll cycle has completed
             (typically within 30 s of startup, depending on
             <literal>[chirpstack].polling_frequency</literal>):</para>
             <screen># Docker — same shape; Compose / systemd / file-tail variants per above.
-docker logs opcgw 2&gt;&amp;1 | grep 'poll_cycle_complete'</screen>
+docker logs opcgw 2&gt;&amp;1 | grep 'poll_cycle_end'</screen>
             <para>If the gateway has not produced
-            <literal>operation="poll_cycle_complete"</literal> within ~30
+            <literal>operation="poll_cycle_end"</literal> within ~30
             s, head straight to <xref linkend="ch-troubleshooting"/>.</para>
           </step>
           <step>
@@ -941,7 +980,8 @@ docker logs opcgw 2&gt;&amp;1 | grep 'poll_cycle_complete'</screen>
             server is reachable and refusing unauthenticated access:</para>
             <screen>curl -sS -o /dev/null -w '%{http_code}\n' http://localhost:8080/
 # Expected: 401  (with WWW-Authenticate: Basic realm="opcgw")
-curl -sS -u opcua-user:&lt;your-opc-ua-user-password&gt; \
+# Substitute the configured user_name (default "opcua-user") + your password:
+curl -sS -u "$OPCGW_OPCUA__USER_NAME:$OPCGW_OPCUA__USER_PASSWORD" \
     http://localhost:8080/api/health
 # Expected: {"status":"ok"}</screen>
           </step>
@@ -1873,7 +1913,7 @@ application_name = "Arrosage"
 2026-04-27T12:34:56.300100Z  INFO opcgw::storage::sqlite: schema_version=5 migrations_applied=0
 2026-04-27T12:34:56.501020Z  INFO opcgw::chirpstack: operation="chirpstack_connect" attempt=1 endpoint=http://... timeout_secs=0
 2026-04-27T12:34:56.612030Z  INFO opcgw::chirpstack: operation="chirpstack_connect" attempt=1 latency_ms=110 success=true
-2026-04-27T12:34:56.700400Z  INFO opcgw::opc_ua: OPC UA server started endpoint=opc.tcp://0.0.0.0:4855
+2026-04-27T12:34:56.700400Z  INFO opcgw::opc_ua: OPC UA limits configured event="opcua_limits_configured" max_sessions=10 …
 2026-04-27T12:34:57.001234Z  INFO opcgw::chirpstack: operation="poll_cycle_start" device_count=12
           </programlisting>
         </example>
@@ -2056,7 +2096,7 @@ application_name = "Arrosage"
               <para>Time to complete a full metric poll cycle. Should remain
               below <literal>polling_frequency</literal>. Watch the per-cycle
               duration in the
-              <literal>operation = "poll_cycle_complete"</literal> log line
+              <literal>operation = "poll_cycle_end"</literal> log line
               and the budget warning if
               <literal>operation = "batch_write"</literal> exceeds
               500 ms.</para>
@@ -2711,7 +2751,7 @@ chirpstack:8080 list</command>.</para>
             <listitem>
               <para>Verify the OPC UA server bound successfully — search
               the log for
-              <literal>"OPC UA server started"</literal>.</para>
+              <literal>event="opcua_limits_configured"</literal> (emitted once by <filename>src/opc_ua.rs</filename> after the OPC UA server applies its session / subscription / message-size limits) or the periodic <literal>event="opcua_session_count"</literal> gauge.</para>
             </listitem>
             <listitem>
               <para>Confirm the port is listening:
@@ -2793,13 +2833,13 @@ chirpstack:8080 list</command>.</para>
           successful <literal>chirpstack_connect</literal> info line; OPC
           UA reads return the discriminant string or
           <literal>BadDataUnavailable</literal>; no
-          <literal>poll_cycle_complete</literal> emissions.</para>
+          <literal>poll_cycle_end</literal> emissions.</para>
           <para><emphasis>Diagnostic recipe:</emphasis></para>
           <screen># systemd:
-journalctl -u opcgw | grep -E 'chirpstack_auth_failed|Unauthenticated|PermissionDenied'
+journalctl -u opcgw | grep -E 'operation="chirpstack_connect".*(Unauthenticated|PermissionDenied|InvalidArgument)'
 
 # Docker:
-docker logs opcgw 2&gt;&amp;1 | grep -E 'chirpstack_auth_failed|Unauthenticated|PermissionDenied'</screen>
+docker logs opcgw 2&gt;&amp;1 | grep -E 'operation="chirpstack_connect".*(Unauthenticated|PermissionDenied|InvalidArgument)'</screen>
           <para><emphasis>Root cause:</emphasis> Most commonly an unset,
           rotated, or wrong-tenant
           <envar>OPCGW_CHIRPSTACK__API_TOKEN</envar>. The shipped
@@ -3356,15 +3396,15 @@ cp /path/to/opcgw.db.pre-epic-a.bak /path/to/opcgw.db
           </listitem>
           <listitem>
             <para>First poll cycle completed — look for
-            <literal>operation="poll_cycle_complete"</literal> in the
+            <literal>operation="poll_cycle_end"</literal> in the
             gateway logs (Path A: this may take up to one
             <literal>[chirpstack].polling_frequency</literal>
             interval; default 10 s).</para>
             <screen># systemd:
-journalctl -u opcgw | grep "poll_cycle_complete" | head -3
+journalctl -u opcgw | grep "poll_cycle_end" | head -3
 
 # Docker Compose:
-docker compose logs opcgw 2&gt;&amp;1 | grep "poll_cycle_complete" | head -3</screen>
+docker compose logs opcgw 2&gt;&amp;1 | grep "poll_cycle_end" | head -3</screen>
           </listitem>
           <listitem>
             <para>OPC UA Read returns the actual measurement payload —

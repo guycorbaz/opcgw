@@ -37,10 +37,14 @@ WORKDIR /usr/local/bin
 # UID 10001 is the convention for application-runtime users (>1000, well outside
 # system-UID range, low enough to fit in any reasonable container UID-map).
 ARG UID=10001
+# `--user-group` (-U) creates a matching group with the same GID as the user,
+# so `docker exec opcgw id` reliably reports `gid=10001(opcgw) groups=10001(opcgw)`
+# regardless of `/etc/login.defs USERGROUPS_ENAB` setting on the base image.
 RUN useradd \
-    --home "/nonexistant" \
+    --home "/nonexistent" \
     --shell "/sbin/nologin" \
     --no-create-home \
+    --user-group \
     --uid "${UID}" \
     opcgw
 
@@ -72,6 +76,10 @@ COPY --from=builder --chown=opcgw:opcgw /usr/src/opcgw/static /usr/local/bin/sta
 # Drop privileges before launching the entrypoint.
 USER opcgw
 
+# OPC UA endpoint (default; configurable via `[opcua].host_port` in config.toml).
 EXPOSE 4855
+# Embedded Axum web UI port (only bound when `[web].enabled = true`; configurable
+# via `[web].port`). Declared here as informational metadata; not auto-published.
+EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/opcgw"]

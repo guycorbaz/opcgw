@@ -44,14 +44,14 @@ Ajoute en haut de ton `README.md` :
 
 ```markdown
 <p align="center">
-  <img src="assets/opcgw-horizontal.svg" alt="opcgw" width="400">
+  <img src="docs/logo/opcgw-horizontal.svg" alt="opcgw" width="400">
 </p>
 ```
 
 Pour un badge plus compact (à côté du titre) :
 
 ```markdown
-# <img src="assets/opcgw-mark.svg" width="32" align="left"> opcgw
+# <img src="docs/logo/opcgw-mark.svg" width="32" align="left"> opcgw
 ```
 
 ---

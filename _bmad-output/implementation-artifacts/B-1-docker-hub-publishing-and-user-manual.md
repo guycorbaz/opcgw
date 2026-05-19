@@ -363,3 +363,45 @@ Strict-zero (verified unchanged by `git status` filter): `src/**/*.rs`, `tests/*
 ### Change Log
 
 - 2026-05-19: Implementation complete; status `ready-for-dev → in-progress → review`. D1 = auto-sync, D2 = Makefile. Smoke test catch added `data/` to Dockerfile + docker-compose.yml + docs.
+- 2026-05-19 (later, same day): `bmad-code-review` iter-1 same-LLM (Opus 4.7) complete. 45 raw findings → 26 PATCH + 6 DEFER + 7 DISMISS. Doctrine validated again: phrase-harmonization-drift surfaced 7 HIGH and 11 MED findings (manual / dockerhub-description grep recipes targeted strings the source never emits; same shape as A-7 L1+L2 / A-5 K5 / A-6 K1).
+- 2026-05-19 (iter-1 patch round): all 26 PATCH findings applied. Strongest catches: T2 `OPCGW_WEB__USER_PASSWORD` (env var doesn't exist), T3 `OPCGW_OPCUA__ENDPOINT` (wrong field name; real is `host_port`/`host_ip_address`), T4+T6+T7 (3 separate non-existent structured-log events that operator grep recipes targeted: `chirpstack_poll_start`/`_end`, `poll_cycle_complete`, `chirpstack_auth_failed`), T5 `"OPC UA server started"` (string doesn't exist; replaced with `opcua_limits_configured`), T9 (manual's 2 docker-run examples missing `data/` mount — same gap that the smoke test caught during implementation), T10 (peter-evans action would have killed entire workflow incl. GHCR publish when DOCKERHUB secrets are missing; now gated by `if: secrets != ''` + `continue-on-error: true`). Plus phrase fixes (T29 "Chirpstack"→"ChirpStack", T30 short-description 109→83 chars under Docker Hub's 100-char limit), portability fixes (T22 em-dash→hyphen, T24 U+2026→explicit cmd, T13 `/nonexistant`→`/nonexistent`), correctness fixes (T17 `chmod 600 *.pem` → `find -exec`, T16 useradd `--user-group`, T14 Makefile html-single output dir so logo path resolves, T15 Makefile drops silent `|| true`, T35 systemd EnvironmentFile syntax warning, T36 curl uses `$OPCGW_OPCUA__USER_NAME`, T20 systemd static/ install step, T37 Dockerfile EXPOSE 8080, T19 dockerhub web-UI "Quick-start variant", T1+T12 manual+dockerhub `data/` path + Compose `:?err` placeholder caveat, T27 logo README assets/→docs/logo/). T18 reclassified as not-a-bug: Docker + systemd procedures effectively agree on PKI dir modes (0755 cert dirs, 0700 private/) given default umask 022. T8 + T11 deferred per user (Cargo.toml bump must be separate pre-tag commit; docker/build-push-action@v5 vs v6 needs real-CI verification). Regression gate post-patch: cargo test exit 0, clippy exit 0, doctest 0/55. DocBook 4.5 DTD validation post-patch: exit 0. Strict-zero invariant re-verified clean. Status `review → in-progress → review` (iter-1 same-LLM complete; iter-2 different-LLM pending per CLAUDE.md "Code Review & Story Validation Loop Discipline" + memory `feedback_iter3_validation` 13-story doctrine).
+
+### Review Findings
+
+#### Patches to apply (iter-1)
+
+- [x] [Review][Patch] **T1** Manual claim "opcgw.db lives next to binary at /usr/local/bin" — real path is `/usr/local/bin/data/opcgw.db` [docs/manual/opcgw-user-manual.xml:~1527 + dockerhub-description.md:~777]
+- [x] [Review][Patch] **T2** dockerhub-description claims `OPCGW_WEB__USER_PASSWORD` env var — doesn't exist in `WebConfig`; web auth uses `[opcua]` credentials [docs/dockerhub-description.md:91]
+- [x] [Review][Patch] **T3** dockerhub-description claims `OPCGW_OPCUA__ENDPOINT` env var — real fields are `host_ip_address` + `host_port` [docs/dockerhub-description.md:93]
+- [x] [Review][Patch] **T4** dockerhub-description grep `chirpstack_poll_start`/`chirpstack_poll_end` — real events `operation="poll_cycle_start"` / `operation="poll_cycle_end"` [docs/dockerhub-description.md:~809]
+- [x] [Review][Patch] **T5** Manual grep "OPC UA server started" — string doesn't exist; replace with `opcua_limits_configured` or `opcua_session_count` [docs/manual/opcgw-user-manual.xml:~1839]
+- [x] [Review][Patch] **T6** Manual `poll_cycle_complete` (3 occurrences) — non-existent; real event is `poll_cycle_end` [docs/manual/opcgw-user-manual.xml:~1855, ~1857, ~2650]
+- [x] [Review][Patch] **T7** Manual troubleshooting grep `chirpstack_auth_failed` — event doesn't exist in src/; replace with `operation="chirpstack_connect"` + gRPC status strings [docs/manual/opcgw-user-manual.xml:~2653]
+- [x] [Review][Patch] **T9** Manual `docker run` examples (Docker Hub + GHCR sect1s) missing `data/` mount — operators lose SQLite DB on every `docker rm` [docs/manual/opcgw-user-manual.xml:~1476, ~1593]
+- [x] [Review][Patch] **T10** `peter-evans/dockerhub-description@v4` failure unguarded → kills whole workflow incl. GHCR publish [.github/workflows/docker-build.yml:72-82]
+- [x] [Review][Patch] **T12** Compose `:?err` guard doesn't catch placeholder values (`REPLACE_ME_...`); manual oversells [docs/manual/opcgw-user-manual.xml:~1645]
+- [x] [Review][Patch] **T13** `/nonexistant` typo in Dockerfile useradd — should be `/nonexistent` (or `/var/empty`) [Dockerfile:41]
+- [x] [Review][Patch] **T14** Makefile `html-single` target leaves logo image broken (path resolves to non-existent `docs/manual/logo/`) [docs/manual/Makefile:~62]
+- [x] [Review][Patch] **T15** Makefile `cp -r ... || true` silently swallows logo-copy failure [docs/manual/Makefile:~65, ~75]
+- [x] [Review][Patch] **T16** Dockerfile `useradd` missing `--user-group` — documented `groups=10001(opcgw)` may not match on alternative base images [Dockerfile:40-45]
+- [x] [Review][Patch] **T17** `chmod 600 ./pki/private/*.pem` fails on empty dir; use `find ... -exec chmod 600 {} +` [README.md + dockerhub-description.md + docs/manual/opcgw-user-manual.xml]
+- [x] [Review][Patch] **T18** PKI directory mode mismatch between Docker procedure (`chmod 700` only on `private/`) and systemd procedure (`0755` on `own/`, `trusted/`, `rejected/`) [docs/manual/opcgw-user-manual.xml + others]
+- [x] [Review][Patch] **T19** dockerhub-description docker-run example missing `-p` for Web UI port; add "with Web UI" variant [docs/dockerhub-description.md]
+- [x] [Review][Patch] **T20** systemd install procedure doesn't deploy `static/` for web UI; add `install -m 0644 -t /var/lib/opcgw/static/ static/*` step [docs/manual/opcgw-user-manual.xml:~1681]
+- [x] [Review][Patch] **T22** Em-dash `—` in compose `:?` message non-portable across shell locales; replace with `-` [docker-compose.yml:31-32]
+- [x] [Review][Patch] **T24** U+2026 ellipsis in compose comment ambiguous; use explicit command [docker-compose.yml:13]
+- [x] [Review][Patch] **T27** `docs/logo/README.md` integration example suggests `assets/opcgw-horizontal.svg` — actual path is `docs/logo/opcgw-horizontal.svg` [docs/logo/README.md:~50]
+- [x] [Review][Patch] **T29** Manual subtitle "Chirpstack" (lowercase s) — official spelling is "ChirpStack" [docs/manual/opcgw-user-manual.xml:8]
+- [x] [Review][Patch] **T30** Workflow `short-description` is 109 chars; Docker Hub limit is 100 — trim to ≤100 [.github/workflows/docker-build.yml:85]
+- [x] [Review][Patch] **T35** systemd procedure's `EnvironmentFile` doesn't warn operators about syntax constraints (no shell escapes; no `=` in values) [docs/manual/opcgw-user-manual.xml:~1707]
+- [x] [Review][Patch] **T36** Manual curl example hardcodes `opcua-user` username; switch to `-u "$OPCGW_OPCUA__USER_NAME:..."` [docs/manual/opcgw-user-manual.xml:~1871]
+- [x] [Review][Patch] **T37** Dockerfile `EXPOSE 8080` (informational) for web UI port [Dockerfile:74]
+
+#### Deferred findings
+
+- [x] [Review][Defer] **T8** Cargo.toml version bump `2.0.0-rc → 2.0.0` — user-confirmed deferral; AC#20 strict-zero forbids in B-1. Required as separate pre-tag commit before pushing `v2.0.0` tag; also update README badge.
+- [x] [Review][Defer] **T11** docker/build-push-action@v5 → v6 — user-confirmed deferral; needs real CI test on a real tag push to verify v6 multi-arch behavior. Add inline comment in workflow noting intentional v5 pin.
+- [x] [Review][Defer] **T23** OPC UA standard port 4840 reference loss in config comment — minor information loss only.
+- [x] [Review][Defer] **T25** `docs/logo/opcgw-logo-pack.zip` checked in vs `docs/manual/out/` gitignored — policy inconsistency, no functional impact.
+- [x] [Review][Defer] **T26** Manual links from Docker Hub Overview point to raw DocBook XML — needs CI HTML publish first (out-of-scope v2.x doc-pass story).
+- [x] [Review][Defer] **AC#23** GitHub tracking issue `Refs #__` placeholder — explicitly anticipated by spec; user will provide issue number out-of-band.
