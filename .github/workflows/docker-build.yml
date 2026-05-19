@@ -6,8 +6,9 @@ on:
       - 'v*'
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  GHCR_REGISTRY: ghcr.io
+  GHCR_IMAGE_NAME: ${{ github.repository }}
+  DOCKERHUB_IMAGE_NAME: gcorbaz/opcgw
 
 jobs:
   build-and-push:
@@ -20,21 +21,38 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Set up QEMU
+        # QEMU is required for cross-architecture emulation when building
+        # the linux/arm64 leg on a linux/amd64 GitHub-hosted runner.
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Container Registry
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ${{ env.GHCR_REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          # Note: secrets.DOCKERHUB_USERNAME = "gcorbaz" (not "guycorbaz" — Docker Hub username differs from GitHub username).
+          # secrets.DOCKERHUB_TOKEN is a Personal Access Token with Read/Write/Delete scope generated at
+          # hub.docker.com → Account Settings → Security → Personal Access Tokens.
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Publish to BOTH Docker Hub and GHCR with identical tags.
+          images: |
+            ${{ env.DOCKERHUB_IMAGE_NAME }}
+            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -45,9 +63,23 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          # Multi-architecture manifest covering x86_64 servers + Raspberry-Pi-class arm64 edge gateways.
+          # linux/arm/v7 (32-bit ARM) is deliberately out of scope for v2.0.
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             RUST_VERSION=1.94.0
             APP_NAME=opcgw
+
+      - name: Sync Docker Hub repository description
+        # D1 (Story B-1 Dev Notes): auto-sync hub.docker.com Overview page from docs/dockerhub-description.md.
+        # Keeps the live Docker Hub page version-controlled in git and updated on every v* tag push.
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ env.DOCKERHUB_IMAGE_NAME }}
+          readme-filepath: ./docs/dockerhub-description.md
+          short-description: "ChirpStack-to-OPC-UA gateway for industrial LoRaWAN deployments. Multi-arch (amd64/arm64), non-root."

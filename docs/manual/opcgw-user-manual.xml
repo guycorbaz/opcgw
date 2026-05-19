@@ -4,8 +4,16 @@
 <book>
 
   <bookinfo>
+    <mediaobject>
+      <imageobject>
+        <imagedata fileref="../logo/opcgw-horizontal.svg" format="SVG" width="400" align="center"/>
+      </imageobject>
+      <textobject>
+        <phrase>opcgw — ChirpStack to OPC UA Gateway</phrase>
+      </textobject>
+    </mediaobject>
     <title>opcgw User Manual</title>
-    <subtitle>LoRaWAN to OPC UA Gateway</subtitle>
+    <subtitle>Chirpstack LoRaWAN to OPC UA Gateway</subtitle>
     <author>
       <firstname>Guy</firstname>
       <surname>Corbaz</surname>
@@ -41,6 +49,31 @@
         for configuration reference, OPC UA address space, and operation
         names.</revremark>
       </revision>
+      <revision>
+        <revnumber>2.0.0-GA</revnumber>
+        <date>2026-05-19</date>
+        <authorinitials>GC</authorinitials>
+        <revremark>v2.0 GA Release. Adds Epic 7 (OPC UA security
+        hardening: three-endpoint matrix, NFR9 private-key permission
+        enforcement, max_connections session cap, opcua_auth_failed and
+        opcua_session_count_at_limit audit events); Epic 8 (real-time
+        subscriptions with DataChangeFilter, configurable subscription
+        and message-size limits, OPC UA HistoryRead and
+        max_history_data_results_per_node); Epic 9 (embedded Axum Web
+        UI behind HTTP Basic auth, dashboard and live metrics page,
+        configuration hot-reload via SIGHUP, CRUD endpoints for
+        applications, devices, and commands); Epic A (storage payload
+        migration closing issue #108 — payload-bearing MetricType, v007
+        and v008 SQLite migrations, NaN/Inf poller filter, real
+        measurement values round-tripped end-to-end for the first
+        time). New Installation, Upgrade and Migration chapters;
+        Configuration chapter extended for [opcua].max_connections,
+        [web], and the audit-event reason taxonomy. Docker Hub
+        (docker.io/gcorbaz/opcgw) and GHCR mirror
+        (ghcr.io/guycorbaz/opcgw) publishing documented; Dockerfile
+        pinned to ubuntu:24.04 and runs as non-root opcgw user (UID
+        10001).</revremark>
+      </revision>
     </revhistory>
     <abstract>
       <para>opcgw is a Rust-based gateway that bridges ChirpStack LoRaWAN
@@ -48,10 +81,14 @@
       systems. It polls device metrics from ChirpStack at configurable
       intervals, persists them in a local SQLite database (WAL mode for
       concurrent reads), exposes them via OPC UA 1.04 with stale-data status
-      codes, and accepts downlink commands from OPC UA clients with
-      end-to-end delivery confirmation. This manual provides comprehensive
-      guidance on installation, configuration, operation, observability, and
-      troubleshooting.</para>
+      codes, real-time subscriptions, and HistoryRead, and accepts downlink
+      commands from OPC UA clients with end-to-end delivery confirmation. An
+      embedded Axum web UI (opt-in) renders the gateway's live status and
+      per-metric values for operator triage. As of v2.0 GA (Epic A), the
+      gateway persists real typed measurement payloads end-to-end. This
+      manual provides comprehensive guidance on installation, configuration,
+      operation, observability, troubleshooting, and upgrade /
+      migration.</para>
     </abstract>
   </bookinfo>
 
@@ -91,14 +128,20 @@
             <para><emphasis>Real-time data collection</emphasis> — Polls
             metrics from ChirpStack at configurable intervals; supports
             counter, gauge, and absolute metric kinds plus the boolean,
-            integer, float, and string OPC UA types.</para>
+            integer, float, and string OPC UA types. As of Epic A (v2.0 GA)
+            real measurement payloads are persisted and round-tripped
+            end-to-end — the pre-Epic-A discriminant-string bug
+            (<ulink url="https://github.com/guycorbaz/opcgw/issues/108">issue
+            #108</ulink>) is closed.</para>
           </listitem>
           <listitem>
             <para><emphasis>Persistent storage</emphasis> — SQLite-backed
             current-value table (UPSERT semantics) plus an append-only
             <literal>metric_history</literal> table for historical analysis.
             WAL mode plus a per-task connection pool eliminates the prior
-            in-memory <literal>Mutex</literal> bottleneck.</para>
+            in-memory <literal>Mutex</literal> bottleneck. Schema is at
+            v008 (Epic A typed-payload columns with exactly-one-non-NULL
+            CHECK constraint).</para>
           </listitem>
           <listitem>
             <para><emphasis>Reliable command delivery</emphasis> — A
@@ -116,7 +159,45 @@
             folder containing health metrics
             (<literal>LastPollTimestamp</literal>,
             <literal>error_count</literal>,
-            <literal>chirpstack_available</literal>).</para>
+            <literal>chirpstack_available</literal>). Three endpoints are
+            advertised concurrently on the same TCP port: <literal>None /
+            None</literal> (development), <literal>Basic256 / Sign</literal>,
+            and <literal>Basic256 / SignAndEncrypt</literal> (production
+            default).</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>OPC UA subscriptions and HistoryRead</emphasis> —
+            Real-time monitored-item subscriptions
+            (<literal>DataChangeFilter</literal>-aware so status-only
+            transitions are surfaced) and OPC UA HistoryRead against the
+            <literal>metric_history</literal> table. The per-call response
+            cap is <literal>[opcua].max_history_data_results_per_node</literal>
+            (default 10000 rows ≈ 28 h at the default 10 s polling
+            cadence); SCADA clients page via follow-up calls (manual paging
+            — OPC UA continuation points are not yet implemented).</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>Hardened OPC UA security</emphasis> — Single
+            user/password authentication with a sanitised audit trail
+            (<literal>event="opcua_auth_failed"</literal>), configurable
+            session cap (<literal>[opcua].max_connections</literal>,
+            default 10, hard cap 4096) with at-limit audit
+            (<literal>event="opcua_session_count_at_limit"</literal>),
+            and NFR9-enforced filesystem permissions on the OPC UA private
+            key (the gateway refuses to start unless
+            <filename>pki/private/*.pem</filename> is mode
+            <literal>0o600</literal> and the parent directory is
+            <literal>0o700</literal>).</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>Embedded Web UI (opt-in)</emphasis> — An Axum
+            HTTP server gated by HTTP Basic auth surfaces the gateway's
+            live status dashboard and a per-metric values page. Disabled
+            by default (<literal>[web].enabled = false</literal>);
+            credentials are shared with <literal>[opcua]</literal> so one
+            rotation step covers both surfaces. Stories 9-4 / 9-5 / 9-6
+            add CRUD endpoints for applications, devices, and commands;
+            Story 9-7 wires SIGHUP-driven configuration hot-reload.</para>
           </listitem>
           <listitem>
             <para><emphasis>Stale-data status codes</emphasis> — Each OPC UA
@@ -257,6 +338,34 @@
             sent to ChirpStack via downlink, and tracked through delivery
             confirmation with a configurable timeout.</para>
           </listitem>
+          <listitem>
+            <para><emphasis>Embedded web server</emphasis>
+            (<filename>src/web/</filename>) — Optional Axum HTTP server
+            (opt-in via <literal>[web].enabled = true</literal>) sharing
+            <literal>[opcua].user_name</literal> /
+            <literal>[opcua].user_password</literal> credentials behind
+            HTTP Basic auth. Renders a live status dashboard
+            (<filename>GET /</filename>), per-metric values page
+            (<filename>GET /metrics.html</filename>), and CRUD endpoints
+            for applications / devices / commands
+            (<filename>/api/applications/*</filename>). Source IP is
+            carried directly via Axum's <literal>ConnectInfo</literal>
+            extractor in audit events.</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>Configuration hot-reload</emphasis>
+            (<filename>src/config_reload.rs</filename>) — On
+            <literal>SIGHUP</literal>, the gateway re-reads
+            <filename>config/config.toml</filename> through the same
+            figment chain used at startup, validates the candidate,
+            classifies the diff (hot-reload-safe vs restart-required vs
+            address-space-mutating), and atomically swaps the live
+            <literal>Arc&lt;AppConfig&gt;</literal>. Audit events:
+            <literal>event="config_reload_attempted"</literal>,
+            <literal>config_reload_succeeded</literal>,
+            <literal>config_reload_failed</literal>. See Story 9-7 limits
+            in <xref linkend="sec-web-config"/>.</para>
+          </listitem>
         </itemizedlist>
 
         <para>Data flow:</para>
@@ -332,14 +441,35 @@
             uses Linux containers.</para>
           </listitem>
           <listitem>
+            <para><emphasis>Runtime options</emphasis> — three supported
+            paths: a published Docker image
+            (<literal>docker.io/gcorbaz/opcgw:2.0</literal> primary;
+            <literal>ghcr.io/guycorbaz/opcgw:2.0</literal> mirror; multi-arch
+            <literal>linux/amd64</literal> + <literal>linux/arm64</literal>),
+            a systemd-managed binary, or a from-source build. See
+            <xref linkend="ch-installation"/>.</para>
+          </listitem>
+          <listitem>
             <para><emphasis>Rust toolchain</emphasis> — version 1.94.0 or
-            later when building from source. The release binary has no Rust
-            runtime requirement.</para>
+            later when building from source. The release binary and the
+            published Docker image have no Rust runtime requirement.</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>Build prerequisites</emphasis> (from-source
+            only) — <literal>protobuf-compiler</literal>,
+            <literal>libssl-dev</literal>, <literal>pkg-config</literal> on
+            Debian/Ubuntu; equivalent packages on other distributions. The
+            build script (<filename>build.rs</filename>) compiles the
+            ChirpStack protobuf definitions via
+            <literal>tonic-build</literal>.</para>
           </listitem>
           <listitem>
             <para><emphasis>SQLite</emphasis> — bundled via
             <literal>rusqlite</literal>'s <literal>bundled</literal>
-            feature; no separate SQLite installation is needed.</para>
+            feature; no separate SQLite installation is needed at runtime.
+            The <literal>sqlite3</literal> CLI is recommended on the
+            operator host for the migration pre-flight script
+            (<xref linkend="ch-upgrade"/>).</para>
           </listitem>
           <listitem>
             <para><emphasis>ChirpStack</emphasis> — version 4.0 or later
@@ -348,7 +478,9 @@
           </listitem>
           <listitem>
             <para><emphasis>Firewall</emphasis> — outbound to ChirpStack
-            (gRPC), inbound to OPC UA clients (port 4855 by default).</para>
+            (gRPC), inbound to OPC UA clients (port 4855 by default), and
+            inbound to the embedded web UI (default port 8080) if
+            <literal>[web].enabled = true</literal>.</para>
           </listitem>
         </itemizedlist>
       </section>
@@ -360,111 +492,460 @@
   <chapter id="ch-installation">
       <title>Installation</title>
 
-      <section id="sec-docker-installation">
-        <title>Installation via Docker (Recommended)</title>
-        <para>Docker installation is the quickest way to get opcgw running
-        without compiling from source. The provided
-        <filename>docker-compose.yml</filename> mounts a configuration
-        directory, a data directory for the SQLite database and PKI
-        certificates, and a log directory for the daily-rolling
-        files.</para>
+      <para>Three supported installation paths: a published Docker image
+      (from Docker Hub or the GHCR mirror, with an optional Docker Compose
+      recipe), a systemd-managed binary, or a from-source build.
+      Post-install verification is the same regardless of path.</para>
+
+      <section id="sec-docker-hub-installation">
+        <title>Docker (Docker Hub — primary)</title>
+        <para>The published image at
+        <literal>docker.io/gcorbaz/opcgw</literal> is the
+        recommended runtime for most deployments. The image is published in
+        lockstep with the GHCR mirror on every <literal>v*</literal> git
+        tag; both registries receive identical multi-architecture manifests
+        covering <literal>linux/amd64</literal> and
+        <literal>linux/arm64</literal>. The runtime base is pinned to
+        <literal>ubuntu:24.04</literal> (LTS, Noble); the process runs as
+        non-root user <literal>opcgw</literal> (UID 10001) and exposes
+        OPC UA on port 4855.</para>
+
+        <para>Tags follow Semantic Versioning. There is no
+        <literal>:latest</literal> tag — pin to a specific minor or
+        patch.</para>
+
+        <table frame="all">
+          <title>Image tag patterns</title>
+          <tgroup cols="3">
+            <thead>
+              <row>
+                <entry>Pattern</entry>
+                <entry>Example</entry>
+                <entry>Meaning</entry>
+              </row>
+            </thead>
+            <tbody>
+              <row>
+                <entry><literal>&lt;major&gt;.&lt;minor&gt;.&lt;patch&gt;</literal></entry>
+                <entry><literal>2.0.0</literal></entry>
+                <entry>Exact release. Pin for fully reproducible
+                deployments.</entry>
+              </row>
+              <row>
+                <entry><literal>&lt;major&gt;.&lt;minor&gt;</literal></entry>
+                <entry><literal>2.0</literal></entry>
+                <entry>Latest patch within a minor line. Auto-updates on
+                patch releases.</entry>
+              </row>
+              <row>
+                <entry><literal>sha-&lt;short&gt;</literal></entry>
+                <entry><literal>sha-25cb062</literal></entry>
+                <entry>Commit-sha-pinned build for tracing back to a
+                specific commit.</entry>
+              </row>
+            </tbody>
+          </tgroup>
+        </table>
 
         <procedure>
-          <title>Docker Installation Steps</title>
+          <title>Docker Hub Installation Steps</title>
           <step>
-            <para>Install Docker. Visit
+            <para>Install Docker Engine. See
             <ulink url="https://docs.docker.com/get-docker/">docker.com</ulink>
-            for instructions for your platform.</para>
+            for platform-specific instructions.</para>
           </step>
           <step>
-            <para>Clone the repository (or copy
-            <filename>docker-compose.yml</filename>):</para>
-            <screen>git clone https://github.com/guycorbaz/opcgw.git
-cd opcgw</screen>
+            <para>Pull the image:</para>
+            <screen>docker pull docker.io/gcorbaz/opcgw:2.0</screen>
           </step>
           <step>
-            <para>Edit <filename>config/config.toml</filename> to point at
-            your ChirpStack server and define your applications, devices,
-            and metrics (see Chapter 4).</para>
+            <para>Prepare the host-side bind-mount directories. The
+            container runs as UID 10001 and cannot
+            <command>chown</command> host files, so the operator
+            <emphasis>must</emphasis> set ownership before first start.
+            <filename>pki/private</filename> additionally requires the
+            NFR9 permission shape (mode <literal>0o700</literal> on the
+            directory, <literal>0o600</literal> on each
+            <filename>*.pem</filename> file):</para>
+            <screen>mkdir -p ./config ./pki/own ./pki/private ./pki/trusted ./pki/rejected ./log
+chown -R 10001:10001 ./config ./pki ./log
+chmod 700 ./pki/private
+chmod 600 ./pki/private/*.pem    # if private-key files already exist</screen>
           </step>
           <step>
-            <para>Start the gateway:</para>
-            <screen>docker compose up</screen>
-            <para>Or run a one-shot container:</para>
+            <para>Author <filename>./config/config.toml</filename> (see
+            <xref linkend="ch-configuration"/> — at minimum the
+            <literal>[chirpstack]</literal>,
+            <literal>[opcua]</literal>, and one
+            <literal>[[application]]</literal> block).</para>
+          </step>
+          <step>
+            <para>Start the container, injecting the required secrets via
+            environment variables:</para>
             <screen>docker run -d \
   --name opcgw \
+  --restart unless-stopped \
   -p 4855:4855 \
-  -v $(pwd)/config:/app/config:ro \
-  -v opcgw-data:/app/data \
-  -v opcgw-logs:/app/log \
-  guycorbaz/opcgw:latest</screen>
+  -e OPCGW_CHIRPSTACK__API_TOKEN='&lt;your-chirpstack-api-token&gt;' \
+  -e OPCGW_OPCUA__USER_PASSWORD='&lt;your-opc-ua-user-password&gt;' \
+  -v "$(pwd)/config:/usr/local/bin/config" \
+  -v "$(pwd)/pki:/usr/local/bin/pki" \
+  -v "$(pwd)/log:/usr/local/bin/log" \
+  docker.io/gcorbaz/opcgw:2.0</screen>
           </step>
           <step>
-            <para>Inspect the startup output:</para>
-            <screen>docker logs -f opcgw</screen>
+            <para>Verify the container is running as a non-root user (UID
+            10001):</para>
+            <screen>docker exec opcgw id
+# Expected: uid=10001(opcgw) gid=10001(opcgw) groups=10001(opcgw)</screen>
           </step>
         </procedure>
 
         <note>
-          <title>Container Volumes</title>
-          <para>The container exposes three mount points:</para>
+          <title>Container Volume Layout</title>
+          <para>The container's <literal>WORKDIR</literal> is
+          <filename>/usr/local/bin</filename>. The standard bind-mount
+          layout:</para>
           <itemizedlist>
             <listitem>
-              <para><filename>/app/config</filename> — configuration files,
-              read-only at runtime.</para>
+              <para><filename>/usr/local/bin/config</filename> —
+              <filename>config.toml</filename>, optional
+              <filename>log4rs.yaml</filename>. Required.</para>
             </listitem>
             <listitem>
-              <para><filename>/app/data</filename> — SQLite database files
-              (<filename>opcgw.db</filename>,
-              <filename>opcgw.db-wal</filename>) and the PKI directory.</para>
+              <para><filename>/usr/local/bin/pki</filename> — OPC UA PKI
+              directory tree (<filename>own/</filename>,
+              <filename>private/</filename>,
+              <filename>trusted/</filename>,
+              <filename>rejected/</filename>). Required unless OPC UA
+              security is set to <literal>None</literal> for both modes
+              and policies. The SQLite database file
+              <filename>opcgw.db</filename> lives next to the binary at
+              <filename>/usr/local/bin</filename> by default.</para>
             </listitem>
             <listitem>
-              <para><filename>/app/log</filename> — daily-rolling log files
-              (set <literal>OPCGW_LOG_DIR=/app/log</literal> or
-              <literal>[logging].dir = "/app/log"</literal>).</para>
+              <para><filename>/usr/local/bin/log</filename> — daily-rolling
+              log files (set <literal>OPCGW_LOG_DIR=/usr/local/bin/log</literal>
+              or <literal>[logging].dir</literal> if you prefer a different
+              location).</para>
             </listitem>
           </itemizedlist>
         </note>
+
+        <warning>
+          <title>Secret Handling</title>
+          <para>Never bake real API tokens or OPC UA passwords into the
+          Docker image, the <filename>config.toml</filename> committed to
+          version control, or the <filename>docker run</filename>
+          command-line in shell history. Inject secrets via
+          <literal>-e ENV_VAR=...</literal> sourced from a secret manager,
+          via a per-environment <filename>.env</filename> file consumed by
+          Docker Compose, or via Kubernetes Secrets. The shipped
+          <filename>config/config.toml</filename> contains placeholder
+          values; the gateway refuses to start with the placeholders in
+          place. See <xref linkend="sec-config-overview"/> and
+          <filename>docs/security.md</filename> for the full env-var
+          recipe.</para>
+        </warning>
+      </section>
+
+      <section id="sec-docker-ghcr-installation">
+        <title>Docker (GHCR mirror)</title>
+        <para>The GitHub Container Registry mirror at
+        <literal>ghcr.io/guycorbaz/opcgw</literal> is identical to the
+        Docker Hub image (same workflow run, same multi-arch manifest).
+        Use the GHCR mirror when:</para>
+        <itemizedlist>
+          <listitem>
+            <para>Your CI / deployment pipeline is already aligned with
+            the GitHub ecosystem
+            (<literal>docker/login-action</literal> against
+            <literal>github.actor</literal> +
+            <literal>secrets.GITHUB_TOKEN</literal>, etc.).</para>
+          </listitem>
+          <listitem>
+            <para>You are hitting Docker Hub's anonymous-pull rate limit
+            on a deployment fleet and prefer GHCR's higher anonymous
+            allowance.</para>
+          </listitem>
+        </itemizedlist>
+
+        <para>Otherwise the procedure is identical to
+        <xref linkend="sec-docker-hub-installation"/>; only the
+        <command>docker pull</command> and <command>docker run</command>
+        image references change:</para>
+        <screen>docker pull ghcr.io/guycorbaz/opcgw:2.0
+
+docker run -d \
+  --name opcgw \
+  --restart unless-stopped \
+  -p 4855:4855 \
+  -e OPCGW_CHIRPSTACK__API_TOKEN='&lt;your-chirpstack-api-token&gt;' \
+  -e OPCGW_OPCUA__USER_PASSWORD='&lt;your-opc-ua-user-password&gt;' \
+  -v "$(pwd)/config:/usr/local/bin/config" \
+  -v "$(pwd)/pki:/usr/local/bin/pki" \
+  -v "$(pwd)/log:/usr/local/bin/log" \
+  ghcr.io/guycorbaz/opcgw:2.0</screen>
+      </section>
+
+      <section id="sec-docker-compose-installation">
+        <title>Docker Compose</title>
+        <para>For convenience, the repository ships a
+        <filename>docker-compose.yml</filename> that wires the container
+        with the canonical bind-mount layout and a
+        <filename>.env</filename>-driven secret-injection pattern.</para>
+
+        <procedure>
+          <title>Docker Compose Installation Steps</title>
+          <step>
+            <para>Clone the repository (the Compose recipe and the
+            <filename>.env.example</filename> template ship in-tree):</para>
+            <screen>git clone https://github.com/guycorbaz/opcgw.git
+cd opcgw</screen>
+          </step>
+          <step>
+            <para>Copy <filename>.env.example</filename> to
+            <filename>.env</filename> and replace the placeholder values
+            with real secrets:</para>
+            <screen>cp .env.example .env
+chmod 600 .env
+$EDITOR .env</screen>
+            <para>The required entries are:</para>
+            <programlisting>OPCGW_CHIRPSTACK__API_TOKEN=&lt;your-chirpstack-api-token&gt;
+OPCGW_OPCUA__USER_PASSWORD=&lt;your-opc-ua-user-password&gt;</programlisting>
+          </step>
+          <step>
+            <para>Prepare the host-side bind-mount directories with UID
+            10001 ownership and the NFR9 PKI permission shape — same as
+            the Docker Hub path:</para>
+            <screen>mkdir -p ./config ./pki/own ./pki/private ./pki/trusted ./pki/rejected ./log
+chown -R 10001:10001 ./config ./pki ./log
+chmod 700 ./pki/private
+chmod 600 ./pki/private/*.pem    # if private-key files already exist</screen>
+          </step>
+          <step>
+            <para>Start the gateway in detached mode:</para>
+            <screen>docker compose up -d</screen>
+            <para>Compose's <literal>:?err</literal> env-var guard pattern
+            in <filename>docker-compose.yml</filename> causes
+            <command>docker compose up</command> to fail fast with a
+            clear error message if either required variable is unset —
+            no silent empty-string passthrough to the gateway.</para>
+          </step>
+          <step>
+            <para>Tail the startup logs to watch the first ChirpStack poll
+            cycle:</para>
+            <screen>docker compose logs -f opcgw</screen>
+          </step>
+        </procedure>
+
+        <note>
+          <title>Choosing the Image</title>
+          <para>The shipped <filename>docker-compose.yml</filename> uses
+          <literal>image: opcgw</literal>, which assumes a locally-built
+          image. To pin to the published Docker Hub or GHCR image,
+          override the <literal>image:</literal> line to
+          <literal>docker.io/gcorbaz/opcgw:2.0</literal> or
+          <literal>ghcr.io/guycorbaz/opcgw:2.0</literal>.</para>
+        </note>
+      </section>
+
+      <section id="sec-systemd-installation">
+        <title>systemd Service (native binary)</title>
+        <para>For deployments without a container runtime, install a
+        pre-built binary (or build from source — see
+        <xref linkend="sec-source-installation"/>) and supervise it
+        via systemd. This path is well-suited to industrial-edge
+        appliances and to the from-source release flow.</para>
+
+        <procedure>
+          <title>systemd Service Installation Steps</title>
+          <step>
+            <para>Build or download the release binary and copy it into
+            <filename>/usr/local/bin/opcgw</filename>:</para>
+            <screen>sudo install -m 0755 -o root -g root \
+    target/release/opcgw /usr/local/bin/opcgw</screen>
+          </step>
+          <step>
+            <para>Create a dedicated unprivileged service user and a
+            state directory:</para>
+            <screen>sudo useradd --system --no-create-home --shell /usr/sbin/nologin opcgw
+sudo install -d -m 0755 -o opcgw -g opcgw /var/lib/opcgw
+sudo install -d -m 0755 -o opcgw -g opcgw /var/lib/opcgw/pki/own
+sudo install -d -m 0700 -o opcgw -g opcgw /var/lib/opcgw/pki/private
+sudo install -d -m 0755 -o opcgw -g opcgw /var/lib/opcgw/pki/trusted
+sudo install -d -m 0755 -o opcgw -g opcgw /var/lib/opcgw/pki/rejected
+sudo install -d -m 0755 -o opcgw -g opcgw /etc/opcgw
+sudo install -d -m 0755 -o opcgw -g opcgw /var/log/opcgw</screen>
+          </step>
+          <step>
+            <para>Place <filename>config.toml</filename> at
+            <filename>/etc/opcgw/config.toml</filename> (mode
+            <literal>0o644</literal>) and the secret env-file at
+            <filename>/etc/opcgw/env</filename> (mode
+            <literal>0o600</literal>, owned by the service user). The
+            env-file mirrors the <filename>.env</filename> file used by
+            Docker Compose:</para>
+            <programlisting>OPCGW_CHIRPSTACK__API_TOKEN=&lt;your-chirpstack-api-token&gt;
+OPCGW_OPCUA__USER_PASSWORD=&lt;your-opc-ua-user-password&gt;
+OPCGW_OPCUA__PKI_DIR=/var/lib/opcgw/pki
+OPCGW_LOG_DIR=/var/log/opcgw</programlisting>
+            <screen>sudo chmod 600 /etc/opcgw/env
+sudo chown opcgw:opcgw /etc/opcgw/env</screen>
+          </step>
+          <step>
+            <para>Write the unit file at
+            <filename>/etc/systemd/system/opcgw.service</filename>:</para>
+            <programlisting>[Unit]
+Description=opcgw — ChirpStack to OPC UA Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opcgw
+Group=opcgw
+WorkingDirectory=/var/lib/opcgw
+EnvironmentFile=/etc/opcgw/env
+ExecStart=/usr/local/bin/opcgw -c /etc/opcgw/config.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+# Sandboxing — NFR9 alignment
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/opcgw /var/log/opcgw
+
+[Install]
+WantedBy=multi-user.target</programlisting>
+            <para>The <literal>ExecReload</literal> line wires
+            <command>systemctl reload opcgw</command> to the configuration
+            hot-reload SIGHUP handler (Story 9-7 — see
+            <xref linkend="sec-web-config"/>).</para>
+          </step>
+          <step>
+            <para>Enable and start the service:</para>
+            <screen>sudo systemctl daemon-reload
+sudo systemctl enable --now opcgw
+sudo systemctl status opcgw</screen>
+          </step>
+          <step>
+            <para>Tail the journal to watch startup:</para>
+            <screen>journalctl -u opcgw -f</screen>
+          </step>
+        </procedure>
       </section>
 
       <section id="sec-source-installation">
-        <title>Building from Source</title>
-        <para>Use a from-source build when you need platform-specific
-        optimizations, debug symbols, or a custom Rust toolchain.</para>
+        <title>Build from Source</title>
+        <para>A from-source build is appropriate when you need
+        platform-specific optimizations, debug symbols, a custom Rust
+        toolchain, or are working on a development checkout.</para>
 
         <procedure>
           <title>Build from Source Steps</title>
+          <step>
+            <para>Install build prerequisites (Debian / Ubuntu):</para>
+            <screen>sudo apt-get update
+sudo apt-get install -y protobuf-compiler libssl-dev pkg-config build-essential</screen>
+            <para>Equivalent packages are available on RHEL / Fedora
+            (<literal>protobuf-compiler openssl-devel
+            pkgconfig</literal>), Alpine (<literal>protoc openssl-dev
+            pkgconfig</literal>), and macOS via Homebrew
+            (<literal>brew install protobuf
+            pkg-config</literal>).</para>
+          </step>
+          <step>
+            <para>Install the Rust toolchain (1.94.0 or later):</para>
+            <screen>curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustc --version</screen>
+          </step>
           <step>
             <para>Clone the repository:</para>
             <screen>git clone https://github.com/guycorbaz/opcgw.git
 cd opcgw</screen>
           </step>
           <step>
-            <para>Verify the Rust toolchain (1.94.0 or later):</para>
-            <screen>rustc --version</screen>
+            <para>For a development build, run a release compile:</para>
+            <screen>cargo build --release
+./target/release/opcgw -c config/config.toml</screen>
           </step>
           <step>
-            <para>Build a release binary:</para>
-            <screen>cargo build --release</screen>
-          </step>
-          <step>
-            <para>The compiled binary is at
-            <filename>target/release/opcgw</filename>.</para>
-          </step>
-          <step>
-            <para>Run the gateway with an explicit configuration
-            path:</para>
-            <screen>./target/release/opcgw -c config/config.toml</screen>
+            <para>For a production install, use
+            <command>cargo install</command> which places the binary at
+            <filename>~/.cargo/bin/opcgw</filename> (or whatever
+            <envar>CARGO_INSTALL_ROOT</envar> points at):</para>
+            <screen>cargo install --path .</screen>
+            <para>Then wire it into systemd per
+            <xref linkend="sec-systemd-installation"/>.</para>
           </step>
         </procedure>
 
         <note>
           <title>Build Time</title>
-          <para>Release builds take roughly 5-10 minutes on a first compile
-          (the protocol-buffer code is generated at build time via
-          <literal>tonic-build</literal>). Subsequent incremental builds are
-          measured in seconds.</para>
+          <para>Release builds take roughly 5-10 minutes on a first
+          compile (the protocol-buffer code is generated at build time via
+          <literal>tonic-build</literal>). Subsequent incremental builds
+          are measured in seconds.</para>
         </note>
+      </section>
+
+      <section id="sec-post-install-verification">
+        <title>Post-install Verification</title>
+        <para>The verification steps below are deployment-agnostic — they
+        work for Docker, Compose, systemd, or a foreground binary. Adjust
+        the log-tail recipe to match your deployment shape.</para>
+
+        <procedure>
+          <title>Post-install Verification Steps</title>
+          <step>
+            <para>Confirm the OPC UA endpoint is bound. From the host
+            running the gateway:</para>
+            <screen>nc -z localhost 4855 &amp;&amp; echo "OPC UA endpoint reachable"</screen>
+          </step>
+          <step>
+            <para>Confirm the gateway has logged its startup checkpoints.
+            Pick the recipe matching your deployment shape:</para>
+            <screen># Docker
+docker logs opcgw 2&gt;&amp;1 | grep -E '(logging_init|chirpstack_connect|OPC UA server started)'
+
+# Docker Compose
+docker compose logs opcgw 2&gt;&amp;1 | grep -E '(logging_init|chirpstack_connect|OPC UA server started)'
+
+# systemd
+journalctl -u opcgw -n 200 | grep -E '(logging_init|chirpstack_connect|OPC UA server started)'
+
+# Foreground binary writing to ./log/opc_ua_gw.log
+tail -n 200 log/opc_ua_gw.log | grep -E '(logging_init|chirpstack_connect|OPC UA server started)'</screen>
+          </step>
+          <step>
+            <para>Confirm the first ChirpStack poll cycle has completed
+            (typically within 30 s of startup, depending on
+            <literal>[chirpstack].polling_frequency</literal>):</para>
+            <screen># Docker — same shape; Compose / systemd / file-tail variants per above.
+docker logs opcgw 2&gt;&amp;1 | grep 'poll_cycle_complete'</screen>
+            <para>If the gateway has not produced
+            <literal>operation="poll_cycle_complete"</literal> within ~30
+            s, head straight to <xref linkend="ch-troubleshooting"/>.</para>
+          </step>
+          <step>
+            <para>(Docker only) Verify the container is running as a
+            non-root user — never as <literal>root</literal>:</para>
+            <screen>docker exec opcgw id
+# Expected: uid=10001(opcgw) gid=10001(opcgw) groups=10001(opcgw)</screen>
+          </step>
+          <step>
+            <para>(Optional — Web UI enabled) Verify the embedded web
+            server is reachable and refusing unauthenticated access:</para>
+            <screen>curl -sS -o /dev/null -w '%{http_code}\n' http://localhost:8080/
+# Expected: 401  (with WWW-Authenticate: Basic realm="opcgw")
+curl -sS -u opcua-user:&lt;your-opc-ua-user-password&gt; \
+    http://localhost:8080/api/health
+# Expected: {"status":"ok"}</screen>
+          </step>
+        </procedure>
       </section>
     </chapter>
 
@@ -685,7 +1166,10 @@ application_name = "Chirpstack OPC UA Gateway"
 application_uri  = "urn:chirpstack:opcua:gateway"
 product_uri      = "urn:chirpstack:opcua:gateway"
 
-# Diagnostics output from the OPC UA stack itself
+# Diagnostics output from the OPC UA stack itself.
+# REQUIRED true when [opcua].max_connections is set — the session-count
+# gauge and the at-limit warn both read async-opcua's CurrentSessionCount
+# diagnostics variable. Startup fail-fasts otherwise.
 diagnostics_enabled = true
 
 # Optional: TCP hello timeout (default 5 s)
@@ -694,26 +1178,99 @@ diagnostics_enabled = true
 # Optional: bind address (default: first interface IP)
 # host_ip_address = "0.0.0.0"
 
-# Optional: TCP port (default: 4840 for OPC UA, this project ships 4855)
+# Optional: TCP port (default 4855 for this project)
 # host_port = 4855
 
-# PKI configuration (relative paths are resolved under pki_dir)
-create_sample_keypair = true
+# PKI configuration (relative paths are resolved under pki_dir).
+# create_sample_keypair = false is the production default (Story 7-2).
+# Set to true ONLY for development self-signed keypair auto-generation.
+create_sample_keypair = false
 certificate_path      = "own/cert.der"
 private_key_path      = "private/private.pem"
 trust_client_cert     = true
 check_cert_time       = true
 pki_dir               = "./pki"
 
-# User authentication (single-user only at this time)
-user_name     = "user1"
-user_password = "user1"
+# User authentication (single user — multi-user RBAC is out of scope).
+# The password placeholder in the shipped TOML is rejected at startup —
+# always inject via OPCGW_OPCUA__USER_PASSWORD env var.
+user_name     = "opcua-user"
+user_password = "REPLACE_ME_WITH_OPCGW_OPCUA__USER_PASSWORD_ENV_VAR"
 
-# Staleness threshold in seconds (Story 5-2)
+# Staleness threshold in seconds (Story 5-2).
 # Metrics older than this return Uncertain in OPC UA;
 # older than 24 h return Bad. Default: 120 (2 x default polling_frequency).
 # Range: 1-86400. Override: OPCGW_OPCUA__STALE_THRESHOLD_SECONDS
-stale_threshold_seconds = 120</programlisting>
+stale_threshold_seconds = 120
+
+# Maximum concurrent OPC UA sessions (Story 7-3). New sessions beyond
+# this limit are rejected with BadTooManySessions. Existing sessions
+# unaffected. Default: 10. Range: 1-4096. Setting 0 or > 4096 fails
+# startup. Override: OPCGW_OPCUA__MAX_CONNECTIONS
+# max_connections = 10
+
+# Subscription / message-size limits (Story 8-2). Optional; default to
+# async-opcua library defaults. Override: OPCGW_OPCUA__&lt;UPPER&gt;
+# max_subscriptions_per_session = 10    # range 1-1000
+# max_monitored_items_per_sub   = 1000  # range 1-100000
+# max_message_size              = 327675  # range 1-268435456 (≈ 256 MiB)
+# max_chunk_count               = 5     # range 1-4096
+
+# HistoryRead per-call response cap (Story 8-3, FR22). Caps the number
+# of HistoryData rows returned per NodeId per HistoryRead call. SCADA
+# clients page via follow-up calls (manual paging). Default 10000 ≈
+# 28 h of poll data at 10 s polling. Range: 1-1000000.
+# max_history_data_results_per_node = 10000</programlisting>
+
+        <para>The gateway advertises <emphasis>three</emphasis> OPC UA
+        endpoints on the same TCP port. SCADA clients pick the
+        endpoint matching their security posture; the gateway accepts the
+        user-token credentials against any of the three.</para>
+
+        <table frame="all">
+          <title>OPC UA endpoint matrix</title>
+          <tgroup cols="4">
+            <thead>
+              <row>
+                <entry>Endpoint</entry>
+                <entry>Security policy</entry>
+                <entry>Security mode</entry>
+                <entry>Intended use</entry>
+              </row>
+            </thead>
+            <tbody>
+              <row>
+                <entry><literal>null</literal></entry>
+                <entry><literal>None</literal></entry>
+                <entry><literal>None</literal></entry>
+                <entry>Development / first-run smoke tests on trusted
+                LANs.</entry>
+              </row>
+              <row>
+                <entry><literal>basic256_sign</literal></entry>
+                <entry><literal>Basic256</literal></entry>
+                <entry><literal>Sign</literal></entry>
+                <entry>Signed, unencrypted traffic when LAN traffic must
+                remain inspectable.</entry>
+              </row>
+              <row>
+                <entry><literal>basic256_sign_encrypt</literal></entry>
+                <entry><literal>Basic256</literal></entry>
+                <entry><literal>SignAndEncrypt</literal></entry>
+                <entry><emphasis>Production default.</emphasis> Highest
+                security level the gateway advertises.</entry>
+              </row>
+            </tbody>
+          </tgroup>
+        </table>
+
+        <para>The PKI directory layout
+        (<filename>pki/own/</filename>,
+        <filename>pki/private/</filename>,
+        <filename>pki/trusted/</filename>,
+        <filename>pki/rejected/</filename>) is documented in
+        <filename>docs/security.md § "OPC UA security endpoints and
+        authentication"</filename>.</para>
 
         <variablelist>
           <varlistentry>
@@ -727,20 +1284,239 @@ stale_threshold_seconds = 120</programlisting>
           <varlistentry>
             <term>create_sample_keypair</term>
             <listitem>
-              <para>When <literal>true</literal>, opcgw generates a
-              self-signed certificate at first start. Set to
-              <literal>false</literal> in production once you have provided
-              real certificates under <literal>pki_dir</literal>.</para>
+              <para>When <literal>true</literal>, opcgw auto-generates a
+              self-signed certificate on first start. <emphasis>Production
+              default is <literal>false</literal></emphasis> — provide
+              real CA-signed (or self-signed) certificates manually at
+              <filename>pki/own/cert.der</filename> and
+              <filename>pki/private/private.pem</filename>. Release
+              builds with <literal>create_sample_keypair = true</literal>
+              emit a startup warning.</para>
+            </listitem>
+          </varlistentry>
+          <varlistentry>
+            <term>max_connections</term>
+            <listitem>
+              <para>Caps concurrent OPC UA sessions (Story 7-3). New
+              sessions beyond the cap are rejected with
+              <literal>BadTooManySessions</literal>; existing sessions
+              unaffected. A misbehaving SCADA reconnect loop or a
+              deliberate session flood cannot exhaust file descriptors or
+              memory. Sized per
+              <literal>(N SCADA clients × sessions each) + 20%
+              headroom</literal>; values above 50 should prompt a
+              deployment review. Hard cap 4096 (fd-exhaustion guard).
+              Inspect utilisation via
+              <literal>event="opcua_session_count"</literal> info gauge
+              and at-limit rejections via
+              <literal>event="opcua_session_count_at_limit"</literal>
+              warns.</para>
+            </listitem>
+          </varlistentry>
+          <varlistentry>
+            <term>max_subscriptions_per_session, max_monitored_items_per_sub, max_message_size, max_chunk_count</term>
+            <listitem>
+              <para>Story 8-2 subscription / message-size shaping knobs
+              fed into async-opcua's <literal>ServerBuilder</literal> at
+              startup. Defaults match async-opcua 0.17.1 library
+              defaults; uncomment only if a deployment scenario requires
+              tuning. Resolved values are echoed at startup as
+              <literal>event="opcua_limits_configured"</literal>.</para>
+            </listitem>
+          </varlistentry>
+          <varlistentry>
+            <term>max_history_data_results_per_node</term>
+            <listitem>
+              <para>Per-NodeId HistoryRead response cap (Story 8-3,
+              FR22). SCADA clients exceeding the cap page via follow-up
+              calls (manual paging — continuation points are not yet
+              implemented; see
+              <filename>docs/security.md § "Historical data
+              access"</filename>).</para>
             </listitem>
           </varlistentry>
         </variablelist>
 
         <warning>
-          <title>OPC UA Security</title>
-          <para>The current build supports a single user/password and a
-          basic PKI surface. Anonymous and certificate-only flows are not
-          yet exposed. Plan production deployments behind a network boundary
-          until Epic 7 (security hardening) lands.</para>
+          <title>OPC UA Private-Key Permissions (NFR9)</title>
+          <para>Story 7-2 enforces filesystem permissions on the OPC UA
+          private key at startup, fail-closed. The gateway
+          <emphasis>refuses to start</emphasis> if any
+          <filename>pki/private/*.pem</filename> file is not at mode
+          <literal>0o600</literal>, or if the parent
+          <filename>pki/private</filename> directory is not at mode
+          <literal>0o700</literal>. The error message includes the
+          observed mode and the <command>chmod</command> recipe. Operator
+          remediation:</para>
+          <screen>chmod 700 pki/private
+chmod 600 pki/private/*.pem</screen>
+          <para>Silently running with a world-readable private key is
+          worse than refusing to start — this fail-closed behaviour is
+          intentional.</para>
+        </warning>
+
+        <warning>
+          <title>OPC UA Authentication Audit Trail</title>
+          <para>Every failed OPC UA authentication emits a structured
+          <literal>warn!</literal> event
+          (<literal>event="opcua_auth_failed"</literal>) in
+          <filename>log/opc_ua.log</filename>. The submitted username is
+          sanitised (control chars escaped, truncated to 64 chars); the
+          attempted password is <emphasis>never</emphasis> logged. Source
+          IP is correlated from async-opcua's
+          <literal>info!</literal>-level
+          <literal>"Accept new connection from ..."</literal> line by
+          timestamp (NFR12 two-event pattern) — keep
+          <literal>OPCGW_LOG_LEVEL</literal> at <literal>info</literal>
+          or below to preserve the correlation, or rely on the per-module
+          <filename>opc_ua.log</filename> file appender (captures at
+          DEBUG independently).</para>
+        </warning>
+      </section>
+
+      <section id="sec-web-config">
+        <title>[web] — Embedded Web UI</title>
+        <para>Story 9-1 ships an embedded Axum HTTP server gated by HTTP
+        Basic auth. <emphasis>Off by default</emphasis> — existing operators
+        upgrading from Phase A see no behavioural change unless they
+        explicitly enable it. The credentials are
+        <emphasis>shared</emphasis> with the <literal>[opcua]</literal>
+        section (same <literal>user_name</literal> /
+        <literal>user_password</literal>); one rotation step covers both
+        surfaces.</para>
+
+        <programlisting language="ini">[web]
+# Master switch — default false.
+# Override: OPCGW_WEB__ENABLED=true
+enabled = true
+
+# Listening port. Default 8080. Range 1024-65535 (privileged ports rejected).
+port = 8080
+
+# Bind address. Default "0.0.0.0" (all interfaces). Use "127.0.0.1" if a
+# reverse proxy on the same host fronts the gateway.
+bind_address = "0.0.0.0"
+
+# HTTP Basic auth realm string. Default "opcgw". Max 64 chars, ASCII,
+# no '"', no '\', no leading/trailing whitespace.
+auth_realm = "opcgw"
+
+# Story 9-4 CSRF allow-list for state-changing routes (POST/PUT/DELETE).
+# Each entry must parse as scheme://host[:port] (no path/query/fragment).
+# When omitted, defaults to ["http://&lt;bind_address&gt;:&lt;port&gt;"].
+# allowed_origins = ["http://gateway.local:8080"]</programlisting>
+
+        <variablelist>
+          <varlistentry>
+            <term>GET /</term>
+            <listitem>
+              <para>Live status dashboard (Story 9-2). Single-screen view
+              of ChirpStack connection state, last-poll timestamp,
+              cumulative error count, configured application + device
+              counts. Auto-refreshes every 10 s; mobile-responsive layout;
+              OS-driven dark mode. Underlying JSON shape at
+              <filename>GET /api/status</filename>.</para>
+            </listitem>
+          </varlistentry>
+          <varlistentry>
+            <term>GET /metrics.html</term>
+            <listitem>
+              <para>Live metric values page (Story 9-3, extended by Story
+              A-6). Per-application / per-device grid showing metric name,
+              <emphasis>typed</emphasis> value (Float / Int / Bool /
+              String — post-Epic-A), unit, last-updated timestamp, and a
+              staleness badge (Good / Uncertain / Bad / Missing). JSON
+              shape at <filename>GET /api/devices</filename>.</para>
+            </listitem>
+          </varlistentry>
+          <varlistentry>
+            <term>GET /api/health</term>
+            <listitem>
+              <para>Minimal smoke endpoint returning
+              <literal>{"status":"ok"}</literal>. Used by integration
+              tests and external monitoring probes.</para>
+            </listitem>
+          </varlistentry>
+          <varlistentry>
+            <term>/api/applications/* — CRUD endpoints (Stories 9-4, 9-5, 9-6)</term>
+            <listitem>
+              <para>POST / PUT / DELETE on the application, device, and
+              command resources. CSRF-protected via
+              <literal>[web].allowed_origins</literal>. Audit events:
+              <literal>application_*</literal> / <literal>device_*</literal>
+              / <literal>command_*</literal> +
+              <literal>*_crud_rejected</literal> on validation failure.
+              State-changing mutations also fire
+              <literal>topology_change_detected</literal> if the OPC UA
+              address space needs reshaping.</para>
+            </listitem>
+          </varlistentry>
+        </variablelist>
+
+        <para><emphasis>Configuration hot-reload</emphasis> (Story 9-7) —
+        sending <literal>SIGHUP</literal> to the gateway PID
+        (<command>systemctl reload opcgw</command> via the
+        <literal>ExecReload</literal> in the systemd unit, or
+        <command>kill -HUP $(pgrep opcgw)</command>) re-reads
+        <filename>config/config.toml</filename> through the same figment
+        chain used at startup, validates the candidate, and classifies
+        the diff into three buckets:</para>
+
+        <itemizedlist>
+          <listitem>
+            <para><emphasis>Hot-reload-safe</emphasis> — applied without
+            restart at the next safe checkpoint.
+            <literal>chirpstack.polling_frequency</literal>,
+            <literal>chirpstack.retry</literal>,
+            <literal>chirpstack.delay</literal>,
+            <literal>chirpstack.list_page_size</literal>, the web-side
+            <literal>[opcua].stale_threshold_seconds</literal>
+            interpretation, and address-space-mutating changes to
+            <literal>[[application]]</literal> /
+            <literal>[[application.device]]</literal> /
+            <literal>[[application.device.read_metric]]</literal> /
+            <literal>[[application.device.command]]</literal> (Story
+            9-8).</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>Restart-required</emphasis> — reload is
+            rejected with
+            <literal>event="config_reload_failed" reason="restart_required"</literal>
+            and a <literal>changed_knob</literal> field naming the
+            offending field. Includes
+            <literal>chirpstack.server_address</literal>,
+            <literal>chirpstack.api_token</literal>,
+            <literal>chirpstack.tenant_id</literal>,
+            <literal>[opcua].host_ip_address</literal>,
+            <literal>[opcua].host_port</literal>, PKI paths, OPC UA
+            session caps, OPC UA / web credentials, and
+            <literal>[web].port</literal> /
+            <literal>bind_address</literal> /
+            <literal>enabled</literal> /
+            <literal>auth_realm</literal>.</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>v1 limitations</emphasis> — credential
+            rotation requires restart in v1 (the auth-middleware refactor
+            to support in-place digest replacement is deferred);
+            <literal>[opcua].stale_threshold_seconds</literal>
+            hot-reload affects only the web dashboard's Good →
+            Uncertain boundary (OPC UA per-variable read-callback
+            closures capture the threshold at startup). See
+            <filename>docs/security.md § "Configuration
+            hot-reload"</filename> for the full taxonomy.</para>
+          </listitem>
+        </itemizedlist>
+
+        <warning>
+          <title>Web UI is HTTP-only — TLS via reverse proxy</title>
+          <para>Story 9-1 binds an HTTP listener; credentials transit in
+          cleartext. Enable <literal>[web]</literal> only on trusted LANs.
+          For internet exposure or any path crossing an untrusted hop,
+          deploy a TLS-terminating reverse proxy (nginx, Caddy, Traefik)
+          in front of the gateway and set
+          <literal>bind_address = "127.0.0.1"</literal> so the listener
+          is loopback-only.</para>
         </warning>
       </section>
 
@@ -781,7 +1557,7 @@ application_name = "Arrosage"
     metric_name             = "Niveau_cit"     # OPC UA browse name
     chirpstack_metric_name  = "Water_deep_cm"  # ChirpStack metric key
     metric_type             = "Float"          # Bool | Int | Float | String
-    metric_unit             = "cm"             # optional, OPC UA EU info
+    metric_unit             = "cm"             # optional, web-dashboard suffix
 
   [[application.device]]
   device_name = "Vanne01"
@@ -811,15 +1587,77 @@ application_name = "Arrosage"
           <listitem>
             <para>
             <literal>[[application.device.read_metric]]</literal> declares
-            uplink metrics; <literal>metric_type</literal> drives the OPC UA
-            <literal>Variant</literal> type
-            (<literal>Bool</literal> →
-            <literal>Variant::Boolean</literal>,
-            <literal>Int</literal> → <literal>Variant::Int32</literal>,
-            <literal>Float</literal> →
-            <literal>Variant::Double</literal>,
-            <literal>String</literal> →
-            <literal>Variant::String</literal>).</para>
+            uplink metrics. <emphasis>As of Epic A (v2.0 GA) the
+            <literal>MetricType</literal> enum is payload-bearing</emphasis>
+            — values carry real measurements end-to-end. The
+            <literal>metric_type</literal> string in TOML drives both the
+            persisted variant in SQLite and the OPC UA
+            <literal>Variant</literal> projection:</para>
+          </listitem>
+        </itemizedlist>
+
+        <table frame="all">
+          <title>metric_type to OPC UA Variant mapping</title>
+          <tgroup cols="3">
+            <thead>
+              <row>
+                <entry>TOML <literal>metric_type</literal></entry>
+                <entry>Storage <literal>MetricType</literal></entry>
+                <entry>OPC UA <literal>Variant</literal></entry>
+              </row>
+            </thead>
+            <tbody>
+              <row>
+                <entry><literal>"Float"</literal></entry>
+                <entry><literal>Float(f64)</literal></entry>
+                <entry><literal>Variant::Float(f32)</literal> — narrowed
+                at the OPC UA boundary; emits
+                <literal>event="metric_read" reason="narrowing_overflow"
+                | "narrowing_underflow"</literal> on lossy narrowing
+                (Story A-4)</entry>
+              </row>
+              <row>
+                <entry><literal>"Int"</literal></entry>
+                <entry><literal>Int(i64)</literal></entry>
+                <entry><literal>Variant::Int32(i32)</literal> when the
+                value fits in i32; <literal>Variant::Int64(i64)</literal>
+                otherwise (counters, large-magnitude
+                metrics)</entry>
+              </row>
+              <row>
+                <entry><literal>"Bool"</literal></entry>
+                <entry><literal>Bool(bool)</literal></entry>
+                <entry><literal>Variant::Boolean(bool)</literal></entry>
+              </row>
+              <row>
+                <entry><literal>"String"</literal></entry>
+                <entry><literal>String(String)</literal></entry>
+                <entry><literal>Variant::String(UAString)</literal> —
+                UTF-8 preserved</entry>
+              </row>
+            </tbody>
+          </tgroup>
+        </table>
+
+        <itemizedlist>
+          <listitem>
+            <para><literal>metric_unit</literal> (Story A-6) is an
+            optional human-readable unit string surfaced on the web
+            dashboard as a value suffix (e.g. <literal>34.2 %</literal>,
+            <literal>17.5 cm</literal>). Empty-string units coalesce to
+            no-suffix. <emphasis>Not yet</emphasis> exposed via the OPC UA
+            <literal>EngineeringUnits</literal> property — that is
+            tracked as a future enhancement.</para>
+          </listitem>
+          <listitem>
+            <para>The OPC UA NodeId for each metric is built as
+            <literal>format!("{}/{}", device.device_id, metric_name)</literal>
+            — the post-issue-#99 fix
+            (<filename>docs/security.md § "OPC UA NodeId format
+            (Issue #99 fix, 2026-05-02)"</filename>) replaced the
+            pre-Epic-7 collision-prone format that conflated
+            different-application metrics sharing the same metric
+            name.</para>
           </listitem>
           <listitem>
             <para>
@@ -839,6 +1677,32 @@ application_name = "Arrosage"
           application at least one device, each device at least one read
           metric (commands are optional). Metric names must be unique
           within a device.</para>
+        </note>
+
+        <note>
+          <title>Audit-event Taxonomy</title>
+          <para>Configuration mutations via the web CRUD endpoints
+          (Stories 9-4 / 9-5 / 9-6) and OPC UA address-space mutations
+          (Story 9-8) emit a closed-enum audit-event taxonomy:
+          <literal>application_created</literal> /
+          <literal>application_updated</literal> /
+          <literal>application_deleted</literal> /
+          <literal>application_crud_rejected</literal>;
+          <literal>device_created</literal> /
+          <literal>device_updated</literal> /
+          <literal>device_deleted</literal> /
+          <literal>device_crud_rejected</literal>;
+          <literal>command_created</literal> /
+          <literal>command_updated</literal> /
+          <literal>command_deleted</literal> /
+          <literal>command_crud_rejected</literal>;
+          <literal>topology_change_detected</literal> +
+          <literal>address_space_mutation_succeeded</literal> /
+          <literal>address_space_mutation_failed</literal>. See
+          <filename>docs/logging.md § "Audit and diagnostic
+          events"</filename> and
+          <filename>docs/security.md § "Configuration mutations"</filename>
+          for the full reference.</para>
         </note>
       </section>
 
@@ -895,6 +1759,44 @@ application_name = "Arrosage"
   <!-- ============================================ -->
   <chapter id="ch-startup">
     <title>Starting the Gateway</title>
+
+      <section id="sec-startup-process-identity">
+        <title>Process Identity</title>
+        <para>opcgw runs as an unprivileged user regardless of deployment
+        path:</para>
+        <itemizedlist>
+          <listitem>
+            <para><emphasis>Docker / Compose</emphasis> — the
+            <filename>Dockerfile</filename> creates a non-root user
+            <literal>opcgw</literal> (UID 10001) and drops privileges
+            via <literal>USER opcgw</literal> before
+            <literal>ENTRYPOINT</literal>. Verify with
+            <command>docker exec opcgw id</command> — the output must
+            show <literal>uid=10001(opcgw)</literal>, never
+            <literal>uid=0(root)</literal>. Bind-mount host directories
+            must be owned by UID 10001 before first start (see
+            <xref linkend="sec-docker-hub-installation"/>).</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>systemd</emphasis> — the canonical unit file
+            (<xref linkend="sec-systemd-installation"/>) sets
+            <literal>User=opcgw</literal> / <literal>Group=opcgw</literal>
+            and uses <literal>ProtectSystem=strict</literal> +
+            <literal>NoNewPrivileges=true</literal> to constrain the
+            service. Verify with <command>systemctl show opcgw -p
+            User,Group,NoNewPrivileges</command>.</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>Foreground binary</emphasis> — the gateway
+            runs as the invoking user. For production, prefer the
+            systemd path so the gateway has a dedicated unprivileged
+            service user. Never run opcgw as <literal>root</literal>;
+            the OPC UA private-key permission enforcement (NFR9) does
+            not protect against a compromised process running with
+            elevated privileges.</para>
+          </listitem>
+        </itemizedlist>
+      </section>
 
       <section id="sec-cli-flags">
         <title>Command-Line Flags</title>
@@ -1025,14 +1927,28 @@ application_name = "Arrosage"
 
       <section id="sec-monitoring-overview">
         <title>What to Monitor</title>
-        <para>The gateway exposes its own health both in the OPC UA address
-        space and through structured log lines. For a typical production
-        deployment, the two-source approach is:</para>
+        <para>The gateway exposes its own health through three channels.
+        For a typical production deployment:</para>
         <itemizedlist>
           <listitem>
-            <para><emphasis>Live health</emphasis> — read the
+            <para><emphasis>Live health (OPC UA)</emphasis> — read the
             <literal>Gateway</literal> folder via OPC UA from your SCADA
             front-end. See <xref linkend="sec-gateway-folder"/>.</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>Live health (Web UI dashboard)</emphasis> — if
+            <literal>[web].enabled = true</literal>, browse to
+            <literal>http://&lt;gateway-host&gt;:&lt;web-port&gt;/</literal>
+            for a single-screen view of ChirpStack connection state,
+            last-poll timestamp, error count, and configured application /
+            device counts. The metrics page at
+            <literal>/metrics.html</literal> shows live typed values plus
+            a staleness badge (Good / Uncertain / Bad / Missing) per
+            metric. Both pages auto-refresh every 10 s and expose JSON
+            shapes at <filename>/api/status</filename> and
+            <filename>/api/devices</filename> for
+            <command>curl | jq</command> / Prometheus textfile
+            exporters.</para>
           </listitem>
           <listitem>
             <para><emphasis>Diagnostics</emphasis> — tail the per-module
@@ -1472,11 +2388,178 @@ application_name = "Arrosage"
           </tgroup>
         </table>
 
-        <para>Future operations reserved for Story 4-4 (auto-recovery from
-        ChirpStack outages):
+        <para>Story 4-4 (auto-recovery from ChirpStack outages) ships
         <literal>recovery_attempt</literal>,
         <literal>recovery_complete</literal>,
-        <literal>recovery_failed</literal>.</para>
+        <literal>recovery_failed</literal> — see
+        <filename>docs/logging.md</filename> for the field schema.</para>
+      </section>
+
+      <section id="sec-audit-event-taxonomy">
+        <title>Audit and Diagnostic Events (event=)</title>
+        <para>Stories 7-2 onward use a separate <literal>event=</literal>
+        field (instead of the older <literal>operation=</literal>) for
+        security-relevant audit events and one-shot diagnostic events.
+        The <literal>event=</literal> prefix makes them easy to filter
+        with <command>grep 'event="..."' log/*.log</command>. The full
+        reference (closed-enum <literal>reason=</literal> taxonomy per
+        event, field schemas, severity, and remediation tips) lives in
+        <filename>docs/logging.md § "Audit and diagnostic events
+        (event=)"</filename> and
+        <filename>docs/security.md</filename>; the table below indexes
+        the event names introduced through v2.0 GA.</para>
+
+        <table frame="all">
+          <title>Audit and diagnostic events introduced through v2.0 GA</title>
+          <tgroup cols="3">
+            <thead>
+              <row>
+                <entry>event=</entry>
+                <entry>Level</entry>
+                <entry>Introduced by</entry>
+              </row>
+            </thead>
+            <tbody>
+              <row>
+                <entry><literal>opcua_auth_failed</literal></entry>
+                <entry>warn (audit)</entry>
+                <entry>Story 7-2 — OPC UA authentication failure</entry>
+              </row>
+              <row>
+                <entry><literal>opcua_session_count</literal></entry>
+                <entry>info (diag)</entry>
+                <entry>Story 7-3 — gauge, every 5 s</entry>
+              </row>
+              <row>
+                <entry><literal>opcua_session_count_at_limit</literal></entry>
+                <entry>warn (audit)</entry>
+                <entry>Story 7-3 — at-cap rejection</entry>
+              </row>
+              <row>
+                <entry><literal>opcua_limits_configured</literal></entry>
+                <entry>info (diag)</entry>
+                <entry>Story 8-2 — startup echo of subscription /
+                message-size limits</entry>
+              </row>
+              <row>
+                <entry><literal>nfr12_correlation_check</literal></entry>
+                <entry>warn (one-shot)</entry>
+                <entry>Story 7-2 retro — log-level below info reduces
+                NFR12 source-IP correlation</entry>
+              </row>
+              <row>
+                <entry><literal>web_server_started</literal></entry>
+                <entry>info (diag)</entry>
+                <entry>Story 9-1 — Axum server bound</entry>
+              </row>
+              <row>
+                <entry><literal>web_auth_failed</literal></entry>
+                <entry>warn (audit)</entry>
+                <entry>Story 9-1 — web UI Basic-auth failure
+                (<literal>reason</literal> ∈
+                <literal>missing</literal>,
+                <literal>malformed_scheme</literal>,
+                <literal>malformed_base64</literal>,
+                <literal>missing_colon</literal>,
+                <literal>user_mismatch</literal>,
+                <literal>password_mismatch</literal>)</entry>
+              </row>
+              <row>
+                <entry><literal>config_reload_attempted</literal></entry>
+                <entry>info (diag)</entry>
+                <entry>Story 9-7 — SIGHUP received</entry>
+              </row>
+              <row>
+                <entry><literal>config_reload_succeeded</literal></entry>
+                <entry>info (diag)</entry>
+                <entry>Story 9-7 — validate + classify + swap
+                complete</entry>
+              </row>
+              <row>
+                <entry><literal>config_reload_failed</literal></entry>
+                <entry>warn (audit)</entry>
+                <entry>Story 9-7 — reload rejected
+                (<literal>reason</literal> ∈
+                <literal>validation</literal>,
+                <literal>io</literal>,
+                <literal>restart_required</literal>)</entry>
+              </row>
+              <row>
+                <entry><literal>application_*</literal> /
+                <literal>device_*</literal> /
+                <literal>command_*</literal>
+                (created / updated / deleted /
+                <literal>*_crud_rejected</literal>)</entry>
+                <entry>info / warn (audit)</entry>
+                <entry>Stories 9-4 / 9-5 / 9-6 — CRUD mutations and
+                validation rejections; CSRF dispatched per URL path
+                prefix</entry>
+              </row>
+              <row>
+                <entry><literal>topology_change_detected</literal></entry>
+                <entry>info (diag)</entry>
+                <entry>Stories 9-7 + 9-8 — reload that adds / removes
+                applications / devices / metrics / commands</entry>
+              </row>
+              <row>
+                <entry><literal>address_space_mutation_succeeded</literal>
+                / <literal>address_space_mutation_failed</literal></entry>
+                <entry>info / warn (audit)</entry>
+                <entry>Story 9-8 — OPC UA address-space runtime
+                mutation outcome</entry>
+              </row>
+              <row>
+                <entry><literal>metric_parse</literal></entry>
+                <entry>warn</entry>
+                <entry>Epic A Story A-3 — poller-side payload conversion
+                (<literal>reason</literal> ∈
+                <literal>invalid_bool</literal>,
+                <literal>non_finite</literal>,
+                <literal>int_overflow</literal>)</entry>
+              </row>
+              <row>
+                <entry><literal>metric_read</literal></entry>
+                <entry>info / warn</entry>
+                <entry>Epic A Story A-4 — OPC UA Read narrowing
+                (<literal>reason</literal> ∈
+                <literal>no_payload</literal>,
+                <literal>narrowing_overflow</literal>,
+                <literal>narrowing_underflow</literal>)</entry>
+              </row>
+              <row>
+                <entry><literal>metric_history_read</literal></entry>
+                <entry>warn</entry>
+                <entry>Epic A Story A-5 — OPC UA HistoryRead per-row
+                conversion (<literal>reason</literal> ∈
+                <literal>schema_drift</literal>,
+                <literal>unparseable_timestamp</literal>,
+                <literal>narrowing_overflow</literal>,
+                <literal>narrowing_underflow</literal>)</entry>
+              </row>
+              <row>
+                <entry><literal>metric_history_summary</literal></entry>
+                <entry>trace</entry>
+                <entry>Epic A Story A-5 — aggregate skip counts per
+                HistoryRead call</entry>
+              </row>
+              <row>
+                <entry><literal>metric_view_serialize</literal></entry>
+                <entry>debug / warn / info</entry>
+                <entry>Epic A Story A-6 — web-layer JSON serialization
+                (<literal>reason</literal> ∈
+                <literal>non_finite</literal>,
+                <literal>int_precision_lossy</literal>)</entry>
+              </row>
+            </tbody>
+          </tgroup>
+        </table>
+
+        <para>The wire response to a client never depends on whether an
+        audit event fired — failure modes that surface as
+        <literal>event="..._failed"</literal> always return the same
+        status code + headers regardless of which internal
+        <literal>reason</literal> they recorded. The discrimination
+        exists only in the audit log for forensic purposes.</para>
       </section>
   </chapter>
 
@@ -1703,14 +2786,692 @@ chirpstack:8080 list</command>.</para>
             </listitem>
           </orderedlist>
         </section>
+
+        <section id="sec-issue-chirpstack-auth">
+          <title>ChirpStack authentication failure</title>
+          <para><emphasis>Symptom:</emphasis> The gateway never logs a
+          successful <literal>chirpstack_connect</literal> info line; OPC
+          UA reads return the discriminant string or
+          <literal>BadDataUnavailable</literal>; no
+          <literal>poll_cycle_complete</literal> emissions.</para>
+          <para><emphasis>Diagnostic recipe:</emphasis></para>
+          <screen># systemd:
+journalctl -u opcgw | grep -E 'chirpstack_auth_failed|Unauthenticated|PermissionDenied'
+
+# Docker:
+docker logs opcgw 2&gt;&amp;1 | grep -E 'chirpstack_auth_failed|Unauthenticated|PermissionDenied'</screen>
+          <para><emphasis>Root cause:</emphasis> Most commonly an unset,
+          rotated, or wrong-tenant
+          <envar>OPCGW_CHIRPSTACK__API_TOKEN</envar>. The shipped
+          <filename>config/config.toml</filename> contains a placeholder
+          token; the gateway refuses to start with the placeholder in
+          place. ChirpStack returns gRPC code 16 / Unauthenticated when
+          the bearer token is invalid.</para>
+          <para><emphasis>Remediation:</emphasis></para>
+          <orderedlist>
+            <listitem>
+              <para>Confirm the env-var is set in the running
+              process:</para>
+              <screen># Docker:
+docker exec opcgw env | grep -c OPCGW_CHIRPSTACK__API_TOKEN
+# Expected: 1
+# systemd:
+sudo systemctl show opcgw -p Environment | grep -c OPCGW_CHIRPSTACK__API_TOKEN
+# Inspect the loaded env-file:
+sudo grep OPCGW_CHIRPSTACK__API_TOKEN /etc/opcgw/env</screen>
+            </listitem>
+            <listitem>
+              <para>Issue a fresh ChirpStack API token (ChirpStack v4 UI
+              → API Keys) scoped to the configured
+              <literal>[chirpstack].tenant_id</literal>. Verify
+              independently with
+              <command>grpcurl -H "Authorization: Bearer $TOKEN"
+              chirpstack:8080 list</command>.</para>
+            </listitem>
+            <listitem>
+              <para>Inject the new token via the env-var (NOT into
+              <filename>config.toml</filename>) and restart the gateway
+              (<command>systemctl restart opcgw</command> /
+              <command>docker compose up -d</command>).</para>
+            </listitem>
+          </orderedlist>
+        </section>
+
+        <section id="sec-issue-opcua-connection-refused">
+          <title>OPC UA connection refused / BadTooManySessions</title>
+          <para><emphasis>Symptom:</emphasis> SCADA client cannot
+          establish a session; existing sessions continue working
+          (suggests Story 7-3 session cap), or all clients are refused
+          (suggests auth / endpoint mismatch).</para>
+          <para><emphasis>Diagnostic recipe:</emphasis></para>
+          <screen>journalctl -u opcgw | grep -E '(opcua_session_count_at_limit|opcua_auth_failed)'</screen>
+          <para><emphasis>Root cause:</emphasis></para>
+          <itemizedlist>
+            <listitem>
+              <para><literal>event="opcua_session_count_at_limit"</literal>
+              warns — the
+              <literal>[opcua].max_connections</literal> cap (default
+              10) is saturated; new
+              <literal>CreateSession</literal> attempts get
+              <literal>BadTooManySessions</literal>. Cross-reference the
+              <literal>source_ip</literal> field to identify a runaway
+              reconnect loop or a port-scan.</para>
+            </listitem>
+            <listitem>
+              <para><literal>event="opcua_auth_failed"</literal> warns —
+              user-token credentials don't match
+              <literal>[opcua].user_name</literal> /
+              <literal>[opcua].user_password</literal>. The
+              <literal>user</literal> field is sanitised; the attempted
+              password is never logged.</para>
+            </listitem>
+          </itemizedlist>
+          <para><emphasis>Remediation:</emphasis></para>
+          <orderedlist>
+            <listitem>
+              <para>For at-limit rejections: raise
+              <literal>[opcua].max_connections</literal> per the
+              tuning checklist in <xref linkend="sec-opcua-config"/>
+              (sized as <literal>N SCADA clients × sessions each + 20%
+              headroom</literal>), then SIGHUP — note that
+              <literal>max_connections</literal> is
+              <emphasis>restart-required</emphasis> per the Story 9-7
+              hot-reload taxonomy, so a full process restart is needed.
+              Investigate the offending
+              <literal>source_ip</literal> if the cap rejection is
+              unexpected.</para>
+            </listitem>
+            <listitem>
+              <para>For auth failures: rotate
+              <envar>OPCGW_OPCUA__USER_PASSWORD</envar>; verify the
+              SCADA client is configured with the matching credential;
+              confirm <literal>OPCGW_LOG_LEVEL</literal> is
+              <literal>info</literal> or below so the NFR12 source-IP
+              correlation (<literal>"Accept new connection from
+              ..."</literal> line by async-opcua) survives.</para>
+            </listitem>
+          </orderedlist>
+        </section>
+
+        <section id="sec-issue-metric-parse-legacy">
+          <title>Polled metrics not appearing in OPC UA Read</title>
+          <para><emphasis>Symptom:</emphasis> SCADA client reads a metric
+          NodeId and receives <literal>BadDataUnavailable</literal>
+          (post-Epic-A legacy-row symptom) or the discriminant string
+          <literal>"Float"</literal> /
+          <literal>"Int"</literal> (pre-Epic-A symptom — should NOT occur
+          on v2.0 GA). Web dashboard shows the
+          <literal>Missing</literal> badge.</para>
+          <para><emphasis>Diagnostic recipe:</emphasis></para>
+          <screen>journalctl -u opcgw | grep 'event="metric_parse"'
+# Inspect the row directly:
+sqlite3 ./opcgw.db \
+  "SELECT device_id, metric_name, value_type, value_real, value_int, value_bool, value_text
+   FROM metric_values WHERE device_id='&lt;eui&gt;' AND metric_name='&lt;name&gt;';"</screen>
+          <para><emphasis>Root cause:</emphasis></para>
+          <itemizedlist>
+            <listitem>
+              <para><literal>value_type='legacy'</literal> rows surface
+              as <literal>BadDataUnavailable</literal> for ONE poll
+              interval after a Path-A migration (<xref
+              linkend="ch-upgrade"/>) until the next poll cycle UPSERTs
+              a typed payload.</para>
+            </listitem>
+            <listitem>
+              <para><literal>event="metric_parse"
+              reason="non_finite"</literal> or
+              <literal>reason="invalid_bool"</literal> or
+              <literal>reason="int_overflow"</literal> — the poller
+              skipped this metric for this cycle (Epic A Story A-3
+              NaN/Inf filter at the poller boundary). The metric is
+              skipped, not silently coerced.</para>
+            </listitem>
+            <listitem>
+              <para>If <literal>value_type</literal> is
+              <literal>real</literal> /
+              <literal>int</literal> / <literal>bool</literal> /
+              <literal>text</literal> but the corresponding typed column
+              is NULL: schema drift — investigate via
+              <command>PRAGMA quick_check;</command>.</para>
+            </listitem>
+          </itemizedlist>
+          <para><emphasis>Remediation:</emphasis></para>
+          <orderedlist>
+            <listitem>
+              <para>For legacy rows: wait one poll interval; the row
+              will be replaced with a typed payload on the next
+              successful poll. Persistent legacy rows past one interval
+              indicate the poller cannot reach the device — cross-check
+              <literal>device_polled success=true</literal>.</para>
+            </listitem>
+            <listitem>
+              <para>For <literal>reason="non_finite"</literal>:
+              investigate sensor calibration. For
+              <literal>reason="invalid_bool"</literal>: confirm device
+              firmware emits <literal>0.0</literal> or
+              <literal>1.0</literal>. For
+              <literal>reason="int_overflow"</literal>: the metric
+              exceeds i64 range — check device firmware emit
+              precision.</para>
+            </listitem>
+          </orderedlist>
+        </section>
+
+        <section id="sec-issue-historyread-empty">
+          <title>HistoryRead returns empty / BadDataUnavailable</title>
+          <para><emphasis>Symptom:</emphasis> SCADA client issues an OPC
+          UA <literal>HistoryRead</literal> over a 7-day window and gets
+          fewer rows than expected, or every row carries
+          <literal>StatusCode::BadDataUnavailable</literal>.</para>
+          <para><emphasis>Diagnostic recipe:</emphasis></para>
+          <screen>journalctl -u opcgw | grep 'event="metric_history_summary"' | tail -10
+journalctl -u opcgw | grep 'event="metric_history_read"' | tail -10</screen>
+          <para><emphasis>Root cause:</emphasis>
+          <literal>metric_history_summary</literal> (trace) is the
+          aggregate-skip telemetry per <literal>query_metric_history</literal>
+          call; it carries
+          <literal>schema_drift_skipped</literal> and
+          <literal>unparseable_timestamp_skipped</literal> counters.
+          Pre-Epic-A rows in <literal>metric_history</literal> surface as
+          <literal>DataValue { value: None, status:
+          BadDataUnavailable }</literal> per Story A-5 — they are NOT
+          silently dropped from the stream. Per-row narrowing failures
+          fire <literal>metric_history_read</literal> with
+          <literal>reason ∈ {narrowing_overflow,
+          narrowing_underflow}</literal>.</para>
+          <para><emphasis>Remediation:</emphasis></para>
+          <orderedlist>
+            <listitem>
+              <para>For legacy rows (<literal>BadDataUnavailable</literal>
+              in the response stream): expected during the Epic A
+              migration window. New rows captured after upgrade carry
+              typed payloads.</para>
+            </listitem>
+            <listitem>
+              <para>For per-call cap saturation: check
+              <literal>[opcua].max_history_data_results_per_node</literal>
+              (default 10000 ≈ 28 h at 10 s polling). For longer
+              windows, SCADA clients must page via follow-up calls
+              (manual paging — continuation points are not implemented;
+              see <filename>docs/security.md § "Historical data
+              access"</filename>).</para>
+            </listitem>
+          </orderedlist>
+        </section>
+
+        <section id="sec-issue-pki-permissions">
+          <title>Gateway refuses to start — PKI permissions</title>
+          <para><emphasis>Symptom:</emphasis> opcgw exits at startup with
+          an error message mentioning the private-key file mode or the
+          <filename>pki/private</filename> directory mode.</para>
+          <para><emphasis>Diagnostic recipe:</emphasis></para>
+          <screen>ls -la pki/private/
+# Expected:
+#   drwx------ ... pki/private
+#   -rw------- ... pki/private/private.pem</screen>
+          <para><emphasis>Root cause:</emphasis> Story 7-2 enforces NFR9
+          fail-closed at startup. The gateway refuses to start unless
+          each <filename>pki/private/*.pem</filename> file is mode
+          <literal>0o600</literal> and the parent directory is mode
+          <literal>0o700</literal>. The error text includes the observed
+          mode and a <command>chmod</command> recipe.</para>
+          <para><emphasis>Remediation:</emphasis></para>
+          <orderedlist>
+            <listitem>
+              <para>Tighten the permissions per the error
+              message:</para>
+              <screen>chmod 700 pki/private
+chmod 600 pki/private/*.pem</screen>
+            </listitem>
+            <listitem>
+              <para>For Docker / Compose deployments, the host-side
+              directory must be at the same modes — UID 10001 owns the
+              files and the gateway cannot <command>chmod</command>
+              loose modes (it can only validate them). Apply on the host
+              before <command>docker compose up</command>.</para>
+            </listitem>
+            <listitem>
+              <para>For an upgrade from Story 7-1 deployments (which
+              left <filename>private.pem</filename> at mode
+              <literal>0o644</literal>): run
+              <command>find pki/private -type f -name '*.pem' -exec
+              chmod 600 {} \;</command> then restart.</para>
+            </listitem>
+          </orderedlist>
+        </section>
+
+        <section id="sec-issue-web-auth-401">
+          <title>Web UI returns 401 / 404</title>
+          <para><emphasis>Symptom:</emphasis> Browser displays the
+          gateway URL's Basic-auth prompt repeatedly (401), or after a
+          successful auth shows a 404 on
+          <filename>/index.html</filename> or
+          <filename>/metrics.html</filename>.</para>
+          <para><emphasis>Diagnostic recipe:</emphasis></para>
+          <screen>journalctl -u opcgw | grep 'event="web_auth_failed"' | tail -10
+# Verify the web server actually started:
+journalctl -u opcgw | grep 'event="web_server_started"'</screen>
+          <para><emphasis>Root cause:</emphasis></para>
+          <itemizedlist>
+            <listitem>
+              <para>For 401: the <literal>web_auth_failed</literal> warn
+              carries a <literal>reason</literal> field
+              (<literal>missing</literal>,
+              <literal>malformed_scheme</literal>,
+              <literal>malformed_base64</literal>,
+              <literal>missing_colon</literal>,
+              <literal>user_mismatch</literal>,
+              <literal>password_mismatch</literal>). Web credentials are
+              <emphasis>shared</emphasis> with
+              <literal>[opcua].user_name</literal> /
+              <literal>[opcua].user_password</literal> — check the env
+              vars.</para>
+            </listitem>
+            <listitem>
+              <para>For 404: the embedded web server resolves
+              <filename>static/</filename> relative to the gateway's
+              CWD. For Docker the
+              <filename>Dockerfile</filename> copies
+              <filename>static/</filename> into
+              <filename>/usr/local/bin/static</filename>; for systemd
+              the unit file must set
+              <literal>WorkingDirectory=/var/lib/opcgw</literal> with
+              <filename>static/</filename> deployed there.</para>
+            </listitem>
+          </itemizedlist>
+          <para><emphasis>Remediation:</emphasis></para>
+          <orderedlist>
+            <listitem>
+              <para>Confirm env vars are set:</para>
+              <screen># Docker
+docker exec opcgw env | grep -E 'OPCGW_OPCUA__USER_NAME|OPCGW_OPCUA__USER_PASSWORD|OPCGW_WEB_'
+# systemd
+sudo grep -E 'OPCGW_OPCUA__USER_NAME|OPCGW_OPCUA__USER_PASSWORD|OPCGW_WEB_' /etc/opcgw/env</screen>
+            </listitem>
+            <listitem>
+              <para>Confirm <literal>[web].enabled = true</literal> (or
+              <envar>OPCGW_WEB__ENABLED=true</envar>) and that
+              <literal>event="web_server_started"</literal> appears
+              within ~5 s of startup. Absence of that line means the
+              web server is disabled.</para>
+            </listitem>
+            <listitem>
+              <para>For 404: verify
+              <filename>static/index.html</filename>,
+              <filename>static/metrics.html</filename>, and the
+              JavaScript files are present in the CWD-relative
+              <filename>static/</filename> directory.</para>
+            </listitem>
+          </orderedlist>
+        </section>
+
+        <section id="sec-issue-log-growth">
+          <title>Log files growing too fast</title>
+          <para><emphasis>Symptom:</emphasis> The
+          <literal>[logging].dir</literal> directory grows by hundreds
+          of MB per day, eventually saturating local disk.</para>
+          <para><emphasis>Diagnostic recipe:</emphasis></para>
+          <screen>du -sh log/
+ls -laS log/ | head -20</screen>
+          <para><emphasis>Root cause:</emphasis> opcgw uses
+          daily-rolling file appenders (one root +
+          four per-module). The per-module files always capture at
+          <literal>TRACE</literal> independently of the global level —
+          this is deliberate (forensic detail when the console is
+          intentionally quiet). Volume scales with poll cadence and OPC
+          UA read rate; 10 devices at 1 Hz polling under a SCADA client
+          actively subscribing typically produces 50-200 MB/day.</para>
+          <para><emphasis>Remediation:</emphasis></para>
+          <orderedlist>
+            <listitem>
+              <para>Configure your platform's log-retention tooling
+              (<command>logrotate</command>, <command>journald</command>
+              with <literal>SystemMaxUse=</literal>, Docker's
+              <literal>--log-opt max-size=</literal>) — opcgw itself
+              does not delete old daily-rolled files.</para>
+            </listitem>
+            <listitem>
+              <para>Reduce the global console verbosity via
+              <envar>OPCGW_LOG_LEVEL=warn</envar> (the per-module files
+              still capture at <literal>TRACE</literal>, preserving
+              forensic detail).</para>
+            </listitem>
+            <listitem>
+              <para>If using a custom <filename>log4rs.yaml</filename>
+              (legacy from pre-tracing days), inspect its
+              <literal>rolling_file</literal> + <literal>size</literal>
+              + <literal>roller</literal> stanza for the rotation
+              window.</para>
+            </listitem>
+          </orderedlist>
+        </section>
       </section>
     </chapter>
 
   <!-- ============================================ -->
-  <!-- CHAPTER 9: MAINTENANCE -->
+  <!-- CHAPTER 9: UPGRADE AND MIGRATION -->
+  <!-- ============================================ -->
+  <chapter id="ch-upgrade">
+    <title>Upgrade and Migration</title>
+
+    <para>This chapter covers operator-driven upgrade procedures. The
+    canonical, exhaustively-tested runbook for the v2.0-rc → v2.0 GA
+    transition (Epic A — payload-bearing
+    <literal>MetricType</literal>; SQLite schema v006 → v008) lives in
+    <filename>docs/deployment-guide.md § "Epic A migration"</filename>.
+    The summary below is operator-facing; defer to the
+    deployment-guide for the per-line architectural rationale, SLA
+    tests, and the v007 / v008 migration internals.</para>
+
+      <section id="sec-upgrade-pre-flight">
+        <title>Pre-upgrade Checklist</title>
+        <para>Before stopping the current (v2.0-rc) gateway:</para>
+        <orderedlist>
+          <listitem>
+            <para><emphasis>Take a file-level backup of the SQLite
+            database.</emphasis> The backup is your
+            <emphasis>only</emphasis> rollback path — the migration is
+            one-way. Use the explicit three-path form, never a glob, so
+            unrelated backup files (e.g.
+            <filename>opcgw.db.bak.YYYY-MM-DD</filename>) are not
+            collected:</para>
+            <screen>cp /path/to/opcgw.db /path/to/opcgw.db.pre-epic-a.bak
+cp /path/to/opcgw.db-wal /path/to/opcgw.db-wal.pre-epic-a.bak 2&gt;/dev/null || true
+cp /path/to/opcgw.db-shm /path/to/opcgw.db-shm.pre-epic-a.bak 2&gt;/dev/null || true</screen>
+          </listitem>
+          <listitem>
+            <para><emphasis>Identify your current schema version.</emphasis>
+            Run the bundled pre-flight script:</para>
+            <screen>./scripts/check-schema-version.sh /path/to/opcgw.db</screen>
+            <para>The script wraps <literal>PRAGMA user_version</literal>
+            with an operator-friendly recommendation, and pre-checks
+            that the file is actually an opcgw database (has the
+            <literal>metric_values</literal> and
+            <literal>metric_history</literal> tables) so you don't
+            accidentally point it at an unrelated SQLite file (Firefox
+            <filename>places.sqlite</filename>, etc.).</para>
+            <itemizedlist>
+              <listitem>
+                <para>Version <emphasis>6</emphasis> — pre-Epic-A.
+                Migration applies.</para>
+              </listitem>
+              <listitem>
+                <para>Version <emphasis>7</emphasis> — interrupted prior
+                upgrade left the database between v007 and v008.
+                Starting the v2.0 gateway will complete the migration
+                (idempotent — only v008 will be re-applied).</para>
+              </listitem>
+              <listitem>
+                <para>Version <emphasis>8</emphasis> — already migrated.
+                No action needed.</para>
+              </listitem>
+            </itemizedlist>
+          </listitem>
+          <listitem>
+            <para><emphasis>Decide Path A vs Path B.</emphasis> Path A
+            preserves pre-Epic-A historical rows (surfacing them as
+            <literal>BadDataUnavailable</literal> for one poll
+            interval); Path B drops the database file and starts fresh.
+            For most production deployments Path A is the right choice;
+            test / dev gateways and deployments where pre-Epic-A history
+            is uninteresting can use Path B.</para>
+          </listitem>
+        </orderedlist>
+      </section>
+
+      <section id="sec-upgrade-path-a">
+        <title>Path A: In-Place Auto-Migration (Default)</title>
+        <para>The recommended path for operators who want to preserve
+        historical metric rows captured under the v2.0-rc schema.</para>
+
+        <orderedlist>
+          <listitem>
+            <para>Stop the v2.0-rc gateway gracefully:</para>
+            <screen># systemd:
+sudo systemctl stop opcgw
+
+# Docker Compose:
+docker compose stop opcgw
+
+# Foreground binary:  Ctrl-C  or  kill -TERM &lt;pid&gt;</screen>
+          </listitem>
+          <listitem>
+            <para>Replace the binary or pull the new image:</para>
+            <screen># Docker Hub:
+docker pull docker.io/gcorbaz/opcgw:2.0
+
+# GHCR mirror:
+docker pull ghcr.io/guycorbaz/opcgw:2.0
+
+# Source build:
+cargo install --path .</screen>
+          </listitem>
+          <listitem>
+            <para>Start the v2.0 gateway pointing at the same
+            <filename>opcgw.db</filename> file. The
+            <literal>run_migrations()</literal> path applies v007 (typed
+            value columns — metadata-only ALTER TABLE) and v008
+            (exactly-one-non-NULL <literal>CHECK</literal> constraint,
+            via <literal>CREATE TABLE … AS SELECT</literal> wrapped in
+            <literal>BEGIN/COMMIT</literal>) automatically. Pre-Epic-A
+            rows are tagged
+            <literal>value_type = 'legacy'</literal> with NULL typed
+            columns by the v007 column default; no rows are
+            dropped.</para>
+          </listitem>
+          <listitem>
+            <para>Verify the migrations applied. Pick the recipe
+            matching your deployment shape:</para>
+            <screen># systemd:
+journalctl -u opcgw -n 200 | grep -E "Applied migration v00(7|8)"
+
+# Docker Compose:
+docker compose logs opcgw | grep -E "Applied migration v00(7|8)"
+
+# Foreground binary:
+tail -n 200 log/opcgw.log | grep -E "Applied migration v00(7|8)"</screen>
+            <para>You should see two info lines:</para>
+            <programlisting>Applied migration v007_typed_value_columns          version=7
+Applied migration v008_typed_value_constraints      version=8</programlisting>
+          </listitem>
+          <listitem>
+            <para>Wait for the first poll cycle. OPC UA clients will see
+            <literal>BadDataUnavailable</literal> on legacy rows for the
+            duration of one poll interval. Once the poller UPSERTs each
+            metric with a typed payload, the legacy rows are replaced
+            and OPC UA Reads return the real measurement.</para>
+          </listitem>
+        </orderedlist>
+      </section>
+
+      <section id="sec-upgrade-path-b">
+        <title>Path B: Drop-and-Recreate</title>
+        <para>The right path for operators who do not need pre-Epic-A
+        history (test deployments, dev gateways, or production
+        gateways where historical rows are uninteresting under the new
+        typed-payload contract).</para>
+
+        <orderedlist>
+          <listitem>
+            <para>Stop the v2.0-rc gateway (same recipes as Path
+            A).</para>
+          </listitem>
+          <listitem>
+            <para>Remove the database file and its sidecar files. Use
+            the explicit three-path form, NOT a glob — a glob like
+            <filename>opcgw.db*</filename> would also remove your
+            <filename>opcgw.db.pre-epic-a.bak</filename> backup file
+            and any operator-managed backup snapshots in the same
+            directory:</para>
+            <screen>rm /path/to/opcgw.db /path/to/opcgw.db-wal /path/to/opcgw.db-shm</screen>
+            <para>For Docker bind-mounts, run the
+            <command>rm</command> on the host side directory that's
+            bind-mounted into the container.</para>
+          </listitem>
+          <listitem>
+            <para>Replace the binary or pull the new image (same as
+            Path A).</para>
+          </listitem>
+          <listitem>
+            <para>Start the v2.0 gateway. It creates a fresh
+            v008-schema database with zero rows; the next poll cycle
+            populates <literal>metric_values</literal> with real typed
+            payloads from the start.</para>
+          </listitem>
+        </orderedlist>
+      </section>
+
+      <section id="sec-upgrade-rollback">
+        <title>Rollback Contract</title>
+        <para>The Epic A migration is
+        <emphasis>one-way</emphasis>. v007 column additions cannot be
+        cleanly dropped without breaking post-Epic-A data integrity
+        contracts (the typed columns become NOT-NULL-able after v008's
+        <literal>CHECK</literal> lands, and the
+        <literal>MetricType</literal> enum no longer carries a string
+        representation). v008's exactly-one-non-NULL
+        <literal>CHECK</literal> is not in v006 and cannot be added to
+        a v006-shaped database without first running v007.</para>
+
+        <para><emphasis>The only rollback path is to restore the
+        pre-upgrade backup file</emphasis> taken in the pre-upgrade
+        checklist, then run the v2.0-rc binary against it:</para>
+        <screen># Stop the v2.0 gateway first.
+cp /path/to/opcgw.db.pre-epic-a.bak /path/to/opcgw.db
+# Restore the v2.0-rc binary or revert the Docker image tag.
+# Start the v2.0-rc gateway.</screen>
+        <para>There is no in-tree rollback tool. <emphasis>Take the
+        backup BEFORE starting the upgrade</emphasis> — the migration
+        starts the moment you launch the v2.0 binary against a v006
+        database.</para>
+      </section>
+
+      <section id="sec-upgrade-verification">
+        <title>Post-Migration Verification</title>
+        <orderedlist>
+          <listitem>
+            <para>Schema version is <literal>8</literal>:</para>
+            <screen>sqlite3 /path/to/opcgw.db "PRAGMA user_version;"
+# Expected output: 8</screen>
+          </listitem>
+          <listitem>
+            <para>First poll cycle completed — look for
+            <literal>operation="poll_cycle_complete"</literal> in the
+            gateway logs (Path A: this may take up to one
+            <literal>[chirpstack].polling_frequency</literal>
+            interval; default 10 s).</para>
+            <screen># systemd:
+journalctl -u opcgw | grep "poll_cycle_complete" | head -3
+
+# Docker Compose:
+docker compose logs opcgw 2&gt;&amp;1 | grep "poll_cycle_complete" | head -3</screen>
+          </listitem>
+          <listitem>
+            <para>OPC UA Read returns the actual measurement payload —
+            <emphasis>not</emphasis> the discriminant string
+            (<literal>Variant::String("Float")</literal>),
+            <emphasis>not</emphasis>
+            <literal>BadDataUnavailable</literal> for any typed row.
+            Connect a SCADA client (UaExpert, FUXA, Ignition) and read a
+            metric variable. Expected
+            <literal>DataValue.value</literal> per
+            <literal>MetricType</literal> variant: see the mapping
+            table in <xref linkend="sec-application-config"/>.</para>
+          </listitem>
+          <listitem>
+            <para>(Path A only) Legacy rows clear within one poll
+            interval. Re-read the same metric a poll interval later;
+            if it previously returned
+            <literal>BadDataUnavailable</literal>, it now returns the
+            freshly UPSERTed typed payload.</para>
+          </listitem>
+        </orderedlist>
+      </section>
+
+      <section id="sec-upgrade-sla">
+        <title>SLA Expectation</title>
+        <para>For typical residential / small-scale deployments
+        (≤10k rows per table, ≤10 MB total database size), the
+        v007 + v008 migrations complete in
+        <emphasis>under 5 seconds</emphasis>. This SLA is pinned by
+        regression tests (<literal>test_v006_to_v008_full_upgrade_path_under_5s</literal>
+        and per-migration siblings).</para>
+        <para>For larger databases (≥100 MB, typically ≥500k
+        historical rows), v008's
+        <literal>CREATE TABLE … AS SELECT</literal> pattern is the
+        dominant cost and scales roughly linearly with row count.
+        <emphasis>Expect a multi-minute startup delay on the first
+        upgrade run</emphasis> — the gateway appears unresponsive
+        (OPC UA port not yet bound) until the migration completes.
+        The auto-migration is synchronous before the OPC UA server
+        binds its port — operator-visible behaviour is "the gateway
+        takes longer than usual to start the first time after
+        upgrading", which is expected and not a defect.</para>
+      </section>
+
+      <section id="sec-upgrade-gotchas">
+        <title>Common Gotchas</title>
+        <para>The full list with examples lives in
+        <filename>docs/deployment-guide.md § "Common
+        gotchas"</filename>. The six pitfalls operators most commonly
+        hit:</para>
+        <orderedlist>
+          <listitem>
+            <para>Legacy rows look like "missing data" in the web
+            dashboard and as <literal>BadDataUnavailable</literal> in
+            OPC UA Reads — <emphasis>for one poll interval only</emphasis>.
+            Wait one cycle.</para>
+          </listitem>
+          <listitem>
+            <para>The <literal>metric_history</literal> table is
+            migrated the same way as
+            <literal>metric_values</literal>. Pre-Epic-A rows surface in
+            HistoryRead responses as
+            <literal>DataValue { value: None, status: BadDataUnavailable }</literal>
+            — NOT silently dropped.</para>
+          </listitem>
+          <listitem>
+            <para>New audit events may fire on first startup. Epic A
+            introduced five <literal>event="metric_*"</literal> audit
+            lines; if a v006 database happens to contain pre-A-3-filter
+            non-finite rows, the defensive guards emit warns. Operator-
+            actionable but not blocking.</para>
+          </listitem>
+          <listitem>
+            <para><literal>run_migrations()</literal> is idempotent.
+            Re-running the v2.0 binary against a v007 or v008 database
+            is a no-op.</para>
+          </listitem>
+          <listitem>
+            <para>v008's
+            <literal>CREATE TABLE … AS SELECT</literal> is
+            <literal>BEGIN/COMMIT</literal>-wrapped. A process kill
+            mid-v008 leaves the database in a consistent v007 state;
+            restart the gateway and v008 retries.</para>
+          </listitem>
+          <listitem>
+            <para>Docker bind mounts preserve <filename>opcgw.db</filename>
+            across container replacement — Path A "just works" with the
+            standard <command>docker compose pull &amp;&amp; docker
+            compose up -d</command> workflow because the database file
+            lives on the host. Path B requires
+            <command>rm ./opcgw.db ./opcgw.db-wal ./opcgw.db-shm</command>
+            in the host-side bind-mount directory (avoid the
+            <filename>opcgw.db*</filename> glob).</para>
+          </listitem>
+        </orderedlist>
+      </section>
+    </chapter>
+
+  <!-- ============================================ -->
+  <!-- CHAPTER 10: MAINTENANCE -->
   <!-- ============================================ -->
   <chapter id="ch-maintenance">
     <title>Maintenance</title>
+
+      <para>For upgrade and migration procedures (v2.0-rc → v2.0 GA,
+      SQLite schema v006 → v008), see
+      <xref linkend="ch-upgrade"/>.</para>
 
       <section id="sec-database-maintenance">
         <title>Database Maintenance</title>
@@ -1967,6 +3728,72 @@ chirpstack:8080 list</command>.</para>
             <entry>seconds</entry>
             <entry><literal>120</literal></entry>
             <entry><literal>OPCGW_OPCUA__STALE_THRESHOLD_SECONDS</literal></entry>
+          </row>
+          <row>
+            <entry><literal>opcua.max_connections</literal></entry>
+            <entry>int</entry>
+            <entry><literal>10</literal></entry>
+            <entry><literal>OPCGW_OPCUA__MAX_CONNECTIONS</literal></entry>
+          </row>
+          <row>
+            <entry><literal>opcua.max_subscriptions_per_session</literal></entry>
+            <entry>int</entry>
+            <entry><literal>10</literal></entry>
+            <entry><literal>OPCGW_OPCUA__MAX_SUBSCRIPTIONS_PER_SESSION</literal></entry>
+          </row>
+          <row>
+            <entry><literal>opcua.max_monitored_items_per_sub</literal></entry>
+            <entry>int</entry>
+            <entry><literal>1000</literal></entry>
+            <entry><literal>OPCGW_OPCUA__MAX_MONITORED_ITEMS_PER_SUB</literal></entry>
+          </row>
+          <row>
+            <entry><literal>opcua.max_message_size</literal></entry>
+            <entry>bytes</entry>
+            <entry><literal>327675</literal></entry>
+            <entry><literal>OPCGW_OPCUA__MAX_MESSAGE_SIZE</literal></entry>
+          </row>
+          <row>
+            <entry><literal>opcua.max_chunk_count</literal></entry>
+            <entry>int</entry>
+            <entry><literal>5</literal></entry>
+            <entry><literal>OPCGW_OPCUA__MAX_CHUNK_COUNT</literal></entry>
+          </row>
+          <row>
+            <entry><literal>opcua.max_history_data_results_per_node</literal></entry>
+            <entry>int</entry>
+            <entry><literal>10000</literal></entry>
+            <entry><literal>OPCGW_OPCUA__MAX_HISTORY_DATA_RESULTS_PER_NODE</literal></entry>
+          </row>
+          <row>
+            <entry><literal>web.enabled</literal></entry>
+            <entry>bool</entry>
+            <entry><literal>false</literal></entry>
+            <entry><literal>OPCGW_WEB__ENABLED</literal></entry>
+          </row>
+          <row>
+            <entry><literal>web.port</literal></entry>
+            <entry>port</entry>
+            <entry><literal>8080</literal></entry>
+            <entry><literal>OPCGW_WEB__PORT</literal></entry>
+          </row>
+          <row>
+            <entry><literal>web.bind_address</literal></entry>
+            <entry>IP</entry>
+            <entry><literal>0.0.0.0</literal></entry>
+            <entry><literal>OPCGW_WEB__BIND_ADDRESS</literal></entry>
+          </row>
+          <row>
+            <entry><literal>web.auth_realm</literal></entry>
+            <entry>string</entry>
+            <entry><literal>opcgw</literal></entry>
+            <entry><literal>OPCGW_WEB__AUTH_REALM</literal></entry>
+          </row>
+          <row>
+            <entry><literal>web.allowed_origins</literal></entry>
+            <entry>list of URLs</entry>
+            <entry><literal>["http://&lt;bind&gt;:&lt;port&gt;"]</literal></entry>
+            <entry>—</entry>
           </row>
           <row>
             <entry><literal>command_delivery.status_poll_interval_secs</literal></entry>

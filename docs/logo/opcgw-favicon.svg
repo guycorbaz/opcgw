@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <title>opcgw</title>
+  <polygon points="16,1 30,9 30,23 16,31 2,23 2,9"
+    fill="#1A3F5C" stroke="#CE7B3C" stroke-width="1.2" stroke-linejoin="round"/>
+  <circle cx="11.5" cy="16" r="4" fill="none" stroke="#CE7B3C" stroke-width="1.3"/>
+  <circle cx="21" cy="16" r="3.2" fill="none" stroke="#FFFFFF" stroke-width="1.3"/>
+  <path d="M 24.2 16 L 24.2 21.6 L 21.4 21.6" fill="none" stroke="#FFFFFF" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

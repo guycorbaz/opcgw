@@ -1,11 +1,23 @@
-# Docker compose file for chirpstack opcua gateway
-
-#version: '3.3'
+# Docker compose file for chirpstack opcua gateway.
+#
+# The gateway image runs as non-root user `opcgw` (UID 10001). Before first
+# start, chown the host-side bind-mount targets to that user so the gateway
+# can read its PKI / write its log / persist its SQLite DB:
+#
+#   sudo chown -R 10001:10001 ./log ./config ./pki ./data
+#   sudo chmod 700 ./pki/private
+#   sudo chmod 600 ./pki/private/*    # NFR9 — OPC UA private-key permissions
+#
+# Pull the published v2.0 image instead of building locally by either:
+#   * `docker compose pull` (uses the `image:` declared below), or
+#   * `docker pull docker.io/gcorbaz/opcgw:2.0 && docker tag … opcgw`
+# For local-dev builds against the working tree, run `docker build -t opcgw .`
+# first and Compose will pick up the local tag.
 
 services:
   opcgw:
     container_name: opcgw
-    image: opcgw
+    image: docker.io/gcorbaz/opcgw:2.0
     restart: always
     ports:
       - "4855:4855"
@@ -22,3 +34,8 @@ services:
       - ./log:/usr/local/bin/log
       - ./config:/usr/local/bin/config
       - ./pki:/usr/local/bin/pki
+      # SQLite database directory. MUST be bind-mounted (or replaced with a
+      # named volume) so persisted metrics + history survive container restart.
+      # Without this mount, the SQLite file lives in the ephemeral container
+      # layer and is destroyed on every `docker compose down`.
+      - ./data:/usr/local/bin/data

@@ -32,3 +32,6 @@ config/config.local.toml
 
 # PKI (can be regenerated)
 pki/
+
+# DocBook manual rendered outputs — regeneratable via `make` in docs/manual/
+docs/manual/out/

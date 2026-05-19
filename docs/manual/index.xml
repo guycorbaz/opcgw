@@ -31,8 +31,13 @@
                     <itemizedlist>
                         <listitem><para>Part 1: Introduction and Overview</para></listitem>
                         <listitem><para>Part 2: Installation and Setup</para></listitem>
-                        <listitem><para>Part 3: Operation and Monitoring</para></listitem>
-                        <listitem><para>Part 4: Appendices</para></listitem>
+                        <listitem><para>Part 3: Configuration</para></listitem>
+                        <listitem><para>Part 4: Operation and Monitoring</para></listitem>
+                        <listitem><para>Part 5: Logging and Observability</para></listitem>
+                        <listitem><para>Part 6: Troubleshooting</para></listitem>
+                        <listitem><para>Part 7: Upgrade and Migration</para></listitem>
+                        <listitem><para>Part 8: Maintenance</para></listitem>
+                        <listitem><para>Part 9: Appendices</para></listitem>
                     </itemizedlist>
                 </listitem>
             </itemizedlist>

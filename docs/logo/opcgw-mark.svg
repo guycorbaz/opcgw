@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <title>opcgw</title>
+  <desc>opcgw - ChirpStack to OPC UA gateway logo</desc>
+  <!-- Hexagone industriel bleu marine bordé orange Rust -->
+  <polygon points="100,15 173.6,57.5 173.6,142.5 100,185 26.4,142.5 26.4,57.5"
+    fill="#1A3F5C" stroke="#CE7B3C" stroke-width="4" stroke-linejoin="round"/>
+  <!-- Lettre "o" - cercle orange Rust -->
+  <circle cx="76" cy="100" r="20" fill="none" stroke="#CE7B3C" stroke-width="5"/>
+  <!-- Lettre "g" - cercle blanc avec descendant -->
+  <circle cx="124" cy="100" r="16" fill="none" stroke="#FFFFFF" stroke-width="4.5"/>
+  <path d="M 140 100 L 140 128 L 126 128" fill="none" stroke="#FFFFFF" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

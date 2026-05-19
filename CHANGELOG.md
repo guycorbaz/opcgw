@@ -70,6 +70,43 @@ check.
 
 ### Added
 
+- **Dual-registry container image publishing.** The Docker image is published in
+  lockstep to both **Docker Hub** (`docker.io/gcorbaz/opcgw`) and **GHCR**
+  (`ghcr.io/guycorbaz/opcgw`) on every `v*` tag. Both registries receive
+  identical multi-architecture manifest lists.
+- **Multi-architecture images.** Built for `linux/amd64` and `linux/arm64`,
+  covering x86_64 servers, Raspberry Pi 4/5, AWS Graviton, and Apple Silicon
+  development machines. (32-bit ARM is not currently published.)
+- **Dockerfile hardening.** Runtime base pinned from `ubuntu:latest` to
+  `ubuntu:24.04` (LTS); the container now runs as non-root user `opcgw`
+  (UID 10001). Operators bind-mounting host directories must `chown -R
+  10001:10001 ./config ./pki ./log` before first start and apply the NFR9 PKI
+  permissions (`chmod 700 ./pki/private`, `chmod 600 ./pki/private/*`).
+- **Docker Hub Overview page** sourced from `docs/dockerhub-description.md`
+  and auto-synced via `peter-evans/dockerhub-description@v4` on every `v*`
+  tag, keeping the live page version-controlled in git.
+- **DocBook 4.5 user manual brought current to v2.0** at
+  `docs/manual/opcgw-user-manual.xml`. New / rewritten chapters: Installation
+  (Docker Hub, GHCR, Docker Compose, systemd, build-from-source,
+  post-install verification); Configuration (config.toml schema with
+  field-by-field tables for `[chirpstack]`, `[opcua]`, `[web]`, and
+  `[[application]]` / `[[application.device]]` / `[[application.metric]]`,
+  plus logging configuration); Troubleshooting (seven new operator scenarios
+  with structured-log-event grep recipes); new **Upgrade and migration**
+  chapter referencing the Epic A migration runbook (Path A in-place vs Path B
+  drop-and-recreate). Audit-event taxonomy section cross-references
+  `docs/logging.md` for the complete closed-enum reason list. Closes the
+  long-standing "manual XML 4 epics behind" deferred-work entry (Epic A retro
+  AI-A-8).
+- **`docs/manual/Makefile`** wrapping the standard DocBook XSL toolchain.
+  `make html` produces chunked multi-page HTML, `make html-single` produces a
+  single-page HTML, `make pdf` produces a PDF via `dblatex`, `make validate`
+  runs DocBook 4.5 DTD validation only. Allows headless and CI manual builds
+  without the oXygen editor (the existing `opcgw.xpr` project remains for
+  authoring workflow).
+- **Official logo pack** at `docs/logo/` (`opcgw-mark.svg`,
+  `opcgw-horizontal.svg`, `opcgw-favicon.svg`) — embedded in the repo
+  README, the DocBook manual title page, and the Docker Hub Overview page.
 - **Real measurement values persisted and round-tripped end-to-end** for the
   first time in the project's history. OPC UA `Read` returns
   `Variant::Double(23.5)` instead of `Variant::String("Float")`; `HistoryRead`
