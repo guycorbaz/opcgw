@@ -1,0 +1,170 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased] — v2.0.0
+
+This is a **major** release. v2.0 ships the Phase A reliability foundation, the
+Phase B real-time + web feature set, and the Epic A storage payload migration
+that closes [issue #108](https://github.com/guycorbaz/opcgw/issues/108) — the
+payload-less `MetricType` enum that flattened every persisted metric value to
+its discriminant string instead of the real measurement. **Before Epic A,
+opcgw never persisted real measurement values; it persisted only the data-type
+discriminant string ("Float", "Int", "Bool", "String").** Epic A closes that
+gap end-to-end through the storage trait, the SQLite schema, the poller, both
+OPC UA Read paths, and the web dashboard.
+
+Operators upgrading from a v2.0-rc deployment **must** follow the migration
+runbook in [`docs/deployment-guide.md` § "Epic A migration"][epic-a-runbook]
+and may use [`scripts/check-schema-version.sh`][schema-script] as a pre-flight
+check.
+
+### Removed (BREAKING)
+
+- **`opcgw::storage::MetricValue.value: String` field removed.** The transitional
+  stringly-typed value field that held the discriminant name (`"Float"`,
+  `"Int"`, `"Bool"`, `"String"`) is gone; the real measurement now lives in the
+  payload-bearing `MetricType` enum. External consumers constructing
+  `MetricValue` via struct literals must update.
+- **`opcgw::storage::MetricValueInternal.value: String` field removed** (same
+  reason).
+- **`opcgw::storage::BatchMetricWrite.value: String` field removed** (same
+  reason).
+- **`HistoricalMetricRow.value: String` field replaced by
+  `payload: Option<MetricType>`.** Legacy pre-v2.0 history rows surface as
+  `None` (rendered to OPC UA clients as
+  `DataValue { value: None, status: BadDataUnavailable }`).
+- **`MetricType` no longer implements `Copy`.** Carrying owned `String` payloads
+  required dropping the `Copy` bound; all variant constructions and pattern
+  matches must `clone()` when both sides need ownership.
+
+### Changed (BREAKING)
+
+- **`opcgw::storage::MetricType` is now payload-bearing.** Variants changed
+  from `MetricType::Float` (unit) to `MetricType::Float(f64)`,
+  `MetricType::Int(i64)`, `MetricType::Bool(bool)`, `MetricType::String(String)`.
+  `Display` and `FromStr` are preserved with a documented zero-default contract
+  on `FromStr`.
+- **`opcgw::opc_ua::convert_variant_to_metric` signature simplified** to
+  `Result<MetricType, OpcGwError>` (no longer threads a separate value
+  argument).
+- **SQLite schema bumped from v006 to v008.** v007 adds typed value columns
+  (`value_real REAL NULL`, `value_int INTEGER NULL`, `value_bool INTEGER NULL`,
+  `value_text TEXT NULL`, `value_type TEXT NOT NULL DEFAULT 'legacy'`) plus
+  column-level `CHECK` constraints to both `metric_values` and `metric_history`.
+  v008 adds an exactly-one-non-NULL cross-column `CHECK` enforced via
+  `CREATE TABLE … AS SELECT` wrapped in `BEGIN`/`COMMIT`. **Rollback is
+  one-way**: only path is restoring a pre-upgrade backup file (documented in
+  the migration runbook).
+- **Web `/api/metrics` JSON shape changed.** `MetricView.value` widened from
+  `Option<String>` to `Option<serde_json::Value>` (typed primitives: Float and
+  Int as JSON numbers, Bool as JSON boolean, String as JSON string). New
+  optional `unit: Option<String>` field surfaces the configured `metric_unit`.
+  `MetricView` and sibling response structs no longer derive `PartialEq, Eq`
+  (`serde_json::Value` cannot implement `Eq` over the NaN axis).
+- **Web dashboard Bool wire format** shifted from `"1"`/`"0"` (A-5 transitional)
+  to native `true`/`false`.
+
+### Added
+
+- **Real measurement values persisted and round-tripped end-to-end** for the
+  first time in the project's history. OPC UA `Read` returns
+  `Variant::Double(23.5)` instead of `Variant::String("Float")`; `HistoryRead`
+  returns the value-over-time series in typed `Variant`s; the web dashboard
+  renders `34.2 %` instead of `Float`.
+- **Pre-Epic-A row handling.** Rows migrated from v006 are tagged
+  `value_type='legacy'` and surface as `BadDataUnavailable` (OPC UA) or the
+  "missing" badge (web dashboard) for one poll interval; the next poll cycle
+  replaces them with real typed payloads. **Legacy rows are not silently
+  dropped**: in `HistoryRead` they appear as `DataValue { value: None,
+  status: BadDataUnavailable }` in the response stream.
+- **NaN/Inf filter at the poller boundary** (`event="metric_parse"`,
+  `reason="non_finite"`, warn level). Prevents downstream `Variant::Float(NaN)`
+  serialization hazards.
+- **Five new structured-log audit events** (closed-enum `reason=*` taxonomy
+  documented in `docs/logging.md`):
+  - `metric_parse` — poller-side payload conversion failures.
+  - `metric_read` — OPC UA `Read` payload conversion (e.g.,
+    `reason="narrowing_overflow"` for f64 → f32 narrowing).
+  - `metric_history_read` — per-row OPC UA `HistoryRead` payload conversion.
+  - `metric_history_summary` — aggregate-per-request `HistoryRead` skip
+    counts (trace level; replaces per-row floods).
+  - `metric_view_serialize` — web-layer JSON serialization issues
+    (`non_finite`, `int_precision_lossy`, `f32_overflow`, `f32_underflow`).
+- **Operator-facing migration runbook** in
+  [`docs/deployment-guide.md` § "Epic A migration"][epic-a-runbook]: Path A
+  (in-place auto-migration) / Path B (drop-and-recreate), pre-upgrade
+  checklist, post-migration verification, rollback contract, SLA expectation,
+  and 6 common gotchas.
+- **`scripts/check-schema-version.sh`** pre-flight POSIX shell script
+  (new top-level `scripts/` directory). Wraps `sqlite3 PRAGMA user_version`
+  with operator-friendly Path A/B recommendations and an opcgw-schema-shape
+  pre-check that prevents misidentifying non-opcgw SQLite files (Firefox
+  `places.sqlite`, etc.) as pre-Epic-A databases.
+- **`web::MetricSpec.metric_unit: Option<String>`** propagated from
+  `[[application.metrics]].metric_unit` through the existing hot-reload
+  pipeline. Empty-string units coalesce to no-suffix on the dashboard.
+- **Compile-time field-shape pins** in `src/storage/types.rs` via
+  `const _: fn(&T) = |v| { let MetricType::Float(_) = v else { return; }; ... }`
+  force compile errors if `MetricType` variants are restructured.
+
+### Fixed
+
+- **Counter monotonic reset detection** now reads the real persisted value
+  instead of a zero-default discriminant (was silently disabling reset
+  detection because `get_metric_value` returned `Int(0)` for the legacy
+  column path).
+- **Saturation guard for f64 → i64 conversion** correctly rejects the
+  `i64::MAX as f64 == 2^63` rounding-up case (uses `>=` not `>`).
+- **Float narrowing overflow / underflow at the OPC UA boundary** now emits
+  `event="metric_read"` with `reason="narrowing_overflow"` /
+  `reason="narrowing_underflow"` warn lines instead of silently producing
+  `Float(0.0)`.
+
+### Security
+
+- Inline security review at Epic A close: **clean** (no HIGH/MEDIUM findings).
+  One LOW finding in the migration runbook (a destructive-`rm` glob example
+  that could have removed operator backup files) was patched in the same
+  retrospective commit.
+- v008 migration is `BEGIN`/`COMMIT`-wrapped for crash safety. Note: the
+  outer v001 → v008 runner is not yet transactional (pre-existing limitation
+  tracked for the next migration story).
+- Strict-zero invariant honored throughout Epic A: no commit touched
+  `src/web/auth.rs`, `src/security*.rs`, `src/opc_ua_auth.rs`,
+  `src/opc_ua_session_monitor.rs`, or `src/main.rs::initialise_tracing`.
+
+### Upgrade notes
+
+External Rust consumers of `opcgw::storage`:
+
+```rust
+// Before (v2.0-rc):
+let mv = MetricValue {
+    device_id: "dev1".into(),
+    metric_name: "moisture".into(),
+    value: "Float".to_string(),    // <-- discriminant string
+    data_type: MetricType::Float,  // <-- unit variant
+    timestamp: Utc::now(),
+};
+
+// After (v2.0):
+let mv = MetricValue {
+    device_id: "dev1".into(),
+    metric_name: "moisture".into(),
+    // `value` field removed — payload now lives inside `data_type`.
+    data_type: MetricType::Float(34.2),  // <-- payload-bearing
+    timestamp: Utc::now(),
+};
+```
+
+Operators upgrading a v2.0-rc deployment: follow [the migration
+runbook][epic-a-runbook]. Both Path A (auto-migration preserving legacy rows
+as `BadDataUnavailable` for one poll cycle) and Path B (drop the database
+file before upgrade) are supported and documented.
+
+[epic-a-runbook]: ./docs/deployment-guide.md
+[schema-script]: ./scripts/check-schema-version.sh
