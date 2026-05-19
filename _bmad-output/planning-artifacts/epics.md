@@ -1057,3 +1057,54 @@ So that FUXA sees the new sensor without reconnecting.
 **And** existing subscriptions on unaffected nodes continue without interruption
 **And** the new device's metrics are available within one poll cycle
 **And** FR24 is satisfied (add/remove OPC UA nodes at runtime)
+
+---
+
+## Epic B: v2.0 GA Release Packaging
+
+**Numbering offset:** this epic uses the literal name `Epic B` in `sprint-status.yaml`, not a numeric index, to flag its release-packaging nature (it polishes deployment artifacts and operator documentation in preparation for the `v2.0` GA tag, rather than introducing new product capability). Stories created via `bmad-create-story` use sprint-status key `B-1`.
+
+**Why it exists:** the [Epic A retrospective](../implementation-artifacts/epic-A-retro-2026-05-19.md) (2026-05-19) identified the final pre-GA gaps. The existing `.github/workflows/docker-build.yml` publishes only to GHCR (`ghcr.io/guycorbaz/opcgw`) and only for `linux/amd64`; v2.0 GA should publish to BOTH Docker Hub (`docker.io/gcorbaz/opcgw`) and GHCR with multi-arch manifests covering `linux/amd64` + `linux/arm64` so industrial Raspberry-Pi-class edge gateways are first-class deployment targets. The DocBook user manual at `docs/manual/opcgw-user-manual.xml` is four epics behind reality (per `deferred-work.md` standing entry; closes retro action item AI-A-8) and has no step-by-step installation or configuration chapters — operators currently have to read source code and configuration examples to figure out how to deploy. The Dockerfile final-stage container also runs as **root** (the non-root `opcgw` UID 10001 user block is commented out at lines 34-40) and pins its runtime base to `ubuntu:latest` (unpinned, non-reproducible). Epic B closes all of these in a single multi-deliverable story before the `v2.0` tag fires the dual-registry CI pipeline.
+
+**FRs covered:** none directly (release-packaging epic).
+
+**Sequencing:** immediate next epic after Epic A. Gates the `v2.0` GA tag. Zero functional-requirement impact — entirely deployment infrastructure + operator documentation + container hardening. Story 8-4 (sprint-status `8-4`, threshold-based alarms, functionally unblocked by Epic A) revival remains downstream under a new story name in a future Phase B+ epic.
+
+### Story B.1: Docker Hub Publishing + DocBook User Manual Update
+
+As an **opcgw operator deploying v2.0 to a production gateway**,
+I want a published Docker image on Docker Hub (alongside the existing GHCR mirror) for both `linux/amd64` and `linux/arm64`, a non-root pinned-base container, and a current step-by-step installation + configuration user manual,
+So that I can deploy opcgw without specialised git/cargo knowledge, without arch-specific build steps, and without consulting source code.
+
+**Acceptance Criteria:**
+
+**Given** a `v*` tag is pushed to the GitHub repository,
+**When** the `.github/workflows/docker-build.yml` workflow fires,
+**Then** the resulting Docker image is published to BOTH `docker.io/gcorbaz/opcgw` AND `ghcr.io/guycorbaz/opcgw` with identical manifests, sourced from the same single workflow run.
+**And** each registry receives a multi-arch manifest covering `linux/amd64` + `linux/arm64`.
+**And** Docker Hub login uses the `DOCKERHUB_USERNAME` (value `gcorbaz`) + `DOCKERHUB_TOKEN` (Personal Access Token, Read/Write/Delete scope) GitHub repository secrets via `docker/login-action@v3`.
+**And** Docker Hub long-description (the "Overview" page rendered at <https://hub.docker.com/r/gcorbaz/opcgw>) is sourced from `docs/dockerhub-description.md` and either (a) auto-synced via `peter-evans/dockerhub-description@v4` step in the same workflow (preferred — keeps the page version-controlled), or (b) manually copy-pasted per major release (acceptable if the action's auth model doesn't fit). The chosen approach is documented in the Story Dev Notes.
+**And** the `Dockerfile` final-stage container runs as non-root user `opcgw` (UID 10001) — the existing commented-out `useradd` + `USER opcgw` block at lines 34-40 is enabled; `WORKDIR` and bind-mount target permissions remain compatible.
+**And** the `Dockerfile` runtime base is pinned from `ubuntu:latest` to `ubuntu:24.04` (or a documented alternative LTS tag).
+**And** the repository `README.md` documents both `docker pull` paths (Docker Hub as the primary publish target, GHCR as the ecosystem mirror) with concrete `docker run` examples; the Planning table gains an Epic B row reflecting Story B-1 status; the Current Version block is updated in the same commit transitions per the CLAUDE.md "Documentation Sync" rule.
+**And** the DocBook user manual at `docs/manual/opcgw-user-manual.xml` gains a complete step-by-step **Installation** chapter covering (a) Docker pull from Docker Hub, (b) Docker pull from GHCR mirror, (c) Docker Compose with the bundled `docker-compose.yml` + `.env` setup, (d) systemd service deployment from a built binary, (e) build-from-source via `cargo install` and `cargo build --release` (Rust 1.94+, `protoc`, `libssl-dev` prerequisites).
+**And** the manual gains a complete step-by-step **Configuration** chapter covering (a) `config/config.toml` location and the `OPCGW_<SECTION>__<FIELD>` env-var override pattern; (b) `[chirpstack]` section field-by-field (server_address, api_token via env-var, tenant_id, polling_frequency, retry, delay); (c) `[opcua]` section (endpoint URL, security modes + policies matrix, user authentication, PKI directory layout, `create_sample_keypair`, `max_connections`); (d) `[web]` section (enable flag, port, basic auth credentials via env-var, hot-reload semantics); (e) `[[application]]` arrays with `[[application.device]]` and `[[application.metric]]` sub-structures (metric_type variants, `metric_unit` field, device-to-OPC-UA NodeId mapping); (f) logging configuration (per-module log levels, audit-event taxonomy referencing `docs/logging.md`).
+**And** the manual gains a **Troubleshooting** appendix covering operator scenarios with structured-log-event grep recipes (ChirpStack auth failure → `event="chirpstack_auth_failed"`; OPC UA connection refused → check `opcua_session_count_at_limit` + `opcua_auth_failed`; polled metrics not appearing → check `metric_parse` warns; web UI 404 → check `web_request_rejected`; certificate errors → check `opcua_session_pki_violation`).
+**And** the manual gains an **Upgrade and migration** chapter referencing `docs/deployment-guide.md § "Epic A migration"` for the v2.0-rc → v2.0 GA path (Path A in-place + Path B drop-and-recreate); also documents the fresh-install v2.0 path.
+**And** the existing DocBook 4.5 syntax + DTD reference (`-//OASIS//DTD DocBook XML V4.5//EN`) is preserved; the manual is NOT migrated to LaTeX / Markdown / AsciiDoc / DocBook 5.
+**And** `docs/manual/index.xml` is updated to reflect the new chapters in the manual's table of contents; the manual passes DocBook 4.5 DTD validation (`xmllint --noout --valid docs/manual/opcgw-user-manual.xml`).
+**And** a local Docker smoke test passes: `docker build -t opcgw:smoke .` succeeds against the hardened Dockerfile; `docker run --rm` with a minimal config.toml + valid env-vars starts the container; `docker exec ... id` confirms the gateway process runs as UID 10001 (not root); the container binds port 4855; the gateway logs at least one `chirpstack_poll_start` event within 30 s.
+**And** `CHANGELOG.md` is updated under `[Unreleased] — v2.0.0` (Added section) to document dual-registry publishing, multi-arch images, Dockerfile hardening, and the user-manual installation/configuration chapters.
+**And** `cargo test --all-targets` continues to pass **1256 / 0 / 10** unchanged (no Rust code changes are expected in this story — Rust production code is OUT of scope).
+**And** `cargo clippy --all-targets -- -D warnings` remains clean; `cargo test --doc` remains 0 failed / 55 ignored.
+**And** strict-zero file invariants: NO changes to any `src/**/*.rs` file, any `tests/**/*.rs` file, `Cargo.toml`, `Cargo.lock`, `migrations/*.sql`, or any file under `config/`. Mutable scope is: `.github/workflows/docker-build.yml`, `Dockerfile`, `README.md`, `CHANGELOG.md`, NEW `docs/dockerhub-description.md`, `docs/manual/opcgw-user-manual.xml`, `docs/manual/index.xml`, and BMad bookkeeping files (`_bmad-output/planning-artifacts/epics.md`, `_bmad-output/implementation-artifacts/sprint-status.yaml`, the B-1 story spec file itself).
+**And** the GitHub tracking issue is referenced in the implementation commit via `Refs #N` (user opens the issue out-of-band; story Dev Notes captures the issue number once provided).
+
+### Epic B — Story Acceptance Criteria
+
+**Given** the `v2.0` GA tag fires the CI pipeline,
+**When** an operator runs `docker pull docker.io/gcorbaz/opcgw:2.0` (or the GHCR equivalent `docker pull ghcr.io/guycorbaz/opcgw:2.0`),
+**Then** the operator receives a non-root, base-pinned image matching their host architecture (linux/amd64 or linux/arm64),
+**And** the operator can follow `docs/manual/opcgw-user-manual.xml` (built to HTML or PDF via the standard DocBook XSL toolchain) end-to-end to install, configure, run, and troubleshoot opcgw without consulting source code or asking the maintainer.
+
+**Epic A retro (2026-05-19) reference:** see [`../implementation-artifacts/epic-A-retro-2026-05-19.md`](../implementation-artifacts/epic-A-retro-2026-05-19.md) action item AI-A-8 (manual XML sync) — Epic B closes it.
