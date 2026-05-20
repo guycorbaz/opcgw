@@ -109,7 +109,7 @@ check.
   README, the DocBook manual title page, and the Docker Hub Overview page.
 - **Real measurement values persisted and round-tripped end-to-end** for the
   first time in the project's history. OPC UA `Read` returns
-  `Variant::Double(23.5)` instead of `Variant::String("Float")`; `HistoryRead`
+  `Variant::Float(23.5_f32)` (or `Variant::Int32` / `Variant::Boolean` / `Variant::String` depending on `[application.metric.metric_type]`) instead of the legacy `Variant::String("Float")` type-tag placeholder; `HistoryRead`
   returns the value-over-time series in typed `Variant`s; the web dashboard
   renders `34.2 %` instead of `Float`.
 - **Pre-Epic-A row handling.** Rows migrated from v006 are tagged

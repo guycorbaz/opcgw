@@ -567,8 +567,8 @@
             NFR9 permission shape (mode <literal>0o700</literal> on the
             directory, <literal>0o600</literal> on each
             <filename>*.pem</filename> file):</para>
-            <screen>mkdir -p ./config ./pki/own ./pki/private ./pki/trusted ./pki/rejected ./log
-chown -R 10001:10001 ./config ./pki ./log
+            <screen>mkdir -p ./config ./pki/own ./pki/private ./pki/trusted ./pki/rejected ./log ./data
+chown -R 10001:10001 ./config ./pki ./log ./data
 chmod 700 ./pki/private
 find ./pki/private -type f -name '*.pem' -exec chmod 600 {} +    # no-op on fresh install</screen>
           </step>
@@ -756,12 +756,17 @@ find ./pki/private -type f -name '*.pem' -exec chmod 600 {} +    # no-op on fres
 
         <note>
           <title>Choosing the Image</title>
-          <para>The shipped <filename>docker-compose.yml</filename> uses
-          <literal>image: opcgw</literal>, which assumes a locally-built
-          image. To pin to the published Docker Hub or GHCR image,
-          override the <literal>image:</literal> line to
-          <literal>docker.io/gcorbaz/opcgw:2.0</literal> or
-          <literal>ghcr.io/guycorbaz/opcgw:2.0</literal>.</para>
+          <para>The shipped <filename>docker-compose.yml</filename> pins
+          <literal>image: docker.io/gcorbaz/opcgw:2.0</literal>, which
+          pulls the published Docker Hub image. To switch to the GHCR
+          mirror (e.g. in environments that block Docker Hub or to
+          avoid the public-rate-limit on anonymous pulls), edit the
+          <literal>image:</literal> line to
+          <literal>ghcr.io/guycorbaz/opcgw:2.0</literal>. To run a
+          locally-built image instead (development, fork builds), run
+          <command>docker build -t opcgw .</command> in the project
+          root and change the <literal>image:</literal> line to
+          <literal>opcgw</literal>.</para>
         </note>
       </section>
 
@@ -827,8 +832,8 @@ sudo chown opcgw:opcgw /etc/opcgw/env</screen>
             gateway resolves <filename>static/</filename> relative to its
             CWD:</para>
             <screen>sudo install -d -m 0755 -o opcgw -g opcgw /var/lib/opcgw/static
-sudo install -m 0644 -o opcgw -g opcgw -t /var/lib/opcgw/static/ \
-    static/*.html static/*.js static/*.css</screen>
+sudo find static -maxdepth 1 -type f \( -name '*.html' -o -name '*.js' -o -name '*.css' \) \
+    -exec install -m 0644 -o opcgw -g opcgw -t /var/lib/opcgw/static/ {} +</screen>
             <para>Skip this step for OPC-UA-only deployments — the static
             payload is only needed when the web UI is enabled.</para>
           </step>
@@ -984,6 +989,15 @@ docker logs opcgw 2&gt;&amp;1 | grep 'poll_cycle_end'</screen>
 curl -sS -u "$OPCGW_OPCUA__USER_NAME:$OPCGW_OPCUA__USER_PASSWORD" \
     http://localhost:8080/api/health
 # Expected: {"status":"ok"}</screen>
+            <important>
+              <para>The embedded Web UI is HTTP-only — Basic-auth
+              credentials transit in cleartext. For any deployment
+              beyond a trusted LAN, deploy a TLS-terminating reverse
+              proxy (nginx, Caddy, Traefik) in front of the gateway
+              and bind the listener to loopback. See
+              <xref linkend="sec-web-config"/> for the full hardening
+              recipe.</para>
+            </important>
           </step>
         </procedure>
       </section>
@@ -1010,10 +1024,13 @@ curl -sS -u "$OPCGW_OPCUA__USER_NAME:$OPCGW_OPCUA__USER_PASSWORD" \
             variable.</para>
           </listitem>
           <listitem>
-            <para>Default: the
-            <literal>OPCGW_CONFIG_PATH/config.toml</literal> directory,
-            where <literal>OPCGW_CONFIG_PATH</literal> defaults to
-            <filename>config</filename>.</para>
+            <para>Default: <filename>config/config.toml</filename>
+            (the <filename>config</filename> directory under the
+            binary's working directory). Only the
+            <literal>CONFIG_PATH</literal> environment variable above
+            and the <literal>-c PATH</literal> CLI flag override this
+            default; there is no <literal>OPCGW_CONFIG_PATH</literal>
+            environment variable.</para>
           </listitem>
         </orderedlist>
 
@@ -1389,7 +1406,7 @@ stale_threshold_seconds = 120
           observed mode and the <command>chmod</command> recipe. Operator
           remediation:</para>
           <screen>chmod 700 pki/private
-chmod 600 pki/private/*.pem</screen>
+find ./pki/private -type f -name '*.pem' -exec chmod 600 {} +    # no-op on fresh install</screen>
           <para>Silently running with a world-readable private key is
           worse than refusing to start — this fail-closed behaviour is
           intentional.</para>
@@ -1913,7 +1930,7 @@ application_name = "Arrosage"
 2026-04-27T12:34:56.300100Z  INFO opcgw::storage::sqlite: schema_version=5 migrations_applied=0
 2026-04-27T12:34:56.501020Z  INFO opcgw::chirpstack: operation="chirpstack_connect" attempt=1 endpoint=http://... timeout_secs=0
 2026-04-27T12:34:56.612030Z  INFO opcgw::chirpstack: operation="chirpstack_connect" attempt=1 latency_ms=110 success=true
-2026-04-27T12:34:56.700400Z  INFO opcgw::opc_ua: OPC UA limits configured event="opcua_limits_configured" max_sessions=10 …
+2026-04-27T12:34:56.700400Z  INFO opcgw::opc_ua: OPC UA limits configured event="opcua_limits_configured" max_sessions=10 [...]
 2026-04-27T12:34:57.001234Z  INFO opcgw::chirpstack: operation="poll_cycle_start" device_count=12
           </programlisting>
         </example>
@@ -3061,7 +3078,7 @@ journalctl -u opcgw | grep 'event="metric_history_read"' | tail -10</screen>
               <para>Tighten the permissions per the error
               message:</para>
               <screen>chmod 700 pki/private
-chmod 600 pki/private/*.pem</screen>
+find ./pki/private -type f -name '*.pem' -exec chmod 600 {} +    # no-op on fresh install</screen>
             </listitem>
             <listitem>
               <para>For Docker / Compose deployments, the host-side
@@ -3309,7 +3326,7 @@ journalctl -u opcgw -n 200 | grep -E "Applied migration v00(7|8)"
 docker compose logs opcgw | grep -E "Applied migration v00(7|8)"
 
 # Foreground binary:
-tail -n 200 log/opcgw.log | grep -E "Applied migration v00(7|8)"</screen>
+tail -n 200 log/opc_ua_gw.log | grep -E "Applied migration v00(7|8)"</screen>
             <para>You should see two info lines:</para>
             <programlisting>Applied migration v007_typed_value_columns          version=7
 Applied migration v008_typed_value_constraints      version=8</programlisting>

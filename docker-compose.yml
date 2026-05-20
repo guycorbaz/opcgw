@@ -21,6 +21,11 @@ services:
     restart: always
     ports:
       - "4855:4855"
+      # Uncomment to expose the Web UI on the host. Required if you set
+      # OPCGW_WEB__ENABLED=true; the gateway binds the Web UI on container
+      # port 8080 (Dockerfile EXPOSE 8080). The "Quick-start with Web UI"
+      # recipe in docs/dockerhub-description.md depends on this mapping.
+      # - "8080:8080"
     # Secret credentials are injected via env vars (Story 7-1, AC#6).
     # Compose reads `.env` from this directory and substitutes the values
     # below into the container's environment. The `:?` form fails compose

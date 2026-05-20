@@ -1,6 +1,6 @@
 # Story B.1: Docker Hub Publishing + DocBook User Manual Update
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -405,3 +405,38 @@ Strict-zero (verified unchanged by `git status` filter): `src/**/*.rs`, `tests/*
 - [x] [Review][Defer] **T25** `docs/logo/opcgw-logo-pack.zip` checked in vs `docs/manual/out/` gitignored — policy inconsistency, no functional impact.
 - [x] [Review][Defer] **T26** Manual links from Docker Hub Overview point to raw DocBook XML — needs CI HTML publish first (out-of-scope v2.x doc-pass story).
 - [x] [Review][Defer] **AC#23** GitHub tracking issue `Refs #__` placeholder — explicitly anticipated by spec; user will provide issue number out-of-band.
+
+#### Decisions resolved (iter-2)
+
+- [x] [Review][Decision→Patch] **U1** GHCR-only fallback fix — RESOLVED 2026-05-20: split into two registry-conditional `build-push` steps (option a). Idiomatic, each registry's failure independently visible, layer cache mitigable via `cache-from`. Apply to `.github/workflows/docker-build.yml:56-78`.
+- [x] [Review][Decision→Patch] **U2** Cargo `2.0.0-rc` × `:2.0` doc pin × semver suppression — RESOLVED 2026-05-20: escalate T8 to HARD pre-tag gate (option a). Keep doc pins at `:2.0` (correct post-bump). Update `_bmad-output/implementation-artifacts/deferred-work.md` T8 entry from soft-deferred to a HARD pre-tag GATE with explicit ordering note: "Cargo bump MUST land BEFORE `v2.0.0` tag is pushed; otherwise all `:2.0` doc references break with `manifest unknown`."
+
+#### Patches to apply (iter-2)
+
+- [x] [Review][Patch] **U3** `actions/checkout@v6` does not exist — pin to `@v4` (latest stable). Workflow would fail at step 1 on first `v*` tag push. [.github/workflows/docker-build.yml:22]
+- [x] [Review][Patch] **U4** dockerhub-description sister sentence `[opcua].endpoint` (iter-1 T3 missed) — replace with `[opcua].host_port` (and mention `host_ip_address`). Phrase-harmonization-drift. [docs/dockerhub-description.md:100]
+- [x] [Review][Patch] **U5** Docker Hub install procedure chown missing `./data` (iter-1 T9 patched the docker-run example but left the preceding chown stale) — append `./data` to mkdir AND chown. Compose section (line 729-730) is already correct; pure phrase-harmonization-drift. [docs/manual/opcgw-user-manual.xml:570-571]
+- [x] [Review][Patch] **U6** Manual conflates Rust constant `OPCGW_CONFIG_PATH` with an env-var name — actual env var is `CONFIG_PATH` (no prefix); `OPCGW_CONFIG_PATH` is just the Rust default string `"config"`. Operators setting `OPCGW_CONFIG_PATH=...` get silent ignore. Rewrite sentence to drop the `OPCGW_` prefix. [docs/manual/opcgw-user-manual.xml:1014-1015]
+- [x] [Review][Patch] **U7** `chmod 600 pki/private/*.pem` glob form survives at 2 of 4 occurrences (iter-1 T17 missed) — Configuration-chapter NFR9 warning + Troubleshooting-chapter remediation step #1 still use the broken glob; line 3077 in the same `<orderedlist>` already uses the safe `find -exec` form (internal contradiction). Sync to find-exec. [docs/manual/opcgw-user-manual.xml:1392, 3064]
+- [x] [Review][Patch] **U8** `EXPOSE 8080` (Dockerfile) vs compose only publishes 4855 — add commented `# - "8080:8080"  # uncomment to enable web UI` to docker-compose.yml ports so the documented "Quick-start with Web UI" recipe actually works. [Dockerfile:83, docker-compose.yml:23]
+- [x] [Review][Patch] **U9** `opcgw.log` outlier in upgrade-verification recipe — actual log filename is `opc_ua_gw.log` (src/main.rs:312 + 7 other manual locations). Single-token swap. [docs/manual/opcgw-user-manual.xml:3312]
+- [x] [Review][Patch] **U10** "Choosing the Image" note describes the pre-B-1 compose state — says `image: opcgw, which assumes a locally-built image` but compose actually has `image: docker.io/gcorbaz/opcgw:2.0`. Rewrite the note to point operators at the GHCR alternative line instead. [docs/manual/opcgw-user-manual.xml:758-765]
+- [x] [Review][Patch] **U11** CHANGELOG.md example `Variant::Double(23.5)` — `OpcMetricTypeConfig` has no `Double` variant; code emits `Variant::Float(f32)` for `Float`-typed metrics (opc_ua.rs:1012, 1909). Replace with `Variant::Float(23.5_f32)` or use a different example metric. [CHANGELOG.md:112]
+- [x] [Review][Patch] **U12** dockerhub-description verification claims `opcua_session_count` confirms "OPC UA server is listening" — the gauge requires `[opcua].diagnostics_enabled = true` (session monitor reads from async-opcua's diagnostics summary; without it, `session_count_variable_missing` fires instead). Add caveat or switch to `opcua_limits_configured`. [docs/dockerhub-description.md:166]
+- [x] [Review][Patch] **U13** Makefile `cp` of 3 SVGs has no prerequisite declaration — declare logos as targets/prereqs so make fails fast before xsltproc writes partial output. [docs/manual/Makefile:53, 64]
+- [x] [Review][Patch] **U14** systemd install recipe uses shell glob `static/*.css` that hard-fails on no-match — use `find static -type f \( -name '*.html' -o -name '*.js' -o -name '*.css' \) -exec install ... {} +`. [docs/manual/opcgw-user-manual.xml:2102-2103]
+- [x] [Review][Patch] **U15** dockerhub-description omits the placeholder-passthrough caveat that the manual documents — `:?err` does NOT catch `REPLACE_ME_...` literal placeholders. One-line addition. [docs/dockerhub-description.md:~1079]
+- [x] [Review][Patch] **U16** Unicode ellipsis `…` survives in log-line example (iter-1 T24 sweep missed this one) — operators grepping for ASCII won't match. [docs/manual/opcgw-user-manual.xml:2817]
+- [x] [Review][Patch] **U17** TLS reverse-proxy requirement asserted in dockerhub-description but not enumerated in the manual's Web UI section — add `<warning>` referencing `docs/security.md` and the dockerhub Overview. [docs/manual/opcgw-user-manual.xml web-UI section]
+
+#### Deferred findings (iter-2)
+
+- [x] [Review][Defer] **U18** `Refs #__` commit-message trap — placeholder is literal `#__` in `e7931fe` + `1cf3ba7` commit messages; resolving via interactive rebase is forbidden by CLAUDE.md. Resolution path: follow-up commit `Refs #N (resolves placeholder from e7931fe + 1cf3ba7)` once issue is opened, not a rewrite. Documented in `deferred-work.md::DEF-iter2-B1-U18`.
+- [x] [Review][Patch→Resolved-by-U13] **U19** Makefile `make -j` parallel race — RESOLVED INCIDENTALLY by U13: the new per-file pattern rule `$(OUT_DIR)/logo/%.svg: $(LOGO_SRC)/%.svg` produces one make target per logo, so `html` and `html-single` no longer execute duplicate unconditional `cp` recipes. No separate fix needed.
+- [x] [Review][Defer] **U20** Makefile `LOGO_SRC := ../logo` relative path fragile — works only when `make` is invoked with cwd = `docs/manual/` (or via `make -C docs/manual`); breaks with `make -f docs/manual/Makefile` from repo root. Documented in `deferred-work.md::DEF-iter2-B1-U20`.
+- [x] [Review][Defer] **U21** dockerhub-description Supported-tags table promises `:2.0` "Auto-updates on patch releases" — accurate post-Cargo-bump (rolls in with U2 / DEF-iter1-B1-T8 resolution). Documented in `deferred-work.md::DEF-iter2-B1-U21`.
+
+#### Dismissed findings (iter-2)
+
+- ~~**X1**~~ `max_message_size = 327675` flagged as typo for `327680` — DISMISSED. Verified at `src/utils.rs:163`: value is exactly `65535 × MAX_CHUNK_COUNT = 65535 × 5 = 327_675`, intentional per-chunk × max-chunk-count product. Internally consistent across config example, manual, and source-of-truth comment.
+- ~~**X2**~~ `poll_cycle_start` (dockerhub) vs `poll_cycle_end` (manual) flagged as inconsistency — DISMISSED. dockerhub-description.md:166 actually mentions BOTH events (`start` as the "within ~30 seconds of startup" signal, `end` for "each successful cycle"); the recipe is correct. Manual's stricter `grep poll_cycle_end` is acceptable.

@@ -93,11 +93,11 @@ The most commonly overridden values:
 | `OPCGW_OPCUA__HOST_IP_ADDRESS` | No | OPC UA listen address (default `0.0.0.0`). |
 | `OPCGW_OPCUA__HOST_PORT` | No | OPC UA TCP port (default `4855`). |
 
-The `:?err` shell guard in `docker-compose.yml` causes Compose parsing to fail fast if required env-vars are unset — see the security guide.
+The `:?err` shell guard in `docker-compose.yml` causes Compose parsing to fail fast if required env-vars are **unset or empty** — see the security guide. Note: `:?err` does **not** detect literal placeholder strings (e.g. `REPLACE_ME_WITH_…`); operators who copy `.env.example` verbatim without filling the values get a container that starts successfully and then errors at gateway startup. Replace every placeholder before `docker compose up`.
 
 ## Exposed ports
 
-- **4855** — OPC UA endpoint (`opc.tcp://`). Configurable via `[opcua].endpoint` in `config.toml`.
+- **4855** — OPC UA endpoint (`opc.tcp://`). Configurable via `[opcua].host_ip_address` (default `0.0.0.0`) + `[opcua].host_port` (default `4855`) in `config.toml`.
 - **8080** — Embedded Axum web UI (informational; only bound when `[web].enabled = true`; configurable via `[web].port`). Publish with an additional `-p 8080:8080` flag on `docker run` if you intend to expose it on the host.
 
 ### Quick-start variant: with the Web UI
@@ -163,7 +163,7 @@ nc -z localhost 4855 && echo "OPC UA endpoint reachable"
 docker logs -f opcgw
 ```
 
-Look for the structured-log event `operation="poll_cycle_start"` within ~30 seconds of startup, followed by `operation="poll_cycle_end"` on each successful cycle. `event="opcua_session_count"` (gauge fired every ~5 s) confirms the OPC UA server is listening.
+Look for the structured-log event `operation="poll_cycle_start"` within ~30 seconds of startup, followed by `operation="poll_cycle_end"` on each successful cycle. When `[opcua].diagnostics_enabled = true` is set, the periodic `event="opcua_session_count"` gauge (fired every ~5 s) additionally confirms the OPC UA server is listening; with diagnostics disabled the gauge does not fire, so use `event="opcua_limits_configured"` from startup as the alternative listener-up signal.
 
 ## Upgrading from v2.0-rc
 

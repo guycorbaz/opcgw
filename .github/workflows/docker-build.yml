@@ -19,7 +19,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Set up QEMU
         # QEMU is required for cross-architecture emulation when building
@@ -49,21 +49,35 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
+      # iter-2 U1: registries are extracted + pushed independently so a missing
+      # Docker Hub credential set cannot fail the GHCR leg of the release.
+      # Each registry has its own metadata-action + build-push step, gated on
+      # the secrets that registry's push step needs.
+
+      - name: Extract GHCR metadata
+        id: meta-ghcr
         uses: docker/metadata-action@v5
         with:
-          # Publish to BOTH Docker Hub and GHCR with identical tags.
-          images: |
-            ${{ env.DOCKERHUB_IMAGE_NAME }}
-            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}
+          images: ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=ref,event=branch
             type=sha
 
-      - name: Build and push Docker image
+      - name: Extract Docker Hub metadata
+        id: meta-hub
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKERHUB_IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=sha
+
+      - name: Build and push to GHCR
         # docker/build-push-action pinned at @v5 deliberately; @v6 has not been
         # validated against this workflow's multi-arch (amd64 + arm64) manifest
         # shape on a real `v*` tag push. Bump tracked as a v2.x follow-up.
@@ -74,8 +88,23 @@ jobs:
           # linux/arm/v7 (32-bit ARM) is deliberately out of scope for v2.0.
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta-ghcr.outputs.tags }}
+          labels: ${{ steps.meta-ghcr.outputs.labels }}
+          build-args: |
+            RUST_VERSION=1.94.0
+            APP_NAME=opcgw
+
+      - name: Build and push to Docker Hub
+        # Gated on Docker Hub secrets being present so a missing/rotated PAT
+        # cannot fail the workflow after GHCR has already been published.
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-hub.outputs.tags }}
+          labels: ${{ steps.meta-hub.outputs.labels }}
           build-args: |
             RUST_VERSION=1.94.0
             APP_NAME=opcgw
