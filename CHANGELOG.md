@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] — 2026-05-20 — first usable release
+
+`v2.0.0` was tagged on 2026-05-20 but never produced Docker images: the
+publishing workflow `.github/workflows/docker-build.yml` failed in 0 s on
+every push because step-level `if:` conditions referenced the `secrets`
+context, which GitHub Actions rejects at workflow-schema-validation time
+(the `secrets` context is not in the list of contexts allowed in `if:`
+expressions). The workflow YAML parsed locally with `python3 yaml.safe_load`
+and was only caught by `actionlint`. Same end-to-end real-world test pass
+also surfaced a second-order bug in the Epic D D-0 empty-TOML-startup
+fix: the validator accepted empty `application_list` but serde rejected
+the TOML at deserialization time because the field lacked `#[serde(default)]`.
+
+`v2.0.1` rolls up the two patches plus the four bug-fix commits from the
+v2.0 walkthrough. **This is the first version of v2.0 with published
+Docker images.** Pulling `gcorbaz/opcgw:2.0` resolves to this release.
+
+### Fixed
+
+- **CI**: replaced `secrets.X` in step-level `if:` conditions in
+  `.github/workflows/docker-build.yml` with step-output indirection. The
+  `Detect Docker Hub credentials` step reads the secrets via `env:` (which
+  IS allowed to reference secrets), exports a `have_creds` step output,
+  and the four downstream conditional steps gate on that output instead.
+  The GHCR-only-fallback semantics from iter-2 U1 are preserved.
+  ([119e16f](https://github.com/guycorbaz/opcgw/commit/119e16f))
+- **Config**: added `#[serde(default)]` to `AppConfig::application_list`
+  so a TOML file with zero `[[application]]` blocks deserializes to an
+  empty vec instead of failing with `missing field "application"` before
+  the validator's allow-empty branch is reached.
+  ([cecd100](https://github.com/guycorbaz/opcgw/commit/cecd100))
+
+### Notes
+
+- All v2.0.0 commits are also in v2.0.1 — same code, plus the two
+  hotfix commits above.
+- The `v2.0.0` tag remains in the repository for historical traceability;
+  pulling `gcorbaz/opcgw:2.0.0` from Docker Hub will fail with `manifest
+  unknown` because no image was ever published for that tag. Use
+  `gcorbaz/opcgw:2.0` (floating) or `gcorbaz/opcgw:2.0.1` (exact).
+
+---
+
 ## [Unreleased] — v2.0.0
 
 This is a **major** release. v2.0 ships the Phase A reliability foundation, the

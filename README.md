@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/guycorbaz/opcgw/actions/workflows/ci.yml"><img src="https://github.com/guycorbaz/opcgw/actions/workflows/ci.yml/badge.svg" alt="build and test"></a>
-  <img src="https://img.shields.io/badge/version-2.0.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-2.0.1-blue" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-green" alt="License">
   <img src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64-brightgreen" alt="Architectures">
 </p>
