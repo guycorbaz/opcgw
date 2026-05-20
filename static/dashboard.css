@@ -38,6 +38,29 @@ header .subtitle {
   opacity: 0.8;
 }
 
+header nav {
+  margin: 0.6rem 0 0;
+  font-size: 0.9rem;
+}
+
+header nav a {
+  color: #f9fafb;
+  text-decoration: underline;
+}
+
+header nav a:hover {
+  color: #ffffff;
+}
+
+header nav a:visited {
+  color: #f9fafb;
+}
+
+header nav strong {
+  color: #fbbf24;
+  font-weight: 600;
+}
+
 main {
   display: grid;
   grid-template-columns: 1fr;
