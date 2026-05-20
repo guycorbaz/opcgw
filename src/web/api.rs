@@ -1191,10 +1191,22 @@ fn command_not_found_response() -> Response {
 }
 
 fn is_valid_app_name_char(c: char) -> bool {
-    // Names are allowed slightly more liberal punctuation (space,
-    // parentheses) for human-readable display, but still rejects
-    // CR/LF/tab and quote characters that could break TOML/HTML/JS.
-    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' ' | '(' | ')')
+    // Human-readable display names accept Unicode letters and digits across
+    // all scripts — so "Bâtiments", "Über", "日本語", "Ёлка" are valid — plus
+    // a small whitelist of safe ASCII punctuation (space, parentheses,
+    // hyphen, underscore, dot). Surfaced 2026-05-20 during the v2.0 GA web-UI
+    // walkthrough when Guy tried to create application "Bâtiments" and the
+    // ASCII-only validator rejected `â`.
+    //
+    // `char::is_alphanumeric` is Unicode-property-aware (Alphabetic ∪ Numeric)
+    // and conservatively excludes:
+    //   - control chars (CR/LF/TAB/NUL etc.) — these are not alphanumeric
+    //   - quote chars (`"`, `'`, `` ` ``) that could break TOML/HTML/JS
+    //   - TOML/HTML metacharacters (`[`, `]`, `{`, `}`, `=`, `<`, `>`, `&`)
+    //   - path separators (`/`, `\`) and shell metacharacters
+    // So the broader char-set is still safe against the same injection
+    // surfaces the original validator was protecting against.
+    c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ' ' | '(' | ')')
 }
 
 /// `GET /api/applications` — list all applications via the
@@ -6047,5 +6059,60 @@ mod tests {
             !logs_contain("event=\"application_crud_rejected\""),
             "must NOT emit application_crud_rejected when invoked from a device handler"
         );
+    }
+
+    /// Regression guard for the 2026-05-20 Unicode-rejection bug surfaced
+    /// during the v2.0 GA web-UI walkthrough: the `is_valid_app_name_char`
+    /// validator used `is_ascii_alphanumeric()` and rejected `â` (and any
+    /// other non-ASCII letter), preventing "Bâtiments", "Über", "日本語",
+    /// "Ёлка" and similar legitimate international names from being created
+    /// via the web UI's Application / Device CRUD forms.
+    ///
+    /// Post-fix: `is_valid_app_name_char` uses `is_alphanumeric()` which is
+    /// Unicode-property-aware (Alphabetic ∪ Numeric) and accepts letters and
+    /// digits from any script.
+    ///
+    /// Each character class is asserted positively (must accept) AND the
+    /// previously-rejected dangerous chars are re-asserted negatively (must
+    /// stay rejected) so a future "looser" change can't accidentally let
+    /// quotes / control chars / path separators through.
+    #[test]
+    fn is_valid_app_name_char_accepts_unicode_letters_across_scripts() {
+        // Positive cases — international letters that USED to be rejected:
+        for c in [
+            'â', 'é', 'è', 'ç', 'ñ', 'ü', 'ö', 'ä', 'ø', 'å', // Latin-1 supplement + extended
+            'Ё', 'я', 'й', // Cyrillic
+            'ä', 'Α', 'Ω', 'ε', // Greek
+            '日', '本', '語', // CJK Han
+            '한', '글', // Hangul
+            'ا', 'ل', // Arabic
+            '5', 'a', 'Z', // existing ASCII alphanumerics still accepted
+            '-', '_', '.', ' ', '(', ')', // existing punctuation whitelist
+        ] {
+            assert!(
+                is_valid_app_name_char(c),
+                "{:?} (U+{:04X}) must be accepted in human-readable names",
+                c,
+                c as u32,
+            );
+        }
+
+        // Negative cases — dangerous chars still rejected (defense-in-depth
+        // against TOML/HTML/JS injection):
+        for c in [
+            '"', '\'', '`', // quotes
+            '<', '>', '&', // HTML metacharacters
+            '[', ']', '{', '}', '=', // TOML / inline-table metacharacters
+            '/', '\\', // path separators
+            '\n', '\r', '\t', '\0', // control chars
+            ';', '|', '$', // shell metacharacters
+        ] {
+            assert!(
+                !is_valid_app_name_char(c),
+                "{:?} (U+{:04X}) must STAY rejected (TOML/HTML/JS/shell injection surface)",
+                c,
+                c as u32,
+            );
+        }
     }
 }
