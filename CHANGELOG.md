@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.2] — 2026-05-21 — expanded Docker Hub Overview
+
+The 2.0.1 release published Docker images correctly but `peter-evans/dockerhub-description@v4` synced the v2.0.1-pinned (thin) Overview content to <https://hub.docker.com/r/gcorbaz/opcgw>. 2.0.2 is a docs-only patch that pushes a substantially expanded Overview page to Docker Hub on tag — same image bytes, better landing page for first-time visitors.
+
+### Changed
+
+- **Docker Hub Overview page** (`docs/dockerhub-description.md`): expanded from 190 → 298 lines. Added sections for the name-translation-gateway rationale ("Why opcgw vs. ChirpStack's built-in integrations?"), an ASCII data-flow architecture diagram, a feature breakdown across OPC UA + web UI + gateway-operations + persistence, audience-targeting ("Who is this for?"), a 6-row troubleshooting table, and indicative scale + performance numbers from a Raspberry Pi 4 reference deployment. Corrected the Supported-tags example from `2.0.0` to `2.0.1` with an explicit note that `:2.0.0` returns `manifest unknown`.
+  ([044a3d3](https://github.com/guycorbaz/opcgw/commit/044a3d3))
+
+### Notes
+
+- No code changes between 2.0.1 and 2.0.2 — `cargo test --all-targets` output, image bytes, and runtime behaviour are identical to 2.0.1. The version bump exists solely to trigger the `v*`-tagged `peter-evans/dockerhub-description@v4` sync step.
+- Operators with `:2.0` pinned will auto-receive the same image bytes 2.0.1 published (no re-pull needed unless you want the SHA-pinned tag).
+
+---
+
 ## [2.0.1] — 2026-05-20 — first usable release
 
 `v2.0.0` was tagged on 2026-05-20 but never produced Docker images: the
