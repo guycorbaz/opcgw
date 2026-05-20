@@ -18,7 +18,7 @@
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/guycorbaz/opcgw)
 [![Architecture](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-brightgreen.svg)](#supported-architectures)
 
-**opcgw** is a Rust application that bridges a [ChirpStack](https://www.chirpstack.io/) LoRaWAN Network Server to OPC UA clients for industrial automation and SCADA systems. It polls device metrics from ChirpStack's gRPC API at configurable intervals, persists them to SQLite, and exposes them as OPC UA variables with real-time `Read`, `HistoryRead`, and live subscription support.
+**opcgw** is a Rust application that bridges a [ChirpStack](https://www.chirpstack.io/) LoRaWAN Network Server to OPC UA clients for industrial automation and SCADA systems. It polls device metrics from ChirpStack's gRPC API at configurable intervals, persists them to SQLite with a 7-day rolling history, and exposes them as OPC UA variables with real-time `Read`, `HistoryRead`, and live subscription support.
 
 The image is published in lockstep to **two registries**:
 
@@ -26,6 +26,87 @@ The image is published in lockstep to **two registries**:
 - **GHCR** (mirror): `ghcr.io/guycorbaz/opcgw`
 
 Both registries receive identical multi-architecture manifests built from the same workflow run.
+
+## Why opcgw vs. ChirpStack's built-in integrations?
+
+ChirpStack ships with MQTT and HTTP integrations that already deliver device data to external systems — so why a dedicated gateway?
+
+**opcgw is a name-translation layer.** Bare ChirpStack integrations emit events keyed by UUIDs (`application_id`, `tenant_id`) and DevEUIs. Downstream SCADA operators see opaque identifiers and have no way to map `52f14cd4-c6f1-4fbd-8f87-4025e1d49242 / a840414bf185f365` to "the temperature sensor in the storeroom."
+
+opcgw polls ChirpStack for both the **configuration** (tenant / application / device names) **and** the **data** (metric values), then exposes the result via OPC UA — the de-facto standard for industrial automation — with a **named browse tree** that operators can read directly:
+
+```
+Server
+└── Objects
+    └── Bâtiments                ← your application_name (any Unicode)
+        └── lsn50-magasin        ← your device_name
+            ├── Humidity         ← Float, 72.36
+            ├── Temperature      ← Float, 15.13 °C
+            └── BatV             ← Float, 3.67
+```
+
+If you're already running OPC UA SCADA software (Ignition, KEPServerEX, B&R, Siemens, etc.), opcgw plugs straight into it — no custom MQTT-to-tag glue code, no UUID translation table to maintain.
+
+## Architecture
+
+```
+LoRaWAN device                                            OPC UA client
+(uplinks ~every                                           (SCADA / HMI /
+20 minutes)                                                historian)
+       │                                                          ▲
+       ▼                                                          │
+ ┌──────────────┐    gRPC      ┌────────────────────┐  OPC UA TCP │
+ │  ChirpStack  │◄─── poll ────│       opcgw        │─────────────┘
+ │  v4 server   │  every 60s   │  • Name translation│  (port 4855)
+ │              │              │  • SQLite history  │
+ └──────────────┘              │  • Optional web UI │  HTTP(S)
+                               └────────────────────┘─────────────┐
+                                                                  ▼
+                                                          Operator browser
+                                                          (port 8088)
+```
+
+## Features
+
+### OPC UA server (port 4855)
+
+- **Read** — current value of any configured metric, with timestamp + quality
+- **HistoryRead** — time-series reads over the last 7 days (configurable retention)
+- **Subscriptions / MonitoredItems** — push-based updates to clients on metric change
+- **Standard data types** — `Float`, `Int32`/`Int64`, `Boolean`, `String`
+- **Anonymous + username/password security profiles** (`None` security policy out of the box; PKI-validated profiles supported)
+- **Session-count + connection-limit telemetry** — opcgw caps concurrent sessions per `[opcua].max_connections` and emits a `opcua_session_count_at_limit` warn when the limit is reached
+
+### Embedded web UI (port 8088 — opt-in via `OPCGW_WEB__ENABLED=true`)
+
+- **Live metrics dashboard** — current value + last-uplink timestamp for every configured metric, auto-refreshing
+- **Application / Device / Metric CRUD** — add, edit, and remove the topology without restarting the gateway (writes back to `config/config.toml` via `toml_edit`, preserving formatting + comments)
+- **ChirpStack status tile** — last poll outcome, cumulative error count, gateway uptime
+- **Commands page** — downlink command queue + delivery-status tracking
+- **HTTP basic-auth gating** — single set of credentials shared with the OPC UA server (no separate web account to manage)
+
+### Gateway operations
+
+- **Configurable poll cadence** — `polling_frequency` per ChirpStack, default 60s
+- **Failure-isolating per-device polling** — a single failing device cannot stop the cycle for the rest
+- **Auto-recovery loop** — opcgw retries ChirpStack connection on transient outages with configurable backoff
+- **Hot-reload-safe knobs** — many `[chirpstack]` / `[opcua]` fields can be changed in `config.toml` and reloaded without restart (see `docs/security.md` § "Hot-reload" for the full list)
+- **Structured JSON logs** — every operationally-meaningful event is emitted at `info` or higher with a closed-enum `event=` taxonomy suitable for SIEM / log aggregation
+
+### Persistence
+
+- **SQLite with WAL mode** — concurrent read/write, crash-safe
+- **7-day metric history** (configurable via `[opcua].history_retention_days`) — auto-pruned by background task
+- **Atomic schema migrations** — versioned (`v001`–`v008`), per-startup forward-only
+
+## Who is this for?
+
+| You are… | opcgw fits if… |
+|---|---|
+| A SCADA integrator with an existing OPC UA HMI | You need LoRaWAN devices to appear as native tags without rewriting your HMI for MQTT |
+| An OT engineer running ChirpStack on-prem | You want a single deployable unit between your LoRaWAN stack and your control system |
+| A facility operator | You want a web dashboard for live LoRaWAN values without standing up a separate visualization tool |
+| A devops/platform team | You want a Rust binary (~30 MB) that runs as a non-root container with a small attack surface — no Node/Python runtime to keep patched |
 
 ## Supported architectures
 
@@ -40,11 +121,13 @@ Tags follow [Semantic Versioning](https://semver.org/) and are generated by `doc
 
 | Tag pattern        | Example   | Meaning                                                            |
 |--------------------|-----------|--------------------------------------------------------------------|
-| `<major>.<minor>.<patch>` | `2.0.0`  | The exact release. Pin to this for fully reproducible deployments. |
+| `<major>.<minor>.<patch>` | `2.0.1`  | The exact release. Pin to this for fully reproducible deployments. |
 | `<major>.<minor>`         | `2.0`    | Latest patch within a minor line. Auto-updates on patch releases.  |
-| `sha-<short>`             | `sha-25cb062` | Commit-sha-pinned build. Used for tracing back to a specific commit. |
+| `sha-<short>`             | `sha-7a26227` | Commit-sha-pinned build. Used for tracing back to a specific commit. |
 
 There is **no** `:latest` tag — pin to a specific minor or patch.
+
+> **Note on `v2.0.0`**: the `2.0.0` tag exists in git history but the corresponding Docker image was never published — the v2.0.0 publishing workflow failed at schema validation due to a GitHub Actions context bug (fixed in v2.0.1). `gcorbaz/opcgw:2.0.0` will return `manifest unknown`. Use `:2.0` (recommended) or `:2.0.1` (exact) instead.
 
 ## Quick start
 
@@ -164,6 +247,32 @@ docker logs -f opcgw
 ```
 
 Look for the structured-log event `operation="poll_cycle_start"` within ~30 seconds of startup, followed by `operation="poll_cycle_end"` on each successful cycle. When `[opcua].diagnostics_enabled = true` is set, the periodic `event="opcua_session_count"` gauge (fired every ~5 s) additionally confirms the OPC UA server is listening; with diagnostics disabled the gauge does not fire, so use `event="opcua_limits_configured"` from startup as the alternative listener-up signal.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Quick fix |
+|---|---|---|
+| Container crashes on first start with "Permission denied" creating `./log` or `./data` | Bind-mount host dirs owned by `root` / your UID, but the container runs as `10001` | `sudo chown -R 10001:10001 ./log ./data ./pki ./config` |
+| `nc -z localhost 4855` returns "Connection refused" but container is running | OPC UA bound to a specific interface (default `0.0.0.0` so this is rare) | Check the startup log for `event="opcua_limits_configured"`; if absent, the OPC UA server failed to start — inspect logs for the actual error |
+| `poll_cycle_end errors=N chirpstack_available=false` repeatedly | Wrong `OPCGW_CHIRPSTACK__API_TOKEN`, expired PAT, or token from a different ChirpStack instance | Generate a new tenant-scoped API key in ChirpStack UI → Tenants → your tenant → API Keys → Add. Update the env var. |
+| Live Metrics page shows "Never reported" for every metric | `chirpstack_metric_name` doesn't match the codec's emitted key | Check ChirpStack UI → device → Metrics tab; the column headers are the case-sensitive keys you must put in `chirpstack_metric_name` |
+| Web UI form returns "CSRF check failed: Origin header missing, null, or not in allow-list" | Browser uses `localhost` but allow-list contains only `127.0.0.1` (or vice versa) | Set `[web].allowed_origins = ["http://127.0.0.1:8088", "http://localhost:8088"]` in `config.toml` |
+| OPC UA `manifest unknown` on `gcorbaz/opcgw:2.0.0` | No image was ever published for v2.0.0 (workflow bug; see the "Supported tags" note above) | Pull `:2.0` (recommended) or `:2.0.1` (exact) instead |
+
+For anything else, file an issue at <https://github.com/guycorbaz/opcgw/issues>.
+
+## Scale & performance
+
+Indicative numbers from a Raspberry Pi 4 / 8 GB running opcgw against a local ChirpStack v4.x:
+
+| Dimension | Value | Notes |
+|---|---|---|
+| Memory footprint | ~30 MB RSS, ~80 MB peak with web UI enabled | Rust binary, no runtime |
+| Image size | ~75 MB compressed | Multi-stage build, runtime is ubuntu:24.04 + the static-linked binary |
+| Poll cycle latency | < 15 ms per cycle, single-digit ms per device | gRPC over loopback; LAN-attached ChirpStack adds RTT |
+| OPC UA Read latency | < 1 ms (in-memory) | Values served from the SQLite latest-value path |
+| OPC UA HistoryRead | bounded by `[opcua].max_history_data_results_per_node` (default 10000) | Manual pagination via follow-up calls |
+| Sustained device count | tested up to ~200 devices × 5 metrics each per gateway | Above this scale, consider tuning `polling_frequency` or sharding |
 
 ## Upgrading from v2.0-rc
 
