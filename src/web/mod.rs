@@ -125,6 +125,17 @@ pub struct DeviceSummary {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MetricSpec {
     pub metric_name: String,
+    /// Storage-layer key: the value the chirpstack poller used when
+    /// writing this metric (i.e. the ChirpStack codec's metric key,
+    /// e.g. `Hum_SHT`, `WaterFlowValue`). The dashboard MUST use this
+    /// (NOT `metric_name` which is the OPC UA display name) when
+    /// looking metrics up in storage — they're keyed by chirpstack name
+    /// because that's what `prepare_metric_for_batch` writes. Surfaced
+    /// 2026-05-20 during v2.0 GA web-UI walkthrough: every Live-Metrics
+    /// row showed "Never reported" even though storage had real values,
+    /// because the dashboard was looking up by `metric_name` while
+    /// storage rows were keyed by `chirpstack_metric_name`.
+    pub chirpstack_metric_name: String,
     pub metric_type: crate::config::OpcMetricTypeConfig,
     pub metric_unit: Option<String>,
 }
@@ -171,6 +182,7 @@ impl DashboardConfigSnapshot {
                             .iter()
                             .map(|m| MetricSpec {
                                 metric_name: m.metric_name.clone(),
+                                chirpstack_metric_name: m.chirpstack_metric_name.clone(),
                                 metric_type: m.metric_type.clone(),
                                 // Story A-6 P11 + iter-2 K4 review fix:
                                 // trim ASCII-only whitespace at the

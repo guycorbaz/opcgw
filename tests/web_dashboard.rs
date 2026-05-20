@@ -608,6 +608,7 @@ async fn api_devices_returns_json_with_expected_shape_when_authed() {
                     device_name: "Device One".to_string(),
                     metrics: vec![opcgw::web::MetricSpec {
                         metric_name: "temperature".to_string(),
+                        chirpstack_metric_name: "temperature".to_string(),
                         metric_type: opcgw::config::OpcMetricTypeConfig::Float,
                         metric_unit: None,
                     }],
@@ -727,21 +728,25 @@ async fn api_devices_emits_typed_value_and_unit_per_variant() {
                 metrics: vec![
                     opcgw::web::MetricSpec {
                         metric_name: "temperature".to_string(),
+                        chirpstack_metric_name: "temperature".to_string(),
                         metric_type: opcgw::config::OpcMetricTypeConfig::Float,
                         metric_unit: Some("°C".to_string()),
                     },
                     opcgw::web::MetricSpec {
                         metric_name: "count".to_string(),
+                        chirpstack_metric_name: "count".to_string(),
                         metric_type: opcgw::config::OpcMetricTypeConfig::Int,
                         metric_unit: None,
                     },
                     opcgw::web::MetricSpec {
                         metric_name: "online".to_string(),
+                        chirpstack_metric_name: "online".to_string(),
                         metric_type: opcgw::config::OpcMetricTypeConfig::Bool,
                         metric_unit: Some("%".to_string()),
                     },
                     opcgw::web::MetricSpec {
                         metric_name: "label".to_string(),
+                        chirpstack_metric_name: "label".to_string(),
                         metric_type: opcgw::config::OpcMetricTypeConfig::String,
                         metric_unit: Some("lvl".to_string()),
                     },
@@ -752,6 +757,7 @@ async fn api_devices_emits_typed_value_and_unit_per_variant() {
                     // test that calls the helper directly.
                     opcgw::web::MetricSpec {
                         metric_name: "bignum".to_string(),
+                        chirpstack_metric_name: "bignum".to_string(),
                         metric_type: opcgw::config::OpcMetricTypeConfig::Int,
                         metric_unit: None,
                     },

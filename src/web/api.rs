@@ -525,7 +525,14 @@ pub async fn api_devices(
                         .metrics
                         .iter()
                         .map(|spec| {
-                            let key = (dev.device_id.clone(), spec.metric_name.clone());
+                            // 2026-05-20 v2.0-GA-blocker fix: look up the
+                            // metric in storage by ChirpStack name (the
+                            // codec key that `prepare_metric_for_batch`
+                            // wrote), NOT by OPC UA display name. The
+                            // dashboard exports `metric_name` (OPC UA) to
+                            // the client below, but the storage row is
+                            // keyed by `chirpstack_metric_name`.
+                            let key = (dev.device_id.clone(), spec.chirpstack_metric_name.clone());
                             match metric_by_key.get(&key) {
                                 Some(row) => {
                                     let value = metric_type_to_json_value(
@@ -5751,6 +5758,7 @@ mod tests {
                 .iter()
                 .map(|(n, t)| crate::web::MetricSpec {
                     metric_name: n.to_string(),
+                    chirpstack_metric_name: n.to_string(),
                     metric_type: t.clone(),
                     metric_unit: None,
                 })
