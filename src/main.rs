@@ -735,16 +735,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
 
-    // Signal poller that restore is complete (Task 11)
-    info!("Metric restore phase complete; signaling poller to start");
-    restore_barrier.wait();
-
-    // Run chirpstack poller and OPC UA server in separate tasks
+    // Spawn the ChirpStack poller FIRST so it can reach its own
+    // `barrier.wait()` (inside `ChirpstackPoller::run()` at
+    // `src/chirpstack.rs::run`). The `restore_barrier` is constructed with
+    // `Barrier::new(2)` and synchronises this main task with the poller
+    // task. Calling `restore_barrier.wait()` here BEFORE the poller is
+    // spawned deadlocks main forever — there is no other participant for
+    // the barrier to release against. (Pre-fix: this exact ordering bug
+    // surfaced via the v2.0 GA end-to-end test on 2026-05-20; main blocked
+    // here forever, the OPC UA server task at line 749 was never spawned,
+    // and the gateway accepted zero OPC UA client connections despite the
+    // session-count gauge — spawned earlier inside `OpcUa::build()` —
+    // continuing to fire and misleading every CI smoke test.)
     let chirpstack_handle = tokio::spawn(async move {
         if let Err(e) = chirpstack_poller.run().await {
             error!(error = ?e, "ChirpStack poller error");
         }
     });
+
+    // Signal poller that restore is complete (Task 11)
+    info!("Metric restore phase complete; signaling poller to start");
+    restore_barrier.wait();
 
     let opcua_handle = tokio::spawn(async move {
         if let Err(e) = OpcUa::run_handles(run_handles).await {
