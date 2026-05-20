@@ -862,7 +862,18 @@ pub struct AppConfig {
     pub web: WebConfig,
 
     /// List of ChirpStack applications and devices to monitor.
-    #[serde(rename = "application")]
+    ///
+    /// Epic D D-0 (2026-05-20): `#[serde(default)]` so a TOML file
+    /// with zero `[[application]]` blocks deserializes to an empty
+    /// vec instead of failing at deserialization with
+    /// `missing field "application"`. Pairs with the validator
+    /// loosening — without this attr, the validator's allow-empty
+    /// branch is unreachable because deserialization fails first.
+    /// Surfaced 2026-05-20 by CI failure of
+    /// `tests/main_startup_no_deadlock.rs::main_startup_with_empty_application_list`
+    /// — the local-only test had been passing because of a stale
+    /// cached binary; the CI fresh build exposed the gap.
+    #[serde(rename = "application", default)]
     pub application_list: Vec<ChirpStackApplications>,
 }
 
