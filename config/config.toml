@@ -178,6 +178,19 @@ stale_threshold_seconds = 120
 #auth_realm = "opcgw"
 #allowed_origins = ["http://gateway.local:8080"]
 
+# Active [web] section. enabled / bind_address / port are still controllable
+# via env vars (OPCGW_WEB__ENABLED, OPCGW_WEB__BIND_ADDRESS, OPCGW_WEB__PORT)
+# which take precedence over the values here. `allowed_origins` is set
+# explicitly because the default ("http://<bind_address>:<port>") only matches
+# one of the two URLs operators commonly browse to; without both entries the
+# CSRF middleware rejects POST/PUT/DELETE when the browser uses localhost
+# while bind_address is 127.0.0.1 (or vice versa).
+[web]
+allowed_origins = [
+    "http://127.0.0.1:8088",
+    "http://localhost:8088",
+]
+
 
 ###########################################################
 # Applications
@@ -193,19 +206,18 @@ stale_threshold_seconds = 120
 ###########################################################
 
 [[application]]
-application_id = "00000000-0000-0000-0000-000000000001"
+application_id = "ae2012c2-75a1-407d-98ab-1520fb511edf"
 application_name = "Example"
 
     [[application.device]]
-    device_name = "ExampleSensor"
-    # Synthesized illustrative DevEUI — replace with the real EUI of your device.
-    device_id = "0000000000000001"
+    device_name = "WaterFlowSensor"
+    device_id = "a84041b8a1867e20"
 
         [[application.device.read_metric]]
-        metric_name = "Temperature"
-        chirpstack_metric_name = "temperature"
-        metric_type = "Float"
-        metric_unit = "C"
+        metric_name = "WaterFlow"
+        chirpstack_metric_name = "WaterFlowValue"
+        metric_type = "Int"
+        metric_unit = ""
 
 
 # Command Delivery Status Configuration
