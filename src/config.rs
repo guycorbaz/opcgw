@@ -1515,10 +1515,16 @@ impl AppConfig {
             }
         }
 
-        // Validate application_list
-        if self.application_list.is_empty() {
-            errors.push("application_list: at least one application must be configured".to_string());
-        } else {
+        // Validate application_list. Epic D D-0 (2026-05-20): an empty
+        // application_list is a valid baseline state — the gateway can
+        // start with zero configured applications, the OPC UA server
+        // exposes an empty browse tree, and the web UI is used to add
+        // applications interactively. Removed the "at least one
+        // application must be configured" error that previously made
+        // `docker run` against a fresh empty config.toml crash at
+        // startup, defeating the Epic-B "spin up, configure via web UI"
+        // deployment model.
+        {
             let mut seen_device_ids = std::collections::HashSet::new();
             // Story 9-4 AC#3: cross-application application_id uniqueness.
             // The pattern mirrors `seen_device_ids` below.
@@ -2270,20 +2276,28 @@ mod tests {
         assert!(error_msg.contains("greater than 0"));
     }
 
-    /// Tests that empty application_list produces clear error.
-    ///
-    /// Verifies that validation detects an empty application list
-    /// and returns an appropriate error message.
+    /// Epic D D-0 (2026-05-20): an empty `application_list` is a valid
+    /// baseline state. The gateway boots with zero configured applications,
+    /// the OPC UA server exposes an empty browse tree, and the web UI is
+    /// used to add applications interactively. Pre-fix this case errored
+    /// with "application_list: at least one application must be
+    /// configured", which made `docker run` against a fresh empty
+    /// config.toml crash at startup — defeating Epic B's "spin up, then
+    /// configure via web UI" deployment model. This test asserts the
+    /// inverse: validate() returns Ok for an empty application_list.
     #[test]
-    fn test_validation_empty_application_list() {
+    fn test_validation_empty_application_list_is_now_valid() {
         let mut config = get_config();
         config.application_list.clear();
+        assert!(config.application_list.is_empty(), "precondition");
 
         let result = config.validate();
-        assert!(result.is_err());
-        let error_msg = result.unwrap_err().to_string();
-        assert!(error_msg.contains("application_list"));
-        assert!(error_msg.contains("at least one"));
+        assert!(
+            result.is_ok(),
+            "empty application_list must be a valid baseline state (Epic D D-0), \
+             got: {:?}",
+            result.err(),
+        );
     }
 
     /// Tests that duplicate device_ids produces clear error.

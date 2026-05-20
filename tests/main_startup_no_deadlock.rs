@@ -217,3 +217,126 @@ fn main_startup_binds_opc_ua_port_within_timeout() {
         opcua_port,
     );
 }
+
+/// Same minimal config as `write_minimal_config` but with **zero
+/// `[[application]]` blocks** — used by `main_startup_with_empty_application_list`
+/// below to assert that the gateway accepts an empty topology as a valid
+/// baseline state (Epic D D-0, 2026-05-20).
+fn write_empty_topology_config(
+    temp_dir: &std::path::Path,
+    opcua_port: u16,
+) -> std::path::PathBuf {
+    let config_path = temp_dir.join("config.toml");
+    let mut f = std::fs::File::create(&config_path).expect("create config.toml");
+    write!(
+        f,
+        r#"[global]
+debug = false
+
+[chirpstack]
+server_address = "http://127.0.0.1:1"
+api_token = "test_token_placeholder"
+tenant_id = "00000000-0000-0000-0000-000000000000"
+polling_frequency = 60
+retry = 1
+delay = 1
+
+[opcua]
+application_name = "opcgw startup test"
+application_uri = "urn:opcgw:test"
+product_uri = "urn:opcgw:test"
+host_ip_address = "127.0.0.1"
+host_port = {opcua_port}
+diagnostics_enabled = true
+create_sample_keypair = true
+certificate_path = "own/cert.der"
+private_key_path = "private/private.pem"
+trust_client_cert = true
+check_cert_time = true
+pki_dir = "./pki"
+user_name = "opcua-user"
+user_password = "test_password_placeholder"
+
+# Intentionally NO [[application]] blocks — Epic D D-0 baseline state.
+"#,
+        opcua_port = opcua_port,
+    )
+    .expect("write config");
+    config_path
+}
+
+/// Epic D D-0 regression test (2026-05-20): the gateway must accept an
+/// empty `application_list` as a valid baseline state and still bind its
+/// OPC UA listener at startup. Pre-fix, `AppConfig::validate` rejected
+/// empty lists with "application_list: at least one application must be
+/// configured", causing `docker run` against a fresh empty config.toml to
+/// crash before the web UI was reachable — defeating Epic B's "spin up,
+/// configure via web UI" deployment model.
+#[test]
+fn main_startup_with_empty_application_list() {
+    let opcua_port: u16 = 24841;
+
+    let temp_dir = tempfile::tempdir().expect("create tempdir");
+    pre_create_runtime_dirs(temp_dir.path());
+    write_empty_topology_config(temp_dir.path(), opcua_port);
+
+    let bin_path = env!("CARGO_BIN_EXE_opcgw");
+
+    let mut child: Child = Command::new(bin_path)
+        .args(["-c", "config.toml"])
+        .current_dir(temp_dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("Failed to spawn opcgw binary — is the release/debug binary built?");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let target: std::net::SocketAddr = format!("127.0.0.1:{}", opcua_port)
+        .parse()
+        .expect("parse loopback addr");
+
+    let mut bound = false;
+    let mut early_exit = false;
+
+    while Instant::now() < deadline {
+        if TcpStream::connect_timeout(&target, Duration::from_millis(300)).is_ok() {
+            bound = true;
+            break;
+        }
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                early_exit = true;
+                break;
+            }
+            Ok(None) => {}
+            Err(_) => {}
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    if early_exit {
+        panic!(
+            "opcgw exited before binding OPC UA port {} despite the config \
+             having ZERO [[application]] blocks. The Epic D D-0 invariant \
+             (empty application_list is a valid baseline state) has \
+             regressed — `AppConfig::validate` is likely rejecting the \
+             empty list again. See `src/config.rs::validate` for the \
+             allow-empty-list comment block.",
+            opcua_port
+        );
+    }
+
+    assert!(
+        bound,
+        "OPC UA listener was not bound on 127.0.0.1:{} within 15 s with an \
+         empty application_list. The validator may have accepted the empty \
+         list (no early-exit panic above) but the gateway's startup task \
+         spawning may have a different empty-list bug downstream. Check \
+         that `OpcUa::build` / `OpcUa::run_handles` and `ChirpstackPoller::run` \
+         all handle an empty application_list gracefully.",
+        opcua_port,
+    );
+}

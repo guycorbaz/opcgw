@@ -575,9 +575,16 @@ find ./pki/private -type f -name '*.pem' -exec chmod 600 {} +    # no-op on fres
           <step>
             <para>Author <filename>./config/config.toml</filename> (see
             <xref linkend="ch-configuration"/> — at minimum the
-            <literal>[chirpstack]</literal>,
-            <literal>[opcua]</literal>, and one
-            <literal>[[application]]</literal> block).</para>
+            <literal>[chirpstack]</literal> and
+            <literal>[opcua]</literal> blocks; the
+            <literal>[[application]]</literal> blocks are
+            <emphasis>optional</emphasis> at this step — the gateway
+            accepts an empty topology and you can add applications,
+            devices, and metrics later via the web UI). For the very
+            first run, the bundled
+            <filename>config/config.toml</filename> template (with
+            placeholder secrets overridden by env vars) is sufficient
+            even without any application configured.</para>
           </step>
           <step>
             <para>Start the container, injecting the required secrets via
@@ -1730,10 +1737,18 @@ application_name = "Arrosage"
 
         <note>
           <title>Constraints</title>
-          <para>Each TOML must contain at least one application, each
-          application at least one device, each device at least one read
-          metric (commands are optional). Metric names must be unique
-          within a device.</para>
+          <para>The TOML may be empty (no <literal>[[application]]</literal>
+          blocks at all) — the gateway will start with an empty OPC UA
+          browse tree and the web UI is then used to add applications,
+          devices and metrics interactively. When applications
+          <emphasis>are</emphasis> declared in the TOML, each application
+          must contain at least one device, each device at least one read
+          metric (commands are optional), and metric names must be unique
+          within a device. <literal>application_id</literal> must be
+          unique across the configuration; <literal>device_id</literal>
+          must be unique within one application;
+          <literal>chirpstack_metric_name</literal> must be unique within
+          one device.</para>
         </note>
 
         <note>
