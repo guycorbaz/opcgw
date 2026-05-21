@@ -1204,10 +1204,10 @@ So that I cannot create silent ambiguity in the OPC UA browse tree (two nodes cl
 
 **Given** opcgw already has an `[[application]]` entry with `application_id = "abc-123"`,
 **When** the operator POSTs another `[[application]]` with the same `application_id = "abc-123"`,
-**Then** the server rejects the request with HTTP 409 (or 400 — Dev Agent picks the better-fitting code), emits `event="application_crud_rejected" reason="duplicate"` matching the existing Story 9-4 audit shape with a `duplicate` sub-code, and the UI renders the error inline near the conflicting field (not as a generic toast).
+**Then** the server rejects the request with HTTP 409 (or 400 — Dev Agent picks the better-fitting code), emits `event="application_crud_rejected" reason="conflict" conflict_kind="duplicate"` (audit-shape course-correction from scope-time `reason="duplicate"` to preserve the existing `reason="conflict"` grep contract — see C-3 spec Dev Notes for full rationale), and the UI renders the error inline near the conflicting field (not as a generic toast).
 **And given** the operator is adding a device under application `abc-123` and `device_id = "DEADBEEF00000001"` already exists under that same application,
 **When** the POST fires,
-**Then** the server rejects with the same 409/400 + `event="device_crud_rejected" reason="duplicate"` audit pattern, scoped to "same DevEUI under same application."
+**Then** the server rejects with the same 409/400 + `event="device_crud_rejected" reason="conflict" conflict_kind="duplicate"` audit pattern, scoped to "same DevEUI under same application."
 **And given** the operator is adding a metric under device `DEADBEEF00000001` and `chirpstack_metric_name = "temperature"` already exists on that device,
 **When** the POST fires,
 **Then** the server rejects with the same pattern at the metric level.
