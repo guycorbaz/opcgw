@@ -226,14 +226,18 @@ impl WebAuthState {
     ///
     /// In first-run mode the gateway has no configured OPC UA password
     /// yet, so the standard [`new`] constructor would fail-close. This
-    /// constructor builds a `WebAuthState` with throwaway random
-    /// credentials (32 bytes each, hex-encoded). The credentials are
-    /// **never** authenticated against because the first-run gate
-    /// middleware (`src/web/setup.rs::first_run_gate_middleware`)
-    /// intercepts every non-wizard, non-static request BEFORE the
-    /// auth middleware can run. The wizard routes themselves bypass
-    /// the auth layer entirely (separate sub-router in
-    /// [`crate::web::build_router`]).
+    /// constructor builds a `WebAuthState` whose user/pass digests are
+    /// `HMAC-SHA256(zero_buffer, random_key)` — operationally
+    /// indistinguishable from random bytes but cheaper to produce than
+    /// three separate `getrandom` calls (iter-1 M9 patch).
+    ///
+    /// The credentials are **never** authenticated against because the
+    /// first-run gate middleware (`first_run_gate_middleware` in
+    /// `src/web/setup.rs`) intercepts every non-wizard, non-static
+    /// request BEFORE the auth middleware can run. The wizard routes
+    /// themselves bypass the auth layer when `state.is_first_run` is
+    /// true (single-router conditional-bypass shape; see the module
+    /// doc in `src/web/setup.rs` after the iter-2 P19 update).
     ///
     /// `is_configured` is set to `false` so the defence-in-depth check
     /// at `basic_auth_middleware:382` short-circuits any auth attempt

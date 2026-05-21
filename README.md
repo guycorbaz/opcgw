@@ -119,7 +119,29 @@ If you start the gateway WITHOUT `OPCGW_OPCUA__USER_PASSWORD` set and without `[
 3. Be restarted automatically by Docker / systemd (per your restart policy).
 4. Boot in normal mode with the new password loaded via the figment provider stack (precedence: env-var > `secrets.toml` > `config.toml`).
 
-This lets you `docker run` against a fresh deployment with no `config.toml` and finish setup through the browser — no operator-side TOML editing. The wizard is one-shot: subsequent `/setup` requests return HTTP 410 Gone. To rotate the password later, either override via `OPCGW_OPCUA__USER_PASSWORD` env-var or hand-edit `config/secrets.toml` and restart.
+**Important — the wizard collects ONLY the OPC UA `user_password`.** Every other configuration field (ChirpStack credentials, OPC UA endpoint + PKI dir + application name, web admin credentials, etc.) must still be present in `config/config.toml` (or provided via `OPCGW_*` env-vars) before the gateway starts. A truly-empty `config.toml` will fail validation BEFORE the wizard becomes reachable. The minimum bootstrap `config.toml` shape:
+
+```toml
+[chirpstack]
+server_address = "127.0.0.1:8080"
+api_token = "<your-token>"
+tenant_id = "<your-tenant-id>"
+
+[opcua]
+endpoint = "0.0.0.0:4855"
+application_name = "opcgw"
+pki_dir = "pki"
+# user_name defaults to "opcua-user" via serde default (iter-2 P23).
+# user_password collected via /setup wizard on first boot.
+
+[web]
+bind = "0.0.0.0"
+port = 8080
+admin_user = "admin"
+admin_password = "<your-admin-password>"
+```
+
+The wizard is one-shot: subsequent `/setup` requests return HTTP 410 Gone. To rotate the password later, either override via `OPCGW_OPCUA__USER_PASSWORD` env-var or hand-edit `config/secrets.toml` and restart. The shipped `config/config.toml` in the repo already contains a working baseline you can adapt — copy it, fill in your credentials, and leave `user_password` unset.
 
 Bind-mounted host directories must be owned by UID 10001 before first start (the container can't `chown` host files):
 

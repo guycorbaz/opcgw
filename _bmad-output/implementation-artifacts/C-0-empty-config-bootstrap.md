@@ -117,7 +117,7 @@ After C-0:
    - A submit button labelled "Save and continue".
    - No global navigation (the operator must complete this step before they can reach `/applications`, `/devices`, etc.).
 
-5. **Every other route redirects to `/setup` while in first-run mode.** A new `first_run_redirect` middleware in `src/web/` checks `AppConfig::is_first_run()` on each request. If `true` AND the path is not `/setup` AND the path is not `/api/setup/*` AND the path is not a static asset under `/static/`, the middleware emits `HTTP 302 Location: /setup` (or `303 See Other` — Dev Agent picks the more semantically appropriate code per RFC 7231).
+5. **Every other route redirects to `/setup` while in first-run mode.** A new `first_run_redirect` middleware in `src/web/` checks `AppConfig::is_first_run()` on each request. If `true` AND the path is not `/setup` AND the path is not `/api/setup/*` AND the path is not a static asset under `/static/`, the middleware emits `HTTP 303 See Other` to `/setup` (iter-2 P16 doc-fix: implementation uses `axum::response::Redirect::to` which emits 303 per RFC 7231 — semantically correct for GET-to-GET redirects with no body carry-over).
 
 6. **OPC UA server behaviour during first-run.** The OPC UA server binds on its configured endpoint even during first-run mode — this is what allows external uptime probes to confirm "the gateway is running" before the wizard is completed. The server's authentication policy during first-run is one of (Dev Agent picks the better-fitting option and documents the choice in Dev Notes):
    - **(a)** Bind in anonymous-only mode (no username/password auth offered) until the wizard completes, then hot-swap to the standard username+password policy.
@@ -208,6 +208,7 @@ After C-0:
    - `.gitignore` (append `config/secrets.toml`)
    - `README.md`, `docs/security.md`, `docs/manual/opcgw-user-manual.xml` (documentation sync per CLAUDE.md rule)
    - `_bmad-output/implementation-artifacts/sprint-status.yaml` (story status flips)
+   - `.github/workflows/ci.yml` (iter-2 AA-L1 scope expansion: C-0 introduced audit event names containing the word "password" that tripped the previous hardcoded-credential CI regex; the regex tighten in commit `c5cdea1` is an in-scope follow-up)
    - This story spec file
 
 ### GitHub tracking issue
@@ -241,7 +242,7 @@ After C-0:
   - [ ] 3.3 Add `POST /api/setup/password` handler (see Task 4 for body).
   - [ ] 3.4 Add `first_run_redirect_middleware` that checks `AppConfig::is_first_run()` and redirects non-`/setup`, non-`/api/setup/*`, non-`/static/*` requests to `/setup` per AC#5.
   - [ ] 3.5 Wire the middleware into the main web router in `src/web/mod.rs` (or wherever the router is constructed).
-  - [ ] 3.6 Integration test in `tests/web_setup_wizard.rs`: (a) GET `/` while in first-run mode returns 302 → `/setup`; (b) GET `/setup` while in first-run mode returns 200 + the wizard HTML; (c) GET `/static/style.css` while in first-run mode is NOT redirected (static assets serve normally).
+  - [ ] 3.6 Integration test in `tests/web_setup_wizard.rs`: (a) GET `/` while in first-run mode returns 303 → `/setup`; (b) GET `/setup` while in first-run mode returns 200 + the wizard HTML; (c) GET `/static/style.css` while in first-run mode is NOT redirected (static assets serve normally).
 
 - [ ] **Task 4 — Wizard POST handler: validate + persist + reload (AC: #7, #8, #11)**
   - [ ] 4.1 Validation logic in `POST /api/setup/password`: (a) minimum length per existing `src/opc_ua_auth.rs` floor; (b) no leading/trailing whitespace; (c) no PLACEHOLDER_PREFIX; (d) confirmation matches password.
@@ -287,6 +288,81 @@ After C-0:
   - [ ] 10.5 Manual smoke test: spin up a fresh container with no `config.toml`, walk through the wizard, verify the password persists across a `docker restart`, verify env-var override still works.
   - [ ] 10.6 Commit message: `Story C-0: Empty-config bootstrap + first-run setup wizard - Implementation Complete` + `Refs #<issue>`.
 
+### Review Findings — iter-2 (2026-05-21)
+
+iter-2 of `bmad-code-review C-0` (Opus 4.7, fresh-context subagents: Blind Hunter + Edge Case Hunter + Acceptance Auditor). The iter-1 patches landed in commit `7ec2fc1` BEFORE this triage; counts below reflect what survives after iter-1.
+
+**Triage:** 2 decision-needed, 22 patch, 21 defer, 15 dismissed (already addressed by iter-1 or non-issues).
+
+#### Decision-needed (must resolve before patch round)
+
+- [ ] [Review][Decision] **EH-H5 — Empty `[opcua].user_name` rejected by validator before wizard becomes reachable** — README + DocBook claim "no config.toml needed" but the validator at `src/config.rs:1593` requires `user_name` non-empty. Operator stripping config.toml to nothing hits this before reaching the wizard. Options: (a) extend wizard form to capture user_name; (b) add `#[serde(default = "default_user_name")]`; (c) document that user_name must be in config.toml. `[src/config.rs:1593, README.md, docs/manual/opcgw-user-manual.xml]`
+- [ ] [Review][Decision] **AA-M1 / AC#14 — Empty applications page missing prominent "Add application" button** — Spec AC#14 requires a prominent button; implementation reuses the existing free-form "Create application" form. Options: (a) add stub button that scroll-focuses the existing form; (b) update spec to acknowledge "form above" as the v1 shape until C-2 lands the picker. `[static/applications.html, static/applications.js, _bmad-output/implementation-artifacts/C-0-empty-config-bootstrap.md AC#14]`
+
+#### Patch — HIGH (7)
+
+- [ ] [Review][Patch] **P1 — Cache `is_first_run()` in main.rs (currently called 2x; races env-var mutation)** `[src/main.rs around lines 705, 985]`
+- [ ] [Review][Patch] **P2 — Gate CSRF exemption for `/api/setup/password` on `state.is_first_run`** (exemption currently permanent — handler-level 410 mitigates but defence-in-depth is missing) `[src/web/csrf.rs:255-262]`
+- [ ] [Review][Patch] **P3 — Tighten `is_wizard_bypass_path`: drop suffix matching on `.js/.css/.png/.ico/.svg/.woff/.woff2`; replace with explicit allowlist of literal paths the wizard depends on (`/dashboard.css`, `/favicon.ico`)** `[src/web/setup.rs:79-119]`
+- [ ] [Review][Patch] **P4 — Add `DefaultBodyLimit::max(4 KiB)` (or `RequestBodyLimitLayer`) on `/api/setup/password`** (unauthenticated route in first-run mode — DoS via large body) `[src/web/mod.rs build_router]`
+- [ ] [Review][Patch] **P5 — `AppState.is_first_run: AtomicBool` with `compare_exchange(true, false)` in `setup_post` BEFORE writing secrets.toml** (closes concurrent-submit race + drain-window double-submit) `[src/web/mod.rs::AppState, src/web/setup.rs::setup_post]`
+- [ ] [Review][Patch] **P6 — README + DocBook overstate "no config.toml needed"** — clarify minimum config.toml required for wizard to become reachable (chirpstack/opcua fields except user_password) `[README.md, docs/manual/opcgw-user-manual.xml, docs/security.md]`
+- [ ] [Review][Patch] **P7 — Better error categorisation for secrets.toml write failures** — distinguish EROFS / EACCES / ENOSPC in audit event + JSON response (`reason="readonly_filesystem" / "permission_denied" / "disk_full" / "io_error"`) `[src/web/setup.rs::setup_post error branch, write_secrets_toml]`
+
+#### Patch — MED (8)
+
+- [ ] [Review][Patch] **P8 — Server-render `PLACEHOLDER_PREFIX` into setup.html** (eliminates JS/Rust drift risk that the Completion Note already acknowledged) `[src/web/setup.rs::setup_get, static/setup.html]`
+- [ ] [Review][Patch] **P9 — Validate `Content-Type: application/json` strictly on `/api/setup/password`** (manual JSON parse currently accepts any Content-Type; CSRF-exempt route is a cross-site-form-POST surface) `[src/web/setup.rs::setup_post]`
+- [ ] [Review][Patch] **P10 — Fix fake regression-guard test `write_secrets_toml_escapes_password_with_special_chars`** — uses `IgnoredAny` so doesn't actually verify round-trip; replace with `toml::from_str` + assert on `user_password` value `[src/web/setup.rs::tests]`
+- [ ] [Review][Patch] **P11 — Add Origin / Referer header check on `/api/setup/password`** (defence-in-depth against drive-by clicks from hostile LAN page) `[src/web/setup.rs::setup_post]`
+- [ ] [Review][Patch] **P12 — Tighten `is_wizard_bypass_path` `/api/setup/` prefix to exact `/api/setup/password`** (combined fix with P3) `[src/web/setup.rs:79-105]`
+- [ ] [Review][Patch] **P13 — Add `control_char_invalid`, `too_long`, `invalid_json` entries to JS REASON_MESSAGES** (currently fallback to raw reason code) `[static/setup.html lines ~1832]`
+- [ ] [Review][Patch] **P14 — Resolve `static_dir` to absolute path in main.rs** — literal `"static"` at main.rs:993 is still cwd-relative; H5 fix only made the read path consistent with it `[src/main.rs:993]`
+- [ ] [Review][Patch] **P15 — Fix `secrets_provider_active` TOCTOU** — read secrets.toml once into a String, pass to `figment::providers::Toml::string(&body)` (currently two separate file reads) `[src/config.rs::from_path]`
+
+#### Patch — LOW (7)
+
+- [ ] [Review][Patch] **P16 — Spec Completion Note line still says "302"** — update to "303 See Other" (matches code + tests + README) `[_bmad-output/implementation-artifacts/C-0-empty-config-bootstrap.md]`
+- [ ] [Review][Patch] **P17 — Add `validate_password_rejects_whitespace_only` unit test** `[src/web/setup.rs::tests]`
+- [ ] [Review][Patch] **P18 — Drop dead `WIZARD_BYPASS_PREFIXES` constant** OR refactor `is_wizard_bypass_path` to use it (currently constant is never read by the function) `[src/web/setup.rs:78-87]`
+- [ ] [Review][Patch] **P19 — Module doc-comment in setup.rs claims "separate auth-less wizard router" — code wires routes into the main router with conditional bypass; update doc** `[src/web/setup.rs:38-46]`
+- [ ] [Review][Patch] **P20 — Drop hardcoded line number "from src/utils.rs:419" in setup.html JS comment** (line numbers drift) `[static/setup.html JS comment]`
+- [ ] [Review][Patch] **P21 — Add `#[serde(deny_unknown_fields)]` to `SetupPasswordRequest`** `[src/web/setup.rs SetupPasswordRequest]`
+- [ ] [Review][Patch] **P22 — Update `for_first_run` doc-string** — says "throwaway random credentials" but M9 changed body to zero buffers under HMAC `[src/web/auth.rs:226-242]`
+
+#### Deferred
+
+- [x] [Review][Defer] **BH-H8 — chmod-before-rename ordering** `[src/web/setup.rs::write_secrets_toml]` — Linux `rename(2)` preserves perms on same-fs; cross-fs scenario unlikely because tempfile is created in same parent dir.
+- [x] [Review][Defer] **BH-H10 — No rate-limit on wizard POST** `[src/web/setup.rs::setup_post]` — out-of-scope for C-0; covered by docs/security.md trusted-operator-network assumption; future hardening story.
+- [x] [Review][Defer] **EH-H3 — `is_first_run()` vs `validate()` use asymmetric env-var helpers** `[src/config.rs]` — extract shared helper in a refactor story; today's behaviour is correct.
+- [x] [Review][Defer] **BH-M5 — secrets.toml hand-edit-without-restart leaves wizard reachable** `[docs/security.md]` — operator-workflow concern; document.
+- [x] [Review][Defer] **BH-M6 — `toml_escape_string` non-BMP / surrogate edge cases** `[src/web/setup.rs::toml_escape_string]` — replace with `toml::Value::String(s).to_string()` in a follow-up cleanup story.
+- [x] [Review][Defer] **BH-M7 — JS countdown lifecycle (cleanup + slow-restart UX)** `[static/setup.html]` — implement "retry until 200" loop with backoff in a UX-polish story.
+- [x] [Review][Defer] **BH-M10 — No fsync of parent directory after rename** `[src/web/setup.rs::write_secrets_toml]` — durability under power-loss; document and revisit.
+- [x] [Review][Defer] **EH-M2 — `validate_password` whitespace-bracketed rule vs `validate()` env-var rule asymmetric** `[src/web/setup.rs, src/config.rs]` — extract shared helper; future refactor.
+- [x] [Review][Defer] **EH-M7 — 5-second restart countdown vs slow supervisor** `[static/setup.html]` — same root as BH-M7; UX polish.
+- [x] [Review][Defer] **BH-L1 — `is_first_run` doc claims secrets.toml file-read; implementation relies on figment-merged value only** `[src/config.rs::is_first_run]` — doc clarification.
+- [x] [Review][Defer] **BH-L3 — Wizard HTML hardcoded English** `[static/setup.html]` — out-of-scope; future i18n story.
+- [x] [Review][Defer] **BH-L7 — `post_first_run_setup_get_returns_410_gone` test doesn't verify auth actually ran** `[tests/web_setup_wizard.rs]` — test hardening; not blocking.
+- [x] [Review][Defer] **BH-L8 — README env-var "WITHOUT" wording on empty-value case** `[README.md]` — doc nit; align with validator behaviour.
+- [x] [Review][Defer] **BH-L11 — setup.html inline `<style>` may violate strict CSP** `[static/setup.html]` — no CSP enforced today; revisit when security headers tightened.
+- [x] [Review][Defer] **BH-L13 — No `trace!` between figment file providers** `[src/config.rs::from_path]` — debuggability; minor.
+- [x] [Review][Defer] **EH-L3 — 256-char password threshold rationale undocumented** `[src/web/setup.rs::validate_password]` — extract as named constant or document.
+- [x] [Review][Defer] **EH-L6 — tempfile may leak on SIGKILL** `[src/web/setup.rs::write_secrets_toml]` — operational concern; document.
+- [x] [Review][Defer] **EH-L7 — Supervisor-not-configured dev-UX gap** `[README.md, src/main.rs first-run mode entry]` — emit warn-level log when running outside a supervisor.
+- [x] [Review][Defer] **AA-L2 — Dashboard empty-state copy variant from AC#13** `[static/dashboard.js, AC#13]` — copy drift; align with spec or update spec.
+- [x] [Review][Defer] **AA-L3 — `Refs #__` placeholder** `[commit messages c200089, c5cdea1, 7ec2fc1]` — per Epic A/B precedent; Guy opens issue out-of-band.
+- [x] [Review][Defer] **AA-L4 — doctest baseline 55 vs spec AC#21 ≥ 56** `[AC#21]` — acknowledged in Completion Note as old snapshot.
+- [x] [Review][Defer] **BH-L10 — Integration test substring-match brittle** `[tests/web_setup_wizard.rs::wizard_post_persists_password_and_signals_shutdown]` — covered by P10 refactor on the unit test side; integration-side similar improvement deferred to a hardening pass.
+
+#### Dismissed (15)
+
+Already addressed by iter-1 patches (commit `7ec2fc1`): BH-H1 (M3), BH-H3 (H5/EH-H2), BH-H7 (M7), BH-H9 (EH-M1), BH-M3 (M9), BH-M4 (302→303), BH-M8 (H2), BH-L6 (M9), AA-L5 (Auditor AC#11).
+
+Non-issues / false alarms / out-of-platform: EH-L1 (empty env-var lifecycle — validator handles), EH-L2 (query string — not a bug), EH-L4 (body extraction false alarm — auth short-circuits in post-first-run), EH-L5 (Windows paths — Linux-only project).
+
+Duplicates merged: EH-M4 → BH-M1/P8 (PLACEHOLDER_PREFIX), EH-M9 → EH-M3/P13 (control_char message).
+
 ---
 
 ## Dev Notes
@@ -316,7 +392,7 @@ Story 9-7 introduced a config-reload primitive that already rebuilds the in-memo
 1. The wizard handler calls the reload primitive's "reload now" entry point.
 2. The reload primitive re-runs the figment provider stack — this time `secrets.toml` exists, so its `user_password` is loaded.
 3. The OPC UA auth manager re-initialises with the new password.
-4. The wizard handler returns HTTP 302 → `/`.
+4. The wizard handler returns HTTP 303 → `/`.
 5. The browser follows the redirect; `is_first_run()` now returns `false`; the dashboard renders.
 
 The Dev Agent must verify that the OPC UA auth manager's re-init does NOT drop existing sessions (today there should be zero sessions during first-run, but be defensive: existing sessions during reload should remain authenticated under the OLD credentials until they reconnect, at which point they re-auth with the new credentials). This is the same contract Story 9-7 already documented.

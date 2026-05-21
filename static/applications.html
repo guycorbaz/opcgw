@@ -39,6 +39,17 @@
 <main>
   <section>
     <h2>Create application</h2>
+    <!-- Iter-2 P24 / AA-M1 (AC#14): explicit "Add application" CTA
+         button per AC#14. C-2 will replace this with the inventory
+         picker (cascading application→device dropdown sourced from
+         ChirpStack via /api/inventory). Until then, the button
+         scroll-focuses the existing free-form Create form. -->
+    <button type="button" id="add-application-cta"
+            onclick="document.getElementById('new-application-id').focus();
+                     document.getElementById('new-application-id')
+                       .scrollIntoView({ behavior: 'smooth', block: 'center' });">
+      + Add application
+    </button>
     <form id="create-form" class="crud-form" action="/api/applications" method="POST">
       <label for="new-application-id">Application ID</label>
       <input id="new-application-id" name="application_id" type="text" required>

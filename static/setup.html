@@ -109,7 +109,7 @@
     <div class="field">
       <label for="password">OPC UA password</label>
       <input id="password" name="password" type="password" required autocomplete="new-password">
-      <span class="hint">Must not be empty; no leading or trailing whitespace.</span>
+      <span class="hint">Must not be empty; no leading or trailing whitespace; no control characters; not a placeholder string; up to 256 characters.</span>
     </div>
     <div class="field">
       <label for="password-confirm">Confirm password</label>
@@ -134,11 +134,28 @@
    * Keep in sync with src/web/setup.rs::validate_password.
    */
   const REASON_MESSAGES = {
+    // Validation rejection reasons emitted by validate_password
+    // (src/web/setup.rs). Iter-2 P13: added control_char_invalid,
+    // too_long, invalid_json, setup_already_in_progress so operators
+    // see a friendly message instead of the raw reason code.
     empty: 'The password must not be empty.',
     whitespace_bracketed: 'The password must not start or end with whitespace.',
     whitespace_only: 'The password must contain non-whitespace characters.',
     placeholder_prefix: 'The password looks like an unfilled placeholder. Replace it with a real value.',
     confirmation_mismatch: 'The two password fields do not match.',
+    control_char_invalid: 'The password contains control characters (likely a paste error). Remove them and try again.',
+    too_long: 'The password is too long (maximum 256 characters).',
+    invalid_json: 'The server could not parse the form data — please try again or reload the page.',
+    setup_already_in_progress: 'Another setup attempt is in flight. Wait a few seconds, then reload this page.',
+    unsupported_media_type: 'The browser sent the form with the wrong content type. Please reload the page and try again.',
+    origin_mismatch: 'The request appears to originate from a different page than the gateway. Reload the wizard directly and try again.',
+    // Iter-2 P7: write-failure reasons emitted by SecretsWriteError.
+    readonly_filesystem: 'opcgw cannot write to the configuration directory (read-only filesystem). Re-mount the directory read-write and retry.',
+    permission_denied: 'opcgw lacks permission to write the configuration file. Check that the config directory is writable by the gateway user.',
+    disk_full: 'No disk space available to persist the configuration. Free up space and retry.',
+    parent_directory_missing: 'The configuration directory does not exist. Create it and retry.',
+    invalid_path: 'The configured secrets path is invalid (no parent directory).',
+    io_error: 'A filesystem error occurred while saving the configuration. See gateway logs for details.',
   };
 
   function showError(reason) {
@@ -186,8 +203,10 @@
     if (!password) return 'empty';
     if (password.trim() !== password) return 'whitespace_bracketed';
     if (!password.trim()) return 'whitespace_only';
-    // PLACEHOLDER_PREFIX from src/utils.rs:419
-    if (password.indexOf('REPLACE_ME_WITH_') === 0) return 'placeholder_prefix';
+    // Iter-2 P8 + P20: PLACEHOLDER_PREFIX is server-rendered into the
+    // {{PLACEHOLDER_PREFIX}} token below by setup_get (src/web/setup.rs)
+    // so client + server share a single source of truth (src/utils.rs).
+    if (password.indexOf('{{PLACEHOLDER_PREFIX}}') === 0) return 'placeholder_prefix';
     if (password !== confirmation) return 'confirmation_mismatch';
     return null;
   }

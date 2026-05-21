@@ -231,6 +231,14 @@ pub struct OpcUaConfig {
     ///
     /// Used when the server requires username/password authentication.
     /// Can be empty if anonymous access is allowed.
+    ///
+    /// Epic C C-0 (iter-2 P23): defaults to `"opcua-user"` via
+    /// [`default_opcua_user_name`] so a minimal bootstrap config.toml
+    /// (or operator stripping the file) doesn't trip the validator
+    /// before the first-run wizard becomes reachable. Operator can
+    /// override via env-var `OPCGW_OPCUA__USER_NAME` or by setting
+    /// the field explicitly in config.toml.
+    #[serde(default = "default_opcua_user_name")]
     pub user_name: String,
 
     /// Password for OPC UA server authentication.
@@ -694,6 +702,18 @@ fn default_database_path() -> String {
     "data/opcgw.db".to_string()
 }
 
+/// Epic C C-0 (iter-2 P23): default OPC UA user name when neither
+/// `config.toml` nor `OPCGW_OPCUA__USER_NAME` provides a value.
+///
+/// The first-run wizard collects `user_password` only; this default
+/// closes the gap for a minimal bootstrap config where the operator
+/// hasn't customised `user_name`. The literal matches the value
+/// `config/config.toml` ships with, so default-vs-explicit yields the
+/// same effective behaviour for fresh deployments.
+fn default_opcua_user_name() -> String {
+    "opcua-user".to_string()
+}
+
 /// Default retention days
 fn default_retention_days() -> u32 {
     7
@@ -990,10 +1010,20 @@ impl AppConfig {
         // sees the warn in logs and can either delete the file (next
         // boot enters first-run mode and the wizard re-runs) or fix
         // the hand-edit.
-        let secrets_provider_active = match std::fs::metadata(&secrets_path) {
+        //
+        // Iter-2 P15 fix: read the file body ONCE into a String and
+        // reuse it for both the parse-validation step AND the figment
+        // merge (via `Toml::string(&body)`). Pre-fix, the file was
+        // read twice — once for parse-validation, then again by
+        // figment's `Toml::file()` — creating a TOCTOU window where a
+        // concurrent writer (operator running `sed -i`, misconfigured
+        // init script, etc.) could land different content between the
+        // two reads. Vanishingly unlikely, but the single-read shape
+        // is also simpler.
+        let secrets_body: Option<String> = match std::fs::metadata(&secrets_path) {
             Ok(_) => match std::fs::read_to_string(&secrets_path) {
                 Ok(body) => match body.parse::<toml_edit::DocumentMut>() {
-                    Ok(_) => true,
+                    Ok(_) => Some(body),
                     Err(e) => {
                         warn!(
                             event = "secrets_toml_malformed",
@@ -1005,7 +1035,7 @@ impl AppConfig {
                              env-var sources. Delete or fix \
                              config/secrets.toml to recover."
                         );
-                        false
+                        None
                     }
                 },
                 Err(e) => {
@@ -1016,10 +1046,10 @@ impl AppConfig {
                         "secrets.toml exists but is not readable — \
                          skipping the provider in the figment stack."
                     );
-                    false
+                    None
                 }
             },
-            Err(_) => false, // absent — first-run signal
+            Err(_) => None, // absent — first-run signal
         };
 
         // Load and merge configuration from multiple sources.
@@ -1028,14 +1058,15 @@ impl AppConfig {
         //   2. secrets.toml (sibling file written by first-run wizard;
         //      Epic C C-0). Absent on fresh deployments — figment skips
         //      silently. Iter-1 H4 fix: only merged if the pre-validate
-        //      step above accepted the file.
+        //      step above accepted the file. Iter-2 P15 fix: merged via
+        //      Toml::string(body) reusing the validated-once buffer.
         //   3. OPCGW_* env-vars (highest priority; existing convention).
         // `split("__")` enables nested-key overrides like
         // `OPCGW_LOGGING__DIR` → `logging.dir` (matches the convention
         // referenced in this module's doc comment).
         let mut figment = Figment::new().merge(Toml::file(config_path));
-        if secrets_provider_active {
-            figment = figment.merge(Toml::file(&secrets_path));
+        if let Some(body) = secrets_body.as_deref() {
+            figment = figment.merge(Toml::string(body));
         }
         let config: AppConfig = figment
             .merge(Env::prefixed("OPCGW_").split("__").global())

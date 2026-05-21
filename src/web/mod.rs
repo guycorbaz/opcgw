@@ -309,14 +309,28 @@ pub struct AppState {
     /// `ServeDir::new(static_dir)` uses ensures wizard serving and
     /// static-fallback serving resolve to the same files.
     pub static_dir: PathBuf,
-    /// Epic C C-0 (2026-05-21): captured-at-boot first-run signal.
-    /// `true` iff `AppConfig::is_first_run()` returned `true` at
-    /// startup. The first-run gate middleware reads this on every
-    /// request to decide whether to redirect to the wizard. Exiting
-    /// first-run mode requires a process restart (the auth
-    /// middleware's `Arc<WebAuthState>` is restart-required), so
-    /// this value is fixed for the lifetime of the process.
-    pub is_first_run: bool,
+    /// Epic C C-0 (2026-05-21, iter-2 P5): first-run signal.
+    /// Initialised at boot from `AppConfig::is_first_run()`.
+    ///
+    /// **Iter-2 P5 atomic flip:** `setup_post` performs
+    /// `compare_exchange(true, false)` on this atomic BEFORE writing
+    /// `secrets.toml`. The winner of that race-free exchange proceeds
+    /// to write + signal shutdown; concurrent submitters (two
+    /// operators racing, or a browser auto-reload during the
+    /// supervisor-restart drain window) see `false` and get HTTP 409
+    /// Conflict via the post-first-run path. Pre-P5, the field was a
+    /// plain `bool` captured at boot — concurrent submits both passed
+    /// the gate and last-write-wins on disk silently corrupted the
+    /// "wizard is one-shot" guarantee.
+    ///
+    /// Readers use `.load(Ordering::SeqCst)`; writers use
+    /// `.compare_exchange(true, false, SeqCst, SeqCst)`. SeqCst is
+    /// chosen for simplicity (the gateway isn't perf-critical on this
+    /// path; one atomic-read per middleware invocation is fine).
+    ///
+    /// `Arc` so the same atomic can be cloned into background tasks
+    /// or future code paths without re-plumbing through AppState.
+    pub is_first_run: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Epic C C-0 (2026-05-21): absolute path to the sibling
     /// `secrets.toml` file the wizard writes on success. Derived at
     /// boot from the main `config_path`'s parent directory.
@@ -445,7 +459,13 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
     let csrf_state = {
         let live = app_state.config_reload.subscribe();
         let cfg = (*live.borrow()).clone();
-        csrf::CsrfState::new(cfg.web.resolved_allowed_origins())
+        // Iter-2 P2: share the AppState's is_first_run atomic with
+        // CsrfState so the `/api/setup/password` CSRF exemption is
+        // scoped to first-run mode (defence-in-depth).
+        csrf::CsrfState::new(
+            cfg.web.resolved_allowed_origins(),
+            app_state.is_first_run.clone(),
+        )
     };
 
     Router::new()
@@ -506,7 +526,17 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
         .route("/setup.html", get(setup::setup_get))
         .route(
             "/api/setup/password",
-            axum::routing::post(setup::setup_post),
+            // Iter-2 P4: cap request body to 4 KiB on the wizard POST.
+            // This is an UNAUTHENTICATED route in first-run mode, so
+            // axum's 2 MiB default body limit is a DoS amplifier (a
+            // 1 KB attacker request can force a ~2 MiB allocation per
+            // hit). 4 KiB headroom comfortably covers the JSON envelope
+            // (`{"password": "<≤256 chars>", "password_confirm":
+            // "<≤256 chars>"}` is ~600 bytes worst case) with margin
+            // for whitespace + future fields. Apply via per-route
+            // layer so other routes keep axum's default.
+            axum::routing::post(setup::setup_post)
+                .layer(axum::extract::DefaultBodyLimit::max(4096)),
         )
         .fallback_service(ServeDir::new(static_dir))
         // Layer ordering invariant (load-bearing): axum 0.8 stacks
@@ -1007,7 +1037,7 @@ mod tests {
             config_writer: crate::web::config_writer::ConfigWriter::new(toml_path),
             // Epic C C-0 test defaults: smoke-test, never enters first-run mode.
             static_dir: PathBuf::from("static"),
-            is_first_run: false,
+            is_first_run: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             secrets_path: PathBuf::from("/tmp/test-secrets.toml"),
             shutdown_token: tokio_util::sync::CancellationToken::new(),
         });

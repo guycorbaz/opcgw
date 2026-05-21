@@ -59,16 +59,27 @@ pub struct CsrfState {
     /// fragment is rejected by `WebConfig::validate` so we never see
     /// such an entry here.
     pub allowed_origins: Vec<String>,
+    /// Iter-2 P2: shared with `AppState.is_first_run` so the CSRF
+    /// exemption for `/api/setup/password` only applies WHILE the
+    /// gateway is in first-run mode. Pre-fix the exemption was
+    /// permanent — defence-in-depth gap (the wizard handler returns
+    /// 410 post-first-run, but the CSRF protection was still
+    /// bypassed for any future code path on that route).
+    pub is_first_run: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl CsrfState {
-    pub fn new(allowed_origins: Vec<String>) -> Arc<Self> {
+    pub fn new(
+        allowed_origins: Vec<String>,
+        is_first_run: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Arc<Self> {
         let normalised = allowed_origins
             .into_iter()
             .map(|o| normalise_origin(&o))
             .collect();
         Arc::new(Self {
             allowed_origins: normalised,
+            is_first_run,
         })
     }
 }
@@ -262,7 +273,18 @@ pub async fn csrf_middleware(
     // GET/PUT/DELETE handler on the same path, it would silently
     // skip CSRF. Tightening to a method+path match prevents that
     // silent over-exemption.
-    if req.method() == Method::POST && req.uri().path() == "/api/setup/password" {
+    //
+    // Iter-2 P2: ALSO gate on `state.is_first_run` so the exemption
+    // is scoped to the time window when CSRF's threat model doesn't
+    // apply (no authenticated session yet). Post-wizard, the wizard
+    // handler returns 410 Gone — but defence-in-depth says the route
+    // should NOT silently lose CSRF protection forever.
+    if state
+        .is_first_run
+        .load(std::sync::atomic::Ordering::SeqCst)
+        && req.method() == Method::POST
+        && req.uri().path() == "/api/setup/password"
+    {
         return next.run(req).await;
     }
 
@@ -421,7 +443,14 @@ mod tests {
         allowed: Vec<&str>,
         mut req: Request<Body>,
     ) -> (StatusCode, String) {
-        let state = CsrfState::new(allowed.into_iter().map(String::from).collect());
+        // Iter-2 P2: csrf tests build CsrfState with is_first_run=false
+        // (the default for non-wizard tests). Tests that exercise the
+        // wizard CSRF-exemption path live in tests/web_setup_wizard.rs
+        // and build a real AppState with is_first_run=true.
+        let state = CsrfState::new(
+            allowed.into_iter().map(String::from).collect(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
         // Inject `ConnectInfo` directly into the request extensions
         // so the middleware's extractor finds it without needing
         // `into_make_service_with_connect_info`. Same shape as

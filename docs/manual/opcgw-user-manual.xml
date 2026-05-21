@@ -1138,6 +1138,24 @@ curl -sS -u "$OPCGW_OPCUA__USER_NAME:$OPCGW_OPCUA__USER_PASSWORD" \
         <filename>docs/security.md § "First-run wizard"</filename> for
         the full threat model.</para>
 
+        <para><emphasis role="strong">Wizard scope: password
+        only.</emphasis> The wizard collects ONLY the OPC UA
+        <literal>user_password</literal>. Every other configuration
+        field (ChirpStack credentials, OPC UA endpoint + PKI directory
+        + application name, web admin credentials, etc.) must already
+        be present in <filename>config/config.toml</filename> (or
+        provided via <literal>OPCGW_*</literal> environment variables)
+        before the gateway starts. A truly-empty
+        <filename>config.toml</filename> will fail validation BEFORE
+        the wizard becomes reachable. As of iter-2 (P23), the
+        <literal>[opcua].user_name</literal> field defaults to
+        <literal>"opcua-user"</literal> via a serde default, so a
+        minimal bootstrap config can omit it. The shipped
+        <filename>config/config.toml</filename> in the repository is
+        the recommended starting point: copy it, fill in your
+        ChirpStack and admin credentials, and leave
+        <literal>user_password</literal> unset.</para>
+
         <para><emphasis role="strong">Empty
         <literal>[[application]]</literal> tolerance.</emphasis> The
         first-run wizard is paired with empty-application-list

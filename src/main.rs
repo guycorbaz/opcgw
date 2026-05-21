@@ -427,6 +427,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // Epic C C-0 (iter-2 P1 fix): capture `is_first_run` once at boot
+    // and reuse the cached value at every downstream call-site (OPC UA
+    // audit emit, web AppState construction, WebAuthState constructor).
+    // Pre-fix, `application_config.is_first_run()` was called twice —
+    // once near line 705 for the OPC UA audit event, once near line 880
+    // for the WebAuthState branch — each invocation re-reading
+    // `OPCGW_OPCUA__USER_PASSWORD` via `std::env::var`. If anything
+    // (test harness, signal handler, racy env-mutator) changed env-vars
+    // between the two reads, the audit log and the actual security
+    // posture would disagree. Single capture closes that gap.
+    let is_first_run = application_config.is_first_run();
+
     // Story 7-2 (AC#6): warn — but do not block — when a release build
     // ships with `create_sample_keypair = true`. Operators legitimately
     // running release-mode dev builds with auto-generated keypairs should
@@ -702,7 +714,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // async-opcua changes. The OPC UA server still binds on its
     // configured port so external uptime probes can confirm the
     // gateway is alive while the operator completes the web wizard.
-    if application_config.is_first_run() {
+    // Iter-2 P1: use the cached `is_first_run` from the top of main()
+    // rather than re-invoking `is_first_run()` here. See the capture
+    // site for the race-window rationale.
+    if is_first_run {
         info!(
             event = "opcua_first_run_mode",
             "OPC UA server starting in first-run mode: all auth attempts will be rejected \
@@ -877,7 +892,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Use the throwaway-credentials constructor instead; the
         // first-run gate middleware (`src/web/setup.rs`) intercepts
         // every non-wizard, non-static request before auth runs.
-        let is_first_run = application_config.is_first_run();
+        //
+        // Iter-2 P1: `is_first_run` was captured once at the top of
+        // main() and is reused here (and the OPC UA audit emit above
+        // and the AppState wiring below). See the capture site for the
+        // race-window rationale.
         let auth_state = std::sync::Arc::new(if is_first_run {
             warn!(
                 event = "first_run_mode_active",
@@ -984,13 +1003,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // case (iter-1 code review H2 / EH-M4 fix).
         let secrets_path = crate::config::AppConfig::secrets_path_for(&config_path);
 
-        // Epic C C-0 (iter-1 H5 / EH-H2): capture static_dir before
-        // AppState construction so the wizard handler can read
-        // setup.html via the same canonical path the ServeDir fallback
-        // uses. The "static" relative-path resolution is independent
-        // of cwd at this scope and is set the same way the original
-        // build_router call site did below.
-        let static_dir = std::path::PathBuf::from("static");
+        // Epic C C-0 (iter-1 H5 / EH-H2 + iter-2 P14): capture
+        // static_dir before AppState construction so the wizard
+        // handler can read setup.html via the same canonical path the
+        // ServeDir fallback uses.
+        //
+        // Iter-2 P14 fix: resolve to an absolute path at startup. The
+        // iter-1 H5 patch made setup_get and ServeDir use the SAME
+        // path, but the literal `"static"` was still cwd-relative —
+        // so a systemd unit launched with cwd `/` (the default when
+        // `WorkingDirectory=` is unset), or a Docker image with
+        // `WORKDIR` differing from the asset root, would still fail.
+        // Canonicalise resolves both: succeeds with an absolute path
+        // when the dir exists at startup; falls back to the literal
+        // when it doesn't (preserving the iter-1 setup_get
+        // error-handler's existing 500 response).
+        let static_dir = std::fs::canonicalize("static")
+            .unwrap_or_else(|_| std::path::PathBuf::from("static"));
 
         let app_state = std::sync::Arc::new(web::AppState {
             auth: auth_state,
@@ -1009,7 +1038,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // so the wizard handlers and the first-run gate middleware
             // can reach them via the State extractor.
             static_dir: static_dir.clone(),
-            is_first_run,
+            // Iter-2 P5: AppState.is_first_run is now Arc<AtomicBool>
+            // so `setup_post` can flip it via compare_exchange BEFORE
+            // writing secrets.toml — closing the concurrent-submit /
+            // drain-window race. See `src/web/mod.rs::AppState` doc-
+            // comment for the full rationale.
+            is_first_run: std::sync::Arc::new(
+                std::sync::atomic::AtomicBool::new(is_first_run),
+            ),
             secrets_path,
             shutdown_token: cancel_token.clone(),
         });

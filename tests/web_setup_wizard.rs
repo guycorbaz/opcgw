@@ -85,7 +85,7 @@ fn build_first_run_app_state(
         // Use the canonical static_dir helper so the wizard handler
         // can locate setup.html regardless of test cwd (iter-1 H5/EH-H2).
         static_dir: static_dir(),
-        is_first_run: true,
+        is_first_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         secrets_path: secrets_dir.path().join("secrets.toml"),
         shutdown_token,
     })
@@ -400,7 +400,7 @@ async fn post_first_run_setup_get_returns_410_gone() {
         config_reload,
         config_writer,
         static_dir: static_dir(),
-        is_first_run: false,
+        is_first_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         secrets_path: PathBuf::from("/tmp/test-secrets.toml"),
         shutdown_token: token.clone(),
     });

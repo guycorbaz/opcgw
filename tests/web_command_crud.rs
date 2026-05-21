@@ -239,7 +239,7 @@ async fn spawn_fixture(seed_toml: &str) -> CrudFixture {
         config_writer,
         // Epic C C-0 test defaults.
         static_dir: std::path::PathBuf::from("static"),
-        is_first_run: false,
+        is_first_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         secrets_path: std::path::PathBuf::from("/tmp/test-secrets.toml"),
         shutdown_token: tokio_util::sync::CancellationToken::new(),
     });
