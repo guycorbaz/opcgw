@@ -98,10 +98,22 @@ jobs:
               /^[[:space:]]*mod tests[[:space:]]*\{?[[:space:]]*$/ {intest=1}
               intest==0 {print}
             ' "$file")
+            # Epic C C-0 (2026-05-21) precision tightening: previously
+            # the chain `grep -E 'password|...' | grep -v <exclusions>
+            # | grep -E '(=\s*..)'` matched any line containing the
+            # keyword anywhere PLUS an assignment-shaped fragment
+            # elsewhere — false-positive on audit event names like
+            # `event = "setup_password_rejected"`, response fields like
+            # `error: "password_validation_failed"`, and URL paths like
+            # `path() == "/api/setup/password"`. The new single
+            # regex requires the keyword to be IMMEDIATELY before the
+            # assignment operator, which is what an actual hardcoded
+            # credential looks like. `\b` word boundary stops false
+            # matches like `chirpstack_metric_name = "foo_token"`.
             hits=$(echo "$prod" \
-              | grep -E 'password|secret|api_key|token' \
+              | grep -E '\b(password|secret|api_key|token)[[:space:]]*[=:][[:space:]]*('"'"'|")' \
               | grep -v 'doc\|unwrap\|parse\|REPLACE_ME\|to_string\|leaked\|assert\|///\|"{' \
-              | grep -E '(=\s*['\''"]|:\s*['\''"])' || true)
+              || true)
             if [ -n "$hits" ]; then
               echo "=== $file ==="
               echo "$hits"
