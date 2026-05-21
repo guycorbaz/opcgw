@@ -94,6 +94,7 @@ fn wrap_in_app_state(auth: Arc<WebAuthState>) -> Arc<AppState> {
         config_reload,
         config_writer,
         // Epic C C-0 test defaults.
+        static_dir: std::path::PathBuf::from("static"),
         is_first_run: false,
         secrets_path: std::path::PathBuf::from("/tmp/test-secrets.toml"),
         shutdown_token: tokio_util::sync::CancellationToken::new(),

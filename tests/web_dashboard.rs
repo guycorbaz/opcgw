@@ -100,6 +100,7 @@ fn build_test_app_state(snapshot: DashboardConfigSnapshot) -> Arc<AppState> {
         config_reload,
         config_writer,
         // Epic C C-0 test defaults.
+        static_dir: std::path::PathBuf::from("static"),
         is_first_run: false,
         secrets_path: std::path::PathBuf::from("/tmp/test-secrets.toml"),
         shutdown_token: tokio_util::sync::CancellationToken::new(),
@@ -809,6 +810,7 @@ async fn api_devices_emits_typed_value_and_unit_per_variant() {
         config_reload,
         config_writer,
         // Epic C C-0 test defaults.
+        static_dir: std::path::PathBuf::from("static"),
         is_first_run: false,
         secrets_path: std::path::PathBuf::from("/tmp/test-secrets.toml"),
         shutdown_token: tokio_util::sync::CancellationToken::new(),

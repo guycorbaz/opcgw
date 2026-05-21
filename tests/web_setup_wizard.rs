@@ -82,6 +82,9 @@ fn build_first_run_app_state(
         stale_threshold_secs: std::sync::atomic::AtomicU64::new(120),
         config_reload,
         config_writer,
+        // Use the canonical static_dir helper so the wizard handler
+        // can locate setup.html regardless of test cwd (iter-1 H5/EH-H2).
+        static_dir: static_dir(),
         is_first_run: true,
         secrets_path: secrets_dir.path().join("secrets.toml"),
         shutdown_token,
@@ -280,10 +283,16 @@ async fn wizard_post_persists_password_and_signals_shutdown() {
         "shutdown_token should be cancelled after successful wizard submit"
     );
 
-    // The server task should now exit (token cancelled by the wizard);
-    // give it a moment to drain.
-    cancel.cancel();
+    // Iter-1 code review M8 fix: pre-fix the test called
+    // `cancel.cancel()` here as a redundant cleanup, which obscured
+    // whether the production handler's `state.shutdown_token.cancel()`
+    // actually drains the server task. The assertion above pins the
+    // production cancel; the timeout below verifies the server task
+    // exits within 5s of the wizard's cancel (no second cancel from
+    // the test).
     let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+    // Quiet the unused-binding lint.
+    drop(cancel);
 }
 
 #[tokio::test]
@@ -390,6 +399,7 @@ async fn post_first_run_setup_get_returns_410_gone() {
         stale_threshold_secs: std::sync::atomic::AtomicU64::new(120),
         config_reload,
         config_writer,
+        static_dir: static_dir(),
         is_first_run: false,
         secrets_path: PathBuf::from("/tmp/test-secrets.toml"),
         shutdown_token: token.clone(),

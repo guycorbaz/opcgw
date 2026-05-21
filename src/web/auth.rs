@@ -241,26 +241,33 @@ impl WebAuthState {
     /// future refactor that removes the gate). The 401 response from
     /// that path makes the failure mode safe.
     pub fn for_first_run(realm: String) -> Self {
+        // Iter-1 code review M9 fix: pre-fix `for_first_run` invoked
+        // `getrandom::getrandom` THREE times — once for `hmac_key`,
+        // twice for throwaway-user + throwaway-pass digests. The
+        // throwaway digests are NEVER COMPARED in first-run mode
+        // (the auth middleware's `is_first_run && bypass_path` short-
+        // circuit fires before any digest comparison; the
+        // `is_configured = false` defence-in-depth short-circuit
+        // covers the rest). Generating the throwaways was wasteful and
+        // added two panic surfaces (`expect("getrandom")`) on a
+        // startup-critical path. Use deterministic zero buffers
+        // instead — even if a future refactor lets these digests be
+        // compared, they're HMAC-of-zeros under a random key so
+        // operationally indistinguishable from random bytes.
         let mut hmac_key = [0u8; 32];
         getrandom::getrandom(&mut hmac_key)
             .expect("system RNG must produce 32 bytes for HMAC key");
-        // Throwaway "credentials" — never compared in first-run mode.
-        // We HMAC random bytes so the digest stored is no more
-        // predictable than the legitimate post-first-run case.
-        let mut throwaway_user = [0u8; 32];
-        let mut throwaway_pass = [0u8; 32];
-        getrandom::getrandom(&mut throwaway_user).expect("getrandom");
-        getrandom::getrandom(&mut throwaway_pass).expect("getrandom");
-        let user_digest = hmac_sha256(&hmac_key, &throwaway_user);
-        let pass_digest = hmac_sha256(&hmac_key, &throwaway_pass);
+        let throwaway_zeros = [0u8; 32];
+        let user_digest = hmac_sha256(&hmac_key, &throwaway_zeros);
+        let pass_digest = hmac_sha256(&hmac_key, &throwaway_zeros);
         Self {
             user_digest,
             pass_digest,
             hmac_key,
             realm,
             // Deliberately `false` so the middleware's defence-in-depth
-            // empty-credentials short-circuit at line 382 fires if the
-            // gate is ever bypassed in a future refactor.
+            // empty-credentials short-circuit fires if the gate is
+            // ever bypassed in a future refactor.
             is_configured: false,
             // Epic C C-0: `true` so `basic_auth_middleware` bypasses
             // the credential check for wizard + static-asset paths.
@@ -437,6 +444,21 @@ pub async fn basic_auth_middleware(
     // mode are wizard + static (which we bypass) — anything else
     // would have been redirected upstream.
     if state.is_first_run && crate::web::setup::is_wizard_bypass_path(&path) {
+        return next.run(req).await;
+    }
+
+    // Iter-1 code review M1 fix: even in post-first-run mode, the
+    // wizard's `GET /setup` and `GET /setup.html` should be reachable
+    // WITHOUT a 401 Basic-Auth challenge. The handler returns 410
+    // Gone with a friendly "already configured" page — but a 401
+    // upstream forces the browser into a credential prompt which is
+    // confusing UX. Bypass auth for those specific GET paths
+    // unconditionally; the handler itself enforces the 410 semantics
+    // post-first-run. `/api/setup/password` POST stays gated
+    // post-first-run so attackers cannot probe with arbitrary bodies.
+    if (path == "/setup" || path == "/setup.html")
+        && req.method() == axum::http::Method::GET
+    {
         return next.run(req).await;
     }
 

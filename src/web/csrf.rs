@@ -255,7 +255,14 @@ pub async fn csrf_middleware(
     // `state.is_first_run` and returns HTTP 410 Gone post-first-run,
     // so the exemption is safe even when this middleware is reached
     // in non-first-run mode.
-    if req.uri().path() == "/api/setup/password" {
+    //
+    // Iter-1 code review M6 fix: require both method == POST AND
+    // path == "/api/setup/password" — pre-fix the exemption fired
+    // for ANY method on that path, so if a future refactor adds a
+    // GET/PUT/DELETE handler on the same path, it would silently
+    // skip CSRF. Tightening to a method+path match prevents that
+    // silent over-exemption.
+    if req.method() == Method::POST && req.uri().path() == "/api/setup/password" {
         return next.run(req).await;
     }
 

@@ -299,6 +299,16 @@ pub struct AppState {
     /// CRUD requests across the entire write+reload critical
     /// section.
     pub config_writer: Arc<crate::web::config_writer::ConfigWriter>,
+    /// Epic C C-0 (iter-1 H5 / EH-H2 fix): static-asset directory
+    /// captured at boot, used by `setup_get` to locate `setup.html`.
+    /// The wizard handler previously read from a hardcoded
+    /// `"static/setup.html"` relative path, which broke deployments
+    /// with non-project-root cwd (systemd unit with no
+    /// `WorkingDirectory=`, Docker image with WORKDIR not at the
+    /// asset root). Threading the same `static_dir` that
+    /// `ServeDir::new(static_dir)` uses ensures wizard serving and
+    /// static-fallback serving resolve to the same files.
+    pub static_dir: PathBuf,
     /// Epic C C-0 (2026-05-21): captured-at-boot first-run signal.
     /// `true` iff `AppConfig::is_first_run()` returned `true` at
     /// startup. The first-run gate middleware reads this on every
@@ -487,6 +497,13 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
         // first-run mode); in post-first-run mode the wizard handlers
         // themselves return HTTP 410 Gone.
         .route("/setup", get(setup::setup_get))
+        // Iter-1 H6 fix: in post-first-run mode, `static/setup.html`
+        // would otherwise be reachable via the ServeDir fallback at
+        // `/setup.html`, presenting a deceptive "Set OPC UA password"
+        // form to anyone who guesses the URL. Route the `.html` path
+        // through the same gated wizard handler so it returns 410
+        // Gone post-first-run.
+        .route("/setup.html", get(setup::setup_get))
         .route(
             "/api/setup/password",
             axum::routing::post(setup::setup_post),
@@ -989,6 +1006,7 @@ mod tests {
             config_reload: Arc::new(handle),
             config_writer: crate::web::config_writer::ConfigWriter::new(toml_path),
             // Epic C C-0 test defaults: smoke-test, never enters first-run mode.
+            static_dir: PathBuf::from("static"),
             is_first_run: false,
             secrets_path: PathBuf::from("/tmp/test-secrets.toml"),
             shutdown_token: tokio_util::sync::CancellationToken::new(),

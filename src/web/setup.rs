@@ -108,8 +108,10 @@ pub fn is_wizard_bypass_path(path: &str) -> bool {
 ///   wired in non-first-run mode is safe.
 /// - If the gateway IS in first-run mode AND the path is a wizard
 ///   route, wizard API endpoint, or static asset: pass through.
-/// - Otherwise (first-run mode, non-wizard path): return HTTP 302 to
-///   `/setup`.
+/// - Otherwise (first-run mode, non-wizard path): return HTTP 303 See
+///   Other to `/setup`. (axum's `Redirect::to` emits 303 by default —
+///   semantically correct for GET-to-GET redirects with no body
+///   carry-over.)
 pub async fn first_run_gate_middleware(
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
@@ -151,10 +153,15 @@ pub async fn setup_get(State(state): State<Arc<AppState>>) -> Response {
             .into_response();
     }
 
-    // Serve the wizard page from static/. Read it directly so the
-    // wizard works even if the static-dir fallback is gated by a
-    // future middleware change.
-    match std::fs::read_to_string("static/setup.html") {
+    // Iter-1 code review H5 / EH-H2 fix: serve the wizard page via
+    // `state.static_dir.join("setup.html")` (the same canonical path
+    // the ServeDir fallback uses), NOT a hardcoded cwd-relative
+    // `"static/setup.html"`. Pre-fix, the hardcoded read broke any
+    // deployment with a non-project-root cwd (systemd unit without
+    // `WorkingDirectory=`, Docker image with `WORKDIR` not equal to
+    // the asset root, etc.).
+    let setup_html_path = state.static_dir.join("setup.html");
+    match std::fs::read_to_string(&setup_html_path) {
         Ok(body) => (
             StatusCode::OK,
             [(
@@ -168,8 +175,9 @@ pub async fn setup_get(State(state): State<Arc<AppState>>) -> Response {
             warn!(
                 event = "setup_wizard_html_read_failed",
                 error = %e,
-                "setup_get: failed to read static/setup.html — \
-                 deployment is missing the static/ directory or the \
+                setup_html_path = %setup_html_path.display(),
+                "setup_get: failed to read setup.html via static_dir — \
+                 deployment is missing the static directory or the \
                  setup.html file."
             );
             (
@@ -228,6 +236,34 @@ fn validate_password(req: &SetupPasswordRequest) -> Option<&'static str> {
     if req.password.starts_with(PLACEHOLDER_PREFIX) {
         return Some("placeholder_prefix");
     }
+    // Iter-1 code review EH-H1 + Blind M5 fix: reject mid-string ASCII
+    // control characters (U+0000..=U+001F + U+007F DEL). Pre-fix, a
+    // password containing `\x7F` would:
+    //   1. Pass `validate_password` (DEL is not whitespace, not in
+    //      `PLACEHOLDER_PREFIX`, doesn't break confirmation match).
+    //   2. Get written to `secrets.toml` as a raw 0x7F byte inside
+    //      a basic string by `toml_escape_string` (which only
+    //      escapes chars `< 0x20`).
+    //   3. Per the TOML spec ("U+0000..U+0008, U+000A..U+001F, U+007F
+    //      must be escaped"), the resulting `secrets.toml` is INVALID
+    //      TOML.
+    //   4. Next boot: figment's parse error → gateway fails to start
+    //      → operator locked out, recovery only via deleting
+    //      `secrets.toml` (which contradicts the wizard's "no
+    //      operator-side TOML editing" promise).
+    // The rejection here is the primary fix; `toml_escape_string` also
+    // gained DEL coverage as defence-in-depth.
+    if req.password.chars().any(|c| (c as u32) < 0x20 || c == '\u{7F}') {
+        return Some("control_char_invalid");
+    }
+    // Iter-1 EH-M1 fix: cap password length to a sane bound (256
+    // chars). Pre-fix, axum's 2 MiB default body limit would have
+    // accepted a 1.9 MiB password; the wizard would persist it
+    // verbatim, and the operator would be locked out because the
+    // SCADA-client side can never type a 1.9 MiB credential.
+    if req.password.chars().count() > 256 {
+        return Some("too_long");
+    }
     if req.password != req.password_confirm {
         return Some("confirmation_mismatch");
     }
@@ -245,8 +281,15 @@ fn validate_password(req: &SetupPasswordRequest) -> Option<&'static str> {
 pub async fn setup_post(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    Json(req): Json<SetupPasswordRequest>,
+    body: axum::body::Bytes,
 ) -> Response {
+    // Iter-1 code review H3 + EH-M2 fix: check `is_first_run` BEFORE
+    // JSON extraction. Pre-fix the handler was `Json(req): Json<...>`
+    // which invoked Axum's extractor first; a malformed body / wrong
+    // Content-Type / missing field would return a generic 400 (or
+    // 415/422) with Axum's default plain-text body, bypassing both
+    // the post-first-run 410 Gone branch AND the structured
+    // `{ error, reason }` response shape the JS error-UX expects.
     if !state.is_first_run {
         return (
             StatusCode::GONE,
@@ -257,6 +300,30 @@ pub async fn setup_post(
         )
             .into_response();
     }
+
+    // Manual JSON parse — bypass Axum's Json extractor so malformed
+    // input maps to a structured `{ error, reason }` response with the
+    // wizard's audit-event taxonomy intact.
+    let req: SetupPasswordRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(
+                event = "setup_password_rejected",
+                reason = "invalid_json",
+                source_ip = %addr.ip(),
+                error = %e,
+                "setup_post: request body is not valid JSON"
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(SetupPasswordError {
+                    error: "password_validation_failed",
+                    reason: "invalid_json",
+                }),
+            )
+                .into_response();
+        }
+    };
 
     if let Some(reason) = validate_password(&req) {
         warn!(
@@ -279,13 +346,56 @@ pub async fn setup_post(
     // config_dir which is captured into AppState at boot.
     match write_secrets_toml(&state.secrets_path, &req.password) {
         Ok(()) => {
+            // Iter-1 code review M2 fix: log the FILENAME only, not
+            // the full path. Full deployment path is sensitive
+            // topology info that would defeat the file's 0600 mode
+            // protection if logs are read by a broader audience than
+            // file-system access.
+            let secrets_filename = state
+                .secrets_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("secrets.toml");
             info!(
                 event = "setup_password_accepted",
                 source_ip = %addr.ip(),
-                secrets_path = %state.secrets_path.display(),
-                "setup_post: password persisted to secrets.toml; \
+                secrets_filename = secrets_filename,
+                "setup_post: password persisted to secrets file; \
                  gateway will shut down for restart"
             );
+
+            // Iter-1 Auditor AC#11 patch: emit the config-reload audit
+            // event with `trigger="first_run_wizard"` so the AC#18
+            // grep contract is preserved (operators watching
+            // `event="config_reload"` see the first-run completion in
+            // their audit stream). The actual reload happens via the
+            // restart path, not the in-place primitive — the event
+            // captures the operational intent for forensic clarity.
+            info!(
+                event = "config_reload",
+                trigger = "first_run_wizard",
+                source_ip = %addr.ip(),
+                "setup_post: first-run wizard completed; \
+                 gateway restart will apply the new password"
+            );
+
+            // Iter-1 code review M7 fix: build the response BEFORE
+            // signalling shutdown. Pre-fix, `state.shutdown_token
+            // .cancel()` was called BEFORE the response was
+            // constructed; the web server task listens on the cancel
+            // token in `tokio::select!` and could win the race,
+            // exiting before the response was flushed to the client.
+            // Building the response first lets axum's graceful-
+            // shutdown ensure in-flight responses complete before the
+            // listener stops accepting new connections.
+            let response = (
+                StatusCode::OK,
+                Json(SetupPasswordSuccess {
+                    status: "password_set_restarting",
+                    restarting_in_seconds: 5,
+                }),
+            )
+                .into_response();
 
             // Trigger graceful shutdown so the supervisor restarts the
             // gateway. The supervisor (Docker restart policy / systemd
@@ -293,23 +403,23 @@ pub async fn setup_post(
             // picks up secrets.toml on the next boot.
             state.shutdown_token.cancel();
 
-            (
-                StatusCode::OK,
-                Json(SetupPasswordSuccess {
-                    status: "password_set_restarting",
-                    restarting_in_seconds: 5,
-                }),
-            )
-                .into_response()
+            response
         }
         Err(e) => {
+            // Iter-1 M2: same filename-only redaction as the success
+            // path above.
+            let secrets_filename = state
+                .secrets_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("secrets.toml");
             warn!(
                 event = "setup_password_persistence_failed",
                 reason = "io_error",
                 source_ip = %addr.ip(),
                 error = %e,
-                secrets_path = %state.secrets_path.display(),
-                "setup_post: failed to write secrets.toml"
+                secrets_filename = secrets_filename,
+                "setup_post: failed to write secrets file"
             );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -355,12 +465,24 @@ user_password = {}
         toml_escape_string(password),
     );
 
-    let parent = secrets_path.parent().ok_or_else(|| {
+    // Iter-1 code review H2 / EH-M4: `Path::parent()` returns
+    // `Some("")` (an empty path), NOT `None`, for paths with no
+    // directory component (e.g. a bare `secrets.toml`). The
+    // `tempfile::NamedTempFile::new_in("")` call interprets the
+    // empty path as cwd on Linux but the behaviour is documented as
+    // platform-specific. Coerce empty to `.` so the parent is always
+    // a well-defined directory reference.
+    let parent_raw = secrets_path.parent().ok_or_else(|| {
         OpcGwError::Configuration(format!(
             "secrets_path has no parent: {}",
             secrets_path.display()
         ))
     })?;
+    let parent: &std::path::Path = if parent_raw.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        parent_raw
+    };
 
     // tempfile in the same parent dir so rename is atomic (same fs).
     let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|e| {
@@ -421,8 +543,13 @@ fn toml_escape_string(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            // Control chars per TOML spec: \uXXXX
-            c if (c as u32) < 0x20 => {
+            // Control chars per TOML spec: U+0000..U+001F AND U+007F
+            // (DEL) must be escaped. The DEL coverage was added in
+            // iter-1 EH-H1 as defence-in-depth; the validator at
+            // `validate_password` is the primary defence (rejects DEL
+            // outright) but this branch keeps the escaper TOML-spec-
+            // compliant if any future call site lets DEL through.
+            c if (c as u32) < 0x20 || c == '\u{7F}' => {
                 out.push_str(&format!("\\u{:04X}", c as u32));
             }
             c => out.push(c),
@@ -479,6 +606,66 @@ mod tests {
             password_confirm: "world".to_string(),
         };
         assert_eq!(validate_password(&req), Some("confirmation_mismatch"));
+    }
+
+    /// Iter-1 EH-H1: DEL byte (U+007F) is rejected.
+    #[test]
+    fn validate_password_rejects_del_byte() {
+        let req = SetupPasswordRequest {
+            password: "abc\u{7F}def".to_string(),
+            password_confirm: "abc\u{7F}def".to_string(),
+        };
+        assert_eq!(validate_password(&req), Some("control_char_invalid"));
+    }
+
+    /// Iter-1 Blind M5: mid-string control chars (U+0000..=U+001F)
+    /// are rejected.
+    #[test]
+    fn validate_password_rejects_mid_string_control_char() {
+        for c in [
+            '\u{0001}', '\u{0008}', '\u{000B}', '\u{000C}', '\u{001F}',
+        ] {
+            let s = format!("abc{}def", c);
+            let req = SetupPasswordRequest {
+                password: s.clone(),
+                password_confirm: s,
+            };
+            assert_eq!(
+                validate_password(&req),
+                Some("control_char_invalid"),
+                "control char {:?} should be rejected",
+                c,
+            );
+        }
+    }
+
+    /// Iter-1 EH-M1: password longer than 256 chars is rejected.
+    #[test]
+    fn validate_password_rejects_too_long() {
+        let long_password = "a".repeat(257);
+        let req = SetupPasswordRequest {
+            password: long_password.clone(),
+            password_confirm: long_password,
+        };
+        assert_eq!(validate_password(&req), Some("too_long"));
+    }
+
+    /// Iter-1 EH-M1: exactly 256 chars is accepted.
+    #[test]
+    fn validate_password_accepts_256_chars() {
+        let pw_256 = "a".repeat(256);
+        let req = SetupPasswordRequest {
+            password: pw_256.clone(),
+            password_confirm: pw_256,
+        };
+        assert_eq!(validate_password(&req), None);
+    }
+
+    /// Iter-1 EH-H1 defence-in-depth: even if validator was bypassed,
+    /// `toml_escape_string` escapes DEL into ``.
+    #[test]
+    fn toml_escape_string_escapes_del_byte() {
+        assert_eq!(toml_escape_string("a\u{7F}b"), "\"a\\u007Fb\"");
     }
 
     #[test]

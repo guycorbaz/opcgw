@@ -977,11 +977,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Epic C C-0 (2026-05-21): derive the sibling secrets.toml
         // path from the main config_path. The first-run wizard will
-        // write to this path on successful submission.
-        let secrets_path = std::path::Path::new(&config_path)
-            .parent()
-            .map(|p| p.join("secrets.toml"))
-            .unwrap_or_else(|| std::path::PathBuf::from("secrets.toml"));
+        // write to this path on successful submission. Use the
+        // canonical helper so the read side (`AppConfig::from_path`)
+        // and the write side (this AppState plumb) resolve to the
+        // same path — including the bare-filename empty-parent edge
+        // case (iter-1 code review H2 / EH-M4 fix).
+        let secrets_path = crate::config::AppConfig::secrets_path_for(&config_path);
+
+        // Epic C C-0 (iter-1 H5 / EH-H2): capture static_dir before
+        // AppState construction so the wizard handler can read
+        // setup.html via the same canonical path the ServeDir fallback
+        // uses. The "static" relative-path resolution is independent
+        // of cwd at this scope and is set the same way the original
+        // build_router call site did below.
+        let static_dir = std::path::PathBuf::from("static");
 
         let app_state = std::sync::Arc::new(web::AppState {
             auth: auth_state,
@@ -999,6 +1008,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // persistence path + shutdown token plumbed into AppState
             // so the wizard handlers and the first-run gate middleware
             // can reach them via the State extractor.
+            static_dir: static_dir.clone(),
             is_first_run,
             secrets_path,
             shutdown_token: cancel_token.clone(),
@@ -1032,7 +1042,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }));
 
         // Build the router and spawn the serve task on the bound listener.
-        let static_dir = std::path::PathBuf::from("static");
+        // `static_dir` was captured into AppState above (iter-1 H5 fix);
+        // we pass the same value through to build_router for the
+        // ServeDir fallback.
         let router = web::build_router(app_state, static_dir);
         let cancel_web = cancel_token.clone();
         Some(tokio::spawn(async move {

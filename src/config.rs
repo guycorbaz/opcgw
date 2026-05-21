@@ -31,7 +31,7 @@ use figment::{
     providers::{Env, Format, Toml},
     Figment,
 };
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -937,6 +937,34 @@ impl AppConfig {
         Self::from_path(&config_path)
     }
 
+    /// Epic C C-0 (iter-1 code review H2 / EH-M4): given a config file
+    /// path string (possibly a bare filename with no directory), return
+    /// the canonical sibling `secrets.toml` path.
+    ///
+    /// `Path::parent()` returns `Some("")` (empty path) — not `None` —
+    /// for a bare filename like `"config.toml"`. The empty-parent case
+    /// would be joined into `Path("").join("secrets.toml") ==
+    /// Path("secrets.toml")` which works at read time but causes
+    /// `tempfile::NamedTempFile::new_in("")` to behave unpredictably at
+    /// write time on some platforms. Coerce empty to `.` so the parent
+    /// path is always a well-defined directory reference.
+    ///
+    /// Used by both `AppConfig::from_path` (read side) and `main.rs`
+    /// (passed into `AppState` for the wizard write side) so the path
+    /// resolution is consistent across the read/write boundary.
+    pub fn secrets_path_for(config_path: &str) -> std::path::PathBuf {
+        let parent = std::path::Path::new(config_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        // Coerce an empty parent (from bare-filename config) to ".".
+        let parent = if parent.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            parent
+        };
+        parent.join("secrets.toml")
+    }
+
     /// Same as [`AppConfig::new`] but takes the configuration file path
     /// explicitly. Used by `main.rs` so the CLI `-c FILE` flag (or the
     /// `CONFIG_PATH` env var) drives both the bootstrap-phase TOML peek
@@ -946,28 +974,70 @@ impl AppConfig {
 
         // Epic C C-0 (2026-05-21): derive the sibling secrets.toml path
         // from the main config_path so the first-run wizard can persist
-        // the OPC UA password to a separate gitignored file. If the
-        // file doesn't exist, figment silently skips the provider — no
-        // error, no warning, the absence IS the first-run signal that
-        // `is_first_run()` later picks up.
-        let secrets_path = std::path::Path::new(config_path)
-            .parent()
-            .map(|p| p.join("secrets.toml"))
-            .unwrap_or_else(|| std::path::PathBuf::from("secrets.toml"));
+        // the OPC UA password to a separate gitignored file. See
+        // [`Self::secrets_path_for`] for the empty-parent coercion
+        // (iter-1 code review H2 / EH-M4 fix).
+        let secrets_path = Self::secrets_path_for(config_path);
+
+        // Iter-1 code review H4 fix: if `secrets.toml` exists but is
+        // malformed TOML, figment's `Toml::file` would propagate the
+        // parse error through `.extract()` and abort startup, bricking
+        // the gateway with no recovery path through the wizard. A
+        // truncated tempfile-persist or a clumsy operator hand-edit
+        // could leave the file in that state. Soft-fail: pre-validate
+        // `secrets.toml` via a standalone parse; on parse error, log a
+        // structured warn event and treat the file as absent. Operator
+        // sees the warn in logs and can either delete the file (next
+        // boot enters first-run mode and the wizard re-runs) or fix
+        // the hand-edit.
+        let secrets_provider_active = match std::fs::metadata(&secrets_path) {
+            Ok(_) => match std::fs::read_to_string(&secrets_path) {
+                Ok(body) => match body.parse::<toml_edit::DocumentMut>() {
+                    Ok(_) => true,
+                    Err(e) => {
+                        warn!(
+                            event = "secrets_toml_malformed",
+                            secrets_path = %secrets_path.display(),
+                            error = %e,
+                            "secrets.toml exists but is not valid TOML — \
+                             skipping the provider in the figment stack. \
+                             The gateway will fall back to config.toml + \
+                             env-var sources. Delete or fix \
+                             config/secrets.toml to recover."
+                        );
+                        false
+                    }
+                },
+                Err(e) => {
+                    warn!(
+                        event = "secrets_toml_unreadable",
+                        secrets_path = %secrets_path.display(),
+                        error = %e,
+                        "secrets.toml exists but is not readable — \
+                         skipping the provider in the figment stack."
+                    );
+                    false
+                }
+            },
+            Err(_) => false, // absent — first-run signal
+        };
 
         // Load and merge configuration from multiple sources.
         // Precedence order (top to bottom = lowest to highest priority):
         //   1. Main config.toml (operator-readable structural config).
         //   2. secrets.toml (sibling file written by first-run wizard;
         //      Epic C C-0). Absent on fresh deployments — figment skips
-        //      silently.
+        //      silently. Iter-1 H4 fix: only merged if the pre-validate
+        //      step above accepted the file.
         //   3. OPCGW_* env-vars (highest priority; existing convention).
         // `split("__")` enables nested-key overrides like
         // `OPCGW_LOGGING__DIR` → `logging.dir` (matches the convention
         // referenced in this module's doc comment).
-        let config: AppConfig = Figment::new()
-            .merge(Toml::file(config_path))
-            .merge(Toml::file(&secrets_path))
+        let mut figment = Figment::new().merge(Toml::file(config_path));
+        if secrets_provider_active {
+            figment = figment.merge(Toml::file(&secrets_path));
+        }
+        let config: AppConfig = figment
             .merge(Env::prefixed("OPCGW_").split("__").global())
             .extract()
             .map_err(|e| {
@@ -1014,7 +1084,19 @@ impl AppConfig {
         if !self.opcua.user_password.trim().is_empty() {
             return false;
         }
-        if std::env::var("OPCGW_OPCUA__USER_PASSWORD").is_ok() {
+        // Iter-1 code review M3 fix: treat env-var as "set" only when
+        // its value is non-empty AND non-whitespace-only. Pre-fix,
+        // `env::var(...).is_ok()` returned true for an env-var set to
+        // `""` or `"   "`, which the validator rejects with a clear
+        // error — but if the validator's rejection somehow doesn't
+        // fire (e.g. a future refactor that changes order), this
+        // would return `false` (= NOT first-run) for an
+        // empty-but-set env-var, leading to the gateway entering
+        // post-first-run mode with no actual credential.
+        if std::env::var("OPCGW_OPCUA__USER_PASSWORD")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
             return false;
         }
         // Source 3: secrets.toml absent or doesn't have the field.

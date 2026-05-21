@@ -94,6 +94,26 @@ impl OpcgwAuthManager {
     /// before the entropy pool is seeded) should produce a clear startup
     /// crash rather than a silent security weakening.
     pub fn new(config: &AppConfig) -> Self {
+        // Epic C C-0 (iter-1 Auditor AC#6 patch — contract pin): the
+        // `is_configured = false` branch below is **load-bearing for
+        // first-run mode**. When `[opcua].user_password` is empty
+        // (the first-run signal — see `AppConfig::is_first_run` and
+        // `src/web/setup.rs`), this manager is built with
+        // `is_configured = false`, which short-circuits every
+        // username-token authentication attempt to "rejected" inside
+        // `OpcgwAuthManager::authenticate_username_identity_token`.
+        // That implicit rejection IS the C-0 "reject-all auth in
+        // first-run mode" guarantee (spec AC#6 option-b) — no new
+        // code path was added for first-run; the existing
+        // `is_configured` short-circuit covers it.
+        //
+        // **Do NOT narrow the meaning of `is_configured = false` here
+        // (e.g. "allow anonymous if user_name is empty") without
+        // revisiting `AppConfig::is_first_run` AND the C-0 spec's
+        // AC#6 deviation rationale.** Such a change would silently
+        // open OPC UA to anonymous connections in first-run mode,
+        // which is the security regression option-(a) was rejected
+        // to prevent.
         let mut hmac_key = [0u8; 32];
         getrandom::getrandom(&mut hmac_key)
             .expect("system RNG must produce 32 bytes for HMAC key");
