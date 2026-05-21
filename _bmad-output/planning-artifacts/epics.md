@@ -1108,3 +1108,168 @@ So that I can deploy opcgw without specialised git/cargo knowledge, without arch
 **And** the operator can follow `docs/manual/opcgw-user-manual.xml` (built to HTML or PDF via the standard DocBook XSL toolchain) end-to-end to install, configure, run, and troubleshoot opcgw without consulting source code or asking the maintainer.
 
 **Epic A retro (2026-05-19) reference:** see [`../implementation-artifacts/epic-A-retro-2026-05-19.md`](../implementation-artifacts/epic-A-retro-2026-05-19.md) action item AI-A-8 (manual XML sync) — Epic B closes it.
+
+## Epic C: Auto-Discovery and Web-First Configuration
+
+**Numbering offset:** literal name `Epic C` in `sprint-status.yaml`, following the lettered post-numeric-epic convention established by Epic A and Epic B. Stories use sprint-status keys `C-0`, `C-1`, `C-2`, `C-3`, `C-4`, `C-6`. **C-5 is intentionally absent** — MQTT real-time path was scoped here originally (as D-5 during the 2026-05-20 vision capture, under the working name "Epic D") but removed from the epic on 2026-05-21 to keep the epic finishable; tracked as `CR-EPIC-C-MQTT` in `_bmad-output/implementation-artifacts/deferred-work.md`. The internal-document working name "Epic D" used during 2026-05-20/21 scope capture has been renamed to Epic C as of 2026-05-21 to avoid letter-skipping confusion.
+
+**Why it exists:** Today operators configure opcgw by hand-editing `config/config.toml`, typing ChirpStack application UUIDs, device DevEUIs, and codec metric-key names from a side-by-side ChirpStack web UI tab. The v2.0 GA walkthrough on 2026-05-20 surfaced this UX gap directly — the operator must context-switch between two UIs and copy strings by sight. Epic C turns opcgw into a self-driving configuration surface: the operator opens the web UI, picks an application *by name* from a list opcgw fetched from ChirpStack, picks a device *by name* under that application, picks metrics *by observed key* from recent uplinks, and optionally overrides display names for the OPC UA browse tree. The load-bearing design call (memorialised in memory `project_epic_c_auto_discovery_vision.md`): **opcgw is a name-translation gateway** — operator-facing pickers always show names, never UUIDs. UUIDs may appear in detail views or audit logs but never as the primary picker key. This is why MQTT-direct integration was explicitly rejected as the primary architecture: MQTT events carry only UUIDs, which are useless to SCADA operators. Epic C also lays the foundation for the long-term end-state architecture Guy articulated 2026-05-20: *"In the final version, all configuration should be in database."* Story C-6 lands that migration.
+
+**FRs covered:** none from the original PRD (Epic C is a post-PRD addition driven by the 2026-05-20 walkthrough; design decisions are captured in memory rather than retro-fitted into `prd.md`). Implicit functional contract per story: C-0 = empty-config startup; C-1 = inventory query API (server-side helpers + endpoints); C-2 = pickers UI; C-3 = duplicate-prevention server-side validator; C-4 = drift-view UI; C-6 = TOML→SQLite config migration.
+
+**Sequencing:** C-0 is the prerequisite for all subsequent stories — C-1's `/api/inventory/*` endpoints are only operator-visible if the gateway can start with no `[[application]]` entries (today's validator rejects `application_list.len() == 0`). C-0 is **partially landed** (commit `cecd100` 2026-05-20 added `#[serde(default)]` to `application_list` so empty TOML deserialises; remaining work is the first-run web wizard for `[opcua].user_password` and dashboard empty-state). C-1 precedes C-2 (C-2 is a thin wrapper over C-1's endpoints). C-3 hardens C-2's writes server-side. C-4 is a read-only diff view consuming C-1's inventory endpoints; can land before or after C-3. C-6 is **last in the epic** — the TOML→SQLite migration depends on C-2's pickers being the operator-facing canonical write surface, on C-3's server-side validation being storage-independent, and on C-0's empty-bootstrap proving the gateway no longer treats TOML as a hard requirement.
+
+### Story C.0: Empty-Config Bootstrap + First-Run Setup Wizard
+
+As an **opcgw operator deploying a fresh container with no pre-existing `config.toml`**,
+I want the gateway to start with an empty configuration and present a first-run web wizard for the OPC UA user password,
+So that I can configure opcgw entirely through the web UI without writing TOML by hand and without learning the env-var override conventions before I can even reach the dashboard.
+
+**Acceptance Criteria:**
+
+**Given** a fresh container starts with a `config.toml` containing only `[global]`, `[chirpstack]`, `[opcua]`, `[web]` baseline sections and no `[[application]]` entries at all,
+**When** `cargo run` (or `docker run`) bootstraps the gateway,
+**Then** startup succeeds: `AppConfig::validate()` accepts `application_list.len() == 0` as a valid state, the ChirpStack poller spawns and no-ops while there are no applications to poll, the OPC UA server binds on the configured endpoint with an empty browse tree (no `Applications` folder yet, or a placeholder empty folder — Dev Agent picks the simpler option in Dev Notes), and the web server binds on the configured port and serves `/`.
+**And given** the same fresh container also has `[opcua].user_password` unset (neither in TOML, nor via the `OPCGW_OPCUA__USER_PASSWORD` env var),
+**When** the operator opens `http://<host>:<web_port>/` in a browser,
+**Then** instead of the dashboard, opcgw renders a **first-run setup wizard** page that (a) explains the gateway has no OPC UA password configured, (b) prompts the operator for a password, (c) confirms the password via a second input, (d) writes the password to a persistent location compatible with the existing OPC UA auth pipeline (Dev Agent's choice: persist into the env-var equivalent secrets file, or into a new `config/secrets.toml` that the gateway loads alongside `config.toml` — documented in Dev Notes), (e) reloads or restarts the OPC UA server so the new password takes effect, (f) on submit success redirects to `/` which now renders the regular dashboard.
+**And** the wizard validates the password against the same rules used by today's `OPCGW_OPCUA__USER_PASSWORD` env-var path (minimum length, allowed character set — copy from `src/opc_ua_auth.rs` rather than diverging).
+**And** the dashboard, when first reached after the wizard, shows an empty state for the "Applications" tile (e.g., "No applications configured — add one from the Applications page") rather than crashing or rendering a blank table.
+**And** the Applications page (today's `static/applications.html`) renders an empty list with a prominent "Add application" button (which today's static HTML already exposes, but ensure the empty-state copy is operator-meaningful, not a blank `<tbody>`).
+**And** the existing env-var override path is preserved unchanged: if `OPCGW_OPCUA__USER_PASSWORD` is set at startup, the wizard is suppressed and the dashboard renders directly.
+**And** `cargo test --all-targets` continues to pass with no regressions; new integration tests cover (a) `validate()` accepts empty `application_list`, (b) wizard renders on first reach when no password is set, (c) wizard's POST endpoint persists the password and unblocks the dashboard, (d) env-var path bypasses the wizard.
+**And** `cargo clippy --all-targets -- -D warnings` remains clean.
+**And** `README.md` documents the empty-bootstrap path in the Docker section (operator can `docker run` with no `config.toml` mount and configure entirely through the web UI).
+**And** the partially-landed serde-default fix at `src/config.rs` (commit `cecd100`, 2026-05-20) is preserved and extended — C-0 does not regress empty-TOML deserialisation.
+
+### Story C.1: ChirpStack Inventory Query Layer
+
+As **opcgw's web UI**,
+I want internal Rust helpers and HTTP endpoints that proxy ChirpStack's `ListApplications`, `ListDevices`, and recent-uplinks gRPC calls,
+So that the inventory picker UI (Story C-2) can render lists of named ChirpStack resources without the browser having to talk to ChirpStack directly.
+
+**Acceptance Criteria:**
+
+**Given** the gateway is running with a valid `[chirpstack]` configuration (server_address, api_token, tenant_id),
+**When** the web UI calls `GET /api/inventory/applications`,
+**Then** opcgw queries ChirpStack's gRPC `ApplicationService.List` for the configured tenant, returns a JSON array of `{id, name}` objects sorted by name (case-insensitive), and the response includes a `count` field for paging signalling.
+**And given** the operator has chosen an application in the UI,
+**When** the web UI calls `GET /api/inventory/devices?application_id=<uuid>`,
+**Then** opcgw queries ChirpStack's `DeviceService.List` for that application, returns a JSON array of `{dev_eui, name, description, profile_name, last_seen_at}` objects sorted by name.
+**And given** the operator has chosen a device in the UI,
+**When** the web UI calls `GET /api/inventory/uplinks?dev_eui=<eui>&limit=<N>` (default N=10, max N=50),
+**Then** opcgw queries ChirpStack's event-log / device-events endpoint for the last N uplinks, returns a JSON array of `{received_at, decoded_object}` where `decoded_object` is the codec output JSON, plus a derived `observed_keys` field listing the union of all top-level keys seen across the N uplinks with a per-key value-type hint (`int` / `float` / `bool` / `string`) inferred from observed values.
+**And** all three endpoints are read-only (no config mutation) and require the same web-UI authentication as the rest of the API surface (basic auth + CSRF per current `src/web/` patterns).
+**And** errors are mapped sensibly: ChirpStack unreachable → 502 + `event="inventory_query_failed"` with `reason="chirpstack_unreachable"`; ChirpStack authentication failure → 502 + `reason="chirpstack_auth_failed"`; ChirpStack returns empty list → 200 with `[]` (not an error).
+**And** **server-side TTL cache** mitigates ChirpStack call volume: `/api/inventory/applications` and `/api/inventory/devices` results are cached in-memory keyed by `(tenant_id)` and `(tenant_id, application_id)` respectively, with a default TTL of **60 seconds** (configurable via a new `[chirpstack].inventory_cache_ttl_seconds` field, default 60, settable to 0 to disable). Cache hits do NOT call ChirpStack. `/api/inventory/uplinks` is **NOT cached** (freshness-sensitive — operator needs the latest uplinks to discover newly-emitted metric keys).
+**And** the operator can bypass the cache with `?refresh=true` on any inventory endpoint — forces a fresh ChirpStack call, repopulates the cache with the new result and a refreshed TTL stamp. The drift-view page (Story C-4) uses `?refresh=true` so the drift comparison is never against stale cache. Static pickers (Story C-2) honor cache by default.
+**And** the cache is invalidated on POST/PUT/DELETE to the corresponding CRUD endpoints (`/api/applications` etc.) — when opcgw's own write changes the tenant's inventory shape (or when the operator runs the drift-view "Add to opcgw" flow), the next picker open serves fresh data even if TTL hasn't expired.
+**And** **audit events fire on cache MISSES only**, not on cache HITS: `event="inventory_query"` carries fields `resource={applications|devices|uplinks}`, `cache_status={miss|refresh|bypassed}`, and the response status. Cache HITS are silent in the audit log (no event). Each cache MISS represents one actual ChirpStack call, so the audit-log volume is bounded by `1 / inventory_cache_ttl_seconds × active_operator_sessions` rather than `clicks_per_session`.
+**And** the helpers (`list_chirpstack_applications`, `list_chirpstack_devices`, `list_chirpstack_recent_uplinks`) live in a new `src/chirpstack_inventory.rs` (or are added to existing `src/chirpstack.rs` — Dev Agent's choice based on file-size) and are exercised by unit tests with a mocked gRPC client.
+**And** the endpoint handlers in `src/web/api.rs` (or a new `src/web/inventory.rs`) are exercised by integration tests using the existing `tests/web_*.rs` test harness pattern.
+**And** `cargo test --all-targets` passes; `cargo clippy --all-targets -- -D warnings` clean.
+**And** `docs/api.md` (if it exists) or `docs/web-api.md` is updated to document the three new endpoints; otherwise add a new section to `README.md` or a new file under `docs/`.
+
+### Story C.2: Inventory Pickers in the Web UI
+
+As an **opcgw operator adding a new application or device through the web UI**,
+I want to pick the ChirpStack application, device, and metrics from named lists fetched from ChirpStack at the moment I'm filling in the form,
+So that I never have to type a UUID or DevEUI by hand and never have to switch to the ChirpStack web UI to look up an ID.
+
+**Acceptance Criteria:**
+
+**Given** Story C-1's inventory endpoints are live,
+**When** the operator clicks "Add application" on the Applications page,
+**Then** instead of (or in addition to) the existing free-form `application_id` text input, opcgw fetches `/api/inventory/applications`, renders a name-sorted dropdown (or searchable picker), and on selection pre-fills the form's hidden `application_id` field plus the editable `application_name` field (defaulting to ChirpStack's name; operator may override for the OPC UA-side display).
+**And given** the operator has selected an application and clicks "Add device",
+**When** the device-add form loads,
+**Then** opcgw fetches `/api/inventory/devices?application_id=<chosen-app>` and presents the same name-picker pattern; on selection pre-fills `device_id` (DevEUI, hidden) and `device_name` (editable, defaults to ChirpStack's name).
+**And given** the operator has selected a device and clicks "Add metric",
+**When** the metric-add form loads,
+**Then** opcgw fetches `/api/inventory/uplinks?dev_eui=<chosen-eui>&limit=10` and renders a multi-select list of the observed top-level keys, each row showing the key name and the inferred wire type with a per-key wire-type override dropdown (Float / Int / Bool / String) defaulting to the observation-driven inference. The operator picks one or more keys; on submit, opcgw creates one metric per picked key with `chirpstack_metric_name = <key>` and `metric_name = <key>` (operator may override the OPC UA display name in the form before submit).
+**And** the existing "type a UUID by hand" escape hatch remains available — the dropdown is preferred, but if ChirpStack is unreachable or the operator wants to pre-create config for a device not yet enrolled, they can switch to a "Type manually" mode and enter the IDs as today. The UI surfaces this fallback prominently when an inventory fetch returns 502.
+**And** the pickers honor opcgw's existing CSRF discipline; no GET-then-immediate-POST race where a stale picker selection submits with a mismatched CSRF token.
+**And** the wire-type inference at metric-pick time logs both the inferred type and the per-uplink sample values into the gateway's audit trail (`event="metric_wire_type_inferred"`) so the choice is auditable.
+**And** integration tests (extending `tests/web_application_crud.rs`, `tests/web_device_crud.rs`, or new `tests/web_inventory_pickers.rs`) cover the happy path for each picker and the fallback-to-manual path on inventory-fetch failure.
+**And** `cargo test --all-targets` passes; `cargo clippy --all-targets -- -D warnings` clean.
+**And** the existing static HTML (`static/applications.html`, `static/devices-config.html`) is updated; if the inline-script complexity grows past ~200 lines, the Dev Agent extracts into a new `static/inventory-picker.js` module.
+
+### Story C.3: Server-Side Duplicate-Prevention Validator
+
+As an **opcgw operator who might accidentally try to add the same ChirpStack application or device twice through the web UI**,
+I want opcgw to reject duplicate IDs at the same level with a clear error message,
+So that I cannot create silent ambiguity in the OPC UA browse tree (two nodes claiming to map to the same ChirpStack resource) and so the picker doesn't accidentally let me add a duplicate by hand-typing.
+
+**Acceptance Criteria:**
+
+**Given** opcgw already has an `[[application]]` entry with `application_id = "abc-123"`,
+**When** the operator POSTs another `[[application]]` with the same `application_id = "abc-123"`,
+**Then** the server rejects the request with HTTP 409 (or 400 — Dev Agent picks the better-fitting code), emits `event="application_crud_rejected" reason="duplicate"` matching the existing Story 9-4 audit shape with a `duplicate` sub-code, and the UI renders the error inline near the conflicting field (not as a generic toast).
+**And given** the operator is adding a device under application `abc-123` and `device_id = "DEADBEEF00000001"` already exists under that same application,
+**When** the POST fires,
+**Then** the server rejects with the same 409/400 + `event="device_crud_rejected" reason="duplicate"` audit pattern, scoped to "same DevEUI under same application."
+**And given** the operator is adding a metric under device `DEADBEEF00000001` and `chirpstack_metric_name = "temperature"` already exists on that device,
+**When** the POST fires,
+**Then** the server rejects with the same pattern at the metric level.
+**And** the rule is **scoped to the same level only**: it is EXPLICITLY ALLOWED for the same DevEUI to appear under two different applications in opcgw's config (an operator might want to expose one physical device under multiple OPC UA namespaces). Test: add `DEADBEEF00000001` under `application_a`, then add `DEADBEEF00000001` under `application_b` — both succeed; both appear in the OPC UA browse tree under their respective parent applications.
+**And** the validator runs on POST and PUT (not just POST) — editing an application to set its `application_id` to a value already used by another application is also rejected.
+**And** the rule is enforced regardless of which write path triggers it: the picker-driven flow from Story C-2, the manual free-form input fallback, AND a direct TOML hot-reload that introduces a duplicate (the hot-reload path emits the same audit event and refuses the load with the snapshot reverting to the pre-load state).
+**And** existing duplicate-tolerance behavior anywhere else in the codebase is audited and either documented as intentional ("duplicate metric_name across two different devices is FINE — that's how operators expose multiple sensors of the same kind under different devices") or fixed.
+**And** integration tests cover: (a) same `application_id` rejected, (b) same `device_id` under same application rejected, (c) same `device_id` under different application ACCEPTED, (d) same `chirpstack_metric_name` on same device rejected, (e) PUT-rename collision rejected, (f) hot-reload-introduced duplicate rejected.
+**And** `cargo test --all-targets` passes; `cargo clippy --all-targets -- -D warnings` clean.
+
+### Story C.4: Inventory Drift View
+
+As an **opcgw operator running a gateway whose ChirpStack inventory has drifted since I last edited the opcgw config**,
+I want a "drift view" page that compares my opcgw config against ChirpStack's current inventory and highlights stale, missing, available, and renamed resources,
+So that I can reconcile divergence without manually cross-referencing two web UIs row by row.
+
+**Acceptance Criteria:**
+
+**Given** opcgw's config contains applications, devices, and metrics, and ChirpStack's actual inventory has diverged (some resources deleted, some new ones added, some renamed),
+**When** the operator opens `/inventory-drift` (or whatever URL the Dev Agent chooses) in the web UI,
+**Then** opcgw queries ChirpStack via Story C-1's endpoints, diffs against its in-memory config snapshot, and renders a table with rows in four classes:
+  - **OK** — configured in opcgw, present in ChirpStack, names match → row is normal-styled.
+  - **Stale** — configured in opcgw, MISSING from ChirpStack (deleted there) → row is yellow/warn-styled with a "Remove from opcgw" button.
+  - **Available** — present in ChirpStack, NOT configured in opcgw → row is blue/info-styled with an "Add to opcgw" button that opens the existing add-flow pre-filled.
+  - **Drifted** — configured in opcgw, present in ChirpStack, but the ChirpStack name differs from opcgw's `application_name` / `device_name` → row shows both names and offers "Update opcgw to ChirpStack's current name" + "Keep opcgw alias as-is" buttons.
+**And** drift detection runs at three levels: application, device, metric (metric drift = a configured metric's `chirpstack_metric_name` no longer appears in the device's recent uplinks).
+**And** clicking "Remove from opcgw" prompts a confirmation dialog before deleting, and the delete flows through the existing CRUD audit events (`event="application_crud" action="delete"` etc.) — drift-view is a thin UI, not a parallel write path.
+**And** clicking "Add to opcgw" routes the operator to the standard add-flow (Story C-2 pickers) with the chosen resource pre-selected.
+**And** clicking "Update opcgw to ChirpStack's current name" issues a standard PUT through the existing CRUD path.
+**And** the drift-view page surfaces a "last refreshed at <timestamp>" indicator and a manual refresh button; no background polling (operator-triggered only, to keep ChirpStack API call volume predictable).
+**And** the page is read-only safe: if ChirpStack is unreachable, the page renders with the cached OPC UA-side names plus an "Unable to reach ChirpStack — drift cannot be computed" banner; no destructive actions are offered.
+**And** integration tests cover the four drift classes (OK / Stale / Available / Drifted) with a mock ChirpStack inventory and assert the JSON returned by a new `GET /api/inventory/drift` endpoint.
+**And** the existing static-HTML pages get a new "Drift" navigation link or sub-tab; the implementation may be a new `static/inventory-drift.html` or a tab on an existing page (Dev Agent's choice).
+**And** `cargo test --all-targets` passes; `cargo clippy --all-targets -- -D warnings` clean.
+
+### Story C.6: TOML→SQLite Configuration Migration
+
+As an **opcgw operator running v2.0+ with an established config**,
+I want opcgw's authoritative configuration to live in SQLite alongside the metric values, with TOML reduced to a bootstrap-only seed file,
+So that all writes (web UI, future automation APIs, eventual ChirpStack-driven auto-sync) hit a single canonical store, and so the gateway's "what's configured" answer comes from one place not two.
+
+**Acceptance Criteria:**
+
+**Given** opcgw starts with both a `config.toml` and an existing SQLite database from a prior version,
+**When** the gateway boots,
+**Then** opcgw migrates the TOML-side `[[application]]` / device / metric / command tree into a new set of SQLite tables (schema migration `v008` — increment from Epic A's `v007`), one-shot on first boot of the v2.0.x version that includes this story, and emits `event="config_migration" stage="toml_to_sqlite"` with row counts.
+**And** post-migration, all CRUD endpoints (Story 9-4 / 9-5 / 9-6 application/device/metric/command CRUD, Story C-2 picker writes, Story C-3 validator) write to SQLite as the authoritative store; the TOML file is no longer mutated by opcgw at runtime.
+**And** the existing `[chirpstack]`, `[opcua]`, `[web]`, `[global]` config-file sections (singleton config not tied to applications/devices/metrics) remain in TOML for v2.x and are migrated to SQLite in a future story — Story C-6 scope is the `[[application]]` tree only.
+**And** the OPC UA address-space builder, ChirpStack poller, and web UI all read from SQLite (not from the in-memory `AppConfig.application_list`) post-migration; the in-memory snapshot is rebuilt from SQLite at boot and on every CRUD write.
+**And** **hot-reload after C-6 is SQLite-driven, not TOML-driven**: the existing TOML file-watcher hot-reload primitive (Story 9-7, `src/web/hot_reload.rs` or wherever the watcher lives today) is **removed**. Hot-reload now means: when a SQLite write to the configuration tables completes (via any of the CRUD endpoints or the migration itself), opcgw rebuilds the in-memory `application_list` snapshot from SQLite, then triggers the same downstream rebuild path Story 9-7 wired up (OPC UA address-space rebuild, ChirpStack poller config refresh, dashboard cache invalidation). The semantics from an operator perspective are unchanged ("config change → live system catches up without restart"); the trigger source is the database write, not a file-system event. A new optional admin endpoint `POST /api/admin/reimport-toml` may be added in a future story to support emergency "restore config from a backup TOML" flows, but Story C-6 does NOT ship that endpoint — pre-C-6 operators who relied on TOML hot-reload as a config-edit primitive will use the web UI CRUD instead post-C-6.
+**And** a migration runbook lives at `docs/c-6-migration-runbook.md` covering: (a) pre-migration backup of `opcgw.db` + `config.toml`, (b) automatic migration on first v2.x boot with this story shipped, (c) verification step (`scripts/check-c6-migration.sh` or similar — confirms row counts match between TOML and the new SQLite tables), (d) one-way rollback contract (if the operator wants to downgrade to a pre-C-6 v2.x, they must restore from the pre-migration `opcgw.db` backup).
+**And** integration tests cover: (a) fresh-DB boot with a populated TOML — migration runs, SQLite tables populate, in-memory snapshot matches TOML byte-for-byte; (b) re-boot with already-migrated SQLite — migration no-ops; (c) CRUD writes go to SQLite, not TOML; (d) OPC UA browse tree reflects SQLite state post-CRUD.
+**And** `cargo test --all-targets` passes; `cargo clippy --all-targets -- -D warnings` clean.
+**And** `docs/architecture.md` is updated to reflect SQLite as the configuration source-of-truth post-C-6; `README.md` Planning table and Configuration section reflect the new state.
+
+### Epic C — Story Acceptance Criteria
+
+**Given** opcgw is freshly deployed with no `config.toml` (or a near-empty one),
+**When** an operator opens the web UI for the first time,
+**Then** they complete the first-run setup wizard (C-0), are routed to the empty dashboard (C-0), add applications/devices/metrics by name-picking from ChirpStack (C-1+C-2), are protected from creating duplicates (C-3), and reconcile drift between opcgw and ChirpStack via the drift-view page (C-4) — all without hand-editing TOML, all by-name not by-UUID.
+**And** the resulting configuration is stored authoritatively in SQLite (C-6), with TOML reduced to optional bootstrap seed.
+
+**Vision capture reference:** see memory `project_epic_c_auto_discovery_vision.md` (Guy 2026-05-20, scope finalised 2026-05-21) for the load-bearing name-translation rationale and the three design decisions resolved at scope time (duplicate scope = same-level only; metric inventory discovery = scrape recent uplinks; wire type default = observation-driven).
+
+**Deferred CR:** `CR-EPIC-C-MQTT` in `../implementation-artifacts/deferred-work.md` — the originally-proposed Story C-5 (MQTT-based real-time path) was removed from Epic C on 2026-05-21 ("not willing to implement MQTT, at least now") to keep this epic finishable. Re-promote to a story in a future epic only on explicit operator request.

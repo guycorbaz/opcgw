@@ -863,7 +863,7 @@ pub struct AppConfig {
 
     /// List of ChirpStack applications and devices to monitor.
     ///
-    /// Epic D D-0 (2026-05-20): `#[serde(default)]` so a TOML file
+    /// Epic C C-0 (captured 2026-05-20 as "Epic D D-0", renamed 2026-05-21): `#[serde(default)]` so a TOML file
     /// with zero `[[application]]` blocks deserializes to an empty
     /// vec instead of failing at deserialization with
     /// `missing field "application"`. Pairs with the validator
@@ -1526,7 +1526,7 @@ impl AppConfig {
             }
         }
 
-        // Validate application_list. Epic D D-0 (2026-05-20): an empty
+        // Validate application_list. Epic C C-0 (captured 2026-05-20 as "Epic D D-0", renamed 2026-05-21): an empty
         // application_list is a valid baseline state — the gateway can
         // start with zero configured applications, the OPC UA server
         // exposes an empty browse tree, and the web UI is used to add
@@ -2287,7 +2287,7 @@ mod tests {
         assert!(error_msg.contains("greater than 0"));
     }
 
-    /// Epic D D-0 (2026-05-20): an empty `application_list` is a valid
+    /// Epic C C-0 (captured 2026-05-20 as "Epic D D-0", renamed 2026-05-21): an empty `application_list` is a valid
     /// baseline state. The gateway boots with zero configured applications,
     /// the OPC UA server exposes an empty browse tree, and the web UI is
     /// used to add applications interactively. Pre-fix this case errored
@@ -2305,7 +2305,7 @@ mod tests {
         let result = config.validate();
         assert!(
             result.is_ok(),
-            "empty application_list must be a valid baseline state (Epic D D-0), \
+            "empty application_list must be a valid baseline state (Epic C C-0), \
              got: {:?}",
             result.err(),
         );

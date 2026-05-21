@@ -221,7 +221,8 @@ fn main_startup_binds_opc_ua_port_within_timeout() {
 /// Same minimal config as `write_minimal_config` but with **zero
 /// `[[application]]` blocks** — used by `main_startup_with_empty_application_list`
 /// below to assert that the gateway accepts an empty topology as a valid
-/// baseline state (Epic D D-0, 2026-05-20).
+/// baseline state (Epic C C-0, captured 2026-05-20 under the working
+/// name "Epic D D-0" and renamed to Epic C C-0 on 2026-05-21).
 fn write_empty_topology_config(
     temp_dir: &std::path::Path,
     opcua_port: u16,
@@ -257,7 +258,7 @@ pki_dir = "./pki"
 user_name = "opcua-user"
 user_password = "test_password_placeholder"
 
-# Intentionally NO [[application]] blocks — Epic D D-0 baseline state.
+# Intentionally NO [[application]] blocks — Epic C C-0 baseline state (originally captured as "Epic D D-0" 2026-05-20).
 "#,
         opcua_port = opcua_port,
     )
@@ -265,7 +266,7 @@ user_password = "test_password_placeholder"
     config_path
 }
 
-/// Epic D D-0 regression test (2026-05-20): the gateway must accept an
+/// Epic C C-0 regression test (captured 2026-05-20 as "Epic D D-0", renamed 2026-05-21): the gateway must accept an
 /// empty `application_list` as a valid baseline state and still bind its
 /// OPC UA listener at startup. Pre-fix, `AppConfig::validate` rejected
 /// empty lists with "application_list: at least one application must be
@@ -320,7 +321,7 @@ fn main_startup_with_empty_application_list() {
     if early_exit {
         panic!(
             "opcgw exited before binding OPC UA port {} despite the config \
-             having ZERO [[application]] blocks. The Epic D D-0 invariant \
+             having ZERO [[application]] blocks. The Epic C C-0 invariant \
              (empty application_list is a valid baseline state) has \
              regressed — `AppConfig::validate` is likely rejecting the \
              empty list again. See `src/config.rs::validate` for the \
