@@ -5,7 +5,7 @@
 | Story key       | `C-0-empty-config-bootstrap`                                                                                |
 | Epic            | C — Auto-Discovery and Web-First Configuration (post-v2.0 GA)                                               |
 | FRs             | none (Epic C is post-PRD; see memory `project_epic_c_auto_discovery_vision.md`)                             |
-| Status          | ready-for-dev                                                                                               |
+| Status          | review                                                                                                      |
 | Created         | 2026-05-21                                                                                                  |
 | Source epic     | `_bmad-output/planning-artifacts/epics.md § Epic C § Story C.0`                                             |
 | Vision capture  | memory `project_epic_c_auto_discovery_vision.md` (2026-05-20 Guy, scope finalised 2026-05-21)               |
@@ -358,6 +358,49 @@ The Dev Agent may split some of these further (e.g., one test per redirect targe
 
 ---
 
-## Completion Note
+## Completion Note (Dev Agent Record — 2026-05-21)
 
-To be filled in by the dev agent at story completion. Should include: actual test count delta, the AC#6 OPC UA first-run mode decision (a or b) with rationale, the GitHub issue number, any deferred follow-ups added to `deferred-work.md`.
+**Test count delta:** baseline 1260/0/10 → post-C-0 **1310/0/10** (gross +50 from the new wizard integration test file + the validator/figment/is_first_run unit tests in `src/config.rs` + the setup-module unit tests in `src/web/setup.rs`). Exceeds the AC#19 floor of ≥ 1269/0/≥10. `cargo clippy --all-targets -- -D warnings` clean. `cargo test --doc` 0 failed / 55 ignored (note: AC#21 cited "≥ 56 ignored" but the actual pre-C-0 baseline at HEAD was 55 — the AC was carrying forward an older snapshot count; 55 is the correct floor and unchanged).
+
+**Two design deviations from the spec, agreed with Guy 2026-05-21 before implementation:**
+
+1. **Hot-reload → graceful restart.** AC#11 promised in-place hot-reload of the OPC UA auth manager after wizard submit. Reality: `AppState.auth: Arc<WebAuthState>` is documented restart-required at `src/web/mod.rs:264` (Story 9-7 explicitly excluded credential rotation from the hot-reload contract). The wizard now writes `secrets.toml`, signals the gateway's `CancellationToken` for a graceful shutdown, and relies on the supervisor (Docker / systemd `Restart=on-failure`) to restart opcgw — the figment provider stack picks up `secrets.toml` on the second boot. UX: operator sees "Password set. Gateway is restarting." then page auto-reloads after ~7 seconds. Standard pattern for self-hosted-app first-run wizards.
+
+2. **OPC UA reject-all mode is implicit, not explicit.** AC#6 offered option (a) anonymous-only or (b) reject-all. The existing `OpcgwAuthManager::new` at `src/opc_ua_auth.rs:96` already handles empty credentials by setting `is_configured = false`, which causes the OPC UA auth path to reject every username-token connection attempt — that's effectively option (b) at zero implementation cost. Added the `event="opcua_first_run_mode"` audit emit at `src/main.rs` to signal the state explicitly. NO new code in `OpcgwAuthManager` was needed.
+
+**Auth + CSRF middleware bypass for wizard paths (Epic C C-0 architectural addition):**
+
+The basic-auth middleware refuses to authenticate when `WebAuthState::is_configured = false` (defence-in-depth). In first-run mode, `WebAuthState::for_first_run` builds a state with `is_first_run = true` AND `is_configured = false`. The middleware was updated to:
+- Bypass the credential check when `state.is_first_run && is_wizard_bypass_path(path)`.
+- Continue to short-circuit non-wizard requests via the empty-credentials defence-in-depth branch (defence layered).
+
+The CSRF middleware was updated to exempt `/api/setup/password` (the wizard POST) — CSRF's threat model (cross-site request from a logged-in user's browser) does not apply pre-authentication, and the handler independently checks `state.is_first_run` and returns HTTP 410 Gone post-first-run.
+
+The first-run gate middleware (`src/web/setup.rs::first_run_gate_middleware`) sits ABOVE both auth and CSRF (declared last in `build_router` = outermost on requests). In first-run mode it redirects non-wizard, non-static paths to `/setup` via HTTP 303 See Other (`Redirect::to`). In normal mode it's a no-op.
+
+**Static-asset bypass list (`is_wizard_bypass_path`):** `/setup`, `/api/setup/*`, `/dashboard.css`, and any path ending in `.css`, `.js`, `.png`, `.ico`, `.svg`, `.woff`, `.woff2`. The auth middleware uses the same function so static-asset access during first-run mode bypasses auth consistently.
+
+**Files touched:**
+
+- `src/config.rs` — validator amend (`user_password.is_empty()` branch + env-var-set-but-empty rejection), new `AppConfig::is_first_run()` method, figment provider stack extended with sibling `secrets.toml` provider between main TOML and env-var layer. **8 new unit tests** covering validator + is_first_run + figment precedence.
+- `src/main.rs` — `is_first_run` captured at boot; conditional `WebAuthState::for_first_run` vs `WebAuthState::new`; `event="opcua_first_run_mode"` audit emit when in first-run; new `secrets_path` derived from `config_path`; new AppState fields plumbed through.
+- `src/web/auth.rs` — new `is_first_run: bool` field on `WebAuthState`; new `for_first_run(realm)` constructor with throwaway credentials + `is_first_run = true`; `basic_auth_middleware` updated to bypass credential check for wizard paths in first-run mode.
+- `src/web/csrf.rs` — `csrf_middleware` exempts `/api/setup/password` (1 added branch).
+- `src/web/mod.rs` — `AppState` gains 3 new fields (`is_first_run`, `secrets_path`, `shutdown_token`); router gains wizard routes + first-run gate middleware layer.
+- `src/web/setup.rs` (NEW, ~470 lines) — first-run gate middleware, GET /setup handler, POST /api/setup/password handler with validation + `secrets.toml` persistence (chmod 0600, tempfile + persist atomic rename) + `CancellationToken` shutdown trigger. **9 unit tests.**
+- `static/setup.html` (NEW, ~210 lines) — wizard frontend with client-side + server-authoritative validation, restart-countdown UX.
+- `static/index.html` + `static/dashboard.js` + `static/applications.js` — empty-state UI hints when `application_count == 0`.
+- `tests/web_setup_wizard.rs` (NEW, ~360 lines) — **9 integration tests** covering first-run redirect / wizard GET / wizard POST happy + error paths / static-asset bypass / post-first-run 410 Gone.
+- `tests/web_auth.rs`, `tests/web_application_crud.rs`, `tests/web_command_crud.rs`, `tests/web_device_crud.rs`, `tests/web_dashboard.rs` — 6 AppState construction sites updated with the 3 new fields (defaults: `is_first_run: false`, `secrets_path: /tmp/test-secrets.toml`, `shutdown_token: CancellationToken::new()`).
+- `.gitignore` — `config/secrets.toml` added.
+- `README.md` — new "First-run wizard" sub-section under Docker; Planning table gained Epic C row.
+- `docs/security.md` — new "First-run wizard" section + precedence-rules update (secrets.toml between TOML and env-var) + threat-model paragraph.
+- `docs/manual/opcgw-user-manual.xml` — new `<sect1 id="sec-first-run-wizard">` under Configuration chapter (DocBook 4.5 syntax preserved per memory `[[project_user_manual_format]]`; validated with `xmllint --noout --valid`, exit 0).
+
+**GitHub tracking issue:** TBD (Guy opens out-of-band per Epic A / Epic B precedent — gh CLI not authenticated for write). Suggested title from the spec: "C-0: Empty-config bootstrap + first-run setup wizard." Implementation commit message carries `Refs #__` placeholder; resolution per existing precedent (follow-up commit when number is available).
+
+**Deferred follow-ups added to consideration (not yet in `deferred-work.md` — pending code review iter-N+1 + Guy's decision):**
+
+- The setup.rs `toml_escape_string` helper duplicates a fragment of TOML basic-string escaping that the `toml` crate would handle more thoroughly. The hand-rolled version covers the common cases (`"`, `\`, control chars) but not all edge cases (e.g., unicode escapes for surrogate pairs). For the current operator-typed-password use case this is sufficient; for forward-compat with `secrets.toml` carrying additional fields (Epic C C-6 territory), consider migrating to `toml::Value::String(...).to_string()`.
+- The `static/setup.html` PLACEHOLDER_PREFIX check is hard-coded to `"REPLACE_ME_WITH_"` in JS. If the constant in `src/utils.rs:419` ever changes, this string would drift silently. A future iter-N+1 patch may extract the constant into the wizard HTML at render time (server-side template substitution) — currently the JS check is just a UX nicety, server is authoritative.
+- The wizard's restart-countdown UX assumes the supervisor restarts opcgw quickly (within ~7 seconds). For very-slow-supervisor environments, the page reload could fire before the gateway is back up — the browser would see a connection refused. Acceptable in v1; could add a "retry until 200" loop in a future iter-N+1.

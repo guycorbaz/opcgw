@@ -123,6 +123,14 @@ pub struct WebAuthState {
     /// Defence-in-depth: `false` if the configured user OR password was
     /// empty at construction time. Mirrors `OpcgwAuthManager::is_configured`.
     is_configured: bool,
+    /// Epic C C-0 (2026-05-21): `true` iff this state was built via
+    /// [`Self::for_first_run`] (no OPC UA password yet — the web UI's
+    /// `/setup` wizard is reachable to collect one). When `true`, the
+    /// auth middleware bypasses the credential check for wizard and
+    /// static-asset paths (see [`is_wizard_bypass_path`] in `setup.rs`).
+    /// Non-wizard paths are caught by the first-run gate middleware
+    /// upstream and redirected to `/setup` BEFORE auth runs.
+    is_first_run: bool,
 }
 
 impl WebAuthState {
@@ -209,6 +217,54 @@ impl WebAuthState {
             hmac_key,
             realm,
             is_configured,
+            is_first_run: false,
+        }
+    }
+
+    /// Epic C C-0 (2026-05-21): build a `WebAuthState` for first-run
+    /// mode.
+    ///
+    /// In first-run mode the gateway has no configured OPC UA password
+    /// yet, so the standard [`new`] constructor would fail-close. This
+    /// constructor builds a `WebAuthState` with throwaway random
+    /// credentials (32 bytes each, hex-encoded). The credentials are
+    /// **never** authenticated against because the first-run gate
+    /// middleware (`src/web/setup.rs::first_run_gate_middleware`)
+    /// intercepts every non-wizard, non-static request BEFORE the
+    /// auth middleware can run. The wizard routes themselves bypass
+    /// the auth layer entirely (separate sub-router in
+    /// [`crate::web::build_router`]).
+    ///
+    /// `is_configured` is set to `false` so the defence-in-depth check
+    /// at `basic_auth_middleware:382` short-circuits any auth attempt
+    /// that somehow reaches the auth layer in first-run mode (e.g. a
+    /// future refactor that removes the gate). The 401 response from
+    /// that path makes the failure mode safe.
+    pub fn for_first_run(realm: String) -> Self {
+        let mut hmac_key = [0u8; 32];
+        getrandom::getrandom(&mut hmac_key)
+            .expect("system RNG must produce 32 bytes for HMAC key");
+        // Throwaway "credentials" — never compared in first-run mode.
+        // We HMAC random bytes so the digest stored is no more
+        // predictable than the legitimate post-first-run case.
+        let mut throwaway_user = [0u8; 32];
+        let mut throwaway_pass = [0u8; 32];
+        getrandom::getrandom(&mut throwaway_user).expect("getrandom");
+        getrandom::getrandom(&mut throwaway_pass).expect("getrandom");
+        let user_digest = hmac_sha256(&hmac_key, &throwaway_user);
+        let pass_digest = hmac_sha256(&hmac_key, &throwaway_pass);
+        Self {
+            user_digest,
+            pass_digest,
+            hmac_key,
+            realm,
+            // Deliberately `false` so the middleware's defence-in-depth
+            // empty-credentials short-circuit at line 382 fires if the
+            // gate is ever bypassed in a future refactor.
+            is_configured: false,
+            // Epic C C-0: `true` so `basic_auth_middleware` bypasses
+            // the credential check for wizard + static-asset paths.
+            is_first_run: true,
         }
     }
 }
@@ -371,6 +427,18 @@ pub async fn basic_auth_middleware(
 ) -> Response {
     let path = req.uri().path().to_string();
     let source_ip = addr.ip();
+
+    // Epic C C-0 (2026-05-21): in first-run mode, bypass auth for
+    // wizard routes and static assets so the operator can reach
+    // `/setup` without a configured password. The first-run gate
+    // middleware (declared above this layer in `build_router`)
+    // redirects non-wizard, non-static paths to `/setup` BEFORE this
+    // middleware runs, so the only paths reaching here in first-run
+    // mode are wizard + static (which we bypass) — anything else
+    // would have been redirected upstream.
+    if state.is_first_run && crate::web::setup::is_wizard_bypass_path(&path) {
+        return next.run(req).await;
+    }
 
     // Defence-in-depth: refuse to authenticate anyone if the
     // `WebAuthState` was somehow built from empty credentials. The

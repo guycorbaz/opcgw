@@ -691,6 +691,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The legacy `OpcUa::run` wrapper does NOT expose `RunHandles`,
     // so we build first, spawn the listener, then drive the server
     // via `OpcUa::run_handles`.
+    //
+    // Epic C C-0 (2026-05-21): if the gateway is in first-run mode,
+    // emit a single audit event signalling the OPC UA server will
+    // start with reject-all auth. The existing `OpcgwAuthManager`
+    // (`src/opc_ua_auth.rs:96`) handles empty credentials by setting
+    // `is_configured = false`, which causes the auth path to reject
+    // every username-token connection attempt — that's the AC#6
+    // option-(b) "reject-all" behaviour without needing invasive
+    // async-opcua changes. The OPC UA server still binds on its
+    // configured port so external uptime probes can confirm the
+    // gateway is alive while the operator completes the web wizard.
+    if application_config.is_first_run() {
+        info!(
+            event = "opcua_first_run_mode",
+            "OPC UA server starting in first-run mode: all auth attempts will be rejected \
+             until the operator completes the /setup wizard and opcgw restarts with the \
+             newly-persisted password."
+        );
+    }
     let opc_ua = OpcUa::new(&application_config, opcua_backend, cancel_token.clone());
     let run_handles = match opc_ua.build().await {
         Ok(handles) => handles,
@@ -852,10 +871,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // `getrandom(2)` is unavailable (chroot without /dev/urandom,
         // seccomp, etc.), the panic surfaces at startup rather than
         // at shutdown via JoinError on the spawned task.
-        let auth_state = std::sync::Arc::new(web::auth::WebAuthState::new(
-            &application_config,
-            realm.clone(),
-        )?);
+        //
+        // Epic C C-0 (2026-05-21): in first-run mode the OPC UA
+        // user_password is empty, which `WebAuthState::new` rejects.
+        // Use the throwaway-credentials constructor instead; the
+        // first-run gate middleware (`src/web/setup.rs`) intercepts
+        // every non-wizard, non-static request before auth runs.
+        let is_first_run = application_config.is_first_run();
+        let auth_state = std::sync::Arc::new(if is_first_run {
+            warn!(
+                event = "first_run_mode_active",
+                "Gateway is in first-run mode: no OPC UA user_password \
+                 configured. Web wizard available at /setup. Basic auth \
+                 is bypassed for wizard and static routes until the \
+                 wizard completes and the gateway restarts."
+            );
+            web::auth::WebAuthState::for_first_run(realm.clone())
+        } else {
+            web::auth::WebAuthState::new(&application_config, realm.clone())?
+        });
 
         // Story 9-2 AC#1: dedicated SqliteBackend for the web server,
         // mirroring the per-task pattern at lines 614, 640, 673, 690.
@@ -941,6 +975,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let config_writer =
             web::config_writer::ConfigWriter::new(std::path::PathBuf::from(&config_path));
 
+        // Epic C C-0 (2026-05-21): derive the sibling secrets.toml
+        // path from the main config_path. The first-run wizard will
+        // write to this path on successful submission.
+        let secrets_path = std::path::Path::new(&config_path)
+            .parent()
+            .map(|p| p.join("secrets.toml"))
+            .unwrap_or_else(|| std::path::PathBuf::from("secrets.toml"));
+
         let app_state = std::sync::Arc::new(web::AppState {
             auth: auth_state,
             backend: web_backend,
@@ -953,6 +995,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // config_reload.reload() after writing the TOML.
             config_reload: reload_handle.clone(),
             config_writer,
+            // Epic C C-0 (2026-05-21): first-run state + wizard
+            // persistence path + shutdown token plumbed into AppState
+            // so the wizard handlers and the first-run gate middleware
+            // can reach them via the State extractor.
+            is_first_run,
+            secrets_path,
+            shutdown_token: cancel_token.clone(),
         });
 
         // Bind synchronously; fail-fast on bind failure.

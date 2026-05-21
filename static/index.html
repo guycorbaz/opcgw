@@ -35,7 +35,10 @@
   <section class="tile" id="tile-applications">
     <h2>Applications</h2>
     <p class="value"><span id="application-count">…</span></p>
-    <p class="hint">Configured in TOML.</p>
+    <p class="hint" id="application-hint">Configured in TOML.</p>
+    <!-- Epic C C-0 (2026-05-21): the dashboard.js empty-state hook
+         swaps in operator-friendly copy when application_count == 0
+         on a freshly-deployed gateway. -->
   </section>
 
   <section class="tile" id="tile-devices">

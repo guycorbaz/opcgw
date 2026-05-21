@@ -99,6 +99,10 @@ fn build_test_app_state(snapshot: DashboardConfigSnapshot) -> Arc<AppState> {
         stale_threshold_secs: std::sync::atomic::AtomicU64::new(120),
         config_reload,
         config_writer,
+        // Epic C C-0 test defaults.
+        is_first_run: false,
+        secrets_path: std::path::PathBuf::from("/tmp/test-secrets.toml"),
+        shutdown_token: tokio_util::sync::CancellationToken::new(),
     })
 }
 
@@ -804,6 +808,10 @@ async fn api_devices_emits_typed_value_and_unit_per_variant() {
         stale_threshold_secs: std::sync::atomic::AtomicU64::new(120),
         config_reload,
         config_writer,
+        // Epic C C-0 test defaults.
+        is_first_run: false,
+        secrets_path: std::path::PathBuf::from("/tmp/test-secrets.toml"),
+        shutdown_token: tokio_util::sync::CancellationToken::new(),
     });
 
     let static_tmp = build_production_static_dir().await;

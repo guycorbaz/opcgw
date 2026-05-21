@@ -35,6 +35,7 @@ pub mod api;
 pub mod auth;
 pub mod config_writer;
 pub mod csrf;
+pub mod setup;
 
 // Iter-1 review P30: `test_support` ships in release binaries
 // because integration tests in `tests/` cannot see `#[cfg(test)]`
@@ -298,6 +299,25 @@ pub struct AppState {
     /// CRUD requests across the entire write+reload critical
     /// section.
     pub config_writer: Arc<crate::web::config_writer::ConfigWriter>,
+    /// Epic C C-0 (2026-05-21): captured-at-boot first-run signal.
+    /// `true` iff `AppConfig::is_first_run()` returned `true` at
+    /// startup. The first-run gate middleware reads this on every
+    /// request to decide whether to redirect to the wizard. Exiting
+    /// first-run mode requires a process restart (the auth
+    /// middleware's `Arc<WebAuthState>` is restart-required), so
+    /// this value is fixed for the lifetime of the process.
+    pub is_first_run: bool,
+    /// Epic C C-0 (2026-05-21): absolute path to the sibling
+    /// `secrets.toml` file the wizard writes on success. Derived at
+    /// boot from the main `config_path`'s parent directory.
+    pub secrets_path: PathBuf,
+    /// Epic C C-0 (2026-05-21): gateway-wide shutdown signal. The
+    /// wizard POST handler calls `.cancel()` after persisting the
+    /// password so the gateway shuts down gracefully; the supervisor
+    /// (docker / systemd) restarts opcgw, and on the second boot the
+    /// figment provider stack picks up the new `secrets.toml`. Same
+    /// `CancellationToken` as the gateway-wide signal in `main.rs`.
+    pub shutdown_token: tokio_util::sync::CancellationToken,
 }
 
 /// Story 9-7 Task 4 — extracted from the inline clamp at
@@ -461,15 +481,25 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
                 .put(api::update_command)
                 .delete(api::delete_command),
         )
+        // Epic C C-0 (2026-05-21): wizard routes. Reachable BEFORE
+        // auth+CSRF when `AppState.is_first_run = true` (the basic-auth
+        // middleware checks for wizard paths and bypasses auth in
+        // first-run mode); in post-first-run mode the wizard handlers
+        // themselves return HTTP 410 Gone.
+        .route("/setup", get(setup::setup_get))
+        .route(
+            "/api/setup/password",
+            axum::routing::post(setup::setup_post),
+        )
         .fallback_service(ServeDir::new(static_dir))
         // Layer ordering invariant (load-bearing): axum 0.8 stacks
         // .layer(...) calls in REVERSE declaration order. For runtime
-        // ordering "auth runs first → CSRF runs second → handler runs
-        // third → security headers added on response", the layers
-        // must be declared in the inverse order. The CSRF layer is
-        // declared FIRST (innermost in the stack); the auth layer
-        // SECOND; the security-header layers are LAST (outermost) so
-        // they run on every response after handler completion.
+        // ordering "first-run gate → auth → CSRF → handler →
+        // security headers (response)", layers must be declared in
+        // the inverse order. CSRF FIRST (innermost), auth SECOND,
+        // first-run gate THIRD (last middleware before security
+        // headers), security headers LAST (outermost — response-side
+        // only, no-op on request).
         .layer(axum::middleware::from_fn_with_state(
             csrf_state,
             csrf::csrf_middleware,
@@ -477,6 +507,14 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             basic_auth_middleware,
+        ))
+        // Epic C C-0 (2026-05-21): first-run gate sits ABOVE auth so
+        // first-run-mode redirects fire BEFORE the auth middleware
+        // can reject. In normal mode the gate is a no-op (passes the
+        // request straight through to auth).
+        .layer(axum::middleware::from_fn_with_state(
+            app_state.clone(),
+            setup::first_run_gate_middleware,
         ))
         // Iter-1 review P9: clickjacking defence. `X-Frame-Options:
         // DENY` blocks framing entirely (legacy header for IE/old
@@ -950,6 +988,10 @@ mod tests {
             ),
             config_reload: Arc::new(handle),
             config_writer: crate::web::config_writer::ConfigWriter::new(toml_path),
+            // Epic C C-0 test defaults: smoke-test, never enters first-run mode.
+            is_first_run: false,
+            secrets_path: PathBuf::from("/tmp/test-secrets.toml"),
+            shutdown_token: tokio_util::sync::CancellationToken::new(),
         });
         let dir = PathBuf::from("static");
         let _router: Router = build_router(app_state, dir);

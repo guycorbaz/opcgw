@@ -237,6 +237,10 @@ async fn spawn_fixture(seed_toml: &str) -> CrudFixture {
         stale_threshold_secs: std::sync::atomic::AtomicU64::new(120),
         config_reload: config_reload.clone(),
         config_writer,
+        // Epic C C-0 test defaults.
+        is_first_run: false,
+        secrets_path: std::path::PathBuf::from("/tmp/test-secrets.toml"),
+        shutdown_token: tokio_util::sync::CancellationToken::new(),
     });
 
     let cancel = CancellationToken::new();

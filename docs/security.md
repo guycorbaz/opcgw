@@ -52,8 +52,33 @@ Configuration values are resolved in this order (highest priority last):
 
 1. **Defaults** — hard-coded in `src/config.rs`.
 2. **`config/config.toml`** — values from the TOML file.
-3. **Environment variables** — figment merges env on top of TOML, so an env
+3. **`config/secrets.toml`** — Epic C C-0 (2026-05-21) added a sibling secrets file written by the first-run wizard (see *First-run wizard* below). Loaded by figment between the main TOML and the env-var layer.
+4. **Environment variables** — figment merges env on top of TOML, so an env
    var of the canonical name above always wins.
+
+## First-run wizard (Epic C C-0)
+
+The gateway enters **first-run mode** when ALL three credential sources are unset:
+
+- `[opcua].user_password` in `config/config.toml` is empty.
+- `OPCGW_OPCUA__USER_PASSWORD` env-var is unset.
+- `config/secrets.toml` is absent or doesn't carry `[opcua].user_password`.
+
+In first-run mode:
+
+- The OPC UA server binds but rejects every authentication attempt (the existing `OpcgwAuthManager::is_configured = false` path handles this — `src/opc_ua_auth.rs:96-110`).
+- The web UI's first-run gate middleware (`src/web/setup.rs::first_run_gate_middleware`) redirects every non-wizard, non-static request to `/setup` BEFORE the basic-auth layer runs. This is intentional: in first-run mode there is no valid password to gate against, so requiring basic auth would deadlock the operator out of the setup flow.
+- The wizard's POST handler (`POST /api/setup/password`) is CSRF-exempt because there is no authenticated session to leverage — the threat model in first-run is "attacker on the local network beats operator to /setup," which CSRF does not address (the attacker would just fetch any token).
+- On successful submit, the wizard writes the password to `config/secrets.toml` with file mode `0o600` (owner read+write only), emits `event="setup_password_accepted"`, and signals the gateway's `CancellationToken` for graceful shutdown.
+- The supervisor (Docker restart policy / systemd `Restart=on-failure`) restarts the gateway. On the second boot, the figment provider stack picks up `secrets.toml`, `AppConfig::is_first_run()` returns `false`, basic auth comes online with the new password, and the OPC UA server accepts authenticated connections.
+
+`config/secrets.toml` is gitignored (added 2026-05-21) and must never be committed.
+
+### Threat model for first-run mode
+
+- **Local network deployment assumption.** The wizard is intended to be reached on a trusted operator network (LAN, VPN, or jump-host). Deploying opcgw on a public-internet-facing interface during first-run is a security regression — set `OPCGW_OPCUA__USER_PASSWORD` via env-var BEFORE the first start to skip the wizard entirely.
+- **TOFU (trust on first use).** The first reach to `/setup` sets the password. There is no defence against a faster attacker on the same network. Use the env-var bypass for shared / public deployments.
+- **One-shot.** Once a password is set, `/setup` returns HTTP 410 Gone. Password rotation post-first-run is via env-var override or hand-editing `secrets.toml` followed by a restart.
 
 ### Placeholder detection
 

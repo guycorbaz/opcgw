@@ -37,6 +37,19 @@
 
   function renderRows(apps) {
     tbody.innerHTML = "";
+    // Epic C C-0 (2026-05-21): operator-friendly empty state. Replaces
+    // the previous behaviour where an empty list rendered a blank
+    // <tbody> and operators couldn't tell whether the fetch had
+    // completed or the gateway was broken.
+    if (apps.length === 0) {
+      const tr = document.createElement("tr");
+      tr.innerHTML =
+        "<td colspan=\"4\" style=\"text-align:center; padding:1.5rem; color:#777;\">" +
+          "No applications configured. Use the form above to add one." +
+        "</td>";
+      tbody.appendChild(tr);
+      return;
+    }
     apps.forEach((app) => {
       const tr = document.createElement("tr");
       tr.innerHTML =

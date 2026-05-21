@@ -944,11 +944,30 @@ impl AppConfig {
     pub fn from_path(config_path: &str) -> Result<Self, OpcGwError> {
         trace!(config_path = %config_path, "Loading configuration");
 
-        // Load and merge configuration from multiple sources
-        // `split("__")` enables nested-key overrides like `OPCGW_LOGGING__DIR` → `logging.dir`
-        // (matches the convention referenced in this module's doc comment).
+        // Epic C C-0 (2026-05-21): derive the sibling secrets.toml path
+        // from the main config_path so the first-run wizard can persist
+        // the OPC UA password to a separate gitignored file. If the
+        // file doesn't exist, figment silently skips the provider — no
+        // error, no warning, the absence IS the first-run signal that
+        // `is_first_run()` later picks up.
+        let secrets_path = std::path::Path::new(config_path)
+            .parent()
+            .map(|p| p.join("secrets.toml"))
+            .unwrap_or_else(|| std::path::PathBuf::from("secrets.toml"));
+
+        // Load and merge configuration from multiple sources.
+        // Precedence order (top to bottom = lowest to highest priority):
+        //   1. Main config.toml (operator-readable structural config).
+        //   2. secrets.toml (sibling file written by first-run wizard;
+        //      Epic C C-0). Absent on fresh deployments — figment skips
+        //      silently.
+        //   3. OPCGW_* env-vars (highest priority; existing convention).
+        // `split("__")` enables nested-key overrides like
+        // `OPCGW_LOGGING__DIR` → `logging.dir` (matches the convention
+        // referenced in this module's doc comment).
         let config: AppConfig = Figment::new()
             .merge(Toml::file(config_path))
+            .merge(Toml::file(&secrets_path))
             .merge(Env::prefixed("OPCGW_").split("__").global())
             .extract()
             .map_err(|e| {
@@ -962,6 +981,49 @@ impl AppConfig {
 
         //debug!("Configuration is {:?} ", config);
         Ok(config)
+    }
+
+    /// Epic C C-0 (2026-05-21): detect the first-run state.
+    ///
+    /// Returns `true` if the gateway has NOT yet been configured with an
+    /// OPC UA `user_password` through any source. This is the signal the
+    /// web server uses to render the first-run setup wizard at `/setup`
+    /// instead of the regular dashboard.
+    ///
+    /// "First-run" means all three sources are unset/empty:
+    /// 1. `[opcua].user_password` in the main `config.toml` is empty.
+    /// 2. `OPCGW_OPCUA__USER_PASSWORD` env-var is unset.
+    /// 3. `config/secrets.toml` (sibling file written by the wizard) is
+    ///    absent OR present-but-without `[opcua].user_password`.
+    ///
+    /// Once the wizard writes `secrets.toml`, the figment provider stack
+    /// merges it on the next boot; `user_password` is then non-empty and
+    /// `is_first_run()` returns `false`.
+    ///
+    /// The check is intentionally a startup-time snapshot — the value
+    /// is captured once and threaded into `AppState` (or equivalent
+    /// boot-time singleton). There is no need to re-check at request
+    /// time because exiting first-run mode requires a process restart
+    /// (the auth middleware's `Arc<WebAuthState>` is documented
+    /// restart-required at `src/web/mod.rs:264`).
+    pub fn is_first_run(&self) -> bool {
+        // Source 1+2: in-memory user_password is empty, AND no env-var.
+        //   The validator (above) accepts empty user_password ONLY when
+        //   the env-var is also unset, so `user_password.is_empty()` is
+        //   already a proxy for "no env-var set." Belt-and-braces here.
+        if !self.opcua.user_password.trim().is_empty() {
+            return false;
+        }
+        if std::env::var("OPCGW_OPCUA__USER_PASSWORD").is_ok() {
+            return false;
+        }
+        // Source 3: secrets.toml absent or doesn't have the field.
+        //   If secrets.toml HAS the field, the figment provider stack
+        //   would have populated `self.opcua.user_password` to a
+        //   non-empty value, which the early-return above already
+        //   handled. So if we reach here, secrets.toml either doesn't
+        //   exist or doesn't have `[opcua].user_password`.
+        true
     }
 
     /// Validates the configuration for correctness and consistency.
@@ -1458,8 +1520,26 @@ impl AppConfig {
             );
         }
 
+        // Epic C C-0 (2026-05-21): allow empty user_password IF and only
+        // if no `OPCGW_OPCUA__USER_PASSWORD` env-var is set — this is the
+        // first-run signal. The web UI's setup wizard at /setup will
+        // collect a password and persist it to `config/secrets.toml`,
+        // which the figment provider stack then picks up on the next
+        // boot. If an env-var IS set but resolved to empty, that's an
+        // operator error (env-var contains whitespace or expanded empty)
+        // and we reject explicitly to surface the misconfiguration.
         if self.opcua.user_password.is_empty() {
-            errors.push("opcua.user_password: must not be empty".to_string());
+            if std::env::var("OPCGW_OPCUA__USER_PASSWORD").is_ok() {
+                errors.push(
+                    "opcua.user_password: OPCGW_OPCUA__USER_PASSWORD env-var \
+                     is set but resolved to empty — the variable likely \
+                     contains only whitespace or expanded to an empty value. \
+                     Set a non-empty password or unset the variable to \
+                     trigger the first-run setup wizard."
+                        .to_string(),
+                );
+            }
+            // else: empty + no env-var = first-run signal, accepted.
         } else if self
             .opcua
             .user_password
@@ -2309,6 +2389,292 @@ mod tests {
              got: {:?}",
             result.err(),
         );
+    }
+
+    /// Epic C C-0 (2026-05-21): the validator accepts an empty
+    /// `[opcua].user_password` IF AND ONLY IF the
+    /// `OPCGW_OPCUA__USER_PASSWORD` env-var is also unset. This is the
+    /// first-run signal — the web UI's `/setup` wizard will collect a
+    /// password and persist it to `config/secrets.toml`.
+    ///
+    /// Pre-C-0 the validator emitted "opcua.user_password: must not be
+    /// empty" for any empty value, which made an operator-friendly
+    /// "spin up empty container, configure via web UI" deployment
+    /// impossible.
+    ///
+    /// Note: uses `temp_env::with_var(None)` rather than
+    /// `std::env::remove_var` so the env-var management acquires
+    /// `temp_env`'s internal mutex — without it, parallel tests that
+    /// set the same env-var would race against this test.
+    #[test]
+    #[serial_test::serial]
+    fn test_validation_empty_password_no_envvar_is_now_valid() {
+        temp_env::with_var("OPCGW_OPCUA__USER_PASSWORD", None::<&str>, || {
+            let mut config = get_config();
+            config.opcua.user_password = String::new();
+            let result = config.validate();
+            assert!(
+                result.is_ok(),
+                "empty user_password + no env-var must be valid (first-run baseline state, Epic C C-0), got: {:?}",
+                result.err(),
+            );
+        });
+    }
+
+    /// Epic C C-0 (2026-05-21): the validator REJECTS empty
+    /// `[opcua].user_password` when the env-var IS set — that's an
+    /// operator-error signal (the env-var contains only whitespace or
+    /// expanded to empty in the operator's shell).
+    #[test]
+    #[serial_test::serial]
+    fn test_validation_empty_password_but_envvar_set_is_invalid() {
+        temp_env::with_var("OPCGW_OPCUA__USER_PASSWORD", Some(""), || {
+            let mut config = get_config();
+            config.opcua.user_password = String::new();
+            let result = config.validate();
+
+            assert!(result.is_err());
+            let err_msg = format!("{:?}", result.err().unwrap());
+            assert!(
+                err_msg.contains("OPCGW_OPCUA__USER_PASSWORD env-var"),
+                "expected error to mention the env-var, got: {}",
+                err_msg,
+            );
+        });
+    }
+
+    /// Epic C C-0 (2026-05-21): `is_first_run()` returns `true` when
+    /// the gateway has no configured OPC UA password from any source.
+    #[test]
+    #[serial_test::serial]
+    fn test_is_first_run_true_when_password_empty_and_no_envvar() {
+        temp_env::with_var("OPCGW_OPCUA__USER_PASSWORD", None::<&str>, || {
+            let mut config = get_config();
+            config.opcua.user_password = String::new();
+
+            assert!(
+                config.is_first_run(),
+                "is_first_run() must return true when password is empty AND no env-var is set",
+            );
+        });
+    }
+
+    /// Epic C C-0 (2026-05-21): `is_first_run()` returns `false` when
+    /// the env-var IS set — even if the in-memory `user_password` is
+    /// empty (which shouldn't happen post-figment-merge in normal
+    /// operation, but defence-in-depth).
+    #[test]
+    #[serial_test::serial]
+    fn test_is_first_run_false_when_envvar_set() {
+        temp_env::with_var(
+            "OPCGW_OPCUA__USER_PASSWORD",
+            Some("some-test-password"),
+            || {
+                let mut config = get_config();
+                // Note: we deliberately leave the in-memory password empty
+                // here to verify the env-var check is independent of the
+                // in-memory figment-resolved value.
+                config.opcua.user_password = String::new();
+                assert!(
+                    !config.is_first_run(),
+                    "is_first_run() must return false when env-var is set",
+                );
+            },
+        );
+    }
+
+    /// Epic C C-0 (2026-05-21): `is_first_run()` returns `false` when
+    /// `user_password` is non-empty (figment merged secrets.toml or
+    /// the TOML provided the value directly).
+    #[test]
+    #[serial_test::serial]
+    fn test_is_first_run_false_when_password_set() {
+        temp_env::with_var("OPCGW_OPCUA__USER_PASSWORD", None::<&str>, || {
+            let mut config = get_config();
+            config.opcua.user_password =
+                "real-password-from-secrets-or-toml".to_string();
+
+            assert!(
+                !config.is_first_run(),
+                "is_first_run() must return false when user_password is set",
+            );
+        });
+    }
+
+    /// Epic C C-0 (2026-05-21): `from_path` figment provider stack
+    /// merges a sibling `secrets.toml` between the main config and the
+    /// env-var layer. This test pins the precedence order:
+    ///   env-var > secrets.toml > config.toml.
+    #[test]
+    #[serial_test::serial]
+    fn test_figment_stack_secrets_toml_overrides_main_config() {
+        temp_env::with_var("OPCGW_OPCUA__USER_PASSWORD", None::<&str>, || {
+            test_figment_stack_secrets_toml_overrides_main_config_body();
+        });
+    }
+
+    fn test_figment_stack_secrets_toml_overrides_main_config_body() {
+
+        let temp_dir = tempfile::tempdir().expect("create tempdir");
+        let config_path = temp_dir.path().join("config.toml");
+        let secrets_path = temp_dir.path().join("secrets.toml");
+
+        // Main config has password = "from-main-toml"; secrets.toml has
+        // password = "from-secrets-toml". After figment merge, the
+        // value seen by the validator must be "from-secrets-toml".
+        let main_toml = r#"
+            [global]
+            debug = true
+            [chirpstack]
+            server_address = "http://localhost:8080"
+            api_token = "x"
+            tenant_id = "t"
+            polling_frequency = 10
+            retry = 1
+            delay = 1
+            [opcua]
+            application_name = "A"
+            application_uri = "urn:a"
+            product_uri = "urn:p"
+            diagnostics_enabled = false
+            create_sample_keypair = true
+            certificate_path = "c"
+            private_key_path = "k"
+            trust_client_cert = true
+            check_cert_time = false
+            pki_dir = "pki"
+            user_name = "u"
+            user_password = "from-main-toml"
+            [web]
+            port = 8080
+            "#;
+        std::fs::write(&config_path, main_toml).expect("write main toml");
+        std::fs::write(
+            &secrets_path,
+            r#"
+            [opcua]
+            user_password = "from-secrets-toml"
+            "#,
+        )
+        .expect("write secrets toml");
+
+        let config =
+            AppConfig::from_path(config_path.to_str().expect("path is utf-8")).expect("load");
+        assert_eq!(
+            config.opcua.user_password, "from-secrets-toml",
+            "secrets.toml must override main config.toml in the figment provider stack",
+        );
+    }
+
+    /// Epic C C-0 (2026-05-21): env-var beats secrets.toml.
+    #[test]
+    #[serial_test::serial]
+    fn test_figment_stack_envvar_overrides_secrets_toml() {
+        let temp_dir = tempfile::tempdir().expect("create tempdir");
+        let config_path = temp_dir.path().join("config.toml");
+        let secrets_path = temp_dir.path().join("secrets.toml");
+
+        let main_toml = r#"
+            [global]
+            debug = true
+            [chirpstack]
+            server_address = "http://localhost:8080"
+            api_token = "x"
+            tenant_id = "t"
+            polling_frequency = 10
+            retry = 1
+            delay = 1
+            [opcua]
+            application_name = "A"
+            application_uri = "urn:a"
+            product_uri = "urn:p"
+            diagnostics_enabled = false
+            create_sample_keypair = true
+            certificate_path = "c"
+            private_key_path = "k"
+            trust_client_cert = true
+            check_cert_time = false
+            pki_dir = "pki"
+            user_name = "u"
+            user_password = "from-main-toml"
+            [web]
+            port = 8080
+        "#;
+        std::fs::write(&config_path, main_toml).expect("write main toml");
+        std::fs::write(
+            &secrets_path,
+            r#"
+            [opcua]
+            user_password = "from-secrets-toml"
+            "#,
+        )
+        .expect("write secrets toml");
+
+        temp_env::with_var(
+            "OPCGW_OPCUA__USER_PASSWORD",
+            Some("from-envvar"),
+            || {
+                let config = AppConfig::from_path(config_path.to_str().expect("path is utf-8"))
+                    .expect("load");
+                assert_eq!(
+                    config.opcua.user_password, "from-envvar",
+                    "env-var must override secrets.toml + main config.toml",
+                );
+            },
+        );
+    }
+
+    /// Epic C C-0 (2026-05-21): `from_path` silently tolerates absent
+    /// secrets.toml (the first-run baseline state).
+    #[test]
+    #[serial_test::serial]
+    fn test_figment_stack_secrets_toml_absent_is_tolerated() {
+        temp_env::with_var("OPCGW_OPCUA__USER_PASSWORD", None::<&str>, || {
+            let temp_dir = tempfile::tempdir().expect("create tempdir");
+            let config_path = temp_dir.path().join("config.toml");
+            // Note: NO secrets.toml is created here.
+
+            let main_toml = r#"
+                [global]
+                debug = true
+                [chirpstack]
+                server_address = "http://localhost:8080"
+                api_token = "x"
+                tenant_id = "t"
+                polling_frequency = 10
+                retry = 1
+                delay = 1
+                [opcua]
+                application_name = "A"
+                application_uri = "urn:a"
+                product_uri = "urn:p"
+                diagnostics_enabled = false
+                create_sample_keypair = true
+                certificate_path = "c"
+                private_key_path = "k"
+                trust_client_cert = true
+                check_cert_time = false
+                pki_dir = "pki"
+                user_name = "u"
+                user_password = ""
+                [web]
+                port = 8080
+            "#;
+            std::fs::write(&config_path, main_toml).expect("write main toml");
+
+            let config = AppConfig::from_path(
+                config_path.to_str().expect("path is utf-8"),
+            )
+            .expect("load");
+            assert!(
+                config.opcua.user_password.is_empty(),
+                "absent secrets.toml + empty config password leaves the in-memory value empty",
+            );
+            assert!(
+                config.is_first_run(),
+                "absent secrets.toml + empty config password + no env-var = first-run state",
+            );
+        });
     }
 
     /// Tests that duplicate device_ids produces clear error.

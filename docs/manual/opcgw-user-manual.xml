@@ -1061,6 +1061,94 @@ curl -sS -u "$OPCGW_OPCUA__USER_NAME:$OPCGW_OPCUA__USER_PASSWORD" \
         </itemizedlist>
       </section>
 
+      <section id="sec-first-run-wizard">
+        <title>First-run setup wizard (Epic C C-0)</title>
+        <para>If you start opcgw with no OPC UA password configured
+        through any source (no <literal>[opcua].user_password</literal>
+        in <filename>config/config.toml</filename>, no
+        <literal>OPCGW_OPCUA__USER_PASSWORD</literal> environment
+        variable, and no <filename>config/secrets.toml</filename>
+        sibling file), the gateway enters
+        <emphasis>first-run mode</emphasis>:</para>
+        <itemizedlist>
+          <listitem>
+            <para>The OPC UA server binds on its configured endpoint
+            but rejects every authentication attempt
+            (<literal>OpcgwAuthManager::is_configured = false</literal>).
+            External uptime probes can confirm the gateway is alive,
+            but no SCADA client can connect until setup is
+            complete.</para>
+          </listitem>
+          <listitem>
+            <para>The web UI at
+            <literal>http://&lt;host&gt;:&lt;web-port&gt;/</literal>
+            redirects every non-wizard, non-static request to
+            <filename>/setup</filename>, where a one-shot
+            password-setup form is served. The wizard is the only
+            reachable page until completion.</para>
+          </listitem>
+        </itemizedlist>
+
+        <para>Walk-through:</para>
+        <orderedlist>
+          <listitem>
+            <para>Operator opens the web UI in a browser. Any URL
+            (including <filename>/</filename>) redirects to
+            <filename>/setup</filename>.</para>
+          </listitem>
+          <listitem>
+            <para>Operator enters a password and a confirmation, then
+            submits. The server validates: non-empty, no leading or
+            trailing whitespace, not a placeholder string, and the
+            two fields match.</para>
+          </listitem>
+          <listitem>
+            <para>On success, the password is persisted to
+            <filename>config/secrets.toml</filename> with file mode
+            <literal>0600</literal> (owner read+write only). The file
+            is gitignored. The gateway then signals a graceful
+            shutdown by cancelling the internal
+            <classname>CancellationToken</classname>.</para>
+          </listitem>
+          <listitem>
+            <para>The supervisor (Docker restart policy /
+            <command>systemctl Restart=on-failure</command>) restarts
+            opcgw automatically. On the second boot, the figment
+            provider stack picks up
+            <filename>secrets.toml</filename> between the main
+            <filename>config.toml</filename> and the env-var layer.
+            <function>AppConfig::is_first_run()</function> now returns
+            <literal>false</literal>, basic auth comes online with
+            the new password, and the OPC UA server accepts
+            authenticated connections.</para>
+          </listitem>
+        </orderedlist>
+
+        <para><emphasis role="strong">One-shot semantics.</emphasis>
+        Post-first-run, <filename>/setup</filename> returns HTTP 410
+        Gone. To rotate the password later: either override via
+        <literal>OPCGW_OPCUA__USER_PASSWORD</literal>, or hand-edit
+        <filename>config/secrets.toml</filename> and restart.</para>
+
+        <para><emphasis role="strong">Trust model.</emphasis> The wizard
+        is intended to be reached on a trusted operator network. For
+        public-internet deployments, set
+        <literal>OPCGW_OPCUA__USER_PASSWORD</literal> via env-var
+        before the first start to skip the wizard entirely. See
+        <filename>docs/security.md § "First-run wizard"</filename> for
+        the full threat model.</para>
+
+        <para><emphasis role="strong">Empty
+        <literal>[[application]]</literal> tolerance.</emphasis> The
+        first-run wizard is paired with empty-application-list
+        tolerance — the validator accepts an
+        <filename>application_list = []</filename> baseline, so a
+        fresh container with no configured applications can boot,
+        present the wizard, and then be configured entirely through
+        the web UI (in conjunction with Epic C's downstream stories
+        C-1 through C-6).</para>
+      </section>
+
       <section id="sec-global-config">
         <title>[global] — Global Settings</title>
         <para>The <literal>[global]</literal> section currently carries a

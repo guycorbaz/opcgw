@@ -246,6 +246,19 @@ pub async fn csrf_middleware(
         return next.run(req).await;
     }
 
+    // Epic C C-0 (2026-05-21): wizard POST (`/api/setup/password`) is
+    // CSRF-exempt because in first-run mode there is no authenticated
+    // session for an attacker to leverage — CSRF's threat model
+    // (cross-site request from a logged-in user's browser) does not
+    // apply pre-authentication. The wizard handler in
+    // `src/web/setup.rs::setup_post` independently checks
+    // `state.is_first_run` and returns HTTP 410 Gone post-first-run,
+    // so the exemption is safe even when this middleware is reached
+    // in non-first-run mode.
+    if req.uri().path() == "/api/setup/password" {
+        return next.run(req).await;
+    }
+
     let method = req.method().clone();
     // Iter-1 review P27: log only the path portion, NOT the full URI
     // — query strings can carry secrets (`?token=...`) and should

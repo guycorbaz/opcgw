@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>opcgw — first-run setup</title>
+<link rel="stylesheet" href="/dashboard.css">
+<style>
+  /* Epic C C-0 minimal first-run wizard styling. Reuses dashboard.css
+     where possible; adds wizard-specific tweaks below. No global
+     navigation — operator must complete this step before the rest of
+     the UI is reachable. */
+  body {
+    max-width: 600px;
+    margin: 2rem auto;
+    padding: 0 1rem;
+  }
+  .wizard {
+    background: #fff;
+    border: 1px solid #ccc;
+    padding: 1.5rem;
+    border-radius: 4px;
+  }
+  .wizard h1 {
+    margin-top: 0;
+    color: #2c3e50;
+  }
+  .wizard .intro {
+    color: #555;
+    line-height: 1.5;
+    margin-bottom: 1.5rem;
+  }
+  .wizard .field {
+    display: grid;
+    gap: 0.3rem;
+    margin-bottom: 1rem;
+  }
+  .wizard label {
+    font-weight: bold;
+    font-size: 0.95rem;
+  }
+  .wizard input[type="password"] {
+    padding: 0.5rem;
+    font-size: 1rem;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+  }
+  .wizard input[type="password"]:focus {
+    outline: 2px solid #2980b9;
+    outline-offset: -1px;
+  }
+  .wizard .hint {
+    font-size: 0.85rem;
+    color: #777;
+  }
+  .wizard button[type="submit"] {
+    padding: 0.6rem 1.2rem;
+    background: #27ae60;
+    color: #fff;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 1rem;
+  }
+  .wizard button[type="submit"]:hover {
+    background: #1e8449;
+  }
+  .wizard button[type="submit"]:disabled {
+    background: #ccc;
+    cursor: not-allowed;
+  }
+  .error-banner {
+    color: #c0392b;
+    padding: 0.5rem;
+    border: 1px solid #c0392b;
+    border-radius: 3px;
+    margin-bottom: 1rem;
+    background: #fdeaea;
+  }
+  .success-banner {
+    color: #1e8449;
+    padding: 1rem;
+    border: 1px solid #27ae60;
+    border-radius: 3px;
+    margin-bottom: 1rem;
+    background: #eafaf1;
+  }
+</style>
+</head>
+<body>
+
+<section class="wizard">
+  <h1>Welcome to opcgw</h1>
+  <p class="intro">
+    This gateway has no OPC UA password configured yet. Set one below to
+    finish the first-run setup. The password is used by your SCADA clients
+    when they connect to the OPC UA server.
+  </p>
+  <p class="intro">
+    The password is persisted to <code>config/secrets.toml</code> (file
+    mode <code>0600</code>; gitignored). After you submit, opcgw will
+    restart to apply the new configuration — this takes a few seconds.
+  </p>
+
+  <div id="error-banner" class="error-banner" hidden></div>
+  <div id="success-banner" class="success-banner" hidden></div>
+
+  <form id="setup-form">
+    <div class="field">
+      <label for="password">OPC UA password</label>
+      <input id="password" name="password" type="password" required autocomplete="new-password">
+      <span class="hint">Must not be empty; no leading or trailing whitespace.</span>
+    </div>
+    <div class="field">
+      <label for="password-confirm">Confirm password</label>
+      <input id="password-confirm" name="password_confirm" type="password" required autocomplete="new-password">
+      <span class="hint">Re-type the same password.</span>
+    </div>
+    <button id="submit-btn" type="submit">Save and continue</button>
+  </form>
+</section>
+
+<script>
+(function () {
+  'use strict';
+
+  const form = document.getElementById('setup-form');
+  const errorBanner = document.getElementById('error-banner');
+  const successBanner = document.getElementById('success-banner');
+  const submitBtn = document.getElementById('submit-btn');
+
+  /**
+   * Reason codes returned by the server (POST /api/setup/password).
+   * Keep in sync with src/web/setup.rs::validate_password.
+   */
+  const REASON_MESSAGES = {
+    empty: 'The password must not be empty.',
+    whitespace_bracketed: 'The password must not start or end with whitespace.',
+    whitespace_only: 'The password must contain non-whitespace characters.',
+    placeholder_prefix: 'The password looks like an unfilled placeholder. Replace it with a real value.',
+    confirmation_mismatch: 'The two password fields do not match.',
+  };
+
+  function showError(reason) {
+    const message = REASON_MESSAGES[reason] || ('Password rejected: ' + reason);
+    errorBanner.textContent = message;
+    errorBanner.hidden = false;
+    successBanner.hidden = true;
+  }
+
+  function showSuccess(restartSeconds) {
+    errorBanner.hidden = true;
+    successBanner.innerHTML =
+      '<strong>Password set.</strong> opcgw is restarting now. ' +
+      'This page will reload automatically in <span id="countdown">' +
+      restartSeconds + '</span> seconds.';
+    successBanner.hidden = false;
+    form.hidden = true;
+
+    // Countdown to reload. The supervisor (docker / systemd) restarts
+    // the gateway; once it's back up, the reload below lands on the
+    // post-first-run dashboard.
+    let remaining = restartSeconds;
+    const countdownEl = document.getElementById('countdown');
+    const timer = setInterval(function () {
+      remaining -= 1;
+      if (countdownEl) countdownEl.textContent = remaining;
+      if (remaining <= 0) {
+        clearInterval(timer);
+        // Add a small grace window beyond the server's reported
+        // restartSeconds — the supervisor's restart may take an
+        // additional second or two after our process exits.
+        setTimeout(function () {
+          window.location.href = '/';
+        }, 2000);
+      }
+    }, 1000);
+  }
+
+  /**
+   * Client-side validation. Server is authoritative, but a quick
+   * client-side check gives operators immediate feedback on the
+   * common mistakes before the round-trip.
+   */
+  function validateClientSide(password, confirmation) {
+    if (!password) return 'empty';
+    if (password.trim() !== password) return 'whitespace_bracketed';
+    if (!password.trim()) return 'whitespace_only';
+    // PLACEHOLDER_PREFIX from src/utils.rs:419
+    if (password.indexOf('REPLACE_ME_WITH_') === 0) return 'placeholder_prefix';
+    if (password !== confirmation) return 'confirmation_mismatch';
+    return null;
+  }
+
+  form.addEventListener('submit', function (event) {
+    event.preventDefault();
+    errorBanner.hidden = true;
+
+    const password = document.getElementById('password').value;
+    const confirmation = document.getElementById('password-confirm').value;
+
+    const clientReason = validateClientSide(password, confirmation);
+    if (clientReason) {
+      showError(clientReason);
+      return;
+    }
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Saving...';
+
+    fetch('/api/setup/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        password: password,
+        password_confirm: confirmation,
+      }),
+    })
+      .then(function (response) {
+        return response.json().then(function (body) {
+          return { status: response.status, body: body };
+        });
+      })
+      .then(function (result) {
+        if (result.status === 200 && result.body.status === 'password_set_restarting') {
+          showSuccess(result.body.restarting_in_seconds || 5);
+        } else if (result.status === 400 && result.body.reason) {
+          showError(result.body.reason);
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Save and continue';
+        } else {
+          showError('unexpected response (HTTP ' + result.status + '). Check the gateway logs.');
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Save and continue';
+        }
+      })
+      .catch(function (err) {
+        showError('network error: ' + (err && err.message ? err.message : 'unknown'));
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Save and continue';
+      });
+  });
+})();
+</script>
+</body>
+</html>

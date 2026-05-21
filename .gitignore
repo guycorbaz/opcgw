@@ -24,6 +24,10 @@ Cargo.lock
 
 # Config & Secrets
 config/config.local.toml
+# Epic C C-0 (2026-05-21): the first-run web wizard at /setup writes
+# the OPC UA user_password to config/secrets.toml (file mode 0600).
+# This file is machine-specific and must NEVER be committed.
+config/secrets.toml
 .env
 .env.local
 

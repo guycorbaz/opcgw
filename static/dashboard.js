@@ -151,8 +151,24 @@
     }
 
     els.errorCount.textContent = numberFormatter.format(data.error_count || 0);
-    els.appCount.textContent = numberFormatter.format(data.application_count || 0);
+    var appCount = data.application_count || 0;
+    els.appCount.textContent = numberFormatter.format(appCount);
     els.devCount.textContent = numberFormatter.format(data.device_count || 0);
+    // Epic C C-0 (2026-05-21): swap the Applications hint to
+    // operator-friendly empty-state copy when no applications are
+    // configured. The fresh-gateway path lands here after the
+    // first-run wizard completes; the dashboard should explain how
+    // to add an application rather than just showing "0".
+    var hintEl = document.getElementById("application-hint");
+    if (hintEl) {
+      if (appCount === 0) {
+        hintEl.innerHTML =
+          'No applications configured yet. ' +
+          '<a href="/applications.html">Add one</a> to start polling.';
+      } else {
+        hintEl.textContent = "Configured in TOML.";
+      }
+    }
     els.uptime.textContent = formatUptime(data.uptime_secs);
     els.lastRefresh.textContent = dateFormatter.format(new Date());
   }

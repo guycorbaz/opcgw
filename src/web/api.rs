@@ -5428,6 +5428,11 @@ mod tests {
             stale_threshold_secs: std::sync::atomic::AtomicU64::new(DEFAULT_STALE_THRESHOLD_SECS),
             config_reload,
             config_writer,
+            // Epic C C-0 test defaults — these tests are not exercising
+            // the first-run wizard, so default to post-first-run state.
+            is_first_run: false,
+            secrets_path: std::path::PathBuf::from("/tmp/test-secrets.toml"),
+            shutdown_token: tokio_util::sync::CancellationToken::new(),
         });
         // Keep the tempdir alive for the AppState's lifetime by
         // leaking it — tests are short-lived processes.
@@ -5739,6 +5744,11 @@ mod tests {
             stale_threshold_secs: std::sync::atomic::AtomicU64::new(DEFAULT_STALE_THRESHOLD_SECS),
             config_reload,
             config_writer,
+            // Epic C C-0 test defaults — these tests are not exercising
+            // the first-run wizard, so default to post-first-run state.
+            is_first_run: false,
+            secrets_path: std::path::PathBuf::from("/tmp/test-secrets.toml"),
+            shutdown_token: tokio_util::sync::CancellationToken::new(),
         });
         // Keep the tempdir alive for the AppState's lifetime by
         // leaking it — tests are short-lived processes.
