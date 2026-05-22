@@ -44,7 +44,7 @@ use tonic::metadata::MetadataValue;
 use tonic::service::Interceptor;
 use tonic::transport::Channel;
 use tonic::{Request, Status};
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 // ---------------------------------------------------------------------------
 // Inventory types — the JSON-serialisable shapes the web layer returns.
@@ -531,9 +531,26 @@ fn log_item_to_uplink(item: &LogItem) -> Option<InventoryUplink> {
     let received_at = match received_at {
         Some(s) => s,
         None => {
-            // Malformed proto — drop this LogItem rather than fabricate a
-            // timestamp. The picker UI's "no recent uplinks" path handles
-            // empty result sets cleanly.
+            // Iter-2 P3 fix (Blind+Edge HIGH convergent): pre-iter-2,
+            // malformed proto timestamps were silently dropped from the
+            // returned uplink list — no audit event, no operator-visible
+            // signal that a codec bug or proto-stream corruption is
+            // happening. Now emit a warn-level audit so operators can
+            // grep `event="inventory_uplink_dropped"` for visibility.
+            // The list is still emitted normally (this one LogItem is
+            // skipped); the picker's "no recent uplinks" branch only
+            // fires if EVERY item was dropped or the stream was empty.
+            let ts_repr = match item.time.as_ref() {
+                Some(ts) => format!("seconds={},nanos={}", ts.seconds, ts.nanos),
+                None => "missing".to_string(),
+            };
+            warn!(
+                event = "inventory_uplink_dropped",
+                reason = "malformed_proto_timestamp",
+                description = %item.description,
+                timestamp = %ts_repr,
+                "log_item_to_uplink: dropping item with invalid/missing proto timestamp"
+            );
             return None;
         }
     };
@@ -625,11 +642,29 @@ pub fn infer_wire_type(values: &[&serde_json::Value]) -> (WireType, bool) {
                 continue;
             }
             if let Some(f) = v.as_f64() {
-                if f.fract() != 0.0 || f.is_nan() || f.is_infinite() {
+                // Story C-1 iter-2 P1 regression fix (2-of-3 reviewer
+                // convergence): the iter-1 P3 patch dropped this
+                // `fract == 0 && in-range` branch entirely, classifying
+                // every f64-parsed value as Float — including common
+                // LoRaWAN codec outputs like `42.0`, `1000.0`, `1e3`
+                // whose mathematical value IS an integer in i64 range.
+                // Pre-iter-1: classified as Int (correct). Iter-1 fix
+                // overcorrected: classified as Float (wrong). Iter-2:
+                // restore the secondary integer check with the boundary
+                // fix from iter-1 baked in — use strict `< i64::MAX as f64`
+                // because i64::MAX as f64 rounds UP to 2^63.
+                if f.is_nan() || f.is_infinite() || f.fract() != 0.0 {
                     any_fractional_or_overflow = true;
                     break;
                 }
-                // Not an i64 but is fractional-free f64 → out of i64 range.
+                // Strict upper bound: `i64::MAX as f64 = 2^63 = i64::MAX + 1`
+                // (rounds up). So `f < (i64::MAX as f64)` is exactly
+                // `f <= i64::MAX` for integer-valued f. The lower bound
+                // `i64::MIN as f64 = -2^63` is exact (representable),
+                // so `>=` is correct there.
+                if f >= (i64::MIN as f64) && f < (i64::MAX as f64) {
+                    continue;
+                }
                 any_fractional_or_overflow = true;
                 break;
             } else {
@@ -1239,6 +1274,67 @@ mod tests {
         let refs: Vec<&serde_json::Value> = values.iter().collect();
         let (wt, _) = infer_wire_type(&refs);
         assert_eq!(wt, WireType::Int);
+    }
+
+    /// Iter-2 P1 regression-guard (2-of-3 reviewer convergence): a JSON
+    /// literal containing `.0` is parsed by serde_json as f64 internally,
+    /// so `as_i64()` returns None. But the mathematical value is still
+    /// an integer in i64 range — and LoRaWAN codecs commonly emit
+    /// values like `42.0`, `1000.0`, `1e3` for sensor readings.
+    /// Iter-1's P3 fix dropped the secondary-integer branch entirely and
+    /// classified these as Float (wrong). This test pins the iter-2
+    /// behaviour: `.0`-decorated integers in i64 range stay Int.
+    ///
+    /// Path-distinct from `infer_wire_type_all_int` (which uses `json!(1)`
+    /// — i64 parse) and from `infer_wire_type_i64_max_exact_is_int`
+    /// (which also uses an integer literal). This test deliberately
+    /// uses `.0` literals to force serde_json's f64 path.
+    #[test]
+    fn infer_wire_type_dotted_zero_integer_is_int() {
+        let values: Vec<serde_json::Value> = vec![
+            serde_json::from_str("42.0").expect("parse 42.0"),
+            serde_json::from_str("100.0").expect("parse 100.0"),
+            serde_json::from_str("0.0").expect("parse 0.0"),
+        ];
+        let refs: Vec<&serde_json::Value> = values.iter().collect();
+        let (wt, het) = infer_wire_type(&refs);
+        assert_eq!(
+            wt,
+            WireType::Int,
+            ".0-decorated integers in i64 range must classify as Int"
+        );
+        assert!(!het);
+    }
+
+    /// Iter-2 P1 regression-guard: exponential-form integers (`1e3` etc.)
+    /// also parse as f64 in serde_json. These should classify as Int when
+    /// the mathematical value is in i64 range.
+    #[test]
+    fn infer_wire_type_exponential_integer_is_int() {
+        let values: Vec<serde_json::Value> = vec![
+            serde_json::from_str("1e3").expect("parse 1e3"),
+            serde_json::from_str("1e10").expect("parse 1e10"),
+        ];
+        let refs: Vec<&serde_json::Value> = values.iter().collect();
+        let (wt, _) = infer_wire_type(&refs);
+        assert_eq!(
+            wt,
+            WireType::Int,
+            "exponential-form integers in i64 range must classify as Int"
+        );
+    }
+
+    /// Iter-2 P1 regression-guard: large f64-shape integers that EXCEED
+    /// i64 range still classify as Float (combined with the iter-1 P3
+    /// boundary fix). 1e20 ≈ 10^20 > i64::MAX ≈ 9.22e18.
+    #[test]
+    fn infer_wire_type_exponential_overflowing_i64_is_float() {
+        let values: Vec<serde_json::Value> = vec![
+            serde_json::from_str("1e20").expect("parse 1e20"),
+        ];
+        let refs: Vec<&serde_json::Value> = values.iter().collect();
+        let (wt, _) = infer_wire_type(&refs);
+        assert_eq!(wt, WireType::Float);
     }
 
     #[test]

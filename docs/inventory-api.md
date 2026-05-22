@@ -58,7 +58,7 @@ TTL = `[chirpstack].inventory_cache_ttl_seconds` (default 60 s).
 { "error": "chirpstack_error", "reason": "chirpstack_unreachable" }
 ```
 
-`reason` ∈ `{ "chirpstack_unreachable", "chirpstack_auth_failed", "chirpstack_grpc_error" }`.
+`reason` ∈ `{ "chirpstack_unreachable", "chirpstack_auth_failed", "chirpstack_grpc_error", "shutdown_cancellation" }`. The `shutdown_cancellation` value (iter-2 P2) fires when a picker request is in flight during graceful gateway shutdown — not a real ChirpStack fault; suppress alerts during planned restarts.
 
 ### `GET /api/inventory/devices?application_id=<uuid>`
 

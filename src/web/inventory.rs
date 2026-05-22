@@ -425,13 +425,30 @@ pub async fn inventory_uplinks(
 
 /// Classify an `OpcGwError` into a stable `reason` string for the
 /// `inventory_query_failed` audit event + JSON error body.
+///
+/// Story C-1 iter-2 P2 fix (2-of-3 reviewer convergence): the iter-1
+/// P5 patch made `fetch_applications` / `fetch_devices` return
+/// `Err(OpcGwError::ChirpStack("cancelled during shutdown"))` on cancel
+/// — but this classifier's substring matchers (`auth` / `connect` /
+/// `unreachable` / `transport` / `permission` / `unauthenticated`)
+/// matched NONE of "cancelled", so the fall-through bucket was
+/// `chirpstack_grpc_error`. Every graceful shutdown that raced a
+/// picker request emitted a false-alarm "ChirpStack gRPC error"
+/// audit signal. Iter-2 adds a dedicated `shutdown_cancellation`
+/// reason classified BEFORE the others (any error message containing
+/// "cancelled" wins, regardless of subsequent substring matches).
 fn chirpstack_failure_reason(err: &crate::utils::OpcGwError) -> &'static str {
     use crate::utils::OpcGwError;
     let s = err.to_string().to_lowercase();
     match err {
         OpcGwError::ChirpStack(_) => {
-            // Try to surface auth vs transport vs other gRPC.
-            if s.contains("auth") || s.contains("permission") || s.contains("unauthenticated") {
+            // Iter-2 P2: shutdown-cancellation must win over the substring
+            // matchers below — the cancellation message could otherwise
+            // false-positive on substring "connect" or similar via the
+            // tonic Status::Cancelled stringification.
+            if s.contains("cancelled") {
+                "shutdown_cancellation"
+            } else if s.contains("auth") || s.contains("permission") || s.contains("unauthenticated") {
                 "chirpstack_auth_failed"
             } else if s.contains("connect") || s.contains("transport") || s.contains("unreachable") {
                 "chirpstack_unreachable"
