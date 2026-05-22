@@ -5,7 +5,7 @@
 | Story key       | `C-0-empty-config-bootstrap`                                                                                |
 | Epic            | C — Auto-Discovery and Web-First Configuration (post-v2.0 GA)                                               |
 | FRs             | none (Epic C is post-PRD; see memory `project_epic_c_auto_discovery_vision.md`)                             |
-| Status          | review                                                                                                      |
+| Status          | done                                                                                                        |
 | Created         | 2026-05-21                                                                                                  |
 | Source epic     | `_bmad-output/planning-artifacts/epics.md § Epic C § Story C.0`                                             |
 | Vision capture  | memory `project_epic_c_auto_discovery_vision.md` (2026-05-20 Guy, scope finalised 2026-05-21)               |
