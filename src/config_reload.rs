@@ -291,6 +291,17 @@ pub(crate) fn classify_diff(
             knob: "chirpstack.tenant_id".to_string(),
         });
     }
+    // Story C-1: inventory_cache_ttl_seconds is restart-required because
+    // the `InventoryCache` captures its `Duration` at boot. A hot-reload-
+    // safe variant would require `Arc<AtomicU64>` plumbing through the
+    // cache; out of scope for C-1.
+    if old.chirpstack.inventory_cache_ttl_seconds
+        != new.chirpstack.inventory_cache_ttl_seconds
+    {
+        return Err(ReloadError::RestartRequired {
+            knob: "chirpstack.inventory_cache_ttl_seconds".to_string(),
+        });
+    }
 
     // ---------- restart-required: opcua ----------
     if old.opcua.host_ip_address != new.opcua.host_ip_address {
@@ -610,11 +621,19 @@ fn chirpstack_equal(a: &crate::config::ChirpstackPollerConfig, b: &crate::config
         retry,
         delay,
         list_page_size,
+        // Story C-1: restart-required (captured by InventoryCache at boot);
+        // already caught by the upstream classify_diff guard. Bind here to
+        // satisfy the destructure-landmine pattern.
+        inventory_cache_ttl_seconds: _,
+        // Story C-1: hot-reload-safe (read per request from the live config
+        // subscription); compared below.
+        inventory_uplink_max_wait_seconds,
     } = a;
     polling_frequency == &b.polling_frequency
         && retry == &b.retry
         && delay == &b.delay
         && list_page_size == &b.list_page_size
+        && inventory_uplink_max_wait_seconds == &b.inventory_uplink_max_wait_seconds
 }
 
 fn opcua_equal(a: &crate::config::OpcUaConfig, b: &crate::config::OpcUaConfig) -> bool {
@@ -1472,6 +1491,8 @@ mod tests {
                 retry: 30,
                 delay: 1,
                 list_page_size: 100,
+                inventory_cache_ttl_seconds: 60,
+                inventory_uplink_max_wait_seconds: 5,
             },
             opcua: OpcUaConfig {
                 application_name: "test".to_string(),

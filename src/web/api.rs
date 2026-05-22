@@ -1430,6 +1430,16 @@ pub async fn create_application(
 
     match state.config_reload.reload().await {
         Ok(_) => {
+            // Story C-1: invalidate inventory cache so the next
+            // `/api/inventory/applications` query is a fresh miss.
+            let tenant_id = state.config_reload.subscribe().borrow().chirpstack.tenant_id.clone();
+            state.inventory_cache.invalidate_applications(&tenant_id).await;
+            info!(
+                event = "inventory_cache_invalidated",
+                cache_scope = "applications",
+                triggered_by = "crud_post",
+                "inventory cache invalidated after application_created"
+            );
             info!(
                 event = "application_created",
                 application_id = %body.application_id,
@@ -1733,6 +1743,16 @@ pub async fn update_application(
 
     match state.config_reload.reload().await {
         Ok(_) => {
+            // Story C-1: invalidate inventory cache so the next
+            // `/api/inventory/applications` query is a fresh miss.
+            let tenant_id = state.config_reload.subscribe().borrow().chirpstack.tenant_id.clone();
+            state.inventory_cache.invalidate_applications(&tenant_id).await;
+            info!(
+                event = "inventory_cache_invalidated",
+                cache_scope = "applications",
+                triggered_by = "crud_put",
+                "inventory cache invalidated after application_updated"
+            );
             info!(
                 event = "application_updated",
                 application_id = %application_id,
@@ -1943,6 +1963,16 @@ pub async fn delete_application(
 
     match state.config_reload.reload().await {
         Ok(_) => {
+            // Story C-1: invalidate inventory cache so the next
+            // `/api/inventory/applications` query is a fresh miss.
+            let tenant_id = state.config_reload.subscribe().borrow().chirpstack.tenant_id.clone();
+            state.inventory_cache.invalidate_applications(&tenant_id).await;
+            info!(
+                event = "inventory_cache_invalidated",
+                cache_scope = "applications",
+                triggered_by = "crud_delete",
+                "inventory cache invalidated after application_deleted"
+            );
             info!(
                 event = "application_deleted",
                 application_id = %application_id,
@@ -2343,6 +2373,16 @@ pub async fn create_device(
 
     match state.config_reload.reload().await {
         Ok(_) => {
+            // Story C-1: invalidate inventory cache so the next
+            // `/api/inventory/devices` query is a fresh miss.
+            let tenant_id = state.config_reload.subscribe().borrow().chirpstack.tenant_id.clone();
+            state.inventory_cache.invalidate_devices(&tenant_id, &application_id).await;
+            info!(
+                event = "inventory_cache_invalidated",
+                cache_scope = "devices",
+                triggered_by = "crud_post",
+                "inventory cache invalidated after device_created"
+            );
             info!(
                 event = "device_created",
                 application_id = %application_id,
@@ -2774,6 +2814,16 @@ pub async fn update_device(
 
     match state.config_reload.reload().await {
         Ok(_) => {
+            // Story C-1: invalidate inventory cache so the next
+            // `/api/inventory/devices` query is a fresh miss.
+            let tenant_id = state.config_reload.subscribe().borrow().chirpstack.tenant_id.clone();
+            state.inventory_cache.invalidate_devices(&tenant_id, &application_id).await;
+            info!(
+                event = "inventory_cache_invalidated",
+                cache_scope = "devices",
+                triggered_by = "crud_put",
+                "inventory cache invalidated after device_updated"
+            );
             info!(
                 event = "device_updated",
                 application_id = %application_id,
@@ -3020,6 +3070,16 @@ pub async fn delete_device(
 
     match state.config_reload.reload().await {
         Ok(_) => {
+            // Story C-1: invalidate inventory cache so the next
+            // `/api/inventory/devices` query is a fresh miss.
+            let tenant_id = state.config_reload.subscribe().borrow().chirpstack.tenant_id.clone();
+            state.inventory_cache.invalidate_devices(&tenant_id, &application_id).await;
+            info!(
+                event = "inventory_cache_invalidated",
+                cache_scope = "devices",
+                triggered_by = "crud_delete",
+                "inventory cache invalidated after device_deleted"
+            );
             info!(
                 event = "device_deleted",
                 application_id = %application_id,
@@ -5434,6 +5494,7 @@ mod tests {
             is_first_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             secrets_path: std::path::PathBuf::from("/tmp/test-secrets.toml"),
             shutdown_token: tokio_util::sync::CancellationToken::new(),
+            inventory_cache: std::sync::Arc::new(crate::chirpstack_inventory::InventoryCache::new(60)),
         });
         // Keep the tempdir alive for the AppState's lifetime by
         // leaking it — tests are short-lived processes.
@@ -5751,6 +5812,7 @@ mod tests {
             is_first_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             secrets_path: std::path::PathBuf::from("/tmp/test-secrets.toml"),
             shutdown_token: tokio_util::sync::CancellationToken::new(),
+            inventory_cache: std::sync::Arc::new(crate::chirpstack_inventory::InventoryCache::new(60)),
         });
         // Keep the tempdir alive for the AppState's lifetime by
         // leaking it — tests are short-lived processes.

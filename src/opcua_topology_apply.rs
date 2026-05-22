@@ -1179,6 +1179,8 @@ mod tests {
                 retry: 30,
                 delay: 1,
                 list_page_size: 100,
+                inventory_cache_ttl_seconds: 60,
+                inventory_uplink_max_wait_seconds: 5,
             },
             opcua: OpcUaConfig {
                 application_name: "test".to_string(),

@@ -101,6 +101,8 @@ fn history_test_config(
             retry: 1,
             delay: 1,
             list_page_size: 100,
+            inventory_cache_ttl_seconds: 60,
+            inventory_uplink_max_wait_seconds: 5,
         },
         opcua: OpcUaConfig {
             application_name: "opcgw-history-8-3".to_string(),
@@ -808,6 +810,8 @@ async fn test_history_read_multi_device_no_node_id_collision_issue_99() {
             retry: 1,
             delay: 1,
             list_page_size: 100,
+            inventory_cache_ttl_seconds: 60,
+            inventory_uplink_max_wait_seconds: 5,
         },
         opcua: OpcUaConfig {
             application_name: "opcgw-issue-99".to_string(),

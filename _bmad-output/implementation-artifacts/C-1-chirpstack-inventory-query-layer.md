@@ -5,7 +5,7 @@
 | Story key       | `C-1-chirpstack-inventory-query-layer`                                                                      |
 | Epic            | C — Auto-Discovery and Web-First Configuration (post-v2.0 GA)                                               |
 | FRs             | none (Epic C is post-PRD; see memory `project_epic_c_auto_discovery_vision.md`)                             |
-| Status          | ready-for-dev                                                                                               |
+| Status          | review                                                                                                      |
 | Created         | 2026-05-21                                                                                                  |
 | Source epic     | `_bmad-output/planning-artifacts/epics.md § Epic C § Story C.1`                                             |
 | Depends on      | C-0 (empty-config bootstrap) — gateway must be able to start with no `[[application]]` for the picker UX    |

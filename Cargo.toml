@@ -18,6 +18,16 @@ tokio = { version = "1.50.0", features = ["full", "rt-multi-thread"] }
 thiserror = "2.0.18"
 tonic = "0.14.5"
 chirpstack_api = "4.17.0"
+# Story C-1: opcgw's own proto compilation (build.rs) generates code that
+# uses `::prost` paths. The chirpstack_api crate re-exports prost, but the
+# local proto module `crate::chirpstack_internal_proto` (lib.rs + main.rs)
+# uses `tonic::include_proto!` which expands to `::prost::*` paths. Pin to
+# 0.14 to match what tonic 0.14.5 + chirpstack_api 4.17.0 already pull in
+# transitively — promoting to a direct dep so the local proto-generated
+# code compiles. No new functionality; just exposes an existing transitive.
+prost = "0.14"
+prost-types = "0.14"
+tonic-prost = "0.14"
 async-opcua = { version = "0.17.1", features = ["server"] }
 constant_time_eq = "0.3"
 hmac = "0.12"

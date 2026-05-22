@@ -61,7 +61,8 @@ use chirpstack_api::api::{
 /// name, and description. This structure is used when retrieving application lists
 /// from the ChirpStack server.
 ///
-#[allow(dead_code)]
+/// Story C-1 promoted to first-class type — consumed by `src/web/inventory.rs`
+/// via the inventory cache layer (`src/chirpstack_inventory.rs`).
 #[derive(Debug, Deserialize, Clone)]
 pub struct ApplicationDetail {
     /// Unique application identifier
@@ -75,8 +76,9 @@ pub struct ApplicationDetail {
 /// Represents details of a device in a list format.
 ///
 /// Contains essential information about a LoRaWAN device retrieved from ChirpStack.
-/// Used when listing devices within an application.
-#[allow(dead_code)]
+/// Used when listing devices within an application. Story C-1 promoted the
+/// `device_profile_name` and `last_seen_at` fields (previously discarded in the
+/// gRPC-to-struct conversion) so the inventory API can render richer picker UIs.
 #[derive(Debug, Deserialize, Clone)]
 pub struct DeviceListDetail {
     /// The unique identifier for the device (DevEUI).
@@ -85,6 +87,14 @@ pub struct DeviceListDetail {
     pub name: String,
     /// A description of the device.
     pub description: String,
+    /// Device-profile name (gRPC field 8). C-1 promotes this for the picker UI.
+    /// `None` if ChirpStack returns an empty string.
+    #[serde(default)]
+    pub device_profile_name: Option<String>,
+    /// Last-seen timestamp as RFC3339 string (gRPC field 4). C-1 promotes this
+    /// for the picker UI. `None` if the device has never been seen.
+    #[serde(default)]
+    pub last_seen_at: Option<String>,
 }
 
 /// Represents metrics and states for a device.
@@ -2131,6 +2141,11 @@ impl ChirpstackPoller {
     ///     println!("Application: {} ({})", app.application_name, app.application_id);
     /// }
     /// ```
+    /// Story C-1: kept as the canonical poller-side helper; the web
+    /// inventory layer (`src/chirpstack_inventory.rs`) uses standalone
+    /// free-function equivalents (`fetch_applications`) instead of
+    /// borrowing a poller instance, since the run loop owns `&mut self`.
+    /// Reserved for future direct poller-side consumers.
     #[allow(dead_code)]
     pub async fn get_applications_list_from_server(
         &self,
@@ -2171,6 +2186,10 @@ impl ChirpstackPoller {
     ///     println!("Device: {} ({})", device.name, device.dev_eui);
     /// }
     /// ```
+    /// Story C-1: kept as the canonical poller-side helper; the web
+    /// inventory layer uses a standalone free-function equivalent
+    /// (`fetch_devices` in `src/chirpstack_inventory.rs`). Reserved for
+    /// future direct poller-side consumers.
     #[allow(dead_code)]
     pub async fn get_devices_list_from_server(
         &self,
@@ -2554,11 +2573,26 @@ impl ChirpstackPoller {
         response
             .result
             .into_iter()
-            .map(|dev: DeviceListItem| DeviceListDetail {
-                dev_eui: dev.dev_eui,
-                name: dev.name,
-                description: dev.description,
-                // Map other fields here if needed
+            .map(|dev: DeviceListItem| {
+                // Story C-1: promote device_profile_name + last_seen_at fields
+                // for the inventory picker UI. Empty string → None so
+                // downstream serialisation renders `null` cleanly.
+                let device_profile_name = if dev.device_profile_name.is_empty() {
+                    None
+                } else {
+                    Some(dev.device_profile_name)
+                };
+                let last_seen_at = dev.last_seen_at.as_ref().and_then(|ts| {
+                    chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
+                        .map(|dt| dt.to_rfc3339())
+                });
+                DeviceListDetail {
+                    dev_eui: dev.dev_eui,
+                    name: dev.name,
+                    description: dev.description,
+                    device_profile_name,
+                    last_seen_at,
+                }
             })
             .collect()
     }

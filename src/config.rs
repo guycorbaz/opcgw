@@ -137,6 +137,31 @@ pub struct ChirpstackPollerConfig {
     /// Can be overridden via environment variable: `OPCGW_CHIRPSTACK__LIST_PAGE_SIZE`
     #[serde(default = "default_list_page_size")]
     pub list_page_size: u32,
+
+    /// Story C-1: TTL in seconds for the inventory query cache.
+    ///
+    /// Controls how long `/api/inventory/applications` and
+    /// `/api/inventory/devices` responses are cached server-side before the
+    /// next request triggers a fresh ChirpStack call. Default: 60 s.
+    /// Setting this to `0` disables the cache (every inventory request
+    /// hits ChirpStack — useful for development).
+    ///
+    /// Can be overridden via env-var: `OPCGW_CHIRPSTACK__INVENTORY_CACHE_TTL_SECONDS`.
+    #[serde(default = "default_inventory_cache_ttl_seconds")]
+    pub inventory_cache_ttl_seconds: u64,
+
+    /// Story C-1: max wait window in seconds for the uplinks stream helper.
+    ///
+    /// `/api/inventory/uplinks` opens an `InternalService.StreamDeviceEvents`
+    /// stream and reads up to `limit` events OR until this many seconds
+    /// elapse, whichever comes first. Default: 5 s. Valid range: 1..=60.
+    /// The validator rejects values outside the range; the upper bound
+    /// prevents an operator click from holding the gateway open indefinitely
+    /// against a silent device.
+    ///
+    /// Can be overridden via env-var: `OPCGW_CHIRPSTACK__INVENTORY_UPLINK_MAX_WAIT_SECONDS`.
+    #[serde(default = "default_inventory_uplink_max_wait_seconds")]
+    pub inventory_uplink_max_wait_seconds: u64,
 }
 
 /// OPC UA server configuration parameters.
@@ -702,6 +727,16 @@ fn default_database_path() -> String {
     "data/opcgw.db".to_string()
 }
 
+/// Story C-1: default inventory-cache TTL in seconds (60).
+fn default_inventory_cache_ttl_seconds() -> u64 {
+    60
+}
+
+/// Story C-1: default uplinks-stream max-wait in seconds (5).
+fn default_inventory_uplink_max_wait_seconds() -> u64 {
+    5
+}
+
 /// Epic C C-0 (iter-2 P23): default OPC UA user name when neither
 /// `config.toml` nor `OPCGW_OPCUA__USER_NAME` provides a value.
 ///
@@ -1209,6 +1244,18 @@ impl AppConfig {
         if self.chirpstack.list_page_size < 1 || self.chirpstack.list_page_size > 1000 {
             errors.push("chirpstack.list_page_size: must be in range [1-1000]".to_string());
         }
+
+        // Story C-1: validate inventory_uplink_max_wait_seconds (range 1..=60)
+        if self.chirpstack.inventory_uplink_max_wait_seconds < 1
+            || self.chirpstack.inventory_uplink_max_wait_seconds > 60
+        {
+            errors.push(
+                "chirpstack.inventory_uplink_max_wait_seconds: must be in range [1-60]"
+                    .to_string(),
+            );
+        }
+        // Story C-1: inventory_cache_ttl_seconds has no hard cap (u64 typing
+        // prevents negatives). 0 = cache disabled, documented in struct doc.
 
         // Validate OpcUaConfig
         if self.opcua.application_name.is_empty() {
@@ -3990,6 +4037,8 @@ mod tests {
             retry: 1,
             delay: 1,
             list_page_size: 100,
+            inventory_cache_ttl_seconds: 60,
+            inventory_uplink_max_wait_seconds: 5,
         };
         let formatted = format!("{:?}", cfg);
         assert!(

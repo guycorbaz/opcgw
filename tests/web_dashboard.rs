@@ -104,6 +104,7 @@ fn build_test_app_state(snapshot: DashboardConfigSnapshot) -> Arc<AppState> {
         is_first_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         secrets_path: std::path::PathBuf::from("/tmp/test-secrets.toml"),
         shutdown_token: tokio_util::sync::CancellationToken::new(),
+        inventory_cache: std::sync::Arc::new(opcgw::chirpstack_inventory::InventoryCache::new(60)),
     })
 }
 
@@ -814,6 +815,7 @@ async fn api_devices_emits_typed_value_and_unit_per_variant() {
         is_first_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         secrets_path: std::path::PathBuf::from("/tmp/test-secrets.toml"),
         shutdown_token: tokio_util::sync::CancellationToken::new(),
+        inventory_cache: std::sync::Arc::new(opcgw::chirpstack_inventory::InventoryCache::new(60)),
     });
 
     let static_tmp = build_production_static_dir().await;

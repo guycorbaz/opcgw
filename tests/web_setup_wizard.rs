@@ -95,6 +95,7 @@ fn build_first_run_app_state(
         is_first_run: is_first_run_atomic,
         secrets_path: secrets_dir.path().join("secrets.toml"),
         shutdown_token,
+        inventory_cache: std::sync::Arc::new(opcgw::chirpstack_inventory::InventoryCache::new(60)),
     })
 }
 
@@ -410,6 +411,7 @@ async fn post_first_run_setup_get_returns_410_gone() {
         is_first_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         secrets_path: PathBuf::from("/tmp/test-secrets.toml"),
         shutdown_token: token.clone(),
+        inventory_cache: std::sync::Arc::new(opcgw::chirpstack_inventory::InventoryCache::new(60)),
     });
 
     let (addr, handle, cancel) = spawn_web_server(app_state).await;

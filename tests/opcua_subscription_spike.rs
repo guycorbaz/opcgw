@@ -215,6 +215,8 @@ fn spike_test_config(port: u16, pki_dir: &std::path::Path, max_connections: usiz
             retry: 1,
             delay: 1,
             list_page_size: 100,
+            inventory_cache_ttl_seconds: 60,
+            inventory_uplink_max_wait_seconds: 5,
         },
         opcua: OpcUaConfig {
             application_name: "opcgw-spike-8-1".to_string(),

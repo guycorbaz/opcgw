@@ -22,6 +22,18 @@
 //! `[logging].dir` in `config.toml`, then the default `./log`.
 
 mod chirpstack;
+/// Story C-1: ChirpStack inventory layer — types + cache + stream helper.
+mod chirpstack_inventory;
+/// Story C-1: locally-compiled ChirpStack proto types — see lib.rs doc-
+/// comment on the same module for rationale.
+pub mod chirpstack_internal_proto {
+    pub mod common {
+        tonic::include_proto!("common");
+    }
+    pub mod api {
+        tonic::include_proto!("api");
+    }
+}
 mod command_validation;
 mod config;
 mod config_reload;
@@ -1062,6 +1074,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_first_run: is_first_run_atomic.clone(),
             secrets_path,
             shutdown_token: cancel_token.clone(),
+            inventory_cache: std::sync::Arc::new(crate::chirpstack_inventory::InventoryCache::new(60)),
         });
 
         // Bind synchronously; fail-fast on bind failure.

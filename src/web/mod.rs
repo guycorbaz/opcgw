@@ -35,6 +35,8 @@ pub mod api;
 pub mod auth;
 pub mod config_writer;
 pub mod csrf;
+/// Story C-1: `/api/inventory/*` handlers.
+pub mod inventory;
 pub mod setup;
 
 // Iter-1 review P30: `test_support` ships in release binaries
@@ -342,6 +344,11 @@ pub struct AppState {
     /// figment provider stack picks up the new `secrets.toml`. Same
     /// `CancellationToken` as the gateway-wide signal in `main.rs`.
     pub shutdown_token: tokio_util::sync::CancellationToken,
+    /// Story C-1: server-side TTL cache for `/api/inventory/*` queries.
+    /// Construced in `main.rs` from `[chirpstack].inventory_cache_ttl_seconds`.
+    /// Shared with the CRUD handlers in `src/web/api.rs` so they can call
+    /// `invalidate_applications` / `invalidate_devices` on success.
+    pub inventory_cache: crate::chirpstack_inventory::SharedInventoryCache,
 }
 
 /// Story 9-7 Task 4 — extracted from the inline clamp at
@@ -472,6 +479,20 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
         .route("/api/health", get(api_health))
         .route("/api/status", get(api::api_status))
         .route("/api/devices", get(api::api_devices))
+        // Story C-1: ChirpStack inventory query layer. GET-only, basic-auth
+        // gated, CSRF-exempt (matches existing /api/* GET convention).
+        .route(
+            "/api/inventory/applications",
+            get(inventory::inventory_applications),
+        )
+        .route(
+            "/api/inventory/devices",
+            get(inventory::inventory_devices),
+        )
+        .route(
+            "/api/inventory/uplinks",
+            get(inventory::inventory_uplinks),
+        )
         // Story 9-4 CRUD routes (FR34).
         .route(
             "/api/applications",
@@ -756,6 +777,8 @@ mod tests {
                 retry: 1,
                 delay: 1,
                 list_page_size: 100,
+                inventory_cache_ttl_seconds: 60,
+                inventory_uplink_max_wait_seconds: 5,
             },
             opcua: OpcUaConfig {
                 application_name: "test".to_string(),
@@ -1040,6 +1063,7 @@ mod tests {
             is_first_run: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             secrets_path: PathBuf::from("/tmp/test-secrets.toml"),
             shutdown_token: tokio_util::sync::CancellationToken::new(),
+            inventory_cache: std::sync::Arc::new(crate::chirpstack_inventory::InventoryCache::new(60)),
         });
         let dir = PathBuf::from("static");
         let _router: Router = build_router(app_state, dir);
