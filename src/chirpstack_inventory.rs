@@ -509,12 +509,34 @@ fn log_item_to_uplink(item: &LogItem) -> Option<InventoryUplink> {
 
     // Prefer the LogItem's `time` field over body.time — the proto carries
     // the canonical server-side timestamp.
-    let received_at = item
-        .time
-        .as_ref()
-        .and_then(|ts| DateTime::<Utc>::from_timestamp(ts.seconds, ts.nanos as u32))
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_else(|| Utc::now().to_rfc3339());
+    //
+    // Iter-1 P14 fix (Edge MED): defensive validation of the proto
+    // timestamp. Pre-fix: `ts.nanos as u32` for negative nanos wrapped to
+    // a huge u32 (chrono returns `None`, falls through to `Utc::now()` →
+    // synthesised "now" timestamp displaces real older uplinks at the top
+    // of the sort). Also missing-timestamp items fell to `Utc::now()`
+    // with the same effect.
+    //
+    // Per protobuf spec, `Timestamp.nanos` ∈ 0..1_000_000_000 and
+    // `seconds` is non-negative for sensible wall-clock times. Reject
+    // anything outside those bounds — return None to drop the LogItem
+    // from the uplink list rather than synthesise a fake timestamp.
+    let received_at = match item.time.as_ref() {
+        Some(ts) if ts.nanos >= 0 && ts.nanos < 1_000_000_000 && ts.seconds >= 0 => {
+            DateTime::<Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
+                .map(|dt| dt.to_rfc3339())
+        }
+        _ => None,
+    };
+    let received_at = match received_at {
+        Some(s) => s,
+        None => {
+            // Malformed proto — drop this LogItem rather than fabricate a
+            // timestamp. The picker UI's "no recent uplinks" path handles
+            // empty result sets cleanly.
+            return None;
+        }
+    };
 
     Some(InventoryUplink {
         received_at,
@@ -588,16 +610,28 @@ pub fn infer_wire_type(values: &[&serde_json::Value]) -> (WireType, bool) {
     if all_number {
         let mut any_fractional_or_overflow = false;
         for v in &non_null {
+            // Story C-1 iter-1 P3 fix (2-of-3 reviewer convergence on
+            // i64::MAX boundary): pre-fix used `f <= i64::MAX as f64`
+            // which is wrong — `i64::MAX as f64` rounds UP to `2^63`
+            // (one past i64::MAX, since f64 only has 53 bits of
+            // mantissa), so the JSON number `9223372036854775808.0`
+            // (= 2^63 = i64::MAX + 1) satisfied the boundary check
+            // and was classified as Int, then later overflowed any
+            // i64 conversion downstream. Fix: use serde_json's own
+            // `as_i64()` for the integer check — that one really
+            // bounds at i64::MIN..=i64::MAX.
+            if v.as_i64().is_some() {
+                // serde_json parsed it as i64 → genuine integer in range.
+                continue;
+            }
             if let Some(f) = v.as_f64() {
-                // Integer if fract() == 0 AND fits in i64.
                 if f.fract() != 0.0 || f.is_nan() || f.is_infinite() {
                     any_fractional_or_overflow = true;
                     break;
                 }
-                if !(f >= i64::MIN as f64 && f <= i64::MAX as f64) {
-                    any_fractional_or_overflow = true;
-                    break;
-                }
+                // Not an i64 but is fractional-free f64 → out of i64 range.
+                any_fractional_or_overflow = true;
+                break;
             } else {
                 // Number that isn't representable as f64 — defensive fallback.
                 any_fractional_or_overflow = true;
@@ -712,22 +746,10 @@ pub type SharedInventoryCache = Arc<InventoryCache>;
 // loop which uses &mut self).
 // ---------------------------------------------------------------------------
 
-/// Tonic interceptor that attaches a static bearer token to every gRPC
-/// request. Sibling to the existing `AuthInterceptor` in `src/chirpstack.rs`
-/// — kept here so the inventory layer is self-contained.
-#[derive(Clone)]
-struct InventoryBearerInterceptor {
-    token: String,
-}
-
-impl Interceptor for InventoryBearerInterceptor {
-    fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
-        let value = MetadataValue::try_from(format!("Bearer {}", self.token))
-            .map_err(|_| Status::invalid_argument("invalid api token"))?;
-        request.metadata_mut().insert("authorization", value);
-        Ok(request)
-    }
-}
+// Iter-1 P6 fix (3-of-3 reviewer convergence): the second
+// `InventoryBearerInterceptor` struct was a byte-for-byte duplicate of
+// `BearerInterceptor` above. Dropped — both the stream helper and the
+// fetch helpers use the same `BearerInterceptor` definition.
 
 /// Build a tonic Channel against the configured ChirpStack endpoint.
 async fn build_channel(server_address: &str) -> Result<Channel, OpcGwError> {
@@ -756,10 +778,15 @@ pub async fn fetch_applications(
     cancel_token: &CancellationToken,
 ) -> Result<Vec<ApplicationDetail>, OpcGwError> {
     if cancel_token.is_cancelled() {
-        return Ok(Vec::new());
+        // Iter-1 P5 fix (Blind HIGH): return Err on cancellation
+        // so the cache layer does NOT insert a poisoned empty Vec that
+        // subsequent in-process requests would serve as "Hit".
+        return Err(OpcGwError::ChirpStack(
+            "cancelled during shutdown".to_string(),
+        ));
     }
     let channel = build_channel(&config.chirpstack.server_address).await?;
-    let interceptor = InventoryBearerInterceptor {
+    let interceptor = BearerInterceptor {
         token: config.chirpstack.api_token.clone(),
     };
     let client = ApplicationServiceClient::with_interceptor(channel, interceptor);
@@ -772,7 +799,11 @@ pub async fn fetch_applications(
 
     loop {
         if cancel_token.is_cancelled() {
-            break;
+            // Iter-1 P5 fix: partial results from a mid-shutdown loop
+            // would also poison the cache. Return Err instead.
+            return Err(OpcGwError::ChirpStack(
+                "cancelled mid-pagination during shutdown".to_string(),
+            ));
         }
         if pages_fetched >= MAX_PAGES {
             return Err(OpcGwError::ChirpStack(
@@ -829,10 +860,15 @@ pub async fn fetch_devices(
     cancel_token: &CancellationToken,
 ) -> Result<Vec<DeviceListDetail>, OpcGwError> {
     if cancel_token.is_cancelled() {
-        return Ok(Vec::new());
+        // Iter-1 P5 fix (Blind HIGH): return Err on cancellation
+        // so the cache layer does NOT insert a poisoned empty Vec that
+        // subsequent in-process requests would serve as "Hit".
+        return Err(OpcGwError::ChirpStack(
+            "cancelled during shutdown".to_string(),
+        ));
     }
     let channel = build_channel(&config.chirpstack.server_address).await?;
-    let interceptor = InventoryBearerInterceptor {
+    let interceptor = BearerInterceptor {
         token: config.chirpstack.api_token.clone(),
     };
     let client = DeviceServiceClient::with_interceptor(channel, interceptor);
@@ -845,7 +881,11 @@ pub async fn fetch_devices(
 
     loop {
         if cancel_token.is_cancelled() {
-            break;
+            // Iter-1 P5 fix: partial results from a mid-shutdown loop
+            // would also poison the cache. Return Err instead.
+            return Err(OpcGwError::ChirpStack(
+                "cancelled mid-pagination during shutdown".to_string(),
+            ));
         }
         if pages_fetched >= MAX_PAGES {
             return Err(OpcGwError::ChirpStack(
@@ -1168,6 +1208,37 @@ mod tests {
         let refs: Vec<&serde_json::Value> = values.iter().collect();
         let (wt, _) = infer_wire_type(&refs);
         assert_eq!(wt, WireType::Float);
+    }
+
+    /// Iter-1 P3 fix: i64::MAX boundary. `i64::MAX as f64` rounds to
+    /// `2^63` (one past i64::MAX), so a JSON number 2^63 was mis-
+    /// classified as Int pre-fix. This test pins the post-fix behaviour:
+    /// any number that doesn't fit in i64 (via serde_json::as_i64)
+    /// falls through to Float.
+    #[test]
+    fn infer_wire_type_i64_max_plus_one_is_float() {
+        // 2^63 = i64::MAX + 1, not representable as i64. serde_json parses
+        // it as a float-ish big number; we expect Float classification.
+        let huge: serde_json::Value =
+            serde_json::from_str("9223372036854775808").expect("parse 2^63");
+        let values = [huge];
+        let refs: Vec<&serde_json::Value> = values.iter().collect();
+        let (wt, het) = infer_wire_type(&refs);
+        assert_eq!(wt, WireType::Float, "2^63 must NOT be classified as Int");
+        assert!(!het);
+    }
+
+    /// i64::MAX itself MUST remain Int (boundary inclusive on the
+    /// representable side). Pre-fix this was Int (correct); post-fix
+    /// it's still Int because serde_json::as_i64 returns Some(i64::MAX).
+    #[test]
+    fn infer_wire_type_i64_max_exact_is_int() {
+        let max: serde_json::Value = serde_json::from_str("9223372036854775807")
+            .expect("parse i64::MAX");
+        let values = [max];
+        let refs: Vec<&serde_json::Value> = values.iter().collect();
+        let (wt, _) = infer_wire_type(&refs);
+        assert_eq!(wt, WireType::Int);
     }
 
     #[test]

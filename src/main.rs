@@ -26,6 +26,16 @@ mod chirpstack;
 mod chirpstack_inventory;
 /// Story C-1: locally-compiled ChirpStack proto types — see lib.rs doc-
 /// comment on the same module for rationale.
+///
+/// Iter-1 P10 deferred: the lib + binary crates both declare this module
+/// because Rust's binary/lib pattern doesn't share `crate::`-relative
+/// modules across the boundary. The compiled proto code is identical in
+/// both; the two type hierarchies are distinct at the type-system level.
+/// `src/chirpstack_inventory.rs` uses ONLY `crate::chirpstack_internal_proto`
+/// (its own crate's view), so no cross-boundary type flow exists today.
+/// A future refactor could collapse main.rs into a thin shim that
+/// only uses `opcgw::*`, removing this duplication; out of scope for
+/// C-1 iter-1.
 pub mod chirpstack_internal_proto {
     pub mod common {
         tonic::include_proto!("common");
@@ -1074,7 +1084,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_first_run: is_first_run_atomic.clone(),
             secrets_path,
             shutdown_token: cancel_token.clone(),
-            inventory_cache: std::sync::Arc::new(crate::chirpstack_inventory::InventoryCache::new(60)),
+            // Story C-1 iter-1 P1 fix (3-of-3 reviewer convergence):
+            // read the TTL from the configured `[chirpstack].inventory_cache_ttl_seconds`
+            // value instead of hardcoding `60`. Pre-fix the brand-new config
+            // field + env-var override were dead weight (operator could set
+            // any value and it would be silently ignored; the documented
+            // TTL=0 "cache disabled" path was unreachable). Restart-required
+            // semantics are preserved via the existing classify_diff guard
+            // in `src/config_reload.rs`.
+            inventory_cache: std::sync::Arc::new(
+                crate::chirpstack_inventory::InventoryCache::new(
+                    application_config.chirpstack.inventory_cache_ttl_seconds,
+                ),
+            ),
         });
 
         // Bind synchronously; fail-fast on bind failure.

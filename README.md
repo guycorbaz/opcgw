@@ -194,6 +194,15 @@ server_address = "http://chirpstack.local:8080"
 api_token = "your-api-token"
 tenant_id = "your-tenant-id"
 polling_frequency = 10
+# Story C-1: server-side TTL cache for /api/inventory/{applications,devices}.
+# Default 60. Set to 0 to disable caching (every inventory request hits
+# ChirpStack — useful for development). Env-var override:
+# OPCGW_CHIRPSTACK__INVENTORY_CACHE_TTL_SECONDS. Restart-required.
+inventory_cache_ttl_seconds = 60
+# Story C-1: max wait window for /api/inventory/uplinks (bounded read
+# against InternalService.StreamDeviceEvents). Default 5; range 1..=60.
+# Env-var override: OPCGW_CHIRPSTACK__INVENTORY_UPLINK_MAX_WAIT_SECONDS.
+inventory_uplink_max_wait_seconds = 5
 
 [opcua]
 application_name = "My IoT Gateway"

@@ -2380,6 +2380,7 @@ pub async fn create_device(
             info!(
                 event = "inventory_cache_invalidated",
                 cache_scope = "devices",
+                application_id = %application_id,
                 triggered_by = "crud_post",
                 "inventory cache invalidated after device_created"
             );
@@ -2821,6 +2822,7 @@ pub async fn update_device(
             info!(
                 event = "inventory_cache_invalidated",
                 cache_scope = "devices",
+                application_id = %application_id,
                 triggered_by = "crud_put",
                 "inventory cache invalidated after device_updated"
             );
@@ -3077,6 +3079,7 @@ pub async fn delete_device(
             info!(
                 event = "inventory_cache_invalidated",
                 cache_scope = "devices",
+                application_id = %application_id,
                 triggered_by = "crud_delete",
                 "inventory cache invalidated after device_deleted"
             );
