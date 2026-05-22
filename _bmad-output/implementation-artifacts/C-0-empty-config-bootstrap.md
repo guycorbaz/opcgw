@@ -363,6 +363,42 @@ Non-issues / false alarms / out-of-platform: EH-L1 (empty env-var lifecycle — 
 
 Duplicates merged: EH-M4 → BH-M1/P8 (PLACEHOLDER_PREFIX), EH-M9 → EH-M3/P13 (control_char message).
 
+### Review Findings — iter-3 (2026-05-22)
+
+iter-3 regression sweep after iter-2 patches landed (commit `d1d1332`). Three fresh-context subagents (Opus 4.7) reviewed the cumulative iter-1+iter-2 delta. **15th iter-N+1 doctrine validation**: Acceptance Auditor verdict "ready to flip to done"; Blind Hunter + Edge Case Hunter found 2 user-facing regressions that nullified parts of iter-2's intent + 4 defence-in-depth concerns. Doctrine pays off again.
+
+Triage: 9 patches applied (5 HIGH + 4 MED) + 1 deferred (Origin no-Origin bypass).
+
+#### Patches applied (iter-3 commit pending)
+
+- [x] **iter-3-P1 (HIGH)** — JS `setup.html` dispatch only fired `REASON_MESSAGES` on HTTP 400; iter-2 P7/P9/P11/P13 had added 11 reason codes that fell into the generic "Check the gateway logs" catch-all for 415/403/409/410/500 responses. Fix: dispatch on `status >= 400 && status < 600 && body.reason`. Also added `first_run_complete` to REASON_MESSAGES (Auditor LOW #1 covered for free). `[static/setup.html]`
+- [x] **iter-3-P2 (HIGH)** — `write_secrets_toml` failure dead-end. Iter-2 P5's `compare_exchange` flipped `is_first_run` to false BEFORE the write; on EROFS/EACCES/ENOSPC the operator's retry hit the 410 Gone path with no recovery without a process restart. Fix: `state.is_first_run.store(true, SeqCst)` in the Err branch so the next legitimate retry goes back through the compare_exchange. `[src/web/setup.rs::setup_post]`
+- [x] **iter-3-P3 (HIGH)** — Origin/Host equality compare didn't handle default-port equivalence. Operator deploying on port 80/443 got locked out (Origin `http://host`, Host `host:80` → mismatch). Fix: strip `:80` from http:// and `:443` from https:// on both sides before compare. `[src/web/setup.rs::setup_post Origin check]`
+- [x] **iter-3-P4 (HIGH)** — Hardcoded Linux errno constants (EROFS=30, ENOSPC=28, EDQUOT=122) only correct on x86_64/arm64. Switched to stable `io::ErrorKind::ReadOnlyFilesystem` + `StorageFull` + `QuotaExceeded` (stable since Rust 1.85; CLAUDE.md mandates rustc ≥ 1.87). `[src/web/setup.rs::SecretsWriteError::from_io]`
+- [x] **iter-3-P5 (HIGH)** — `WebAuthState.is_first_run` was a plain `bool` while `AppState.is_first_run` became `Arc<AtomicBool>` in iter-2 P5. During the ~5s supervisor-restart drain window, the two states could disagree (AppState flipped, WebAuthState stuck). Fix: shared `Arc<AtomicBool>` constructed once in `main.rs`, cloned into AppState, WebAuthState, and CsrfState. `for_first_run(realm, is_first_run)` now takes the atomic as a parameter. `new`/`new_with_fresh_key` build their own throwaway atomic (post-first-run path, never flipped). `[src/main.rs, src/web/auth.rs, src/web/mod.rs, tests/web_setup_wizard.rs]`
+- [x] **iter-3-P6 (MED)** — Dropped `/favicon.ico` from `WIZARD_BYPASS_EXACT`. The file doesn't exist in `static/`; the bypass was allow-listing a 404 anyway. Test pinned to assert rejection. `[src/web/setup.rs]`
+- [x] **iter-3-P7 (LOW, Auditor)** — Updated `302` → `303` in 2 places in `tests/web_setup_wizard.rs` docstrings/comments. Assertion already used `SEE_OTHER`. `[tests/web_setup_wizard.rs]`
+- [x] **iter-3-P8 (MED)** — `Cache-Control: no-store` on the `/setup` HTML response. The page is server-rendered with iter-2 P8's `{{PLACEHOLDER_PREFIX}}` substitution; cached HTML on a fresh install with a different constant would silently mismatch. `[src/web/setup.rs::setup_get]`
+- [x] **iter-3-P9 (MED)** — Added `\r` (carriage return) to the regression-guard test password in `write_secrets_toml_escapes_password_with_special_chars`. Pre-fix, the `\r` arm of `toml_escape_string` was unexercised — a typo `'\r' => "\\n"` would have shipped silently. `[src/web/setup.rs::tests]`
+
+#### Deferred (1)
+
+- [x] **DEF-iter3-C0-BH-H1 (Blind HIGH — defence-in-depth, defensible):** Origin check accepts missing Origin header. Browsers always send Origin on POST per WHATWG; the threat model is "browser drive-by from a malicious LAN page" which is covered. curl-style attackers face the Content-Type strict check (iter-2 P9) that a `<form>` cannot forge. Documented in `src/web/setup.rs::setup_post` inline comment + `deferred-work.md`. Guy-accepted 2026-05-22 with documented reason.
+
+#### Dismissed iter-3 findings
+
+- BH MED on Content-Type charset parsing edge cases — `application/json` per RFC handles all browser-emitted forms; wizard JS already uses correct CT
+- BH MED on `secrets_path_for("/")` invented path — non-realistic input
+- BH MED on `compare_exchange` pre-persistence ordering — second-order race-window analysis; the post-iter-3-P2 revert closes the operator-visible gap
+- Edge MED on whitespace-only env-var diagnostic accuracy — already covered by DEF-iter2-C0-EH-H3 (extract shared helper deferred)
+- Edge MED on canonicalize-symlink behaviour — restart-required deploy convention, acceptable
+- Edge LOW on `whitespace_only` reason code unreachable from server — covered by P17 test that accepts either reason; defensive belt-and-braces branch intentional
+- Edge LOW on `SecretsWriteError::IoError` catchall — expected fallback; raw `error=` field carries detail
+- BH LOW on 4 KiB body limit comment math — accurate cap, comment math is approximate
+- BH LOW on for_first_run doc "operationally indistinguishable" — covered by surrounding implementation note
+- BH LOW on static_dir canonicalize symlink follow — duplicate with Edge MED
+- Auditor LOWs L2-L5 — covered by P7 (302→303 in tests) + iter-2 P16 + REASON_MESSAGES additions; no further patch needed
+
 ---
 
 ## Dev Notes

@@ -439,6 +439,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // posture would disagree. Single capture closes that gap.
     let is_first_run = application_config.is_first_run();
 
+    // Iter-3 P5: ONE Arc<AtomicBool> shared between AppState,
+    // WebAuthState, and CsrfState so a single atomic store inside
+    // setup_post's compare_exchange propagates to all three
+    // middlewares atomically. Pre-iter-3 (iter-2 P5), only AppState
+    // got the atomic — WebAuthState had its own plain `bool` capture
+    // → drift window between AppState.is_first_run = false and
+    // WebAuthState.is_first_run = true during the supervisor-restart
+    // drain.
+    let is_first_run_atomic = std::sync::Arc::new(
+        std::sync::atomic::AtomicBool::new(is_first_run),
+    );
+
     // Story 7-2 (AC#6): warn — but do not block — when a release build
     // ships with `create_sample_keypair = true`. Operators legitimately
     // running release-mode dev builds with auto-generated keypairs should
@@ -905,7 +917,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                  is bypassed for wizard and static routes until the \
                  wizard completes and the gateway restarts."
             );
-            web::auth::WebAuthState::for_first_run(realm.clone())
+            // Iter-3 P5: pass the shared atomic so WebAuthState's
+            // `is_first_run` flips in lock-step with AppState/CsrfState.
+            web::auth::WebAuthState::for_first_run(
+                realm.clone(),
+                is_first_run_atomic.clone(),
+            )
         } else {
             web::auth::WebAuthState::new(&application_config, realm.clone())?
         });
@@ -1038,14 +1055,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // so the wizard handlers and the first-run gate middleware
             // can reach them via the State extractor.
             static_dir: static_dir.clone(),
-            // Iter-2 P5: AppState.is_first_run is now Arc<AtomicBool>
-            // so `setup_post` can flip it via compare_exchange BEFORE
-            // writing secrets.toml — closing the concurrent-submit /
-            // drain-window race. See `src/web/mod.rs::AppState` doc-
-            // comment for the full rationale.
-            is_first_run: std::sync::Arc::new(
-                std::sync::atomic::AtomicBool::new(is_first_run),
-            ),
+            // Iter-2 P5 + iter-3 P5: clone the SHARED atomic (also
+            // held by WebAuthState and CsrfState) so a single
+            // compare_exchange in `setup_post` flips first-run mode
+            // across all three middlewares atomically.
+            is_first_run: is_first_run_atomic.clone(),
             secrets_path,
             shutdown_token: cancel_token.clone(),
         });

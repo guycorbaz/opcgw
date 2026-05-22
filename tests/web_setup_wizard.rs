@@ -11,7 +11,7 @@
 //   - AC#4: GET /setup in first-run mode renders the wizard HTML.
 //     GET /setup post-first-run returns HTTP 410 Gone.
 //   - AC#5: in first-run mode, GET / (and any other non-wizard,
-//     non-static path) returns HTTP 302 → /setup. Static assets
+//     non-static path) returns HTTP 303 → /setup. Static assets
 //     (/dashboard.css) bypass the redirect.
 //   - AC#6: in first-run mode, the OPC UA path is not exercised by
 //     these tests (that's pinned in src/main.rs integration);
@@ -62,8 +62,15 @@ fn build_first_run_app_state(
     secrets_dir: &TempDir,
     shutdown_token: CancellationToken,
 ) -> Arc<AppState> {
+    // Iter-3 P5: ONE atomic shared between WebAuthState + AppState
+    // so the test exercises the same flip-propagation semantics as
+    // production. Pre-iter-3, the test built two separate atomics
+    // and never noticed the drift.
+    let is_first_run_atomic =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let auth = Arc::new(WebAuthState::for_first_run(
         WEB_DEFAULT_AUTH_REALM.to_string(),
+        is_first_run_atomic.clone(),
     ));
     let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
     let snapshot = Arc::new(DashboardConfigSnapshot {
@@ -85,7 +92,7 @@ fn build_first_run_app_state(
         // Use the canonical static_dir helper so the wizard handler
         // can locate setup.html regardless of test cwd (iter-1 H5/EH-H2).
         static_dir: static_dir(),
-        is_first_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        is_first_run: is_first_run_atomic,
         secrets_path: secrets_dir.path().join("secrets.toml"),
         shutdown_token,
     })
@@ -120,7 +127,7 @@ async fn spawn_web_server(
 }
 
 /// Build a reqwest client that does NOT follow redirects — so the test
-/// can assert HTTP 302 directly without losing it to redirect chasing.
+/// can assert HTTP 303 directly without losing it to redirect chasing.
 fn client_no_redirect() -> reqwest::Client {
     reqwest::Client::builder()
         .redirect(Policy::none())

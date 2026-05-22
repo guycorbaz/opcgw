@@ -78,17 +78,20 @@ use crate::web::AppState;
 /// the prefix `/api/setup/`. That made `/etc/passwd.css`,
 /// `/api/setup/anything`, and ANY future API endpoint ending in `.js`
 /// implicitly auth-exempt in first-run mode. The exact-match form
-/// below is the minimum surface needed by `static/setup.html` — see
-/// the grep at iter-2 P3 build time: `setup.html` references only
-/// `/dashboard.css`. `/favicon.ico` is kept because browsers auto-
-/// request it and a 401/redirect noise in dev tools is worse than a
-/// trivial bypass on a 1×1 image.
+/// below is the minimum surface needed by `static/setup.html` — at
+/// iter-2 P3 build time, `setup.html` references only `/dashboard.css`.
+///
+/// Iter-3 P6: dropped `/favicon.ico` entry. The justification was
+/// "browsers auto-request it; 401-redirect noise in dev tools is worse
+/// than a trivial bypass on a 1×1 image." But `static/favicon.ico`
+/// doesn't actually ship in the repo — the bypass was allow-listing
+/// a path that returned 404 anyway. Either ship the file or drop the
+/// bypass; the latter is the minimal-surface choice.
 const WIZARD_BYPASS_EXACT: &[&str] = &[
     "/setup",
     "/setup.html",
     "/api/setup/password",
     "/dashboard.css",
-    "/favicon.ico",
 ];
 
 /// Returns true if the request path is exempt from the first-run
@@ -180,12 +183,25 @@ pub async fn setup_get(State(state): State<Arc<AppState>>) -> Response {
             // can carry untrusted content, switch to a proper
             // templating layer.
             let body = body.replace("{{PLACEHOLDER_PREFIX}}", PLACEHOLDER_PREFIX);
+            // Iter-3 P8: Cache-Control: no-store. The /setup HTML is
+            // server-rendered with the PLACEHOLDER_PREFIX constant
+            // substituted at request time (iter-2 P8). If a browser
+            // caches the rendered HTML and serves it on a future
+            // install where the constant has changed, the cached
+            // page's client-side validator would mismatch the
+            // server's. Cheap defence; the wizard is one-shot anyway.
             (
                 StatusCode::OK,
-                [(
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static("text/html; charset=utf-8"),
-                )],
+                [
+                    (
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("text/html; charset=utf-8"),
+                    ),
+                    (
+                        header::CACHE_CONTROL,
+                        HeaderValue::from_static("no-store"),
+                    ),
+                ],
                 body,
             )
                 .into_response()
@@ -378,6 +394,17 @@ pub async fn setup_post(
     // browser would set Origin to the malicious site, not the
     // gateway's own host. CSRF middleware is exempted from this route
     // (P2 + iter-1 M6), so this is the only Origin-class guard.
+    //
+    // Iter-3 D1 (deferred, see deferred-work.md): missing-Origin is
+    // accepted by design. The threat model is a malicious LAN page
+    // in an operator's browser, and BROWSERS always send Origin on
+    // POST. curl-style attackers that omit Origin still face the
+    // Content-Type strict check (P9 — `application/json` required),
+    // which a `<form>` element cannot forge. The defence-in-depth
+    // layer would be tightening missing-Origin to a 403, but that
+    // breaks legitimate scripting/automation use cases on the wizard
+    // (which Guy may want for unattended provisioning in a future
+    // story). Documented limitation; tracked as DEF-iter3-C0-BH-H1.
     if let Some(origin) = headers
         .get(axum::http::header::ORIGIN)
         .and_then(|v| v.to_str().ok())
@@ -386,9 +413,28 @@ pub async fn setup_post(
             .get(axum::http::header::HOST)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        let expected_http = format!("http://{}", host);
-        let expected_https = format!("https://{}", host);
-        if origin != expected_http && origin != expected_https {
+        // Iter-3 P3: default-port normalisation. Browsers per WHATWG
+        // URL spec omit `:80` from http:// origins and `:443` from
+        // https://. Host header can include OR omit the port for
+        // default-port deployments. Without normalisation, a gateway
+        // deployed on port 80 (or 443) gets locked out: Origin is
+        // `http://host` while Host is `host:80` → mismatch.
+        let strip_default_port = |s: &str, scheme: &str| -> String {
+            let default = if scheme == "https" { ":443" } else { ":80" };
+            s.strip_suffix(default).map(str::to_string).unwrap_or_else(|| s.to_string())
+        };
+        let host_norm_http = strip_default_port(host, "http");
+        let host_norm_https = strip_default_port(host, "https");
+        let origin_norm = if let Some(rest) = origin.strip_prefix("http://") {
+            format!("http://{}", strip_default_port(rest, "http"))
+        } else if let Some(rest) = origin.strip_prefix("https://") {
+            format!("https://{}", strip_default_port(rest, "https"))
+        } else {
+            origin.to_string()
+        };
+        let expected_http = format!("http://{}", host_norm_http);
+        let expected_https = format!("https://{}", host_norm_https);
+        if origin_norm != expected_http && origin_norm != expected_https {
             warn!(
                 event = "setup_password_rejected",
                 reason = "origin_mismatch",
@@ -554,6 +600,25 @@ pub async fn setup_post(
             response
         }
         Err(e) => {
+            // Iter-3 P2: revert the compare_exchange flip on write
+            // failure so the operator can retry after fixing the
+            // underlying cause (chmod, mount rw, free disk). Pre-fix
+            // (iter-2 P5), `is_first_run` stayed `false` after a
+            // failed write — the operator's retry hit the 410 Gone
+            // path and got locked out without a process restart, but
+            // the JS UI re-enabled the submit button so the operator
+            // could click again and again. Reverting closes that
+            // dead-end. The race-free guarantee is preserved: the
+            // next legitimate retry goes back through compare_exchange
+            // and either wins (proceeds to write) or loses (gets 409
+            // Conflict because a concurrent retry won).
+            //
+            // Ordering: revert BEFORE emitting the audit event so the
+            // event accurately reflects the post-revert state. The
+            // `store(true, SeqCst)` is unconditional because we won
+            // the prior compare_exchange — we're the only writer.
+            state.is_first_run.store(true, std::sync::atomic::Ordering::SeqCst);
+
             // Iter-1 M2: same filename-only redaction as the success
             // path above.
             let secrets_filename = state
@@ -575,7 +640,8 @@ pub async fn setup_post(
                 source_ip = %addr.ip(),
                 error = %e,
                 secrets_filename = secrets_filename,
-                "setup_post: failed to write secrets file"
+                "setup_post: failed to write secrets file; \
+                 is_first_run reverted to true for operator retry"
             );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -641,29 +707,22 @@ impl SecretsWriteError {
     /// Map an io::Error to the most specific variant. Falls back to
     /// `IoError` for unrecognised kinds.
     ///
-    /// Linux-only errno values are used because opcgw is Linux-only
-    /// (see CLAUDE.md). Values from `<errno.h>`:
-    ///   EROFS=30, ENOSPC=28, EDQUOT=122. (EACCES=13 and EPERM=1 are
-    /// surfaced through `io::ErrorKind::PermissionDenied` already.)
+    /// Iter-3 P4: use the stable `io::ErrorKind` variants
+    /// (`ReadOnlyFilesystem`, `StorageFull`, `QuotaExceeded`) stable
+    /// since Rust 1.85 (CLAUDE.md mandates rustc ≥ 1.87). Pre-fix
+    /// (iter-2 P7) used hardcoded Linux errno constants (EROFS=30,
+    /// ENOSPC=28, EDQUOT=122) — correct on x86_64/arm64 but wrong on
+    /// mips/sparc/alpha. The stable ErrorKind variants handle the
+    /// cross-arch mapping for us.
     fn from_io(io_err: &std::io::Error, context: impl Into<String>) -> Self {
         use std::io::ErrorKind;
-        // Linux errno constants — opcgw is Linux-only.
-        const EROFS: i32 = 30;
-        const ENOSPC: i32 = 28;
-        const EDQUOT: i32 = 122;
 
         let detail = format!("{}: {}", context.into(), io_err);
         match io_err.kind() {
             ErrorKind::NotFound => Self::ParentDirectoryMissing { detail },
             ErrorKind::PermissionDenied => Self::PermissionDenied { detail },
-            _ if io_err.raw_os_error() == Some(EROFS) => {
-                Self::ReadOnlyFilesystem { detail }
-            }
-            _ if io_err.raw_os_error() == Some(ENOSPC)
-                || io_err.raw_os_error() == Some(EDQUOT) =>
-            {
-                Self::DiskFull { detail }
-            }
+            ErrorKind::ReadOnlyFilesystem => Self::ReadOnlyFilesystem { detail },
+            ErrorKind::StorageFull | ErrorKind::QuotaExceeded => Self::DiskFull { detail },
             _ => Self::IoError { detail },
         }
     }
@@ -939,7 +998,10 @@ mod tests {
         assert!(is_wizard_bypass_path("/setup.html"));
         assert!(is_wizard_bypass_path("/api/setup/password"));
         assert!(is_wizard_bypass_path("/dashboard.css"));
-        assert!(is_wizard_bypass_path("/favicon.ico"));
+        // Iter-3 P6: /favicon.ico was dropped from the allowlist
+        // because static/favicon.ico doesn't ship — pinning the
+        // rejection so a future re-add requires shipping the asset.
+        assert!(!is_wizard_bypass_path("/favicon.ico"));
     }
 
     #[test]
@@ -1035,10 +1097,19 @@ mod tests {
         let tmp_dir = tempfile::tempdir().expect("create tempdir");
         let secrets_path = tmp_dir.path().join("secrets.toml");
 
-        // Password contains quote + backslash + newline + tab — every
-        // escape arm in `toml_escape_string` is exercised at least
-        // once. Round-trip MUST recover the exact original.
-        let password = "has\"quote\\and-backslash\nand-newline\tand-tab";
+        // Password contains quote + backslash + newline + carriage-
+        // return + tab — every escape arm in `toml_escape_string` is
+        // exercised at least once (iter-3 P9 added \r — pre-fix that
+        // arm was unexercised and a typo `'\r' => out.push_str("\\n")`
+        // would have shipped silently). Round-trip MUST recover the
+        // exact original character-for-character.
+        //
+        // Note: in production, the validator rejects mid-string
+        // control chars (iter-1 EH-H1) so this password never reaches
+        // write_secrets_toml via the API — the round-trip is direct,
+        // bypassing validate_password to exercise the escaper's
+        // defence-in-depth control-char arms.
+        let password = "has\"quote\\and-backslash\nand-newline\rand-cr\tand-tab";
         write_secrets_toml(&secrets_path, password)
             .expect("write_secrets_toml succeeds");
 

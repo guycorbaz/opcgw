@@ -149,6 +149,7 @@
     setup_already_in_progress: 'Another setup attempt is in flight. Wait a few seconds, then reload this page.',
     unsupported_media_type: 'The browser sent the form with the wrong content type. Please reload the page and try again.',
     origin_mismatch: 'The request appears to originate from a different page than the gateway. Reload the wizard directly and try again.',
+    first_run_complete: 'opcgw is already configured. The first-run wizard is no longer available; to rotate the password, edit config/secrets.toml on the gateway and restart, or override OPCGW_OPCUA__USER_PASSWORD via env-var.',
     // Iter-2 P7: write-failure reasons emitted by SecretsWriteError.
     readonly_filesystem: 'opcgw cannot write to the configuration directory (read-only filesystem). Re-mount the directory read-write and retry.',
     permission_denied: 'opcgw lacks permission to write the configuration file. Check that the config directory is writable by the gateway user.',
@@ -241,9 +242,18 @@
         });
       })
       .then(function (result) {
-        if (result.status === 200 && result.body.status === 'password_set_restarting') {
+        // Iter-3 P1: route EVERY non-200 response with `body.reason`
+        // through REASON_MESSAGES. Pre-fix the dispatch only consulted
+        // REASON_MESSAGES on HTTP 400, so the iter-2 P7/P9/P11/P13
+        // additions (415 unsupported_media_type, 403 origin_mismatch,
+        // 409 setup_already_in_progress, 410 first_run_complete, 500
+        // persistence_failed with readonly_filesystem/permission_denied
+        // /disk_full/parent_directory_missing/io_error reasons) fell
+        // through to the generic "Check the gateway logs" message —
+        // nullifying the iter-2 user-facing work.
+        if (result.status === 200 && result.body && result.body.status === 'password_set_restarting') {
           showSuccess(result.body.restarting_in_seconds || 5);
-        } else if (result.status === 400 && result.body.reason) {
+        } else if (result.status >= 400 && result.status < 600 && result.body && result.body.reason) {
           showError(result.body.reason);
           submitBtn.disabled = false;
           submitBtn.textContent = 'Save and continue';

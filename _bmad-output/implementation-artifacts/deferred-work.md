@@ -698,3 +698,9 @@
 - **DEF-iter2-C0-AA-L3 (Auditor LOW — issue-tracker precedent):** `Refs #__` placeholder in commit messages `c200089`, `c5cdea1`, `7ec2fc1`. Per Epic A/B precedent (gh CLI not authenticated for write), Guy opens the issue out-of-band and a follow-up commit can reference the resolved number. Same resolution path as `DEF-iter2-B1-U18`.
 - **DEF-iter2-C0-AA-L4 (Auditor LOW — spec drift):** AC#21 cites `≥ 56 ignored` doctests; actual pre-C-0 baseline at HEAD is 55. Acknowledged in the Completion Note. Spec-body amendment optional.
 - **DEF-iter2-C0-BH-L10 (Blind LOW — test brittleness):** Integration test `wizard_post_persists_password_and_signals_shutdown` asserts on substring match of `secrets.toml` body. Brittle if `toml_escape_string` whitespace changes. Same fix shape as P10 on the unit-test side: parse via `toml` crate, assert `user_password` value equals input. P10 covers the unit-test version; integration test deferred to a hardening pass.
+
+
+## Deferred from: code review of C-0-empty-config-bootstrap — iter-3 (2026-05-22)
+
+- **DEF-iter3-C0-BH-H1 (Blind HIGH — defence-in-depth, defensible):** Origin header check on `POST /api/setup/password` accepts requests with NO Origin header. The threat model documented in `docs/security.md` § "First-run wizard" is "browser drive-by from a malicious LAN page" — browsers ALWAYS send Origin on POST. curl-style attackers omitting Origin still face the Content-Type strict check (iter-2 P9, `application/json` required) that a `<form>` element cannot forge. Tightening to a 403 on missing Origin would close the residual gap but break legitimate scripting/automation (curl, unattended provisioning) on the wizard. Documented in `src/web/setup.rs::setup_post` comments. Guy-accepted 2026-05-22 with documented reason: defence-in-depth-only; primary defence is trusted-network + Content-Type.
+

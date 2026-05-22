@@ -123,14 +123,21 @@ pub struct WebAuthState {
     /// Defence-in-depth: `false` if the configured user OR password was
     /// empty at construction time. Mirrors `OpcgwAuthManager::is_configured`.
     is_configured: bool,
-    /// Epic C C-0 (2026-05-21): `true` iff this state was built via
-    /// [`Self::for_first_run`] (no OPC UA password yet — the web UI's
-    /// `/setup` wizard is reachable to collect one). When `true`, the
-    /// auth middleware bypasses the credential check for wizard and
-    /// static-asset paths (see [`is_wizard_bypass_path`] in `setup.rs`).
-    /// Non-wizard paths are caught by the first-run gate middleware
-    /// upstream and redirected to `/setup` BEFORE auth runs.
-    is_first_run: bool,
+    /// Epic C C-0 (2026-05-21, iter-3 P5): live first-run signal,
+    /// SHARED with `AppState.is_first_run` and `CsrfState.is_first_run`
+    /// (all three are clones of the same `Arc<AtomicBool>` created in
+    /// `main.rs`). When the wizard submit succeeds, ALL THREE
+    /// middlewares observe the flip-to-false within the same atomic
+    /// store — closing the drain-window drift gap where pre-fix
+    /// (iter-2 P5) WebAuthState would stay at "first-run" while
+    /// AppState had already flipped.
+    ///
+    /// When `true`, the auth middleware bypasses the credential check
+    /// for wizard and static-asset paths (see [`is_wizard_bypass_path`]
+    /// in `setup.rs`). Non-wizard paths are caught by the first-run
+    /// gate middleware upstream and redirected to `/setup` BEFORE
+    /// auth runs.
+    is_first_run: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl WebAuthState {
@@ -217,7 +224,11 @@ impl WebAuthState {
             hmac_key,
             realm,
             is_configured,
-            is_first_run: false,
+            // Iter-3 P5: post-first-run path. The atomic is owned
+            // locally and never flipped — semantically dead but
+            // typed-consistent with the for_first_run shape so
+            // basic_auth_middleware's `.load()` works uniformly.
+            is_first_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -244,7 +255,10 @@ impl WebAuthState {
     /// that somehow reaches the auth layer in first-run mode (e.g. a
     /// future refactor that removes the gate). The 401 response from
     /// that path makes the failure mode safe.
-    pub fn for_first_run(realm: String) -> Self {
+    pub fn for_first_run(
+        realm: String,
+        is_first_run: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
         // Iter-1 code review M9 fix: pre-fix `for_first_run` invoked
         // `getrandom::getrandom` THREE times — once for `hmac_key`,
         // twice for throwaway-user + throwaway-pass digests. The
@@ -273,9 +287,10 @@ impl WebAuthState {
             // empty-credentials short-circuit fires if the gate is
             // ever bypassed in a future refactor.
             is_configured: false,
-            // Epic C C-0: `true` so `basic_auth_middleware` bypasses
-            // the credential check for wizard + static-asset paths.
-            is_first_run: true,
+            // Epic C C-0 + iter-3 P5: SHARED atomic with AppState +
+            // CsrfState — when the wizard submit flips this to false,
+            // all three middlewares observe the change atomically.
+            is_first_run,
         }
     }
 }
@@ -447,7 +462,14 @@ pub async fn basic_auth_middleware(
     // middleware runs, so the only paths reaching here in first-run
     // mode are wizard + static (which we bypass) — anything else
     // would have been redirected upstream.
-    if state.is_first_run && crate::web::setup::is_wizard_bypass_path(&path) {
+    // Iter-3 P5: `is_first_run` is now Arc<AtomicBool> shared with
+    // AppState/CsrfState — load via SeqCst (matches the read pattern
+    // at setup.rs::setup_post + csrf.rs::csrf_middleware).
+    if state
+        .is_first_run
+        .load(std::sync::atomic::Ordering::SeqCst)
+        && crate::web::setup::is_wizard_bypass_path(&path)
+    {
         return next.run(req).await;
     }
 
