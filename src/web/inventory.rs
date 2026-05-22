@@ -442,11 +442,22 @@ fn chirpstack_failure_reason(err: &crate::utils::OpcGwError) -> &'static str {
     let s = err.to_string().to_lowercase();
     match err {
         OpcGwError::ChirpStack(_) => {
-            // Iter-2 P2: shutdown-cancellation must win over the substring
-            // matchers below — the cancellation message could otherwise
-            // false-positive on substring "connect" or similar via the
-            // tonic Status::Cancelled stringification.
-            if s.contains("cancelled") {
+            // Iter-2 P2 / iter-3 P1: shutdown-cancellation must win over
+            // the substring matchers below. Iter-3 P1 fix (Edge MED):
+            // match the LOCAL cancellation strings only, NOT the bare
+            // substring "cancelled". Pre-iter-3, `s.contains("cancelled")`
+            // also matched tonic's `Status::Cancelled` stringification
+            // (`"status: 'Cancelled', message: ..."` lowercased contains
+            // "cancelled") — server-initiated ChirpStack cancels (HTTP/2
+            // RST_STREAM, propagated deadline) were misclassified as
+            // shutdown_cancellation and the docs-row instructed
+            // operators to "suppress alerts on this reason during
+            // planned restarts," actively masking real faults. Match
+            // only the strings we construct ourselves in
+            // `chirpstack_inventory.rs::fetch_*`.
+            if s.contains("cancelled during shutdown")
+                || s.contains("cancelled mid-pagination during shutdown")
+            {
                 "shutdown_cancellation"
             } else if s.contains("auth") || s.contains("permission") || s.contains("unauthenticated") {
                 "chirpstack_auth_failed"
@@ -528,6 +539,63 @@ mod tests {
     fn applications_query_force_refresh_defaults_false() {
         let q = ApplicationsQuery::default();
         assert!(!q.force_refresh());
+    }
+
+    // -------------------------------------------------------------------
+    // Iter-3 P3 regression-guards for `chirpstack_failure_reason` (Edge LOW)
+    // -------------------------------------------------------------------
+
+    use crate::utils::OpcGwError;
+
+    /// Iter-3 P1 regression-guard: the LOCAL cancellation strings emitted
+    /// by `chirpstack_inventory::fetch_*` must classify as
+    /// `shutdown_cancellation`.
+    #[test]
+    fn chirpstack_failure_reason_classifies_local_cancellation_as_shutdown() {
+        let local_entry = OpcGwError::ChirpStack("cancelled during shutdown".into());
+        assert_eq!(chirpstack_failure_reason(&local_entry), "shutdown_cancellation");
+        let local_loop = OpcGwError::ChirpStack(
+            "cancelled mid-pagination during shutdown".into(),
+        );
+        assert_eq!(chirpstack_failure_reason(&local_loop), "shutdown_cancellation");
+    }
+
+    /// Iter-3 P1 regression-guard: tonic's `Status::Cancelled` stringifies
+    /// to something like `"... status: 'Cancelled', message: ..."`, lowercased
+    /// contains the bare substring "cancelled" — but THAT must NOT classify
+    /// as shutdown_cancellation. Pre-iter-3, the matcher used
+    /// `s.contains("cancelled")` and false-positived on this case, hiding
+    /// real ChirpStack faults. Post-iter-3 it must fall through to the
+    /// generic gRPC error bucket.
+    #[test]
+    fn chirpstack_failure_reason_does_not_false_positive_on_tonic_cancelled() {
+        // Mimic tonic's Status::Cancelled stringification shape.
+        let tonic_cancel = OpcGwError::ChirpStack(
+            "list_applications gRPC error: status: 'Cancelled', message: \"call cancelled by server\"".into(),
+        );
+        assert_ne!(
+            chirpstack_failure_reason(&tonic_cancel),
+            "shutdown_cancellation",
+            "bare substring \"cancelled\" must NOT classify as shutdown_cancellation"
+        );
+        // Should fall through to the generic gRPC error bucket.
+        assert_eq!(chirpstack_failure_reason(&tonic_cancel), "chirpstack_grpc_error");
+    }
+
+    /// Iter-3 P1 regression-guard: the auth / unreachable / fallback
+    /// branches must still classify correctly.
+    #[test]
+    fn chirpstack_failure_reason_classifies_auth_unreachable_grpc() {
+        let auth = OpcGwError::ChirpStack(
+            "list_applications gRPC error: auth failed".into(),
+        );
+        assert_eq!(chirpstack_failure_reason(&auth), "chirpstack_auth_failed");
+
+        let unreachable = OpcGwError::ChirpStack("connect failed: refused".into());
+        assert_eq!(chirpstack_failure_reason(&unreachable), "chirpstack_unreachable");
+
+        let generic = OpcGwError::ChirpStack("internal: code 13".into());
+        assert_eq!(chirpstack_failure_reason(&generic), "chirpstack_grpc_error");
     }
 }
 

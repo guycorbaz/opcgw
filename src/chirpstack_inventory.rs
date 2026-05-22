@@ -544,10 +544,20 @@ fn log_item_to_uplink(item: &LogItem) -> Option<InventoryUplink> {
                 Some(ts) => format!("seconds={},nanos={}", ts.seconds, ts.nanos),
                 None => "missing".to_string(),
             };
+            // Iter-3 P2 fix (Edge MED): use `?` (Debug) for the
+            // `description` field instead of `%` (Display). `LogItem.description`
+            // is an unconstrained gRPC string from upstream ChirpStack — a
+            // newline / ANSI escape / quotation mark in the field would
+            // otherwise pass through tracing's Display interpolation
+            // unescaped, allowing log-injection (e.g. forging a second log
+            // line that looks like a real audit event). Debug formatting
+            // quotes the string and escapes control chars / non-printable
+            // bytes. Audit-log integrity is now load-bearing (Story 9-7
+            // auth events, OPC UA session monitoring, etc.).
             warn!(
                 event = "inventory_uplink_dropped",
                 reason = "malformed_proto_timestamp",
-                description = %item.description,
+                description = ?item.description,
                 timestamp = %ts_repr,
                 "log_item_to_uplink: dropping item with invalid/missing proto timestamp"
             );
