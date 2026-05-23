@@ -999,16 +999,19 @@ application_id = "app-dup"
     );
     assert!(body_json["hint"].as_str().is_some(), "hint must be present");
 
-    // Iter-2 BH-H2 + ECH-MED2: the audit emit must fire exactly
-    // once with conflict_kind="duplicate" (NOT twice — iter-1
-    // accidentally emitted both the generic and the disambiguating
-    // line; iter-2 fixed via single-emit refactor).
+    // Iter-2 BH-H2 + ECH-MED2 + iter-3 BH-L2: the audit emit
+    // must fire EXACTLY once with conflict_kind="duplicate" (NOT
+    // twice — iter-1 accidentally emitted both the generic and
+    // the disambiguating line; iter-2 fixed via single-emit
+    // refactor; iter-3 tightens `>= 1` to `== 1` so a regression
+    // that restores the double-emit fails LOUD instead of passing
+    // silently against the weaker bound).
     tokio::time::sleep(Duration::from_millis(120)).await;
     let logs = captured_logs();
     let conflict_kind_dup_count = logs.matches("conflict_kind=\"duplicate\"").count();
-    assert!(
-        conflict_kind_dup_count >= 1,
-        "expected ≥1 conflict_kind=\"duplicate\" audit emit on post-write reload duplicate path; logs:\n{logs}"
+    assert_eq!(
+        conflict_kind_dup_count, 1,
+        "expected EXACTLY 1 conflict_kind=\"duplicate\" audit emit on post-write reload duplicate path (single-emit contract); got {conflict_kind_dup_count}; logs:\n{logs}"
     );
     // The generic CRUD reload failure line must NOT also fire for
     // the same rejection — iter-2 ECH-MED2 fix (skip the generic

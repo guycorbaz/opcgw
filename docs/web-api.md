@@ -37,6 +37,9 @@ The `scope` field follows a predictable shape so the picker UI can locate where 
 | Device | `"application:<application_id>"` | `"application:app-1"` |
 | Metric mapping | `"device:<device_id>"` | `"device:dev-1"` |
 | Command | `"device:<device_id>"` | `"device:probe-1"` |
+| Post-write reload (any resource) | `"reload"` | `"reload"` |
+
+The `"reload"` sentinel surfaces in the rare race where a CRUD pre-flight does not detect a duplicate that the post-write `AppConfig::validate()` does (e.g. a concurrent operator hand-edit during the pre-flight-to-write window introduced a duplicate elsewhere in the TOML; or a duplicate exists in a cross-cutting scope the handler doesn't iterate). The `field` and `value` are still present and accurate — `scope: "reload"` indicates the source of the rejection rather than a specific resource scope. Audit consumers see the matching `<resource>_crud_rejected reason="conflict" conflict_kind="duplicate"` event with sibling `duplicate_field` / `duplicate_value` structured-log fields for forensics. Picker UIs that don't recognise the `"reload"` sentinel should fall back to a generic "duplicate detected" inline message (the `field` + `value` are still actionable).
 
 ### Sibling audit event
 

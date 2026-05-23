@@ -328,6 +328,39 @@ Audit consumers that grep `reason="conflict"` continue to work; consumers that w
 
 **Real-world doctrine validation moment (iter-2):** my own iter-2 integration test `post_write_reload_duplicate_returns_structured_409_with_conflict_kind_duplicate` initially FAILED because the parser couldn't handle the actual multi-line wrapped `ReloadError::Validation` Display format. The unit tests passed (single-line input) but the integration test exercising the real Display chain caught the bug. Pattern: **unit tests with hand-crafted inputs cannot replace integration tests that exercise the real wire format.**
 
+### Review Findings — iter-3 (2026-05-23, commit `de1c716`)
+
+3 parallel reviewers re-ran against the iter-2 patch diff (~956 lines). Acceptance Auditor verdict: `ELIGIBLE-FOR-DONE` with one MEDIUM AC#22 gap. **Doctrine validation streak: 21** — iter-3 caught a residual apostrophe-embedded-phrase parser leak that iter-2 thought it had closed.
+
+| Source | Findings |
+|---|---|
+| Blind Hunter | 11 (0 HIGH explicit + 6 MEDIUM + 5 LOW; M1 actually HIGH-severity) |
+| Edge Case Hunter | 11 (0 HIGH explicit + 7 MEDIUM + 4 LOW; #3 actually HIGH-severity) |
+| Acceptance Auditor | ELIGIBLE-FOR-DONE + 1 NEW_VIOLATION (AC#22 gap) |
+| **Unified (deduped)** | **5 PATCH + 3 user-approved DEFER (MEDIUM) + 8 auto-DEFER (LOW)** |
+
+**Critical iter-3 finding (both Blind + Edge independently):** the iter-2 structural parser was still vulnerable to operator-controlled field values with embedded apostrophe + phrase. An operator naming `application_id = "foo' is duplicated within bar"` produced a validator length-error containing the phrase verbatim; `find()` matched the FIRST occurrence inside the value and returned falsified `(field="application_id", value="foo")`. Re-opened the C-1 substring-attribution leak class iter-2 was meant to close.
+
+**PATCH iter-3 (all applied):**
+
+- [x] [Review][Patch] [HIGH (mis-rated MEDIUM by reviewers)] Parser apostrophe-embedded-phrase leak [src/config_reload.rs::try_parse_duplicate_line] — **Fix:** three structural anchors layered together — (a) `rfind()` for closing-quote markers (anchors on LAST occurrence so embedded `' is duplicated ` inside the value falls inside the extracted value rather than being mistaken for the boundary), (b) new `is_known_duplicate_scope()` allowlist on `after_value` (only the 4 wordings the validator actually emits pass: `application_list` / `device.read_metric_list` / `device.device_command_list` / `application '<id>'`), (c) `prefix.contains('.')` field guard (rejects outer-wrapper lines without a dotted-path prefix). New unit-test negative cases pin all three attack vectors.
+- [x] [Review][Patch] [MEDIUM AC#22 (Auditor explicit gap)] `docs/web-api.md` missing `"reload"` scope value — **Fix:** added new table row to the scope-format table + paragraph explaining the post-write-reload sentinel + picker-UI fallback guidance.
+- [x] [Review][Patch] [MEDIUM BH-M2] Field-extraction guard didn't require dotted-path prefix — **Fix:** added explicit `if !prefix.contains('.') { return None; }` guard at line start; documented as iter-3 BH-M2 in the doc-comment.
+- [x] [Review][Patch] [LOW Edge-#10] `DuplicateInfo` struct + `as_duplicate_info()` method visibility tightened from `pub` to `pub(crate)` — sole consumer is `reload_error_response` in the same crate; avoids accidentally exposing parsed-shape as semver-stable public API.
+- [x] [Review][Patch] [LOW BH-L2] Integration test assertion tightened from `conflict_kind_dup_count >= 1` to `== 1` — pins the single-emit contract (a regression that restores iter-1's double-emit now fails loud instead of passing silently against the weaker bound).
+
+**DEFER iter-3 — user-approved MEDIUM (3, all logged to deferred-work.md with rationale):**
+
+- [x] [Review][Defer] [MEDIUM BH-M4] update_command BH-H3 corruption-first guard ordering locks operator out of legitimate self-recovery PUTs on pre-corrupted TOML — UX trade-off; corruption-first prioritisation is defensible.
+- [x] [Review][Defer] [MEDIUM BH-M5 / Edge-#6] config.rs empty-app_id branch silently un-deduplicates device_ids within the empty-app — iterative-fix workflow friction; surfaces deferred duplicate after operator fixes empty-id.
+- [x] [Review][Defer] [MEDIUM Edge-#5] Cross-resource attribution leak in `reload_error_response` (`command_crud_rejected` paired with `duplicate_field=application_id` when app-level dup caught during command CRUD) — defensible by event-handler-attribution semantics.
+
+**DEFER iter-3 — auto LOW (8):** parser bullet-line whitespace fragility (BH-L3, Edge-#1), trailing-whitespace-as-scope (Edge-#11) — both obviated by the iter-3 scope allowlist that requires exact-match or `application '<id>'` framing; `command_id` negative-value sanity (Edge-#4); `docs/logging.md` Debug-format shape-fragility against future refactor (BH-M6, defensive doc concern); multi-line first-match ordering (BH-M3, defensive); integration test cleanup of corrupted on-disk TOML (BH-L1); `update_command` malformed-block body uses `with_hint` not `duplicate` (BH-L5, surfaces only if picker UI grows malformed-block surfacing); bullet stripping constant (BH-L3).
+
+**Iter-3 test gate:** 1437/0/65 unchanged (no new tests added; iter-3 hardening is parser-internal); clippy `--all-targets -- -D warnings` clean; doctest 0 failed / 55 ignored unchanged.
+
+**Real-world doctrine validation moment (iter-3):** my own iter-3 parser unit test ran into a stale positive case for the `application[N]` scope wording — a remnant of iter-1 HIGH-5's `app_context` fallback that iter-2 BH-M2 had made unreachable but my test still asserted as positive. The iter-3 scope allowlist correctly rejected it (since `application[0]` is not in the allowlist), failing my own test. Caught by `cargo test`. **Pattern: test fixtures lag behind code refactors — every patch that obviates a scenario must also retire the matching test case.**
+
 **DEFER** (LOW only — pre-existing or out-of-scope):
 
 - [x] [Review][Defer] [LOW] No CI guard for `conflict_kind` coverage at all 30 sites [src/web/api.rs] — deferred, would need a `ConflictKind` enum refactor; pre-existing pattern.

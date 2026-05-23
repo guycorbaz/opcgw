@@ -167,7 +167,7 @@ impl ReloadError {
     /// (`application_id`, `device_id`, `metric_name`,
     /// `chirpstack_metric_name`, `command_name`) and the one
     /// unquoted-integer-value site (`command_id`).
-    pub fn as_duplicate_info(&self) -> Option<DuplicateInfo> {
+    pub(crate) fn as_duplicate_info(&self) -> Option<DuplicateInfo> {
         let msg = match self {
             Self::Validation(m) => m.as_str(),
             _ => return None,
@@ -180,10 +180,44 @@ impl ReloadError {
 /// duplicate-class error message. Wire-consumed by
 /// `reload_error_response` to build a contract-conforming
 /// `ErrorResponse::duplicate` body.
+///
+/// Iter-3 review Edge-#10: visibility tightened to `pub(crate)` —
+/// the only consumer is `reload_error_response` in the same crate.
+/// Avoids accidentally making the parsed-shape a semver-stable
+/// public API.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DuplicateInfo {
+pub(crate) struct DuplicateInfo {
     pub field: String,
     pub value: String,
+}
+
+/// Iter-3 review BH-M1 + ECH-#3: structural allowlist for the
+/// `scope` segment that follows `"is duplicated within|across "`
+/// in the validator's six duplicate-class messages. Closes the
+/// residual substring-attribution leak that the iter-2 parser
+/// still left open: an operator naming a field with an embedded
+/// `'` + phrase (e.g. `application_name = "X' is duplicated within
+/// bar"`) defeated the iter-2 quote-framing because `find()`
+/// matched the FIRST occurrence inside the value. Iter-3 uses
+/// (a) `rfind()` for the closing-quote marker (finds LAST
+/// occurrence) AND (b) this allowlist on the extracted scope
+/// string — only the four wordings the validator actually emits
+/// pass.
+fn is_known_duplicate_scope(s: &str) -> bool {
+    if matches!(
+        s,
+        "application_list" | "device.read_metric_list" | "device.device_command_list"
+    ) {
+        return true;
+    }
+    // Parameterized scope: `application '<app_id>'` (operator-
+    // controlled <app_id> framed by single quotes). The empty-
+    // app_id branch in src/config.rs no longer emits the duplicate
+    // error at all (iter-2 BH-M2), so the embedded value is
+    // always non-empty.
+    s.starts_with("application '")
+        && s.ends_with('\'')
+        && s.len() > "application ''".len()
 }
 
 /// Structural parser for the validator's six duplicate-class error
@@ -215,33 +249,60 @@ fn parse_duplicate_info(msg: &str) -> Option<DuplicateInfo> {
 ///   "{path}.{field}: '{value}' is duplicated within {scope}"
 ///   "{path}.{field}: '{value}' is duplicated across {scope}"
 ///   "{path}.command_id: {int_value} is duplicated within {scope}"
+///
+/// **Iter-3 review BH-M1 + ECH-#3 hardening** — the iter-2
+/// implementation used `find()` for the closing-quote marker,
+/// which matched the FIRST occurrence inside the value. An
+/// operator-controlled field value with an embedded `'` + phrase
+/// (e.g. `application_name = "X' is duplicated within bar"`)
+/// produced a validator length-error containing the phrase
+/// verbatim, and the parser returned falsified `(field, value)`.
+/// This re-opened the substring-attribution leak class.
+///
+/// Iter-3 closes the gap with three structural anchors:
+/// 1. `prefix.contains('.')` — outer wrapper lines have no dotted
+///    path prefix; only field-level error lines do.
+/// 2. `rfind()` for the closing-quote marker — finds the LAST
+///    occurrence, so an embedded `' is duplicated ` inside the
+///    quoted value falls inside the (now-longer) extracted value
+///    rather than being mistaken for the marker.
+/// 3. [`is_known_duplicate_scope`] allowlist on the extracted
+///    scope — only the four wordings the validator actually emits
+///    pass. An operator value containing the phrase produces
+///    `after_value = "<scope-junk>' must not exceed N characters"`
+///    which fails the allowlist.
 fn try_parse_duplicate_line(line: &str) -> Option<DuplicateInfo> {
     // Step 1: split path-prefix from rest at the FIRST ": " on this
     // line. The validator's per-field error always starts with a
     // path like `application[0].device[1].metric_name:`.
     let (prefix, rest) = line.split_once(": ")?;
+    // Iter-3 review BH-M2: require a dotted-path prefix. The
+    // outer wrapper lines ("config validation error",
+    // "Configuration error", "Configuration validation failed")
+    // have no `.` in their prefix; require it here so the loop
+    // fall-through is explicit, not incidental.
+    if !prefix.contains('.') {
+        return None;
+    }
     // Field name is the last `.`-segment of the prefix.
     let field = prefix.rsplit('.').next()?.to_string();
     if field.is_empty() || field.contains(' ') {
-        // A `.`-less prefix or a prefix containing spaces is the
-        // outer wrapper line ("config validation error" /
-        // "Configuration error" / "Configuration validation failed")
-        // — fail-closed and let the caller try the next line.
         return None;
     }
 
     // Step 2: extract value. Try quoted form first; fall back to
-    // integer-form for command_id only.
+    // integer-form for command_id only. Iter-3 uses rfind() to
+    // anchor on the LAST marker occurrence.
     let (value, after_value) = if let Some(after_quote) = rest.strip_prefix('\'') {
-        // Quoted form: 'value' is duplicated within|across ...
+        // Quoted form: 'value' is duplicated within|across {scope}
         let marker_within = "' is duplicated within ";
         let marker_across = "' is duplicated across ";
-        if let Some(idx) = after_quote.find(marker_within) {
+        if let Some(idx) = after_quote.rfind(marker_within) {
             (
                 after_quote[..idx].to_string(),
                 &after_quote[idx + marker_within.len()..],
             )
-        } else if let Some(idx) = after_quote.find(marker_across) {
+        } else if let Some(idx) = after_quote.rfind(marker_across) {
             (
                 after_quote[..idx].to_string(),
                 &after_quote[idx + marker_across.len()..],
@@ -250,10 +311,10 @@ fn try_parse_duplicate_line(line: &str) -> Option<DuplicateInfo> {
             return None;
         }
     } else {
-        // Integer form (command_id only): N is duplicated within ...
+        // Integer form (command_id only): N is duplicated within {scope}
         let marker_within = " is duplicated within ";
         let marker_across = " is duplicated across ";
-        if let Some(idx) = rest.find(marker_within) {
+        if let Some(idx) = rest.rfind(marker_within) {
             let value = rest[..idx].to_string();
             // Sanity: integer-form value should parse as i64;
             // reject otherwise (defends against an operator value
@@ -263,7 +324,7 @@ fn try_parse_duplicate_line(line: &str) -> Option<DuplicateInfo> {
                 return None;
             }
             (value, &rest[idx + marker_within.len()..])
-        } else if let Some(idx) = rest.find(marker_across) {
+        } else if let Some(idx) = rest.rfind(marker_across) {
             let value = rest[..idx].to_string();
             if value.parse::<i64>().is_err() {
                 return None;
@@ -274,10 +335,13 @@ fn try_parse_duplicate_line(line: &str) -> Option<DuplicateInfo> {
         }
     };
 
-    // Step 3: verify there's a non-empty scope after the marker
-    // (structural sanity — if scope is empty, the validator wording
-    // drifted and we should fail-closed to avoid misclassification).
-    if after_value.is_empty() {
+    // Step 3 (iter-3 BH-M1 + ECH-#3): scope must match one of the
+    // four known validator-emitted patterns. This is the structural
+    // anchor that defeats operator-controlled values containing
+    // the duplicate phrase — even with rfind, an embedded phrase
+    // attack produces `after_value = "<crafted-scope>' must not
+    // exceed N characters"` which fails the allowlist.
+    if !is_known_duplicate_scope(after_value) {
         return None;
     }
 
@@ -1811,12 +1875,18 @@ mod tests {
         let cases_must_match = [
             "application[0].application_id: 'app-1' is duplicated across application_list",
             "application[0].device[1].device_id: 'dev-1' is duplicated within application 'app-1'",
-            "application[0].device[1].device_id: 'dev-1' is duplicated within application[0]",
             "application[0].device[0].read_metric[1].metric_name: 'temp' is duplicated within device.read_metric_list",
             "application[0].device[0].read_metric[1].chirpstack_metric_name: 'temp' is duplicated within device.read_metric_list",
             "application[0].device[0].command[1].command_id: 1 is duplicated within device.device_command_list",
             "application[0].device[0].command[1].command_name: 'reboot' is duplicated within device.device_command_list",
         ];
+        // Iter-3 BH-M2 note: the historical "application[N]" scope
+        // (iter-1 HIGH-5 fallback when application_id was empty)
+        // is no longer reachable after iter-2 BH-M2 — the
+        // empty-app_id branch in src/config.rs now SKIPS the
+        // duplicate check entirely. So `application[0]` is NOT in
+        // is_known_duplicate_scope()'s allowlist; the only valid
+        // device-scope wording is `application '<non-empty id>'`.
         for msg in cases_must_match {
             let err = ReloadError::Validation(msg.into());
             assert!(err.is_duplicate(), "must classify as duplicate: {msg}");
@@ -1856,6 +1926,27 @@ mod tests {
             // Integer-form value that's not actually an integer
             // (defensive — parser rejects via i64::parse).
             "application[0].device[0].command[0].command_id: not_an_int is duplicated within device.device_command_list",
+            // Iter-3 review BH-M1 + ECH-#3: operator names a field
+            // with an embedded `'` + phrase, AND the value's
+            // trailing portion looks like a known scope. The
+            // iter-2 implementation false-positived because find()
+            // matched the FIRST `' is duplicated within ` inside
+            // the value; iter-3's rfind + scope allowlist defeats
+            // it because the residual `after_value` is
+            // "{scope-segment}' must not exceed ..." which fails
+            // is_known_duplicate_scope().
+            "application[0].application_name: 'foo' is duplicated within bar' must not exceed 64 characters",
+            "application[0].application_name: 'X' is duplicated across application_list' must not exceed 64 characters",
+            "application[0].device[0].device_name: 'X' is duplicated within device.read_metric_list' must not be empty",
+            // Iter-3 review BH-M2: outer wrapper line WITHOUT a
+            // dotted-path prefix must NOT pass the field-extraction
+            // even if the rest looks like a duplicate phrase.
+            "single_field: 'value' is duplicated within application_list",
+            // Iter-3 review BH-M1: empty / malformed scope must fail
+            // the allowlist.
+            "application[0].application_id: 'X' is duplicated within ",
+            "application[0].application_id: 'X' is duplicated within unknown_collection",
+            "application[0].device[0].device_id: 'X' is duplicated within application ",
         ];
         for msg in cases_must_not_match {
             let err = ReloadError::Validation(msg.into());
