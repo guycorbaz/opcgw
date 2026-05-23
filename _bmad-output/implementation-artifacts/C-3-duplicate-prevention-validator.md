@@ -5,7 +5,7 @@
 | Story key       | `C-3-duplicate-prevention-validator`                                                                        |
 | Epic            | C — Auto-Discovery and Web-First Configuration (post-v2.0 GA)                                               |
 | FRs             | none (Epic C is post-PRD)                                                                                   |
-| Status          | ready-for-dev                                                                                               |
+| Status          | done (2026-05-23 — 3 code-review iterations + loop terminated per CLAUDE.md condition #3)                  |
 | Created         | 2026-05-21                                                                                                  |
 | Source epic     | `_bmad-output/planning-artifacts/epics.md § Epic C § Story C.3`                                             |
 | Depends on      | C-2 (picker UX exists) — strictly speaking C-3 could land before C-2, but the operator-visible UX benefit  |
