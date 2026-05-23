@@ -532,6 +532,15 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
                 .put(api::update_command)
                 .delete(api::delete_command),
         )
+        // Story C-2 (AC#11): thin endpoint accepting client-attributable
+        // picker audit events. Basic-auth gated (inherits the layer
+        // stack below) and CSRF-protected. No state mutation — the
+        // handler validates the event-name allowlist + sanitises the
+        // fields per-event before emitting one tracing line.
+        .route(
+            "/api/audit/picker-event",
+            axum::routing::post(api::audit_picker_event),
+        )
         // Epic C C-0 (2026-05-21): wizard routes. Reachable BEFORE
         // auth+CSRF when `AppState.is_first_run = true` (the basic-auth
         // middleware checks for wizard paths and bypasses auth in

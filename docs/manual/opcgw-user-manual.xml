@@ -1167,6 +1167,140 @@ curl -sS -u "$OPCGW_OPCUA__USER_NAME:$OPCGW_OPCUA__USER_PASSWORD" \
         C-1 through C-6).</para>
       </section>
 
+      <section id="sec-web-pickers">
+        <title>Adding applications, devices, and metrics via the web UI (Epic C C-2)</title>
+        <para>From Epic C C-2 onward, the
+        <filename>/applications.html</filename> and
+        <filename>/devices-config.html</filename> pages offer
+        <emphasis>name-driven pickers</emphasis> instead of the
+        legacy free-form UUID/DevEUI text inputs. The pickers are
+        populated from
+        <literal>GET /api/inventory/{applications,devices,uplinks}</literal>
+        (Story C-1) — the operator never needs to copy a UUID from
+        ChirpStack into opcgw by hand.</para>
+
+        <para>The full add-flow is
+        <emphasis>application → device → metric</emphasis>:</para>
+
+        <orderedlist>
+          <listitem>
+            <para>On <filename>/applications.html</filename>, the
+            <emphasis>Create application</emphasis> form shows a
+            dropdown sourced from
+            <literal>/api/inventory/applications</literal>. Pick an
+            application by name; the hidden
+            <literal>application_id</literal> pre-fills and the
+            <literal>Application Name</literal> field defaults to the
+            ChirpStack name (operator-editable). Submit lands the
+            application in <filename>config/config.toml</filename>
+            through the existing CRUD path.</para>
+          </listitem>
+          <listitem>
+            <para>On <filename>/devices-config.html</filename>, each
+            already-configured application has an
+            <emphasis>Add device</emphasis> sub-form. The dropdown
+            fetches
+            <literal>/api/inventory/devices?application_id=&lt;id&gt;</literal>
+            and lets the operator pick a device by name. The DevEUI
+            is shown beneath the picker as a small read-only
+            footnote so the operator can copy it for ChirpStack-side
+            troubleshooting if needed.</para>
+          </listitem>
+          <listitem>
+            <para>The metric-picker sub-form is fed by
+            <literal>/api/inventory/uplinks?dev_eui=&lt;eui&gt;&amp;limit=10</literal>
+            and renders the
+            <literal>observed_keys</literal> aggregate as a
+            multi-select checkbox list. Each row carries an
+            auto-inferred wire-type
+            (<literal>Float | Int | Bool | String</literal>) which
+            the operator can override per row. Tick any combination
+            of keys to add them as metrics in one submission.</para>
+          </listitem>
+        </orderedlist>
+
+        <para><emphasis role="strong">Manual-entry fallback (load-bearing).</emphasis>
+        Every picker carries a
+        <emphasis>Switch to manual entry</emphasis> toggle. The toggle
+        also fires automatically when the inventory endpoint returns
+        HTTP 502 (ChirpStack unreachable) so the operator never gets
+        trapped. The chosen mode persists per page via
+        <literal>localStorage</literal>
+        (<literal>opcgw.picker.applications.mode</literal>,
+        <literal>opcgw.picker.devices.mode</literal>,
+        <literal>opcgw.picker.metrics.mode</literal>) so an operator
+        who prefers manual entry permanently doesn't have to re-toggle
+        on every page load.</para>
+
+        <para>Three failure modes are covered:</para>
+        <itemizedlist>
+          <listitem>
+            <para><emphasis>ChirpStack maintenance window</emphasis> —
+            picker auto-fallbacks; operator can still configure opcgw
+            using values they know.</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>Device not yet enrolled in ChirpStack</emphasis>
+            — picker shows an empty-state and flips to manual; the
+            operator can pre-create opcgw config so the device works
+            the moment its first uplink lands.</para>
+          </listitem>
+          <listitem>
+            <para><emphasis>Metric not yet emitted by the codec</emphasis>
+            — the uplink picker shows
+            <emphasis>no recent uplinks</emphasis> and falls back to
+            manual metric-row entry so the operator can hand-type a
+            metric_name they know the codec will eventually
+            produce.</para>
+          </listitem>
+        </itemizedlist>
+
+        <para><emphasis role="strong">Re-fetch on demand.</emphasis>
+        Each picker has a small <literal>↻</literal> refresh icon
+        that calls the corresponding
+        <literal>/api/inventory/*</literal> endpoint with
+        <literal>?refresh=true</literal>, bypassing the server-side
+        TTL cache (default 60 seconds). Useful when an operator
+        added a device to ChirpStack in another browser tab and
+        wants to see it in opcgw immediately.</para>
+
+        <para><emphasis role="strong">Audit signals.</emphasis> The
+        picker emits three audit events into the canonical structured
+        log:</para>
+        <itemizedlist>
+          <listitem>
+            <para><literal>event="picker_opened"</literal> — operator
+            opened a picker; carries
+            <literal>picker_resource</literal> and the relevant
+            <literal>cache_status</literal>.</para>
+          </listitem>
+          <listitem>
+            <para><literal>event="picker_manual_fallback"</literal> —
+            picker switched to manual entry; carries
+            <literal>picker_resource</literal> and a
+            <literal>reason</literal>
+            (<literal>operator_choice</literal>,
+            <literal>chirpstack_unreachable</literal>,
+            <literal>chirpstack_error</literal>,
+            <literal>chirpstack_empty</literal>, or
+            <literal>no_recent_uplinks</literal>).</para>
+          </listitem>
+          <listitem>
+            <para><literal>event="metric_wire_type_inferred"</literal>
+            — per-metric audit emitted server-side from the
+            <literal>POST|PUT /api/applications/&lt;app&gt;/devices[/&lt;dev&gt;]</literal>
+            success path when the metric request carries a
+            <literal>picker_metadata</literal> envelope. Records the
+            inferred type, the operator's final choice, and the
+            sample-values-count from the uplink stream.</para>
+          </listitem>
+        </itemizedlist>
+
+        <para>See
+        <filename>docs/inventory-api.md § Picker-event audit endpoint</filename>
+        for the full request/response contract.</para>
+      </section>
+
       <section id="sec-global-config">
         <title>[global] — Global Settings</title>
         <para>The <literal>[global]</literal> section currently carries a

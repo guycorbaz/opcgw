@@ -2,12 +2,19 @@
 // (c) [2024] Guy Corbaz
 //
 // Story 9-5 — Device + metric mapping CRUD page controller.
+// Story C-2 — Device + metric pickers fed by /api/inventory/*.
 // Vanilla JS, no SPA framework, no build step.
 
 (function () {
   'use strict';
 
   const METRIC_TYPES = ['Float', 'Int', 'Bool', 'String'];
+  // Story C-2: per-page localStorage keys for picker-vs-manual mode.
+  const DEVICES_PAGE_KEY = 'devices';
+  const METRICS_PAGE_KEY = 'metrics';
+  // Story C-2: namespace-aliased global from inventory-picker.js (must
+  // be loaded BEFORE this script — see static/devices-config.html).
+  const picker = window.opcgwPicker;
 
   function el(tag, attrs, children) {
     const node = document.createElement(tag);
@@ -245,36 +252,399 @@
     // Per-application create form.
     const createErr = el('div', { class: 'error-banner', hidden: 'hidden' });
     const metricContainer = el('div');
+    // Story C-2: per-form picker state object captures all the
+    // operator-set bits the submit handler needs to read at submit
+    // time (NOT at picker-render time, AC#14).
+    const pickerState = {
+      mode: picker.mode.get(DEVICES_PAGE_KEY),
+      metricsMode: picker.mode.get(METRICS_PAGE_KEY),
+      pickedDevices: [],   // [{id, name, dev_eui}]
+      observedKeys: [],    // [{key, wire_type, sample_value}]
+      currentDevEui: '',   // selected dev_eui (lowercase, normalized by API)
+    };
     const form = el('form', {
       class: 'crud-form',
       action: '/api/applications/' + encodeURIComponent(app.application_id) + '/devices',
       method: 'POST',
     });
     form.appendChild(el('h3', { text: 'Add device' }));
-    form.appendChild(el('label', { text: 'Device ID (DevEUI)' }));
-    form.appendChild(el('input', {
-      type: 'text', name: 'device_id', required: 'required',
-    }));
+
+    // -------- Device picker (Story C-2 AC#4 / #5 / #6) --------
+    const devPickerWrap = el('div');
+    const devPickerToolbar = el('div', { class: 'picker-toolbar' });
+    const devPickerSelect = el('select', { 'aria-label': 'Device from ChirpStack' });
+    devPickerSelect.disabled = true;
+    devPickerSelect.appendChild(el('option', { text: 'Loading…' }));
+    const devPickerRefresh = el('button', {
+      type: 'button', text: '↻', title: 'Refresh from ChirpStack (cache bypass)',
+    });
+    const devPickerToManual = el('a', {
+      role: 'button', tabindex: '0', text: 'Switch to manual entry',
+    });
+    devPickerToolbar.appendChild(devPickerSelect);
+    devPickerToolbar.appendChild(devPickerRefresh);
+    devPickerToolbar.appendChild(devPickerToManual);
+    devPickerWrap.appendChild(devPickerToolbar);
+    const devEuiFootnote = el('div', { class: 'dev-eui-footnote', text: '' });
+    devPickerWrap.appendChild(devEuiFootnote);
+    const devPickerBanner = el('div', { class: 'picker-fallback-banner' });
+    devPickerBanner.hidden = true;
+    devPickerWrap.appendChild(devPickerBanner);
+
+    const devManualWrap = el('div');
+    devManualWrap.hidden = true;
+    const devManualToolbar = el('div', { class: 'picker-toolbar' });
+    const devManualToPicker = el('a', {
+      role: 'button', tabindex: '0', text: 'Switch to picker',
+    });
+    devManualToolbar.appendChild(devManualToPicker);
+    devManualWrap.appendChild(devManualToolbar);
+    const devIdInput = el('input', {
+      type: 'text', name: 'device_id', placeholder: 'Device ID (DevEUI hex)',
+    });
+    devManualWrap.appendChild(el('label', { text: 'Device ID (DevEUI)' }));
+    devManualWrap.appendChild(devIdInput);
+
+    form.appendChild(el('label', { text: 'Device from ChirpStack' }));
+    form.appendChild(devPickerWrap);
+    form.appendChild(devManualWrap);
+
     form.appendChild(el('label', { text: 'Device name' }));
-    form.appendChild(el('input', {
+    const devNameInput = el('input', {
       type: 'text', name: 'device_name', required: 'required',
-    }));
-    form.appendChild(el('h4', { text: 'Metric mappings (optional)' }));
-    form.appendChild(metricContainer);
-    form.appendChild(el('button', {
+    });
+    form.appendChild(devNameInput);
+    picker.editedFlag.attach(devNameInput);
+
+    // -------- Metric picker (Story C-2 AC#7 / #8 / #9 / #10) --------
+    const metricPickerWrap = el('div');
+    const metricPickerToolbar = el('div', { class: 'picker-toolbar' });
+    const metricPickerRefresh = el('button', {
+      type: 'button', text: '↻ Refresh metric picker',
+      title: 'Re-fetch recent uplinks for the selected device',
+    });
+    const metricPickerToManual = el('a', {
+      role: 'button', tabindex: '0', text: 'Switch to manual metric entry',
+    });
+    metricPickerToolbar.appendChild(metricPickerRefresh);
+    metricPickerToolbar.appendChild(metricPickerToManual);
+    metricPickerWrap.appendChild(metricPickerToolbar);
+    const metricPickerStatus = el('div', { text: 'Choose a device above first.' });
+    metricPickerWrap.appendChild(metricPickerStatus);
+    const metricPickerRows = el('div');
+    metricPickerWrap.appendChild(metricPickerRows);
+    const metricPickerBanner = el('div', { class: 'picker-fallback-banner' });
+    metricPickerBanner.hidden = true;
+    metricPickerWrap.appendChild(metricPickerBanner);
+
+    const metricManualWrap = el('div');
+    const metricManualToolbar = el('div', { class: 'picker-toolbar' });
+    const metricManualToPicker = el('a', {
+      role: 'button', tabindex: '0', text: 'Switch to metric picker',
+    });
+    metricManualToolbar.appendChild(metricManualToPicker);
+    metricManualWrap.appendChild(metricManualToolbar);
+    metricManualWrap.appendChild(el('h4', { text: 'Metric mappings (manual)' }));
+    metricManualWrap.appendChild(metricContainer);
+    metricManualWrap.appendChild(el('button', {
       type: 'button', class: 'btn-add-metric', text: '+ Add metric',
       onclick: function () { buildMetricRow(null, metricContainer); },
     }));
+
+    form.appendChild(el('h4', { text: 'Metrics from recent uplinks (picker)' }));
+    form.appendChild(metricPickerWrap);
+    form.appendChild(metricManualWrap);
+
+    function applyDeviceMode(mode) {
+      pickerState.mode = mode;
+      picker.mode.set(DEVICES_PAGE_KEY, mode);
+      if (mode === 'manual') {
+        devPickerWrap.hidden = true;
+        devManualWrap.hidden = false;
+      } else {
+        devPickerWrap.hidden = false;
+        devManualWrap.hidden = true;
+      }
+    }
+    function applyMetricsMode(mode) {
+      pickerState.metricsMode = mode;
+      picker.mode.set(METRICS_PAGE_KEY, mode);
+      if (mode === 'manual') {
+        metricPickerWrap.hidden = true;
+        metricManualWrap.hidden = false;
+      } else {
+        metricPickerWrap.hidden = false;
+        metricManualWrap.hidden = true;
+      }
+    }
+
+    function setDevicePickerBanner(msg, withRetry) {
+      devPickerBanner.replaceChildren();
+      if (!msg) {
+        devPickerBanner.hidden = true;
+        return;
+      }
+      devPickerBanner.appendChild(document.createTextNode(msg + ' '));
+      if (withRetry) {
+        const btn = el('button', {
+          type: 'button', text: 'Retry picker',
+          onclick: function () { loadDevicePicker({ refresh: true }); },
+        });
+        devPickerBanner.appendChild(btn);
+      }
+      devPickerBanner.hidden = false;
+    }
+
+    function setMetricPickerStatus(msg) {
+      metricPickerStatus.textContent = msg || '';
+    }
+
+    function setMetricPickerBanner(msg) {
+      metricPickerBanner.textContent = msg || '';
+      metricPickerBanner.hidden = !msg;
+    }
+
+    async function loadDevicePicker(opts) {
+      devPickerSelect.disabled = true;
+      devPickerSelect.replaceChildren();
+      devPickerSelect.appendChild(el('option', { text: 'Loading…' }));
+      setDevicePickerBanner('');
+      try {
+        const data = await picker.fetchDevices(app.application_id, {
+          refresh: !!(opts && opts.refresh),
+        });
+        picker.auditEvent('picker_opened', {
+          picker_resource: 'device',
+          application_id: app.application_id,
+          cache_status: (opts && opts.refresh) ? 'bypassed' : (data.cache_status || 'unknown'),
+        });
+        if (!data.items || data.items.length === 0) {
+          devPickerSelect.replaceChildren();
+          devPickerSelect.appendChild(el('option', { text: '(no devices in ChirpStack)' }));
+          applyDeviceMode('manual');
+          setDevicePickerBanner(
+            'No devices found under this application in ChirpStack.',
+            true,
+          );
+          picker.auditEvent('picker_manual_fallback', {
+            picker_resource: 'device',
+            reason: 'chirpstack_empty',
+          });
+          return;
+        }
+        pickerState.pickedDevices = data.items;
+        const items = data.items.slice().sort(function (a, b) {
+          const ax = (a.name || '').toLowerCase();
+          const bx = (b.name || '').toLowerCase();
+          return ax < bx ? -1 : ax > bx ? 1 : 0;
+        });
+        devPickerSelect.replaceChildren();
+        const placeholder = el('option', { value: '', text: 'Choose a device…' });
+        placeholder.disabled = true;
+        placeholder.selected = true;
+        devPickerSelect.appendChild(placeholder);
+        items.forEach(function (item) {
+          const opt = el('option', { value: item.id, text: item.name });
+          opt.dataset.devName = item.name;
+          // The C-1 InventoryDevice carries id == dev_eui (normalised
+          // lowercase hex). The /uplinks endpoint expects the same.
+          opt.dataset.devEui = item.id;
+          devPickerSelect.appendChild(opt);
+        });
+        devPickerSelect.disabled = false;
+      } catch (err) {
+        applyDeviceMode('manual');
+        setDevicePickerBanner('Could not reach ChirpStack — switched to manual entry.', true);
+        picker.auditEvent('picker_manual_fallback', {
+          picker_resource: 'device',
+          reason: err && err.status === 502 ? 'chirpstack_unreachable' : 'chirpstack_error',
+          error_detail: err && err.message ? String(err.message).slice(0, 200) : '',
+        });
+      }
+    }
+
+    async function loadMetricPicker(devEui, opts) {
+      pickerState.observedKeys = [];
+      pickerState.currentDevEui = devEui;
+      metricPickerRows.replaceChildren();
+      setMetricPickerBanner('');
+      if (!devEui) {
+        setMetricPickerStatus('Choose a device above first.');
+        return;
+      }
+      setMetricPickerStatus('Loading recent uplinks…');
+      try {
+        const data = await picker.fetchUplinks(devEui, { limit: 10 });
+        picker.auditEvent('picker_opened', {
+          picker_resource: 'uplink',
+          application_id: app.application_id,
+          dev_eui: devEui,
+          cache_status: 'bypassed',
+        });
+        if (!data.observed_keys || data.observed_keys.length === 0) {
+          // AC#9: empty observed keys -> flip to manual entry.
+          setMetricPickerStatus(
+            'No recent uplinks for this device. Either wait for it to send and refresh, or add metrics manually below.',
+          );
+          applyMetricsMode('manual');
+          picker.auditEvent('picker_manual_fallback', {
+            picker_resource: 'uplink',
+            reason: 'no_recent_uplinks',
+          });
+          return;
+        }
+        pickerState.observedKeys = data.observed_keys;
+        setMetricPickerStatus('Tick metric keys to include; override wire type per row if needed.');
+        data.observed_keys.forEach(function (k, idx) {
+          const row = el('div', { class: 'metric-pick-row' });
+          const checkbox = el('input', {
+            type: 'checkbox', id: 'mk-' + idx,
+            'data-key': k.key,
+            'data-inferred': k.wire_type,
+            'data-sample-count': '1',
+          });
+          const label = el('label', { for: 'mk-' + idx, text: k.key });
+          const typeSelect = el('select');
+          METRIC_TYPES.forEach(function (t) {
+            const opt = el('option', { value: t, text: t });
+            if (t === k.wire_type) opt.selected = true;
+            typeSelect.appendChild(opt);
+          });
+          typeSelect.dataset.role = 'wire-type';
+          const sample = el('span', {
+            class: 'sample-cell',
+            text: 'sample: ' + JSON.stringify(k.sample_value),
+          });
+          row.appendChild(checkbox);
+          row.appendChild(label);
+          row.appendChild(typeSelect);
+          row.appendChild(sample);
+          metricPickerRows.appendChild(row);
+        });
+      } catch (err) {
+        setMetricPickerStatus('Could not fetch recent uplinks.');
+        setMetricPickerBanner('You can still add metrics manually below.');
+        applyMetricsMode('manual');
+        picker.auditEvent('picker_manual_fallback', {
+          picker_resource: 'uplink',
+          reason: err && err.status === 502 ? 'chirpstack_unreachable' : 'chirpstack_error',
+          error_detail: err && err.message ? String(err.message).slice(0, 200) : '',
+        });
+      }
+    }
+
+    function readPickerMetrics() {
+      const rows = metricPickerRows.querySelectorAll('.metric-pick-row');
+      const result = [];
+      for (const row of rows) {
+        const checkbox = row.querySelector('input[type="checkbox"]');
+        if (!checkbox || !checkbox.checked) continue;
+        const key = checkbox.dataset.key;
+        const inferred = checkbox.dataset.inferred || '';
+        const chosen = row.querySelector('select[data-role="wire-type"]').value;
+        result.push({
+          metric_name: key,
+          chirpstack_metric_name: key,
+          metric_type: chosen,
+          picker_metadata: {
+            inferred_type: inferred,
+            operator_chosen_type: chosen,
+            sample_values_count: 1,
+          },
+        });
+      }
+      return result;
+    }
+
+    // -------- Wire up handlers --------
+    devPickerSelect.addEventListener('change', function () {
+      const opt = devPickerSelect.options[devPickerSelect.selectedIndex];
+      const devName = opt ? (opt.dataset.devName || opt.textContent || '') : '';
+      const devEui = opt ? (opt.dataset.devEui || opt.value) : '';
+      if (!picker.editedFlag.has(devNameInput) && devName) {
+        devNameInput.value = devName;
+      }
+      devEuiFootnote.textContent = devEui ? 'DevEUI: ' + devEui : '';
+      // Trigger metric-picker fetch when the device changes.
+      if (devEui && pickerState.metricsMode === 'picker') {
+        loadMetricPicker(devEui, {});
+      }
+    });
+    devPickerRefresh.addEventListener('click', function () {
+      picker.auditEvent('picker_opened', {
+        picker_resource: 'device',
+        application_id: app.application_id,
+        cache_status: 'bypassed',
+      });
+      loadDevicePicker({ refresh: true });
+    });
+    devPickerToManual.addEventListener('click', function () {
+      applyDeviceMode('manual');
+      picker.auditEvent('picker_manual_fallback', {
+        picker_resource: 'device',
+        reason: 'operator_choice',
+      });
+    });
+    devManualToPicker.addEventListener('click', function () {
+      applyDeviceMode('picker');
+      loadDevicePicker({});
+    });
+    metricPickerRefresh.addEventListener('click', function () {
+      if (!pickerState.currentDevEui) {
+        // Try to read from the picker selection (if any).
+        const opt = devPickerSelect.options[devPickerSelect.selectedIndex];
+        const eui = opt && opt.dataset ? opt.dataset.devEui : '';
+        if (eui) loadMetricPicker(eui, {});
+        return;
+      }
+      loadMetricPicker(pickerState.currentDevEui, {});
+    });
+    metricPickerToManual.addEventListener('click', function () {
+      applyMetricsMode('manual');
+      picker.auditEvent('picker_manual_fallback', {
+        picker_resource: 'uplink',
+        reason: 'operator_choice',
+      });
+    });
+    metricManualToPicker.addEventListener('click', function () {
+      applyMetricsMode('picker');
+      if (pickerState.currentDevEui) {
+        loadMetricPicker(pickerState.currentDevEui, {});
+      }
+    });
+
     form.appendChild(el('button', { type: 'submit', text: 'Create device' }));
     form.appendChild(createErr);
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();
       clearError(createErr);
-      const fd = new FormData(form);
+      // Read device id from active mode.
+      let deviceId = '';
+      let deviceName = String(devNameInput.value || '').trim();
+      if (pickerState.mode === 'manual') {
+        deviceId = String(devIdInput.value || '').trim();
+      } else {
+        const opt = devPickerSelect.options[devPickerSelect.selectedIndex];
+        deviceId = opt ? (opt.dataset.devEui || opt.value || '') : '';
+      }
+      if (!deviceId) {
+        showError(createErr, 'Choose a device from the picker, or switch to manual entry and type a DevEUI.');
+        return;
+      }
+      if (!deviceName) {
+        showError(createErr, 'Device name is required.');
+        return;
+      }
+      let metrics;
+      if (pickerState.metricsMode === 'picker') {
+        metrics = readPickerMetrics();
+      } else {
+        metrics = readMetricsFromContainer(metricContainer);
+      }
       const payload = {
-        device_id: String(fd.get('device_id') || '').trim(),
-        device_name: String(fd.get('device_name') || '').trim(),
-        read_metric_list: readMetricsFromContainer(metricContainer),
+        device_id: deviceId,
+        device_name: deviceName,
+        read_metric_list: metrics,
       };
       const url = form.getAttribute('action');
       fetch(url, {
@@ -290,12 +660,21 @@
         }
         form.reset();
         metricContainer.replaceChildren();
+        metricPickerRows.replaceChildren();
+        picker.editedFlag.reset(devNameInput);
+        pickerState.currentDevEui = '';
         await render();
       }).catch(function (err) {
         showError(createErr, 'Network error: ' + err.message);
       });
     });
+
     section.appendChild(form);
+
+    // Boot the picker modes after the form is in the DOM.
+    applyDeviceMode(pickerState.mode);
+    applyMetricsMode(pickerState.metricsMode);
+    if (pickerState.mode === 'picker') loadDevicePicker({});
     return section;
   }
 

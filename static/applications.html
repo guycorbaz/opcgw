@@ -9,7 +9,7 @@
   /* Story 9-4 minimal-footprint overrides on top of dashboard.css. */
   .crud-form { display: grid; gap: 0.5rem; max-width: 400px; margin: 1rem 0; }
   .crud-form label { font-weight: bold; }
-  .crud-form input { padding: 0.4rem; font-size: 1rem; }
+  .crud-form input, .crud-form select { padding: 0.4rem; font-size: 1rem; }
   .crud-form button { padding: 0.5rem; cursor: pointer; }
   table.applications { width: 100%; border-collapse: collapse; }
   table.applications th, table.applications td {
@@ -20,6 +20,11 @@
   .btn-delete { color: #fff; background: #c0392b; border: none; }
   .btn-edit { background: #2980b9; color: #fff; border: none; }
   .error-banner { color: #c0392b; padding: 0.5rem; }
+  /* Story C-2 picker UI. */
+  .picker-toolbar { display: flex; gap: 0.6rem; align-items: center; font-size: 0.85rem; }
+  .picker-toolbar a { cursor: pointer; color: #2980b9; text-decoration: underline; }
+  .picker-toolbar button { padding: 0.2rem 0.4rem; cursor: pointer; font-size: 0.85rem; }
+  .picker-fallback-banner { background: #fcf3cf; color: #7d6608; padding: 0.5rem; margin: 0.4rem 0; border-left: 4px solid #f1c40f; }
   @media (max-width: 600px) {
     table.applications, table.applications thead, table.applications tbody,
     table.applications tr, table.applications th, table.applications td {
@@ -39,20 +44,37 @@
 <main>
   <section>
     <h2>Create application</h2>
-    <!-- Iter-2 P24 / AA-M1 (AC#14): explicit "Add application" CTA
-         button per AC#14. C-2 will replace this with the inventory
-         picker (cascading application→device dropdown sourced from
-         ChirpStack via /api/inventory). Until then, the button
-         scroll-focuses the existing free-form Create form. -->
+    <!-- Story C-2: inventory-picker CTA scroll-focuses the create form.
+         The form below now offers either a name-driven picker fed by
+         /api/inventory/applications (the default) or the legacy
+         free-form manual-entry input as a fallback (per AC#1 / #2). -->
     <button type="button" id="add-application-cta"
-            onclick="document.getElementById('new-application-id').focus();
-                     document.getElementById('new-application-id')
-                       .scrollIntoView({ behavior: 'smooth', block: 'center' });">
+            onclick="document.getElementById('create-form').scrollIntoView({ behavior: 'smooth', block: 'center' });">
       + Add application
     </button>
     <form id="create-form" class="crud-form" action="/api/applications" method="POST">
-      <label for="new-application-id">Application ID</label>
-      <input id="new-application-id" name="application_id" type="text" required>
+      <label for="new-application-id">Application</label>
+      <!-- Story C-2 AC#1 / #2: picker + manual fallback. Exactly ONE
+           of `application-picker-wrap` and `application-manual-wrap`
+           is visible at a time; the toggle link below switches between
+           them and persists the choice via localStorage. -->
+      <div id="application-picker-wrap">
+        <div class="picker-toolbar">
+          <label class="sr-only" for="application-picker">Application from ChirpStack</label>
+          <select id="application-picker" disabled aria-label="Application from ChirpStack">
+            <option>Loading…</option>
+          </select>
+          <button type="button" id="application-picker-refresh" title="Refresh from ChirpStack (cache bypass)">↻</button>
+          <a id="application-mode-to-manual" role="button" tabindex="0">Switch to manual entry</a>
+        </div>
+        <div id="application-picker-banner" class="picker-fallback-banner" hidden></div>
+      </div>
+      <div id="application-manual-wrap" hidden>
+        <div class="picker-toolbar">
+          <a id="application-mode-to-picker" role="button" tabindex="0">Switch to picker</a>
+        </div>
+        <input id="new-application-id" name="application_id" type="text" placeholder="Application ID (UUID)" autocomplete="off">
+      </div>
       <label for="new-application-name">Application Name</label>
       <input id="new-application-name" name="application_name" type="text" required>
       <button type="submit">Create</button>
@@ -78,6 +100,7 @@
   </section>
 </main>
 
+<script src="/inventory-picker.js"></script>
 <script src="/applications.js"></script>
 </body>
 </html>

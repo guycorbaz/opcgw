@@ -183,6 +183,7 @@ fn is_state_changing(method: &Method) -> bool {
 /// Story 9-5 AC#5/AC#8: dispatch the CSRF rejection audit-event
 /// name by URL path so each resource gets its own grep contract.
 ///
+/// - `/api/audit/picker-event`                                 → `"picker_audit"` (Story C-2)
 /// - `/api/applications/:application_id/devices/.../commands*` → `"command"` (Story 9-6 future)
 /// - `/api/applications/:application_id/devices*`              → `"device"`
 /// - `/api/applications/...`                                   → `"application"` (Story 9-4)
@@ -192,6 +193,13 @@ fn is_state_changing(method: &Method) -> bool {
 /// The longer-prefix branches are matched first so a future Story 9-6
 /// commands surface lifts cleanly into the dispatch.
 pub(crate) fn csrf_event_resource_for_path(path: &str) -> &'static str {
+    // Story C-2: picker-audit endpoint maps to its own resource bucket
+    // so a CSRF rejection on this surface emits a literal
+    // `event="picker_audit_rejected"` and never collides with the
+    // application_crud_rejected grep contract.
+    if path == "/api/audit/picker-event" || path == "/api/audit/picker-event/" {
+        return "picker_audit";
+    }
     // Match the bare LIST/CREATE surface FIRST so POST /api/applications
     // (no application_id) emits `event="application_crud_rejected"` on
     // CSRF rejection — preserving Story 9-4's grep contract at the
@@ -346,6 +354,18 @@ pub async fn csrf_middleware(
                 origin = origin_str,
                 "CSRF rejected: missing or cross-origin Origin"
             ),
+            // Story C-2 AC#11: literal match arm so the picker-audit
+            // surface gets its own grep contract
+            // (`git grep -hoE 'event = "picker_[a-z_]+"' src/`).
+            "picker_audit" => warn!(
+                event = "picker_audit_rejected",
+                reason = "csrf",
+                path = %path,
+                method = %method,
+                source_ip = %addr.ip(),
+                origin = origin_str,
+                "CSRF rejected: missing or cross-origin Origin"
+            ),
             _ => warn!(
                 event = "crud_rejected",
                 reason = "csrf",
@@ -389,6 +409,16 @@ pub async fn csrf_middleware(
             ),
             "command" => warn!(
                 event = "command_crud_rejected",
+                reason = "csrf",
+                path = %path,
+                method = %method,
+                source_ip = %addr.ip(),
+                "CSRF rejected: Content-Type is not application/json"
+            ),
+            // Story C-2 AC#11: literal match arm for picker-audit
+            // Content-Type rejection.
+            "picker_audit" => warn!(
+                event = "picker_audit_rejected",
                 reason = "csrf",
                 path = %path,
                 method = %method,
@@ -793,6 +823,19 @@ mod tests {
         assert_eq!(
             csrf_event_resource_for_path("/api/applications/foo/devices/bar/commands/"),
             "command"
+        );
+
+        // Story C-2: picker-audit surface gets its own dispatch arm
+        // so CSRF rejection on the new POST endpoint emits the
+        // literal `event="picker_audit_rejected"` rather than the
+        // fall-through `crud_rejected` catch-all.
+        assert_eq!(
+            csrf_event_resource_for_path("/api/audit/picker-event"),
+            "picker_audit"
+        );
+        assert_eq!(
+            csrf_event_resource_for_path("/api/audit/picker-event/"),
+            "picker_audit"
         );
     }
 }

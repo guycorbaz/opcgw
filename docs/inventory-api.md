@@ -209,3 +209,89 @@ inventory_uplink_max_wait_seconds = 5
 Both fields can be overridden via environment variables:
 - `OPCGW_CHIRPSTACK__INVENTORY_CACHE_TTL_SECONDS`
 - `OPCGW_CHIRPSTACK__INVENTORY_UPLINK_MAX_WAIT_SECONDS`
+
+## Picker-event audit endpoint (Story C-2)
+
+`POST /api/audit/picker-event`
+
+Thin endpoint accepting client-attributable picker audit events. No
+state mutation; the handler validates the `event` name against an
+allowlist, sanitises the per-event `fields` map, and emits a single
+`tracing::info!(event=…, source="web_picker", …)` line into the
+canonical audit stream. Basic-auth gated and CSRF-protected (Origin +
+JSON-only Content-Type, same as the CRUD surface).
+
+Request body:
+
+```json
+{
+  "event": "picker_opened",
+  "fields": {
+    "picker_resource": "application",
+    "cache_status": "miss"
+  }
+}
+```
+
+Responses:
+- `204 No Content` — accepted, audit emitted.
+- `400 Bad Request` — unknown `event` name; emits
+  `event="picker_audit_rejected" reason="unknown_event"`.
+- `401 Unauthorized` — missing basic auth.
+- `403 Forbidden` — CSRF reject (missing/cross-origin Origin); emits
+  `event="picker_audit_rejected" reason="csrf"`.
+- `415 Unsupported Media Type` — Content-Type is not
+  `application/json`.
+
+### Accepted events
+
+| `event`                    | Required scope fields                                | Optional fields |
+| -------------------------- | ---------------------------------------------------- | --------------- |
+| `picker_opened`            | `picker_resource`                                    | `application_id`, `dev_eui`, `cache_status` |
+| `picker_manual_fallback`   | `picker_resource`, `reason`                          | `error_detail` |
+
+`picker_resource` is one of `application`, `device`, `uplink`.
+
+`reason` (manual_fallback) is one of:
+- `operator_choice` — operator clicked the "Switch to manual entry"
+  toggle.
+- `chirpstack_unreachable` — inventory endpoint returned 502; the
+  client auto-flipped to manual.
+- `chirpstack_error` — inventory endpoint failed for a non-502 reason.
+- `chirpstack_empty` — inventory returned zero items.
+- `no_recent_uplinks` — `/api/inventory/uplinks` returned an empty
+  `observed_keys` aggregate within the wait window.
+
+Unknown fields are silently dropped; string values are length-capped
+at 256 bytes; nested objects/arrays are stripped.
+
+### `picker_metadata` field on the metric-create path
+
+When a metric is added via the inventory picker UI, the client attaches
+a `picker_metadata` envelope to each metric inside the
+`POST|PUT /api/applications/<app>/devices[/<dev>]` request body:
+
+```json
+{
+  "device_id": "a84041b8a1867e21",
+  "device_name": "WaterFlowSensor",
+  "read_metric_list": [
+    {
+      "metric_name": "water_flow",
+      "chirpstack_metric_name": "water_flow",
+      "metric_type": "Float",
+      "picker_metadata": {
+        "inferred_type": "Float",
+        "operator_chosen_type": "Float",
+        "sample_values_count": 8
+      }
+    }
+  ]
+}
+```
+
+The handler emits one `event="metric_wire_type_inferred"` info-level
+audit per metric carrying a `picker_metadata` envelope, then drops the
+envelope before persisting to TOML. Manual-entry metrics (no envelope)
+stay silent — they remain covered by the existing
+`event="device_created"` / `device_updated` audits.

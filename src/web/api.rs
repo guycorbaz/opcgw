@@ -2069,6 +2069,16 @@ pub struct UpdateDeviceRequest {
 /// `metric_type` is a string at the wire level; the handler validates
 /// against the `OpcMetricTypeConfig` enum vocabulary (`Float | Int |
 /// Bool | String`). `metric_unit` is optional free-text.
+///
+/// **Story C-2 picker_metadata field (AC#10):** when a metric was added
+/// via the inventory picker, the client attaches a `picker_metadata`
+/// envelope carrying the inferred wire-type, the operator's final
+/// choice, and the sample-values-count from `/api/inventory/uplinks`.
+/// The handler emits one `event="metric_wire_type_inferred"` info-level
+/// audit per metric whose `picker_metadata` is set, then drops the
+/// envelope before persisting to TOML (it's an audit-only signal —
+/// not a configured field). Manual-entry metrics (no envelope) are
+/// silent; they remain covered by the existing `device_crud` events.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetricMappingRequest {
@@ -2077,6 +2087,52 @@ pub struct MetricMappingRequest {
     pub metric_type: String,
     #[serde(default)]
     pub metric_unit: Option<String>,
+    /// Story C-2 AC#10: picker-attributed wire-type inference envelope.
+    /// Absent for manual-entry metrics.
+    #[serde(default)]
+    pub picker_metadata: Option<PickerMetadata>,
+}
+
+/// Story C-2 AC#10 — picker-attributed wire-type inference envelope.
+///
+/// Carried on a per-metric basis inside [`MetricMappingRequest`]. The
+/// fields are all `Option<...>` so the client can attach a partial
+/// envelope (e.g. metric was picker-selected but the sample count was
+/// zero so the wire-type fell back to the operator's choice). The
+/// handler does not validate field combinations — it emits whatever
+/// the client attaches, sanitised to the audit-event wire shape.
+///
+/// **Sanitisation:** `inferred_type` / `operator_chosen_type` are
+/// constrained to the `OpcMetricTypeConfig` vocabulary (`Float | Int |
+/// Bool | String`). Unknown values are silently coerced to the literal
+/// string `"unknown"` in the audit event — the field is informational,
+/// not load-bearing, and rejecting the whole metric on a typo in this
+/// optional audit envelope would be operator-hostile.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PickerMetadata {
+    #[serde(default)]
+    pub inferred_type: Option<String>,
+    #[serde(default)]
+    pub operator_chosen_type: Option<String>,
+    #[serde(default)]
+    pub sample_values_count: Option<u32>,
+}
+
+impl PickerMetadata {
+    /// Coerce an optional wire-type string into the allowlist for audit
+    /// emission. Unknown values become `"unknown"` so a typo in a
+    /// client field never leaks raw operator input into the log line.
+    fn sanitise_wire_type(value: Option<&str>) -> &'static str {
+        match value.map(str::trim) {
+            Some("Float") => "Float",
+            Some("Int") => "Int",
+            Some("Bool") => "Bool",
+            Some("String") => "String",
+            Some(_) => "unknown",
+            None => "unset",
+        }
+    }
 }
 
 /// `GET /api/applications/:application_id/devices` response body —
@@ -2392,6 +2448,16 @@ pub async fn create_device(
                 metric_count = body.read_metric_list.len(),
                 source_ip = %addr.ip(),
                 "Device created via web UI"
+            );
+            // Story C-2 AC#10 — emit per-metric picker audit BEFORE
+            // we consume `body.read_metric_list`. Fires only for
+            // picker-attributed metrics (manual entry stays silent).
+            emit_metric_wire_type_inferred_events(
+                &application_id,
+                &body.device_id,
+                &body.read_metric_list,
+                &addr,
+                "create_device",
             );
             let location = format!(
                 "/api/applications/{}/devices/{}",
@@ -2834,6 +2900,16 @@ pub async fn update_device(
                 metric_count = read_metric_list.len(),
                 source_ip = %addr.ip(),
                 "Device updated via web UI"
+            );
+            // Story C-2 AC#10 — emit per-metric picker audit BEFORE
+            // we consume `read_metric_list`. Fires only for
+            // picker-attributed metrics; manual-entry stays silent.
+            emit_metric_wire_type_inferred_events(
+                &application_id,
+                &device_id,
+                &read_metric_list,
+                &addr,
+                "update_device",
             );
             let read_metric_list_resp = read_metric_list
                 .into_iter()
@@ -5189,6 +5265,227 @@ fn handle_restart_required(
             )
         }
     }
+}
+
+// =====================================================================
+// Story C-2 — Inventory picker audit endpoint and per-metric audit emit
+// =====================================================================
+
+/// Story C-2 AC#10 — emit one `event="metric_wire_type_inferred"`
+/// info-level audit per metric in `metric_list` that carries a
+/// `picker_metadata` envelope. Manual-entry metrics (envelope absent)
+/// are skipped silently.
+///
+/// Called from the success branches of `create_device` and
+/// `update_device` AFTER the reload commit and BEFORE the
+/// `read_metric_list` is consumed into the response body.
+///
+/// The audit log line is structured so a downstream
+/// `git grep -hoE 'event = "metric_wire_type_inferred"' src/`
+/// returns exactly one line — keeping the audit-event grep contract
+/// consistent with the Story 9-4 / 9-5 conventions.
+fn emit_metric_wire_type_inferred_events(
+    application_id: &str,
+    device_id: &str,
+    metric_list: &[MetricMappingRequest],
+    addr: &SocketAddr,
+    site: &'static str,
+) {
+    for m in metric_list {
+        let Some(meta) = m.picker_metadata.as_ref() else {
+            continue;
+        };
+        let inferred = PickerMetadata::sanitise_wire_type(meta.inferred_type.as_deref());
+        let operator_chosen =
+            PickerMetadata::sanitise_wire_type(meta.operator_chosen_type.as_deref());
+        let sample_count = meta.sample_values_count.unwrap_or(0);
+        // Iter-N+1 hardening: untrusted upstream strings (chirpstack_
+        // metric_name comes via JSON body from the operator's browser)
+        // use ?-Debug formatting so a newline / ANSI escape in the
+        // value cannot inject a fake log line (C-1 iter-3 P2 pattern).
+        info!(
+            event = "metric_wire_type_inferred",
+            source = "web_picker",
+            site = %site,
+            application_id = %application_id,
+            device_id = %device_id,
+            chirpstack_metric_name = ?m.chirpstack_metric_name,
+            metric_name = ?m.metric_name,
+            inferred_type = inferred,
+            operator_chosen_type = operator_chosen,
+            sample_values_count = sample_count,
+            source_ip = %addr.ip(),
+            "Picker-attributed metric wire-type recorded"
+        );
+    }
+}
+
+/// `POST /api/audit/picker-event` request body — Story C-2 AC#11.
+///
+/// The client picker JS calls this endpoint to push operator-attributable
+/// audit events into the canonical server-side `tracing` stream. The
+/// endpoint is logging-only: no state mutation.
+///
+/// `event` is constrained server-side to the allowlist
+/// [`PICKER_EVENT_ALLOWED`]; unknown event names are rejected with 400
+/// before any field is read. `fields` is a free-form JSON object whose
+/// keys are filtered per-event against [`picker_event_field_allowlist`]
+/// — any field NOT in the allowlist is silently dropped (a typo in a
+/// field name should never reject the whole event; the operator's UX
+/// would degrade with no visibility, and the audit signal is best-effort).
+///
+/// **Sanitisation invariants:**
+///   - String values are length-capped at 256 bytes; longer values
+///     are truncated. Prevents log-flooding via a malicious
+///     `error_detail` payload.
+///   - Values that are not strings, numbers, or booleans are converted
+///     to their JSON string representation then capped.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PickerEventRequest {
+    pub event: String,
+    #[serde(default)]
+    pub fields: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Allowlist of `event` names accepted by `POST /api/audit/picker-event`
+/// (AC#11). Adding a new event name requires:
+///   1. Updating this list,
+///   2. Updating [`picker_event_field_allowlist`] for the field shape,
+///   3. Adding the new event to `docs/logging.md`.
+const PICKER_EVENT_ALLOWED: &[&str] = &["picker_opened", "picker_manual_fallback"];
+
+/// Maximum byte length retained from any sanitised audit-event field
+/// value. Longer values are truncated. 256 is comfortably larger than
+/// the documented values (`picker_resource`, `cache_status`, `reason`)
+/// and an `error_detail` short-string while still bounding log-flood
+/// blast radius.
+const PICKER_EVENT_FIELD_VALUE_CAP: usize = 256;
+
+/// Per-event whitelist of accepted client-supplied field names.
+/// Unknown fields are dropped before the audit line is emitted.
+fn picker_event_field_allowlist(event: &str) -> &'static [&'static str] {
+    match event {
+        // AC#12 — `picker_opened` carries scoping context.
+        "picker_opened" => &[
+            "picker_resource",
+            "application_id",
+            "dev_eui",
+            "cache_status",
+        ],
+        // AC#13 — `picker_manual_fallback` carries the trigger reason.
+        "picker_manual_fallback" => &[
+            "picker_resource",
+            "reason",
+            "error_detail",
+        ],
+        _ => &[],
+    }
+}
+
+/// Truncate `value` to [`PICKER_EVENT_FIELD_VALUE_CAP`] bytes on a UTF-8
+/// boundary. Caller passes the raw string; the helper guarantees the
+/// returned string is valid UTF-8 and at most the cap.
+fn truncate_audit_value(value: &str) -> String {
+    if value.len() <= PICKER_EVENT_FIELD_VALUE_CAP {
+        return value.to_string();
+    }
+    let mut end = PICKER_EVENT_FIELD_VALUE_CAP;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
+}
+
+/// Convert a `serde_json::Value` into the audit-line string form (with
+/// length cap applied). Strings stay as-is; numbers / booleans get
+/// `to_string()`d; objects and arrays are dropped (audit lines stay
+/// flat key=value — nested structure belongs at the audit-name level,
+/// not inside fields).
+fn json_value_to_audit_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(truncate_audit_value(s)),
+        serde_json::Value::Number(n) => Some(truncate_audit_value(&n.to_string())),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Null => None,
+        // Refuse nested structure — keeps the audit-line shape flat.
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
+    }
+}
+
+/// `POST /api/audit/picker-event` — Story C-2 AC#11.
+///
+/// Validates the event name against [`PICKER_EVENT_ALLOWED`], filters
+/// fields per [`picker_event_field_allowlist`], and emits a single
+/// `tracing::info!(event=…, source="web_picker", …)` line. No-op
+/// otherwise. Returns 204 No Content on success and 400 with a JSON
+/// error body on validation failure.
+pub async fn audit_picker_event(
+    State(_state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<PickerEventRequest>,
+) -> Response {
+    // Reject unknown event names (AC#11).
+    if !PICKER_EVENT_ALLOWED.contains(&body.event.as_str()) {
+        warn!(
+            event = "picker_audit_rejected",
+            reason = "unknown_event",
+            source_ip = %addr.ip(),
+            received_event = ?body.event,
+            "POST /api/audit/picker-event: unknown event name rejected"
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                format!("unknown picker event name '{}'", body.event),
+                "expected one of: picker_opened, picker_manual_fallback",
+            )),
+        )
+            .into_response();
+    }
+
+    let allowlist = picker_event_field_allowlist(&body.event);
+
+    // Sanitise & filter fields. Each value is rendered as a String for
+    // the audit line; unknown / nested / null values are dropped.
+    let mut sanitised: HashMap<&'static str, String> = HashMap::new();
+    for (key, value) in body.fields.iter() {
+        let Some(allowed_key) = allowlist.iter().find(|k| **k == key.as_str()) else {
+            continue;
+        };
+        if let Some(rendered) = json_value_to_audit_string(value) {
+            sanitised.insert(allowed_key, rendered);
+        }
+    }
+
+    // Emit a single tracing event per dispatch. Literal match arms
+    // preserve the source-grep contract `git grep -hoE 'event =
+    // "picker_[a-z_]+"' src/`.
+    let pick = |k: &str| sanitised.get(k).map(String::as_str).unwrap_or("");
+    match body.event.as_str() {
+        "picker_opened" => info!(
+            event = "picker_opened",
+            source = "web_picker",
+            picker_resource = pick("picker_resource"),
+            application_id = pick("application_id"),
+            dev_eui = pick("dev_eui"),
+            cache_status = pick("cache_status"),
+            source_ip = %addr.ip(),
+            "Picker opened by operator"
+        ),
+        "picker_manual_fallback" => info!(
+            event = "picker_manual_fallback",
+            source = "web_picker",
+            picker_resource = pick("picker_resource"),
+            reason = pick("reason"),
+            error_detail = pick("error_detail"),
+            source_ip = %addr.ip(),
+            "Picker switched to manual entry"
+        ),
+        _ => unreachable!("event name was validated against PICKER_EVENT_ALLOWED above"),
+    }
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[cfg(test)]

@@ -212,6 +212,14 @@ index of the event names introduced so far.
 | `topology_change_detected` | `info` (diag) | 9-7 (+9-8 fields) | `security.md` § Dynamic OPC UA address-space mutation |
 | `opcgw_stale_read_callback_leak_observed` | `info` (diag, one-shot) | 9-8 | `security.md` § Dynamic OPC UA address-space mutation (Task 6 option-b limitation) |
 | `opcgw_stale_write_callback_leak_observed` | `info` (diag, one-shot) | 9-8 | `security.md` § Dynamic OPC UA address-space mutation (Task 6 option-b limitation) |
+| `inventory_query` | `info` (audit) | C-1 | `inventory-api.md` § Audit events — cache miss / refresh / bypassed inventory read |
+| `inventory_query_failed` | `warn` (audit) | C-1 | `inventory-api.md` § Audit events — ChirpStack call failed |
+| `inventory_cache_invalidated` | `info` (audit) | C-1 | `inventory-api.md` § Caching contract — CRUD write invalidated the cache |
+| `inventory_observed_key_heterogeneous` | `warn` (audit) | C-1 | `inventory-api.md` § Audit events — wire-type fell back to String |
+| `picker_opened` | `info` (audit) | C-2 | `inventory-api.md` § Picker-event audit endpoint — operator opened a picker (carries `picker_resource` + `cache_status`) |
+| `picker_manual_fallback` | `info` (audit) | C-2 | `inventory-api.md` § Picker-event audit endpoint — picker flipped to manual entry (carries `picker_resource` + `reason`) |
+| `picker_audit_rejected` | `warn` (audit) | C-2 | `inventory-api.md` § Picker-event audit endpoint — unknown-event or CSRF rejection |
+| `metric_wire_type_inferred` | `info` (audit) | C-2 | `inventory-api.md` § `picker_metadata` field — per-metric inference recorded at create/update time (carries `inferred_type` + `operator_chosen_type` + `sample_values_count`) |
 
 The CSRF middleware dispatches between `application_crud_rejected`,
 `device_crud_rejected`, and `command_crud_rejected` by URL path
