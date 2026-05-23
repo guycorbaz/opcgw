@@ -587,14 +587,14 @@ async fn post_application_with_duplicate_id_returns_409() {
     .expect("send");
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let body: Value = resp.json().await.expect("json");
-    assert!(
-        body["error"]
-            .as_str()
-            .unwrap()
-            .to_lowercase()
-            .contains("already exists"),
-        "expected duplicate-mention; got: {body}"
-    );
+    // Story C-3 AC#1: structured duplicate body shape — `error` is the
+    // literal "duplicate"; `field` / `value` / `scope` echo the
+    // conflicting input. Updated from the pre-C-3 string-matching
+    // assertion that grepped for "already exists" in the message.
+    assert_eq!(body["error"].as_str().unwrap(), "duplicate");
+    assert_eq!(body["field"].as_str().unwrap(), "application_id");
+    assert_eq!(body["value"].as_str().unwrap(), "app-1");
+    assert_eq!(body["scope"].as_str().unwrap(), "application_list");
     // No write happened (pre-write check rejects); TOML byte-equal.
     let post_bytes = std::fs::read(&fix.config_path).expect("read");
     assert_eq!(pre_bytes, post_bytes, "TOML file unexpectedly modified");

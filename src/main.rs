@@ -1251,6 +1251,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     error = %e,
                                     "Configuration reload failed"
                                 );
+                                // Story C-3 AC#9: if the validation
+                                // failure is duplicate-class, emit the
+                                // disambiguating `config_reload_rejected`
+                                // event so audit consumers grepping
+                                // `reason="conflict" conflict_kind=
+                                // "duplicate"` see the hot-reload
+                                // rejection alongside the web-CRUD
+                                // rejections. The general
+                                // `config_reload_failed` line above is
+                                // preserved (AC#11 reason-taxonomy).
+                                if e.is_duplicate() {
+                                    warn!(
+                                        event = "config_reload_rejected",
+                                        trigger = "sighup",
+                                        reason = "conflict",
+                                        conflict_kind = "duplicate",
+                                        error = %e,
+                                        "Configuration reload rejected: duplicate at same scope-level"
+                                    );
+                                }
                             }
                         }
                     }

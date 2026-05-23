@@ -779,31 +779,35 @@ async fn post_device_with_duplicate_id_within_application_returns_409() {
     .expect("send");
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let body: Value = resp.json().await.expect("json");
+    // Story C-3 AC#3: structured duplicate body shape.
+    assert_eq!(body["error"].as_str().unwrap(), "duplicate");
+    assert_eq!(body["field"].as_str().unwrap(), "device_id");
+    assert_eq!(body["value"].as_str().unwrap(), "dev-1");
+    assert_eq!(body["scope"].as_str().unwrap(), "application:app-1");
     assert!(
-        body["error"]
-            .as_str()
-            .unwrap()
-            .to_lowercase()
-            .contains("already exists"),
-        "expected duplicate-mention; got: {body}"
+        body["hint"].as_str().is_some(),
+        "expected actionable hint; got: {body}"
     );
     let post_bytes = std::fs::read(&fix.config_path).expect("read");
     assert_eq!(pre_bytes, post_bytes, "TOML modified on conflict");
     fix.shutdown().await;
 }
 
-// Iter-1 review M3 (Auditor A5): cross-application duplicate
-// device_id is caught by `AppConfig::validate`'s `seen_device_ids`
-// HashSet AT RELOAD TIME (not pre-flight), so it surfaces as 422
-// from `reload_error_response`. Distinct from the within-app 409
-// path (pre-flight conflict) above. Spec test name per AC#3:
-// `post_device_with_duplicate_id_returns_422`. Template seeds two
-// applications (app-1 with dev-1 + dev-2; app-2 with probe-1) — POST
-// `dev-1` into app-2 to trigger the cross-app validate rejection.
+// Story C-3 AC#5 reversal: cross-application duplicate device_id is
+// now EXPLICITLY ALLOWED (operator-supported pattern for exposing one
+// physical sensor under multiple OPC UA namespaces). This test was
+// previously `post_device_with_duplicate_id_returns_422` asserting
+// 422 rejection from the validator's old global-scope HashSet; C-3
+// fixes the validator to scope per-application (src/config.rs) and
+// flips the assertion to expect 201 Created. The within-application
+// duplicate test at `post_device_with_duplicate_id_within_application_returns_409`
+// above is unchanged — that's the still-valid negative case.
+//
+// Template seeds two applications (app-1 with dev-1 + dev-2; app-2
+// with probe-1) — POST `dev-1` into app-2 succeeds post-C-3.
 #[tokio::test]
-async fn post_device_with_duplicate_id_returns_422() {
+async fn post_same_device_id_under_different_application_returns_201() {
     let fix = spawn_fixture(APP_TOML_TEMPLATE).await;
-    let pre_bytes = std::fs::read(&fix.config_path).expect("read");
     let client = reqwest::Client::new();
     let origin = fix.base_url.clone();
     let resp = json_request(
@@ -811,32 +815,40 @@ async fn post_device_with_duplicate_id_returns_422() {
         reqwest::Method::POST,
         &fix.url("/api/applications/app-2/devices"),
         Some(&origin),
-        Some(r#"{"device_id":"dev-1","device_name":"DupAcrossApps","read_metric_list":[]}"#),
+        Some(r#"{"device_id":"dev-1","device_name":"SameDevEUIAcrossApps","read_metric_list":[]}"#),
     )
     .send()
     .await
     .expect("send-dev");
     assert_eq!(
         resp.status(),
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "cross-app duplicate device_id must be 422 (validate-time rejection); got {}",
+        StatusCode::CREATED,
+        "Story C-3 AC#5: same DevEUI under different applications must be ALLOWED (201); got {}",
         resp.status()
     );
-    let final_bytes = std::fs::read(&fix.config_path).expect("read");
-    assert_eq!(
-        pre_bytes, final_bytes,
-        "TOML must be byte-identical after rollback (cross-app dup-id rollback)"
-    );
+    // Verify the device IS now under app-2 by reading it back.
+    let read = client
+        .get(fix.url("/api/applications/app-2/devices/dev-1"))
+        .header(reqwest::header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .send()
+        .await
+        .expect("read-back");
+    assert_eq!(read.status(), StatusCode::OK);
+    let body: Value = read.json().await.expect("json");
+    assert_eq!(body["device_id"].as_str().unwrap(), "dev-1");
+    assert_eq!(body["device_name"].as_str().unwrap(), "SameDevEUIAcrossApps");
     fix.shutdown().await;
 }
 
+// Story C-3 AC#6: per-device duplicate metric_name now caught at the
+// CRUD-handler pre-flight layer (409 with structured ErrorResponse::
+// duplicate body), not at AppConfig::validate reload-time (the pre-C-3
+// 422 path). The pre-flight fires BEFORE config_writer.lock(), so the
+// P42 pre/post-bytes regression-guard from iter-1 review M5 (Blind B12
+// + Edge E9) remains load-bearing: no TOML write attempt at all.
 #[tokio::test]
-async fn post_device_with_duplicate_metric_name_within_device_returns_422() {
+async fn post_device_with_duplicate_metric_name_within_device_returns_409() {
     let fix = spawn_fixture(APP_TOML_TEMPLATE).await;
-    // Iter-1 review M5 (Blind B12 + Edge E9): pin pre/post-bytes
-    // equality so a silent rollback failure (Story 9-4 iter-3 P42
-    // disk-dirty-after-persist regression class) cannot pass this
-    // test on status code alone.
     let pre_bytes = std::fs::read(&fix.config_path).expect("read");
     let client = reqwest::Client::new();
     let origin = fix.base_url.clone();
@@ -854,28 +866,28 @@ async fn post_device_with_duplicate_metric_name_within_device_returns_422() {
     .send()
     .await
     .expect("send");
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
     let body: Value = resp.json().await.expect("json");
+    assert_eq!(body["error"].as_str().unwrap(), "duplicate");
+    assert_eq!(body["field"].as_str().unwrap(), "metric_name");
+    assert_eq!(body["value"].as_str().unwrap(), "Moisture");
+    assert_eq!(body["scope"].as_str().unwrap(), "device:dev-dupm");
     assert!(
-        body["error"]
-            .as_str()
-            .unwrap()
-            .to_lowercase()
-            .contains("metric_name"),
-        "expected metric_name in error; got: {body}"
+        body["hint"].as_str().is_some(),
+        "expected actionable hint; got: {body}"
     );
     let post_bytes = std::fs::read(&fix.config_path).expect("read");
     assert_eq!(
         pre_bytes, post_bytes,
-        "TOML must be byte-identical after rollback (P42 regression class)"
+        "TOML must be byte-identical (pre-flight fires before config lock; P42 regression class)"
     );
     fix.shutdown().await;
 }
 
+// Story C-3 AC#6 (chirpstack_metric_name variant of above).
 #[tokio::test]
-async fn post_device_with_duplicate_chirpstack_metric_name_within_device_returns_422() {
+async fn post_device_with_duplicate_chirpstack_metric_name_within_device_returns_409() {
     let fix = spawn_fixture(APP_TOML_TEMPLATE).await;
-    // Iter-1 review M5 (Edge E10): pre/post-bytes equality.
     let pre_bytes = std::fs::read(&fix.config_path).expect("read");
     let client = reqwest::Client::new();
     let origin = fix.base_url.clone();
@@ -893,20 +905,20 @@ async fn post_device_with_duplicate_chirpstack_metric_name_within_device_returns
     .send()
     .await
     .expect("send");
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
     let body: Value = resp.json().await.expect("json");
+    assert_eq!(body["error"].as_str().unwrap(), "duplicate");
+    assert_eq!(body["field"].as_str().unwrap(), "chirpstack_metric_name");
+    assert_eq!(body["value"].as_str().unwrap(), "shared");
+    assert_eq!(body["scope"].as_str().unwrap(), "device:dev-dupc");
     assert!(
-        body["error"]
-            .as_str()
-            .unwrap()
-            .to_lowercase()
-            .contains("chirpstack_metric_name"),
-        "expected chirpstack_metric_name in error; got: {body}"
+        body["hint"].as_str().is_some(),
+        "expected actionable hint; got: {body}"
     );
     let post_bytes = std::fs::read(&fix.config_path).expect("read");
     assert_eq!(
         pre_bytes, post_bytes,
-        "TOML must be byte-identical after rollback (P42 regression class)"
+        "TOML must be byte-identical (pre-flight fires before config lock; P42 regression class)"
     );
     fix.shutdown().await;
 }

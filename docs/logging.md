@@ -194,6 +194,7 @@ index of the event names introduced so far.
 | `config_reload_attempted` | `info` (diag) | 9-7 | `security.md` § Configuration hot-reload |
 | `config_reload_succeeded` | `info` (diag) | 9-7 | `security.md` § Configuration hot-reload |
 | `config_reload_failed` | `warn` (audit) | 9-7 | `security.md` § Configuration hot-reload |
+| `config_reload_rejected` | `warn` (audit) | C-3 | `web-api.md` § Duplicate-rejection contract — duplicate-class hot-reload failure (carries `reason="conflict"` + `conflict_kind="duplicate"`) |
 | `application_created` | `info` (audit) | 9-4 | `security.md` § Configuration mutations |
 | `application_updated` | `info` (audit) | 9-4 | `security.md` § Configuration mutations |
 | `application_deleted` | `info` (audit) | 9-4 | `security.md` § Configuration mutations |
@@ -232,6 +233,20 @@ name; everything else under `/api/applications*` emits the
 `application_*` name. The catch-all `_ =>` arm remains as a
 defensive future-proofing guard for any un-routed resource
 (currently unreachable in normal operation).
+
+**Story C-3 — `conflict_kind` sub-field of `reason="conflict"`:**
+the `application_crud_rejected`, `device_crud_rejected`,
+`command_crud_rejected`, and `config_reload_rejected` events carry
+`reason="conflict"` for two semantically different conditions. C-3
+keeps the `reason` value stable (existing grep contract) and adds a
+`conflict_kind` sub-field to disambiguate:
+
+| `conflict_kind=` | Meaning | Operator action |
+|---|---|---|
+| `duplicate` | The CRUD request — or a hot-reloaded TOML — attempted to introduce a same-level duplicate that the C-3 validator rejects (e.g. duplicate `application_id`, duplicate `device_id` within an application, duplicate `metric_name` / `chirpstack_metric_name` within a device, duplicate `command_id` / `command_name` within a device). HTTP body shape: `{ "error": "duplicate", "field": "...", "value": "...", "scope": "...", "hint": "..." }`. | Pick a different identifier (or DELETE the existing entry first); fix the TOML hand-edit. |
+| `malformed_existing_block` | The on-disk TOML already contains a block whose shape doesn't match the schema (missing required field, wrong type, non-array-of-tables where one is expected). Pre-existing state corruption surfaced by a subsequent CRUD attempt. HTTP body keeps the pre-C-3 `ErrorResponse::with_hint` shape pointing at manual TOML cleanup. | Hand-edit `config/config.toml` to fix the malformed block, then retry. |
+
+Audit consumers grepping `reason="conflict"` continue to work; consumers wanting to distinguish add the `conflict_kind` filter. Other existing `reason=` values on these events (e.g. `cascade_blocked`, `empty_application_list`) carry their own `conflict_kind` value that mirrors the reason for grep-uniformity.
 
 **Note (iter-2 review M1):** the `_crud_rejected` event family
 fires on **any** path-shape rejection, regardless of HTTP method —

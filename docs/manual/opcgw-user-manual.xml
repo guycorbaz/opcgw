@@ -2928,6 +2928,61 @@ chirpstack:8080 list</command>.</para>
           </orderedlist>
         </section>
 
+        <section id="sec-issue-duplicate-rejected">
+          <title>Attempted to add a duplicate</title>
+          <para><emphasis>Log signature:</emphasis>
+          <literal>event="application_crud_rejected"</literal> or
+          <literal>event="device_crud_rejected"</literal> or
+          <literal>event="command_crud_rejected"</literal>, each carrying
+          <literal>reason="conflict" conflict_kind="duplicate"</literal>.
+          For a hot-reload (operator hand-edited
+          <filename>config/config.toml</filename> and saved):
+          <literal>event="config_reload_rejected" reason="conflict"
+          conflict_kind="duplicate"</literal>.</para>
+          <para>Story C-3 rejects same-level duplicates server-side: two
+          applications with the same <literal>application_id</literal>;
+          two devices with the same <literal>device_id</literal> under
+          one application; two metrics with the same
+          <literal>metric_name</literal> or
+          <literal>chirpstack_metric_name</literal> within one device;
+          two commands with the same <literal>command_id</literal> or
+          <literal>command_name</literal> within one device.</para>
+          <orderedlist>
+            <listitem>
+              <para>Find the rejection in the structured log:
+              <command>grep 'conflict_kind="duplicate"' opcgw.log</command>.
+              The <literal>field</literal> + <literal>value</literal> +
+              <literal>scope</literal> fields name exactly what was
+              rejected and at which level.</para>
+            </listitem>
+            <listitem>
+              <para>For an HTTP rejection (web UI / API), the 409
+              response body has the same shape:
+              <literal>{"error":"duplicate","field":"...","value":"...","scope":"...","hint":"..."}</literal>.
+              The UI surfaces the <literal>hint</literal> inline near
+              the offending input — pick a different identifier, or
+              DELETE the existing entry first.</para>
+            </listitem>
+            <listitem>
+              <para>For a <literal>config_reload_rejected</literal>
+              (TOML hand-edit), the in-memory configuration is
+              unchanged (no partial apply); the on-disk
+              <filename>config.toml</filename> is also untouched (the
+              gateway does not rewrite operator files). Hand-edit the
+              TOML to fix the duplicate, save the file, and re-trigger
+              the reload (SIGHUP).</para>
+            </listitem>
+            <listitem>
+              <para>Two patterns are explicitly NOT duplicates and
+              remain allowed: the same DevEUI under different
+              applications (one physical sensor exposed under multiple
+              OPC UA namespaces); the same
+              <literal>chirpstack_metric_name</literal> on different
+              devices (multiple sensors of the same kind).</para>
+            </listitem>
+          </orderedlist>
+        </section>
+
         <section id="sec-issue-error-spike">
           <title>Sudden burst of errors</title>
           <para><emphasis>Log signature:</emphasis>

@@ -1776,13 +1776,22 @@ impl AppConfig {
         // startup, defeating the Epic-B "spin up, configure via web UI"
         // deployment model.
         {
-            let mut seen_device_ids = std::collections::HashSet::new();
             // Story 9-4 AC#3: cross-application application_id uniqueness.
-            // The pattern mirrors `seen_device_ids` below.
             let mut seen_application_ids = std::collections::HashSet::new();
 
             for (app_idx, app) in self.application_list.iter().enumerate() {
                 let app_context = format!("application[{}]", app_idx);
+
+                // Story C-3 AC#5 fix: per-application device_id uniqueness
+                // (NOT cross-application). Pre-C-3, `seen_device_ids` was
+                // declared OUTSIDE the per-application loop, which rejected
+                // the same DevEUI under different applications — but the
+                // C-3 same-level rule explicitly ALLOWS that pattern
+                // (operators expose one physical sensor under multiple
+                // OPC UA namespaces, e.g., during LoRaWAN-side
+                // application ownership migration). Declare the HashSet
+                // INSIDE the loop so each application gets its own scope.
+                let mut seen_device_ids = std::collections::HashSet::new();
 
                 if app.application_name.is_empty() {
                     errors.push(format!("{}.application_name: must not be empty", app_context));
@@ -1821,11 +1830,16 @@ impl AppConfig {
                         if device.device_id.is_empty() {
                             errors.push(format!("{}.device_id: must not be empty", dev_context));
                         } else {
-                            // Check for duplicate device IDs
+                            // Story C-3 AC#5: per-application device_id
+                            // uniqueness. The HashSet is scoped to the
+                            // current application — same DevEUI under a
+                            // different application is intentionally
+                            // ALLOWED (see seen_device_ids declaration
+                            // above for the full rationale).
                             if seen_device_ids.contains(&device.device_id) {
                                 errors.push(format!(
-                                    "{}.device_id: '{}' is duplicated across applications",
-                                    dev_context, device.device_id
+                                    "{}.device_id: '{}' is duplicated within application '{}'",
+                                    dev_context, device.device_id, app.application_id
                                 ));
                             } else {
                                 seen_device_ids.insert(device.device_id.clone());
@@ -2837,23 +2851,63 @@ mod tests {
         });
     }
 
-    /// Tests that duplicate device_ids produces clear error.
-    ///
-    /// Verifies that validation detects duplicate device IDs
-    /// across applications and returns an appropriate error message.
+    /// Story C-3 AC#5: per-application device_id uniqueness — same
+    /// DevEUI under DIFFERENT applications is intentionally ALLOWED
+    /// (operator-supported pattern for exposing one physical sensor
+    /// under multiple OPC UA namespaces during LoRaWAN-side
+    /// application ownership migration). This test was previously
+    /// `test_validation_duplicate_device_ids` asserting REJECTION
+    /// across applications; C-3 reverses that decision and keeps
+    /// duplicate-rejection scoped to within-application only (see the
+    /// `same_device_id_across_applications_is_allowed` positive case
+    /// plus the within-app negative test below).
     #[test]
-    fn test_validation_duplicate_device_ids() {
+    fn test_validation_same_device_id_across_applications_is_allowed() {
         let mut config = get_config();
 
-        // Create a duplicate device ID in a second application
+        // Set the SAME device_id in TWO DIFFERENT applications.
         if config.application_list.len() > 1 {
             config.application_list[1].device_list[0].device_id =
                 config.application_list[0].device_list[0].device_id.clone();
 
             let result = config.validate();
-            assert!(result.is_err());
-            let error_msg = result.unwrap_err().to_string();
-            assert!(error_msg.contains("duplicated"));
+            assert!(
+                result.is_ok(),
+                "same DevEUI across applications must validate OK per C-3 AC#5; got: {:?}",
+                result.err()
+            );
+        }
+    }
+
+    /// Story C-3 AC#3 / AC#10: same-device_id WITHIN one application's
+    /// device_list IS rejected (the in-scope duplicate). Companion to
+    /// the cross-application positive case above.
+    #[test]
+    fn test_validation_duplicate_device_id_within_one_application_rejected() {
+        let mut config = get_config();
+
+        // Inject a duplicate device_id into the first application by
+        // cloning the existing first-device entry and appending it
+        // back to the same application's device_list.
+        if !config.application_list.is_empty()
+            && !config.application_list[0].device_list.is_empty()
+        {
+            let original = config.application_list[0].device_list[0].clone();
+            let dup_id = original.device_id.clone();
+            config.application_list[0].device_list.push(original);
+
+            let result = config.validate();
+            assert!(
+                result.is_err(),
+                "duplicate device_id within ONE application must fail; (dev_id={dup_id})"
+            );
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("duplicated"), "unexpected error: {err}");
+            assert!(err.contains("device_id"), "unexpected error: {err}");
+            assert!(
+                err.contains("within application"),
+                "expected 'within application' scope in error; got: {err}"
+            );
         }
     }
 

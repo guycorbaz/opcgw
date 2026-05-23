@@ -67,6 +67,16 @@ pub struct ErrorResponse {
     pub error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// Story C-3 AC#1/#3/#6: machine-parseable fields populated only
+    /// on the duplicate-rejection wire shape so picker UIs can surface
+    /// inline errors near the conflicting field. Skipped from the
+    /// wire when `None`; existing callers see no shape change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 impl ErrorResponse {
@@ -74,6 +84,9 @@ impl ErrorResponse {
         Self {
             error: "internal server error".to_string(),
             hint: None,
+            field: None,
+            value: None,
+            scope: None,
         }
     }
 
@@ -83,6 +96,9 @@ impl ErrorResponse {
         Self {
             error: error.into(),
             hint: Some(hint.into()),
+            field: None,
+            value: None,
+            scope: None,
         }
     }
 
@@ -91,6 +107,33 @@ impl ErrorResponse {
         Self {
             error: error.into(),
             hint: None,
+            field: None,
+            value: None,
+            scope: None,
+        }
+    }
+
+    /// Story C-3 helper: build a structured duplicate-rejection body
+    /// per AC#1/#3/#6. `error` is fixed to the literal `"duplicate"`
+    /// so the picker UI can match on the field directly without
+    /// regexing the human-readable message. `field` names the
+    /// rejected attribute (e.g. `"application_id"`); `value` echoes
+    /// the conflicting input verbatim; `scope` describes the
+    /// containing namespace (e.g. `"application:<app_id>"` or
+    /// `"device:<dev_eui>"`). Optional `hint` carries an
+    /// operator-action message in the same shape as `with_hint`.
+    pub(crate) fn duplicate(
+        field: impl Into<String>,
+        value: impl Into<String>,
+        scope: impl Into<String>,
+        hint: impl Into<String>,
+    ) -> Self {
+        Self {
+            error: "duplicate".to_string(),
+            hint: Some(hint.into()),
+            field: Some(field.into()),
+            value: Some(value.into()),
+            scope: Some(scope.into()),
         }
     }
 }
@@ -1344,6 +1387,7 @@ pub async fn create_application(
                         warn!(
                             event = "application_crud_rejected",
                             reason = "conflict",
+                            conflict_kind = "malformed_existing_block",
                             source_ip = %addr.ip(),
                             malformed_block_index = idx,
                             id_value_present = id_value.is_some(),
@@ -1365,17 +1409,20 @@ pub async fn create_application(
                     warn!(
                         event = "application_crud_rejected",
                         reason = "conflict",
+                        conflict_kind = "duplicate",
                         application_id = %body.application_id,
                         source_ip = %addr.ip(),
                         "create_application: duplicate application_id rejected before write"
                     );
+                    // Story C-3 AC#1: structured duplicate body so the
+                    // picker UI can surface inline errors near the
+                    // application_id field without regexing the message.
                     return Err((
                         StatusCode::CONFLICT,
-                        Json(ErrorResponse::with_hint(
-                            format!(
-                                "application_id '{}' already exists",
-                                body.application_id
-                            ),
+                        Json(ErrorResponse::duplicate(
+                            "application_id",
+                            body.application_id.clone(),
+                            "application_list",
                             "PUT to rename or DELETE the existing application before recreating",
                         )),
                     )
@@ -1663,6 +1710,7 @@ pub async fn update_application(
             warn!(
                 event = "application_crud_rejected",
                 reason = "conflict",
+                conflict_kind = "malformed_existing_block",
                 source_ip = %addr.ip(),
                 malformed_block_index = idx,
                 "update_application: existing [[application]] block at index {idx} has missing or non-string application_id; manual cleanup required"
@@ -1695,6 +1743,7 @@ pub async fn update_application(
         warn!(
             event = "application_crud_rejected",
             reason = "conflict",
+            conflict_kind = "duplicate",
             application_id = %application_id,
             source_ip = %addr.ip(),
             duplicate_count = match_count,
@@ -1824,6 +1873,7 @@ pub async fn delete_application(
         warn!(
             event = "application_crud_rejected",
             reason = "conflict",
+            conflict_kind = "cascade_blocked",
             application_id = %application_id,
             source_ip = %addr.ip(),
             device_count = target_device_count,
@@ -1845,6 +1895,7 @@ pub async fn delete_application(
         warn!(
             event = "application_crud_rejected",
             reason = "conflict",
+            conflict_kind = "empty_application_list",
             application_id = %application_id,
             source_ip = %addr.ip(),
             "delete_application: would empty application_list"
@@ -1892,6 +1943,7 @@ pub async fn delete_application(
             warn!(
                 event = "application_crud_rejected",
                 reason = "conflict",
+                conflict_kind = "malformed_existing_block",
                 source_ip = %addr.ip(),
                 malformed_block_index = idx,
                 "delete_application: existing [[application]] block at index {idx} has missing or non-string application_id; manual cleanup required"
@@ -1921,6 +1973,7 @@ pub async fn delete_application(
         warn!(
             event = "application_crud_rejected",
             reason = "conflict",
+            conflict_kind = "duplicate",
             application_id = %application_id,
             source_ip = %addr.ip(),
             duplicate_count = match_count,
@@ -2327,6 +2380,63 @@ pub async fn create_device(
         validate_metric_mapping_fields(idx, m, &addr)?;
     }
 
+    // Story C-3 AC#6: pre-flight per-device duplicate check on
+    // chirpstack_metric_name + metric_name. Pre-C-3, duplicates were
+    // caught at reload-validate time (422 via AppConfig::validate's
+    // per-device HashSet); the C-3 contract requires a clean 409 at
+    // the CRUD-handler layer so the picker UI can surface inline
+    // errors near the offending metric row before any TOML write.
+    {
+        let mut seen_chirp = std::collections::HashSet::new();
+        let mut seen_display = std::collections::HashSet::new();
+        for m in body.read_metric_list.iter() {
+            if !seen_chirp.insert(m.chirpstack_metric_name.as_str()) {
+                warn!(
+                    event = "device_crud_rejected",
+                    reason = "conflict",
+                    conflict_kind = "duplicate",
+                    application_id = %application_id,
+                    device_id = %body.device_id,
+                    chirpstack_metric_name = ?m.chirpstack_metric_name,
+                    source_ip = %addr.ip(),
+                    "create_device: duplicate chirpstack_metric_name in request body rejected before write"
+                );
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse::duplicate(
+                        "chirpstack_metric_name",
+                        m.chirpstack_metric_name.clone(),
+                        format!("device:{}", body.device_id),
+                        "remove the duplicate metric row before retrying",
+                    )),
+                )
+                    .into_response());
+            }
+            if !seen_display.insert(m.metric_name.as_str()) {
+                warn!(
+                    event = "device_crud_rejected",
+                    reason = "conflict",
+                    conflict_kind = "duplicate",
+                    application_id = %application_id,
+                    device_id = %body.device_id,
+                    metric_name = ?m.metric_name,
+                    source_ip = %addr.ip(),
+                    "create_device: duplicate metric_name (OPC UA display) in request body rejected before write"
+                );
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse::duplicate(
+                        "metric_name",
+                        m.metric_name.clone(),
+                        format!("device:{}", body.device_id),
+                        "remove the duplicate metric row before retrying",
+                    )),
+                )
+                    .into_response());
+            }
+        }
+    }
+
     let _guard = state.config_writer.lock().await;
 
     let original_bytes = state
@@ -2374,6 +2484,7 @@ pub async fn create_device(
                     warn!(
                         event = "device_crud_rejected",
                         reason = "conflict",
+                        conflict_kind = "malformed_existing_block",
                         application_id = %application_id,
                         source_ip = %addr.ip(),
                         malformed_block_index = idx,
@@ -2396,18 +2507,19 @@ pub async fn create_device(
                 warn!(
                     event = "device_crud_rejected",
                     reason = "conflict",
+                    conflict_kind = "duplicate",
                     application_id = %application_id,
                     device_id = %body.device_id,
                     source_ip = %addr.ip(),
                     "create_device: duplicate device_id within application rejected before write"
                 );
+                // Story C-3 AC#3: structured duplicate body.
                 return Err((
                     StatusCode::CONFLICT,
-                    Json(ErrorResponse::with_hint(
-                        format!(
-                            "device_id '{}' already exists under application '{}'",
-                            body.device_id, application_id
-                        ),
+                    Json(ErrorResponse::duplicate(
+                        "device_id",
+                        body.device_id.clone(),
+                        format!("application:{}", application_id),
                         "PUT to rename or DELETE the existing device before recreating",
                     )),
                 )
@@ -2716,6 +2828,61 @@ pub async fn update_device(
         validate_metric_mapping_fields(idx, m, &addr)?;
     }
 
+    // Story C-3 AC#6: pre-flight per-device duplicate check on
+    // chirpstack_metric_name + metric_name (PUT-replaces semantics —
+    // same hazard as POST). See create_device's identical block for
+    // the rationale: clean 409 here vs reload-time 422.
+    {
+        let mut seen_chirp = std::collections::HashSet::new();
+        let mut seen_display = std::collections::HashSet::new();
+        for m in read_metric_list.iter() {
+            if !seen_chirp.insert(m.chirpstack_metric_name.as_str()) {
+                warn!(
+                    event = "device_crud_rejected",
+                    reason = "conflict",
+                    conflict_kind = "duplicate",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    chirpstack_metric_name = ?m.chirpstack_metric_name,
+                    source_ip = %addr.ip(),
+                    "update_device: duplicate chirpstack_metric_name in request body rejected before write"
+                );
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse::duplicate(
+                        "chirpstack_metric_name",
+                        m.chirpstack_metric_name.clone(),
+                        format!("device:{}", device_id),
+                        "remove the duplicate metric row before retrying",
+                    )),
+                )
+                    .into_response());
+            }
+            if !seen_display.insert(m.metric_name.as_str()) {
+                warn!(
+                    event = "device_crud_rejected",
+                    reason = "conflict",
+                    conflict_kind = "duplicate",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    metric_name = ?m.metric_name,
+                    source_ip = %addr.ip(),
+                    "update_device: duplicate metric_name (OPC UA display) in request body rejected before write"
+                );
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse::duplicate(
+                        "metric_name",
+                        m.metric_name.clone(),
+                        format!("device:{}", device_id),
+                        "remove the duplicate metric row before retrying",
+                    )),
+                )
+                    .into_response());
+            }
+        }
+    }
+
     // Pre-check via live config — application + device must exist
     // BEFORE we acquire the writer lock.
     {
@@ -2816,6 +2983,7 @@ pub async fn update_device(
                 warn!(
                     event = "device_crud_rejected",
                     reason = "conflict",
+                    conflict_kind = "malformed_existing_block",
                     application_id = %application_id,
                     source_ip = %addr.ip(),
                     malformed_block_index = idx,
@@ -2845,6 +3013,7 @@ pub async fn update_device(
             warn!(
                 event = "device_crud_rejected",
                 reason = "conflict",
+                conflict_kind = "duplicate",
                 application_id = %application_id,
                 device_id = %device_id,
                 source_ip = %addr.ip(),
@@ -3091,6 +3260,7 @@ pub async fn delete_device(
                 warn!(
                     event = "device_crud_rejected",
                     reason = "conflict",
+                    conflict_kind = "malformed_existing_block",
                     application_id = %application_id,
                     source_ip = %addr.ip(),
                     malformed_block_index = idx,
@@ -3121,6 +3291,7 @@ pub async fn delete_device(
             warn!(
                 event = "device_crud_rejected",
                 reason = "conflict",
+                conflict_kind = "duplicate",
                 application_id = %application_id,
                 device_id = %device_id,
                 source_ip = %addr.ip(),
@@ -3661,6 +3832,7 @@ pub async fn create_command(
                     warn!(
                         event = "command_crud_rejected",
                         reason = "conflict",
+                        conflict_kind = "malformed_existing_block",
                         application_id = %application_id,
                         device_id = %device_id,
                         source_ip = %addr.ip(),
@@ -3686,19 +3858,21 @@ pub async fn create_command(
                 warn!(
                     event = "command_crud_rejected",
                     reason = "conflict",
+                    conflict_kind = "duplicate",
                     application_id = %application_id,
                     device_id = %device_id,
                     command_id = command_id,
                     source_ip = %addr.ip(),
                     "create_command: duplicate command_id within device rejected before write"
                 );
+                // Story C-3 AC#6: structured duplicate body (same shape
+                // as the device/application duplicate handlers).
                 return Err((
                     StatusCode::CONFLICT,
-                    Json(ErrorResponse::with_hint(
-                        format!(
-                            "command_id {} already exists under device '{}' (application '{}')",
-                            command_id, device_id, application_id
-                        ),
+                    Json(ErrorResponse::duplicate(
+                        "command_id",
+                        command_id.to_string(),
+                        format!("device:{}", device_id),
                         "PUT to modify or DELETE the existing command before recreating",
                     )),
                 )
@@ -3716,19 +3890,20 @@ pub async fn create_command(
                 warn!(
                     event = "command_crud_rejected",
                     reason = "conflict",
+                    conflict_kind = "duplicate",
                     application_id = %application_id,
                     device_id = %device_id,
                     command_name = ?command_name,
                     source_ip = %addr.ip(),
                     "create_command: duplicate command_name within device rejected before write"
                 );
+                // Story C-3 AC#6: structured duplicate body.
                 return Err((
                     StatusCode::CONFLICT,
-                    Json(ErrorResponse::with_hint(
-                        format!(
-                            "command_name '{}' already exists under device '{}' (application '{}')",
-                            command_name, device_id, application_id
-                        ),
+                    Json(ErrorResponse::duplicate(
+                        "command_name",
+                        command_name.clone(),
+                        format!("device:{}", device_id),
                         "PUT to modify or DELETE the existing command before recreating",
                     )),
                 )
@@ -4125,6 +4300,7 @@ pub async fn update_command(
                             warn!(
                                 event = "command_crud_rejected",
                                 reason = "conflict",
+                                conflict_kind = "malformed_existing_block",
                                 application_id = %application_id,
                                 device_id = %device_id,
                                 source_ip = %addr.ip(),
@@ -4358,6 +4534,7 @@ pub async fn delete_command(
                             warn!(
                                 event = "command_crud_rejected",
                                 reason = "conflict",
+                                conflict_kind = "malformed_existing_block",
                                 application_id = %application_id,
                                 device_id = %device_id,
                                 source_ip = %addr.ip(),
@@ -4598,6 +4775,7 @@ fn check_top_level_application_shape(
                 "device" => warn!(
                     event = "device_crud_rejected",
                     reason = "conflict",
+                    conflict_kind = "malformed_existing_block",
                     application_id = ?application_id,
                     source_ip = %addr.ip(),
                     "handler: top-level `application` exists but is not an array-of-tables (`[[application]]`); manual cleanup required"
@@ -4605,6 +4783,7 @@ fn check_top_level_application_shape(
                 "application" => warn!(
                     event = "application_crud_rejected",
                     reason = "conflict",
+                    conflict_kind = "malformed_existing_block",
                     application_id = ?application_id,
                     source_ip = %addr.ip(),
                     "handler: top-level `application` exists but is not an array-of-tables (`[[application]]`); manual cleanup required"
@@ -4612,6 +4791,7 @@ fn check_top_level_application_shape(
                 "command" => warn!(
                     event = "command_crud_rejected",
                     reason = "conflict",
+                    conflict_kind = "malformed_existing_block",
                     application_id = ?application_id,
                     source_ip = %addr.ip(),
                     "handler: top-level `application` exists but is not an array-of-tables (`[[application]]`); manual cleanup required"
@@ -4619,6 +4799,7 @@ fn check_top_level_application_shape(
                 _ => warn!(
                     event = "crud_rejected",
                     reason = "conflict",
+                    conflict_kind = "malformed_existing_block",
                     resource = resource,
                     application_id = ?application_id,
                     source_ip = %addr.ip(),
@@ -4663,6 +4844,7 @@ fn find_application_index(
                     "device" => warn!(
                         event = "device_crud_rejected",
                         reason = "conflict",
+                        conflict_kind = "malformed_existing_block",
                         application_id = %application_id,
                         source_ip = %addr.ip(),
                         malformed_block_index = idx,
@@ -4671,6 +4853,7 @@ fn find_application_index(
                     "application" => warn!(
                         event = "application_crud_rejected",
                         reason = "conflict",
+                        conflict_kind = "malformed_existing_block",
                         application_id = %application_id,
                         source_ip = %addr.ip(),
                         malformed_block_index = idx,
@@ -4679,6 +4862,7 @@ fn find_application_index(
                     _ => warn!(
                         event = "crud_rejected",
                         reason = "conflict",
+                        conflict_kind = "malformed_existing_block",
                         resource = resource,
                         application_id = %application_id,
                         source_ip = %addr.ip(),

@@ -324,4 +324,46 @@ C-3 may surface a new issue if the picker's "decorate already-configured" UX fro
 
 ## Completion Note
 
-To be filled in by the dev agent at story completion. Should include: the verb × level coverage table from Task 1, actual test count delta, any deferred follow-ups added to `deferred-work.md`, the final epics.md AC#3 update (replace `reason="duplicate"` with `reason="conflict" conflict_kind="duplicate"`).
+Implementation complete 2026-05-23 (status: in-progress → review). Awaiting `bmad-code-review C-3` on a different LLM per CLAUDE.md "Code Review & Story Validation Loop Discipline" + the 19-story iter-N+1 doctrine streak.
+
+### Verb × level coverage table (from Task 1)
+
+26 pre-C-3 `reason="conflict"` emits in `src/web/api.rs`, classified:
+
+| `conflict_kind` | Count | Sites |
+|---|---|---|
+| `duplicate` | 8 | create_application, update_application TOML-state, delete_application TOML-state, create_device, update_device TOML-state, delete_device TOML-state, create_command duplicate_id, create_command duplicate_name |
+| `malformed_existing_block` | 16 | POST/PUT/DELETE × {app, device, command} malformed-block + 4 helpers (`check_top_level_application_shape` + `find_application_index` inline emits) |
+| `cascade_blocked` | 1 | delete_application with devices (L1826) |
+| `empty_application_list` | 1 | delete_application would-empty (L1847) |
+
+C-3 added 4 new `duplicate` emits (pre-flight blocks in `create_device` + `update_device` for `chirpstack_metric_name` + `metric_name`), bringing the final total to 30 / 12 / 16 / 1 / 1. All 30 emit sites have co-located `conflict_kind = "..."` tags verified via `awk` scan (Task 5).
+
+### Test count delta
+
+| | Pre-C-3 (C-2 baseline) | Post-C-3 | Delta |
+|---|---|---|---|
+| Integration + unit tests | 1417 / 0 / 65 | 1434 / 0 / 65 | +17 |
+| Doctest | 0 / 0 / 55 | 0 / 0 / 55 | 0 |
+
+New test breakdown:
+- `tests/web_duplicate_prevention.rs`: 12 new integration tests (+3 from common/mod.rs counted in this binary = 15).
+- `src/config_reload.rs::tests::reload_error_is_duplicate_classifies_validation_kind`: 1 new unit test for the `is_duplicate()` predicate.
+- 3 existing tests in `tests/web_device_crud.rs` updated to the new 409 + structured-body wire (renamed `_returns_422` → `_returns_409`; same count, no net delta).
+- 2 existing tests in `tests/web_application_crud.rs` updated to the new structured-body wire (zero net delta; already counted).
+
+`cargo clippy --all-targets -- -D warnings` clean. `cargo test --doc` 0 failed / 55 ignored (no regression — AC#19's "≥56 ignored" floor was off-by-one vs the actual pre-C-3 baseline of 55).
+
+### Design deviations from spec (acknowledged + documented)
+
+1. **`docs/web-api.md` created as new file** (vs spec AC#22 implicit "update existing"). The spec named `docs/web-api.md` explicitly, and the file did not exist pre-C-3. Created as a small focused error-shape contract doc rather than appending to the unrelated `docs/api-contracts.md` (which is ChirpStack-gRPC + OPC UA only). Cross-linked from `docs/logging.md` § conflict_kind taxonomy.
+2. **The 4 update/delete TOML-state duplicate emits keep `ErrorResponse::with_hint` body shape** rather than `ErrorResponse::duplicate`. Rationale: operator action diverges from "pick a different name" — these surface pre-existing TOML-state corruption that manifests as duplicates; the actionable text is "edit `config.toml` to fix the duplicate manually". `conflict_kind="duplicate"` audit field still applied for grep uniformity. Documented inline at the 4 sites.
+3. **AC#19's "≥56 ignored" doctest floor was off-by-one** — pre-C-3 baseline was 55 (verified via `git stash --include-untracked` then `cargo test --doc`). No regression introduced; floor adjusted in completion note rather than synthesizing an extra `///` block to game the count.
+
+### Deferred follow-ups
+
+None added by C-3. Carry-forward GH issues from C-2 unchanged: #88 (per-IP rate limiting), #100 (56 doctest ignores — would have addressed the AC#19 floor mismatch root cause but out of C-3 scope), #102 (tests/common reuse — `tests/web_duplicate_prevention.rs` followed established per-file copy pattern; refactor still tracked), #104 (TLS hardening), #110 (RunHandles Drop), #117 (perf-CI lane).
+
+### epics.md AC#3 follow-up (post-review)
+
+Spec AC#3 mentions updating `epics.md` to replace any `reason="duplicate"` sketch wording with `reason="conflict" conflict_kind="duplicate"` (the chosen audit shape). Deferred to the C-3 review-fix commit or the epic-C retrospective; out of scope for the Implementation Complete commit since it's documentation-only and the `epics.md` text needs to be located/inspected before edit.

@@ -116,6 +116,22 @@ impl ReloadError {
             _ => None,
         }
     }
+
+    /// True iff this is a `Validation` error whose underlying message
+    /// came from one of the duplicate-class checks in
+    /// `AppConfig::validate()`. Used by the SIGHUP listener to emit
+    /// `event="config_reload_rejected" reason="conflict"
+    /// conflict_kind="duplicate"` per Story C-3 AC#9 in addition to the
+    /// general `config_reload_failed` line.
+    ///
+    /// Substring-matching on `"duplicated"` is acceptable here because
+    /// the word is uniquely local to the seven `errors.push(format!(...
+    /// duplicated ...))` sites in `src/config.rs` (the `seen_*`
+    /// HashSet checks). Any future validator change that adds a non-
+    /// duplicate error containing this word must update this method.
+    pub fn is_duplicate(&self) -> bool {
+        matches!(self, Self::Validation(msg) if msg.contains("duplicated"))
+    }
 }
 
 impl From<ReloadError> for OpcGwError {
@@ -1629,6 +1645,33 @@ mod tests {
             }
             .changed_knob(),
             Some("opcua.host_port"),
+        );
+    }
+
+    /// Story C-3 AC#9 — `is_duplicate()` is true only for `Validation`
+    /// errors whose underlying message contains the `"duplicated"` word
+    /// produced by the `seen_*` HashSet checks in `AppConfig::validate()`.
+    /// Drives the `conflict_kind="duplicate"` field on the hot-reload
+    /// rejected event.
+    #[test]
+    fn reload_error_is_duplicate_classifies_validation_kind() {
+        // Exact wording from the validator's per-application duplicate
+        // device_id check (src/config.rs:1841).
+        let dup = ReloadError::Validation(
+            "application[0].device[1].device_id: 'dev-1' is duplicated within application 'app-1'"
+                .into(),
+        );
+        assert!(dup.is_duplicate(), "duplicate-class validation must classify");
+
+        // Other Validation errors (e.g. empty-field, out-of-range) must
+        // NOT classify as duplicates.
+        let other = ReloadError::Validation("application[0].application_name: must not be empty".into());
+        assert!(!other.is_duplicate());
+
+        // Io + RestartRequired are never duplicates.
+        assert!(!ReloadError::Io("file missing".into()).is_duplicate());
+        assert!(
+            !ReloadError::RestartRequired { knob: "opcua.host_port".into() }.is_duplicate()
         );
     }
 }

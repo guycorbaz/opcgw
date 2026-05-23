@@ -249,6 +249,11 @@ fn reject(status: StatusCode, message: &str, hint: Option<&str>) -> Response {
         Json(ErrorResponse {
             error: message.to_string(),
             hint: hint.map(|s| s.to_string()),
+            // Story C-3: new optional fields default to None on CSRF
+            // rejections — only the duplicate-helper populates them.
+            field: None,
+            value: None,
+            scope: None,
         }),
     )
         .into_response()
