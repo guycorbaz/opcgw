@@ -210,6 +210,12 @@
     pickerSelect.innerHTML = '<option value="">Loading…</option>';
     setPickerBanner(null);
     var cacheStatus = 'unknown';
+    // Iter-2 review HIGH-1: `finally` safety net so the submit button
+    // re-enables on EVERY exit path — including the aborted-fetch
+    // early-return and any synchronous throw. Pre-fix, both old AND
+    // new fetches returning via the abort-check path could leave the
+    // submit button wedged disabled until a manual toggle.
+    try {
     try {
       var data = await picker.fetchApplications({ refresh: !!(opts && opts.refresh) });
       // Iter-1 review HIGH-7: if a newer fetch aborted us, drop the
@@ -222,7 +228,10 @@
       });
       if (!data.items || data.items.length === 0) {
         // AC#1: empty inventory → pre-flip to manual + show context.
-        pickerSelect.innerHTML = '<option>(no applications in ChirpStack)</option>';
+        // Iter-2 review LOW-10: explicit value="" so a programmatic
+        // submit before the operator interacts never posts the
+        // placeholder textContent as application_id.
+        pickerSelect.innerHTML = '<option value="" disabled selected>(no applications in ChirpStack)</option>';
         applyMode('manual');
         setPickerBanner('No applications found in ChirpStack for this tenant — type one manually or create one in ChirpStack first.');
         picker.auditEvent('picker_manual_fallback', {
@@ -252,20 +261,27 @@
         pickerSelect.appendChild(opt);
       });
       pickerSelect.disabled = false;
-      setSubmitEnabled(true);
     } catch (err) {
       // Iter-1 review HIGH-7: drop stale aborted fetches silently.
       if (controller.signal.aborted) return;
       // AC#1 / AC#2: auto-fallback on 502 or any other error.
       var reason = err && err.status === 502 ? 'chirpstack_unreachable' : 'chirpstack_error';
       applyMode('manual');
-      setSubmitEnabled(true);
       setPickerBanner('Could not reach ChirpStack — switched to manual entry.');
       picker.auditEvent('picker_manual_fallback', {
         picker_resource: 'application',
         reason: reason,
         error_detail: err && err.message ? String(err.message).slice(0, 200) : '',
       });
+    }
+    } finally {
+      // Iter-2 review HIGH-1: re-enable submit on every exit path
+      // (success / error / abort early-return). Only valid for THIS
+      // fetch — if a newer fetch aborted us, the newer fetch's own
+      // finally will own the final state.
+      if (!controller.signal.aborted) {
+        setSubmitEnabled(true);
+      }
     }
   }
 
@@ -292,6 +308,10 @@
       var appName = opt ? (opt.dataset.appName || opt.textContent || '') : '';
       if (!picker.editedFlag.has(nameInput) && appName) {
         nameInput.value = appName;
+        // Iter-2 review HIGH-4: record the picker-populated value so
+        // a browser-autofill restoration of the same value cannot
+        // false-positive the edited flag on the operator's behalf.
+        picker.editedFlag.recordPickerPopulation(nameInput, appName);
       }
     });
     pickerRefresh.addEventListener('click', function () {
@@ -304,6 +324,11 @@
     });
     modeToManual.addEventListener('click', function () {
       applyMode('manual');
+      // Iter-2 review HIGH-3: switching to manual must re-enable the
+      // submit button even if a picker fetch was in flight (otherwise
+      // the operator is stuck in manual mode with a disabled submit
+      // until the now-irrelevant fetch resolves).
+      setSubmitEnabled(true);
       picker.auditEvent('picker_manual_fallback', {
         picker_resource: 'application',
         reason: 'operator_choice',
@@ -311,7 +336,12 @@
     });
     modeToPicker.addEventListener('click', function () {
       applyMode('picker');
-      loadPicker({});
+      loadPicker({}).catch(function (err) {
+        // Iter-2 review HIGH-4: log instead of swallowing so a real
+        // bug (e.g. AbortError from a legit nav-away) is at least
+        // visible in the operator's browser console.
+        console.warn('opcgw: picker reload after mode toggle failed:', err);
+      });
     });
     picker.editedFlag.attach(nameInput);
   }
@@ -345,13 +375,16 @@
       picker.editedFlag.reset(nameInput);
       fetchApplications();
       // Refetch on next form open: cache may serve a hit (AC#17, #20).
-      // Iter-1 review MED-4: .catch to prevent unhandled-rejection if
-      // the post-create picker reload fails (the new app already
-      // landed; a picker-reload failure should not surface another
-      // alert on top of the existing fetchApplications error path).
       // Iter-1 review HIGH-5: read pickerState.mode, not DOM hidden.
+      // Iter-2 review HIGH-4: replace silent swallow with console.warn
+      // so a failed post-create reload (e.g., ChirpStack went down
+      // between Create and refetch) is visible in the operator's
+      // browser console. The new app already landed; the warning is
+      // diagnostic-only.
       if (pickerState.mode !== 'manual') {
-        loadPicker({}).catch(function () { /* swallowed; non-fatal */ });
+        loadPicker({}).catch(function (err) {
+          console.warn('opcgw: picker reload after create failed:', err);
+        });
       }
     } catch (e) {
       showError(createError, 'Create failed: ' + e);
@@ -362,8 +395,11 @@
     setupPickerEventListeners();
     applyMode(picker.mode.get(PAGE_KEY));
     // Iter-1 review HIGH-5: read pickerState.mode, not DOM hidden.
+    // Iter-2 review HIGH-4: console.warn on failure (non-fatal).
     if (pickerState.mode !== 'manual') {
-      loadPicker({}).catch(function () { /* swallowed; non-fatal */ });
+      loadPicker({}).catch(function (err) {
+        console.warn('opcgw: initial picker load failed:', err);
+      });
     }
     fetchApplications();
   });

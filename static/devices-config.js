@@ -15,6 +15,13 @@
   // Story C-2: namespace-aliased global from inventory-picker.js (must
   // be loaded BEFORE this script — see static/devices-config.html).
   const picker = window.opcgwPicker;
+  // Iter-2 review MED-6: page-wide monotonic counter for metric-pick
+  // checkbox ids. Pre-iter-2 used `'mk-' + sanitised_app_id + '-' + idx`
+  // which collided when two distinct app_ids contained different
+  // non-allowed characters (e.g. `a:1` and `a/1` both sanitised to
+  // `a_1`). A monotonic counter is collision-free by construction
+  // regardless of operator-supplied application_id contents.
+  let _metricCheckboxIdSeq = 0;
 
   function el(tag, attrs, children) {
     const node = document.createElement(tag);
@@ -429,6 +436,12 @@
       // mid-load submit is safe.
       devPickerSelect.appendChild(el('option', { value: '', text: 'Loading…' }));
       setDevicePickerBanner('');
+      // Iter-2 review HIGH-1: `finally` re-enables submit on every
+      // exit path. Pre-fix, both-fetches-abort-return could leave the
+      // submit button wedged disabled. The aborted-fetch case is
+      // explicitly excluded so the NEWER fetch's `finally` owns the
+      // final state (this aborted fetch should not race-overwrite).
+      try {
       try {
         const data = await picker.fetchDevices(app.application_id, {
           refresh: !!(opts && opts.refresh),
@@ -441,7 +454,12 @@
         });
         if (!data.items || data.items.length === 0) {
           devPickerSelect.replaceChildren();
-          devPickerSelect.appendChild(el('option', { text: '(no devices in ChirpStack)' }));
+          // Iter-2 review LOW-10: explicit value="" so a programmatic
+          // submit on the empty-state placeholder never posts the
+          // textContent as device_id.
+          devPickerSelect.appendChild(
+            el('option', { value: '', disabled: 'disabled', text: '(no devices in ChirpStack)' })
+          );
           applyDeviceMode('manual');
           setDevicePickerBanner(
             'No devices found under this application in ChirpStack.',
@@ -473,17 +491,24 @@
           devPickerSelect.appendChild(opt);
         });
         devPickerSelect.disabled = false;
-        setFormSubmitEnabled(true);
       } catch (err) {
         if (controller.signal.aborted) return; // iter-1 HIGH-7
         applyDeviceMode('manual');
-        setFormSubmitEnabled(true);
         setDevicePickerBanner('Could not reach ChirpStack — switched to manual entry.', true);
         picker.auditEvent('picker_manual_fallback', {
           picker_resource: 'device',
           reason: err && err.status === 502 ? 'chirpstack_unreachable' : 'chirpstack_error',
           error_detail: err && err.message ? String(err.message).slice(0, 200) : '',
         });
+      }
+      } finally {
+        // Iter-2 review HIGH-1: re-enable submit on every exit path
+        // (success / error / empty-items / abort early-return). Only
+        // valid for THIS fetch — newer fetch's own finally owns
+        // its state.
+        if (!controller.signal.aborted) {
+          setFormSubmitEnabled(true);
+        }
       }
     }
 
@@ -492,13 +517,19 @@
       pickerState.currentDevEui = devEui;
       metricPickerRows.replaceChildren();
       setMetricPickerBanner('');
+      // Iter-2 review HIGH-5: abort any in-flight uplinks fetch BEFORE
+      // the `!devEui` early-return. Pre-fix, a placeholder-reselect
+      // (which calls loadMetricPicker(undefined)) would leave the
+      // prior in-flight fetch running; it would later resolve with
+      // sample data for the now-stale DevEUI and render rows that no
+      // longer match the visible device selection.
+      if (pickerState.uplinkFetchController) {
+        pickerState.uplinkFetchController.abort();
+        pickerState.uplinkFetchController = null;
+      }
       if (!devEui) {
         setMetricPickerStatus('Choose a device above first.');
         return;
-      }
-      // Iter-1 review HIGH-7: abort prior in-flight uplinks fetch.
-      if (pickerState.uplinkFetchController) {
-        pickerState.uplinkFetchController.abort();
       }
       const controller = new AbortController();
       pickerState.uplinkFetchController = controller;
@@ -510,6 +541,13 @@
           picker_resource: 'uplink',
           application_id: app.application_id,
           dev_eui: devEui,
+          // Iter-2 review LOW-9: `/api/inventory/uplinks` is UNCACHED
+          // per C-1 spec — every call is a fresh ChirpStack stream.
+          // Pre-fix this emitted "bypassed" which implies a cache was
+          // bypassed; "uncached" is the accurate value matching C-1's
+          // `cache_status: "bypassed"` literal for that endpoint's
+          // own emit (src/web/inventory.rs::inventory_uplinks). Keep
+          // "bypassed" to stay aligned with the C-1 server-side audit.
           cache_status: 'bypassed',
         });
         if (!data.observed_keys || data.observed_keys.length === 0) {
@@ -528,14 +566,13 @@
         setMetricPickerStatus('Tick metric keys to include; override wire type per row if needed.');
         data.observed_keys.forEach(function (k, idx) {
           const row = el('div', { class: 'metric-pick-row' });
-          // Iter-1 review HIGH-6: prefix checkbox id with the parent
-          // application_id so multiple application sections rendered
-          // on the same page do NOT collide on HTML id (which would
-          // cause a <label for="mk-0"> click to toggle the wrong-
-          // section checkbox). Use a sanitised app id segment so any
-          // exotic chars in application_id can't break attribute syntax.
-          const idSafeAppId = String(app.application_id).replace(/[^A-Za-z0-9_-]/g, '_');
-          const checkboxId = 'mk-' + idSafeAppId + '-' + idx;
+          // Iter-2 review MED-6 fix: use a page-wide monotonic
+          // counter rather than sanitised app_id + idx. The latter
+          // re-introduced HIGH-6's collision when distinct app_ids
+          // sanitised to the same string (e.g. `a:1` and `a/1` both
+          // → `a_1`). The counter is collision-free by construction
+          // and survives any operator-supplied application_id shape.
+          const checkboxId = 'mk-' + (_metricCheckboxIdSeq++);
           const checkbox = el('input', {
             type: 'checkbox', id: checkboxId,
             'data-key': k.key,
@@ -616,6 +653,9 @@
       const devEui = opt ? (opt.dataset.devEui || opt.value || '') : '';
       if (!picker.editedFlag.has(devNameInput) && devName) {
         devNameInput.value = devName;
+        // Iter-2 review HIGH-4: record the picker-populated value
+        // so browser-autofill cannot false-positive the edited flag.
+        picker.editedFlag.recordPickerPopulation(devNameInput, devName);
       }
       devEuiFootnote.textContent = devEui ? 'DevEUI: ' + devEui : '';
       // Iter-1 review MED-3: clear stale currentDevEui + metric rows
@@ -641,6 +681,11 @@
     });
     devPickerToManual.addEventListener('click', function () {
       applyDeviceMode('manual');
+      // Iter-2 review HIGH-3: switching to manual must re-enable
+      // submit even if a picker fetch was in flight (otherwise the
+      // operator is stuck in manual mode with a disabled submit
+      // until the now-irrelevant fetch resolves).
+      setFormSubmitEnabled(true);
       picker.auditEvent('picker_manual_fallback', {
         picker_resource: 'device',
         reason: 'operator_choice',
@@ -660,7 +705,15 @@
         } else {
           // Iter-1 review LOW-6: surface a status message instead of
           // a silent no-op so the operator knows why nothing happened.
-          setMetricPickerStatus('Select a device first.');
+          // Iter-2 review LOW-11: branch on device-picker mode so the
+          // message matches the visible UI (no dropdown means the
+          // operator is in manual mode and the prompt should say
+          // "type a DevEUI", not "select a device").
+          if (pickerState.mode === 'manual') {
+            setMetricPickerStatus('Type a DevEUI in the device-id field first.');
+          } else {
+            setMetricPickerStatus('Select a device first.');
+          }
         }
         return;
       }

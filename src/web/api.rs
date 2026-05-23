@@ -5334,12 +5334,21 @@ fn emit_metric_wire_type_inferred_events(
         // metric_name comes via JSON body from the operator's browser)
         // use ?-Debug formatting so a newline / ANSI escape in the
         // value cannot inject a fake log line (C-1 iter-3 P2 pattern).
+        //
+        // Iter-2 review MED-8: extend the same ?-Debug discipline to
+        // `application_id` and `device_id`. They ARE validated upstream
+        // by validate_path_application_id / validate_path_device_id
+        // (control chars rejected with 400 + audit), but the iter-1
+        // HIGH-4 doctrine ("EVERY audit-emit field consuming
+        // upstream-provided data uses ?-Debug or sanitisation by
+        // default") applies regardless — a future validator regression
+        // would silently re-open the injection sink. Defence-in-depth.
         info!(
             event = "metric_wire_type_inferred",
             source = "web_picker",
             site = %site,
-            application_id = %application_id,
-            device_id = %device_id,
+            application_id = ?application_id,
+            device_id = ?device_id,
             chirpstack_metric_name = ?m.chirpstack_metric_name,
             metric_name = ?m.metric_name,
             inferred_type = inferred,

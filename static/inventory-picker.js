@@ -178,12 +178,24 @@
     if (inputEl.dataset.opcgwEditedAttached === '1') return;
     inputEl.dataset.opcgwEditedAttached = '1';
     // Iter-1 review MED — listen to `input` rather than `keydown`. The
-    // `input` event fires only when the value actually changes (cover
-    // context-menu paste, drag-drop, autofill, and IME composition) and
-    // does NOT fire for arrow keys / Tab / modifier keys (which would
-    // false-positive the edited flag on keydown).
+    // `input` event fires on actual value changes (covering paste,
+    // drag-drop, IME composition) and does NOT fire for arrow keys /
+    // Tab / modifier keys that wouldn't change the value.
+    //
+    // Iter-2 review HIGH-4 fix: comparing against the last
+    // picker-populated value (recorded by `recordPickerPopulation`
+    // below) ensures that browser-autofill restoring the picker's own
+    // pre-fill does NOT false-positive the edited flag. Only a value
+    // that genuinely diverges from what the picker last set is
+    // considered operator-edited intent.
     inputEl.addEventListener('input', function () {
-      inputEl.dataset.opcgwEdited = '1';
+      const populated = inputEl.dataset.opcgwLastPopulated;
+      // If no picker-populate has happened yet, ANY input is operator
+      // intent (the field started empty; the operator typed). If a
+      // populate HAS happened, only divergence from that value counts.
+      if (populated === undefined || (inputEl.value || '') !== populated) {
+        inputEl.dataset.opcgwEdited = '1';
+      }
     });
   }
 
@@ -194,7 +206,17 @@
   function resetEditedFlag(inputEl) {
     if (inputEl && inputEl.dataset) {
       delete inputEl.dataset.opcgwEdited;
+      delete inputEl.dataset.opcgwLastPopulated;
     }
+  }
+
+  /// Record the value the picker just programmatically set on the
+  /// input. Subsequent `input` events (including browser-autofill
+  /// restorations of the SAME value) are then ignored by the edited
+  /// heuristic; only a divergent value counts as operator intent.
+  function recordPickerPopulation(inputEl, value) {
+    if (!inputEl || !inputEl.dataset) return;
+    inputEl.dataset.opcgwLastPopulated = String(value || '');
   }
 
   // -------------------------------------------------------------------
@@ -216,6 +238,7 @@
       attach: attachEditedFlag,
       has: hasEditedFlag,
       reset: resetEditedFlag,
+      recordPickerPopulation: recordPickerPopulation,
     },
   };
 })();
