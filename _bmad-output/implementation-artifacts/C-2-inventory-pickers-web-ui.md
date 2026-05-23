@@ -5,7 +5,7 @@
 | Story key       | `C-2-inventory-pickers-web-ui`                                                                              |
 | Epic            | C — Auto-Discovery and Web-First Configuration (post-v2.0 GA)                                               |
 | FRs             | none (Epic C is post-PRD)                                                                                   |
-| Status          | review                                                                                                      |
+| Status          | done                                                                                                        |
 | Created         | 2026-05-21                                                                                                  |
 | Source epic     | `_bmad-output/planning-artifacts/epics.md § Epic C § Story C.2`                                             |
 | Depends on      | C-1 (`/api/inventory/{applications,devices,uplinks}` endpoints must be live)                                |
