@@ -1243,12 +1243,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             Err(e) => {
                                 let knob = e.changed_knob().unwrap_or("");
+                                // Iter-1 review E-M1: Debug-format the
+                                // error (`?e`) instead of Display
+                                // (`%e`) so any operator-controlled
+                                // field value embedded in the error
+                                // message (e.g. an `application_id`
+                                // hand-edited with a TOML multi-line
+                                // string containing `\n` or other
+                                // control chars) is escaped before
+                                // landing in the structured-log line.
+                                // Matches the iter-2 C-1 / 9-5 "new
+                                // audit-emit field is a new injection
+                                // sink" finding-class hardening.
                                 warn!(
                                     event = "config_reload_failed",
                                     trigger = "sighup",
                                     reason = e.reason(),
                                     changed_knob = knob,
-                                    error = %e,
+                                    error = ?e,
                                     "Configuration reload failed"
                                 );
                                 // Story C-3 AC#9: if the validation
@@ -1267,7 +1279,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         trigger = "sighup",
                                         reason = "conflict",
                                         conflict_kind = "duplicate",
-                                        error = %e,
+                                        error = ?e,
                                         "Configuration reload rejected: duplicate at same scope-level"
                                     );
                                 }

@@ -124,13 +124,31 @@ impl ReloadError {
     /// conflict_kind="duplicate"` per Story C-3 AC#9 in addition to the
     /// general `config_reload_failed` line.
     ///
-    /// Substring-matching on `"duplicated"` is acceptable here because
-    /// the word is uniquely local to the seven `errors.push(format!(...
-    /// duplicated ...))` sites in `src/config.rs` (the `seen_*`
-    /// HashSet checks). Any future validator change that adds a non-
-    /// duplicate error containing this word must update this method.
+    /// **Iter-1 review B-H1 hardening** — the previous bare-word
+    /// match `msg.contains("duplicated")` would have false-positived
+    /// on any non-duplicate validation error that incidentally
+    /// interpolated an operator-controlled field value containing the
+    /// literal substring (e.g. an operator naming an application
+    /// `application_id="duplicated-sensors"`). This is exactly the
+    /// "substring-matcher attribution leak" finding-class flagged by
+    /// the C-1 iter-3 review. Tightened to two full multi-word
+    /// phrases that are uniquely local to the six
+    /// `errors.push(format!(... is duplicated {within,across} ...))`
+    /// sites in `src/config.rs::validate()` (the `seen_*` HashSet
+    /// checks for application_id / device_id / metric_name /
+    /// chirpstack_metric_name / command_id / command_name).
+    ///
+    /// Any future validator change that adds a new duplicate-class
+    /// error MUST use the same phrase wording (`"is duplicated within
+    /// '{scope}'"` for per-scope checks or `"is duplicated across
+    /// {collection}"` for cross-scope checks).
     pub fn is_duplicate(&self) -> bool {
-        matches!(self, Self::Validation(msg) if msg.contains("duplicated"))
+        matches!(
+            self,
+            Self::Validation(msg)
+                if msg.contains("is duplicated within ")
+                    || msg.contains("is duplicated across ")
+        )
     }
 }
 
@@ -1649,24 +1667,60 @@ mod tests {
     }
 
     /// Story C-3 AC#9 — `is_duplicate()` is true only for `Validation`
-    /// errors whose underlying message contains the `"duplicated"` word
-    /// produced by the `seen_*` HashSet checks in `AppConfig::validate()`.
+    /// errors whose underlying message contains the full phrase
+    /// `"is duplicated within "` or `"is duplicated across "` produced
+    /// by the six `seen_*` HashSet checks in `AppConfig::validate()`.
     /// Drives the `conflict_kind="duplicate"` field on the hot-reload
     /// rejected event.
+    ///
+    /// **Iter-1 review B-H1 + E-L2 hardening** — the previous
+    /// implementation matched on bare `"duplicated"`, which would have
+    /// false-positived on operator-controlled field values containing
+    /// the substring. This test now also asserts the negative cases.
     #[test]
     fn reload_error_is_duplicate_classifies_validation_kind() {
-        // Exact wording from the validator's per-application duplicate
-        // device_id check (src/config.rs:1841).
-        let dup = ReloadError::Validation(
-            "application[0].device[1].device_id: 'dev-1' is duplicated within application 'app-1'"
-                .into(),
-        );
-        assert!(dup.is_duplicate(), "duplicate-class validation must classify");
+        // Exact wording from each of the six validator duplicate-class
+        // sites (src/config.rs:1804 / 1841 / 1889 / 1901 / 1950 / 1960).
+        let cases_must_match = [
+            "application[0].application_id: 'app-1' is duplicated across application_list",
+            "application[0].device[1].device_id: 'dev-1' is duplicated within application 'app-1'",
+            "application[0].device[0].read_metric[1].metric_name: 'temp' is duplicated within device.read_metric_list",
+            "application[0].device[0].read_metric[1].chirpstack_metric_name: 'temp' is duplicated within device.read_metric_list",
+            "application[0].device[0].command[1].command_id: 1 is duplicated within device.device_command_list",
+            "application[0].device[0].command[1].command_name: 'reboot' is duplicated within device.device_command_list",
+        ];
+        for msg in cases_must_match {
+            let err = ReloadError::Validation(msg.into());
+            assert!(err.is_duplicate(), "must classify as duplicate: {msg}");
+        }
 
-        // Other Validation errors (e.g. empty-field, out-of-range) must
-        // NOT classify as duplicates.
-        let other = ReloadError::Validation("application[0].application_name: must not be empty".into());
-        assert!(!other.is_duplicate());
+        // Negative cases — non-duplicate validation errors must NOT
+        // classify as duplicates, even when they incidentally contain
+        // the literal substring "duplicated" via operator-controlled
+        // field values. This is the C-1 "substring-matcher attribution
+        // leak" finding-class regression-guard.
+        let cases_must_not_match = [
+            // Empty-field error.
+            "application[0].application_name: must not be empty",
+            // Out-of-range error.
+            "opcua.stale_threshold_seconds: must be in range (0, 86400]",
+            // Operator names an application with the literal word
+            // "duplicated" — must NOT trigger a false-positive
+            // is_duplicate() classification.
+            "application[0].application_name: 'duplicated-sensors-pilot' must not exceed 64 characters",
+            // Operator's device_name happens to contain "duplicated".
+            "application[0].device[0].device_name: 'Sensor (duplicated unit replaced)' must not be empty",
+            // Adjacent word — "duplicated" appears without the
+            // surrounding "is ... within|across" framing.
+            "some-future-error: the value was already duplicated upstream",
+        ];
+        for msg in cases_must_not_match {
+            let err = ReloadError::Validation(msg.into());
+            assert!(
+                !err.is_duplicate(),
+                "must NOT classify as duplicate (substring-leak guard): {msg}"
+            );
+        }
 
         // Io + RestartRequired are never duplicates.
         assert!(!ReloadError::Io("file missing".into()).is_duplicate());

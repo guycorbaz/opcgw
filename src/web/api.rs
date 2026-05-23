@@ -71,12 +71,23 @@ pub struct ErrorResponse {
     /// on the duplicate-rejection wire shape so picker UIs can surface
     /// inline errors near the conflicting field. Skipped from the
     /// wire when `None`; existing callers see no shape change.
+    ///
+    /// **Iter-1 review B-M1 hardening**: visibility constrained to
+    /// `pub(crate)` so external callers (binary crates, future
+    /// integration tests via `opcgw::web::api::ErrorResponse { ... }`)
+    /// cannot construct an instance with mismatched invariants
+    /// (e.g. `error: "internal server error"` paired with
+    /// `field: Some(...)`). The wire-shape contract documented in
+    /// `docs/web-api.md` is: `error == "duplicate"` IFF
+    /// `field/value/scope` are all `Some`. Routing this through the
+    /// `duplicate()` / `with_hint()` / `from_error()` constructors
+    /// preserves the invariant at construction time.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub field: Option<String>,
+    pub(crate) field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub value: Option<String>,
+    pub(crate) value: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
+    pub(crate) scope: Option<String>,
 }
 
 impl ErrorResponse {
@@ -2828,10 +2839,54 @@ pub async fn update_device(
         validate_metric_mapping_fields(idx, m, &addr)?;
     }
 
+    // Iter-1 review B-M6: existence pre-check FIRST. Without this
+    // ordering, a PUT to a nonexistent app/device with a duplicate
+    // metric_name body returned 409 (duplicate) instead of 404 (not
+    // found), violating the CRUD-contract convention that 404 takes
+    // precedence over body-content errors (e.g. Story 9-5's POST
+    // path-validation-before-body-validation pattern).
+    //
+    // Pre-check via live config — application + device must exist
+    // BEFORE we acquire the writer lock.
+    {
+        let live = state.config_reload.subscribe();
+        let cfg = (*live.borrow()).clone();
+        let app = cfg
+            .application_list
+            .iter()
+            .find(|a| a.application_id == application_id);
+        let app = match app {
+            Some(a) => a,
+            None => {
+                warn!(
+                    event = "device_crud_rejected",
+                    reason = "application_not_found",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    source_ip = %addr.ip(),
+                    "update_device: parent application not found"
+                );
+                return Err(application_not_found_response());
+            }
+        };
+        if !app.device_list.iter().any(|d| d.device_id == device_id) {
+            warn!(
+                event = "device_crud_rejected",
+                reason = "device_not_found",
+                application_id = %application_id,
+                device_id = %device_id,
+                source_ip = %addr.ip(),
+                "update_device: device not found under application"
+            );
+            return Err(device_not_found_response());
+        }
+    }
+
     // Story C-3 AC#6: pre-flight per-device duplicate check on
     // chirpstack_metric_name + metric_name (PUT-replaces semantics —
     // same hazard as POST). See create_device's identical block for
-    // the rationale: clean 409 here vs reload-time 422.
+    // the rationale: clean 409 here vs reload-time 422. Runs AFTER
+    // the existence pre-check above (iter-1 B-M6 ordering fix).
     {
         let mut seen_chirp = std::collections::HashSet::new();
         let mut seen_display = std::collections::HashSet::new();
@@ -2880,42 +2935,6 @@ pub async fn update_device(
                 )
                     .into_response());
             }
-        }
-    }
-
-    // Pre-check via live config — application + device must exist
-    // BEFORE we acquire the writer lock.
-    {
-        let live = state.config_reload.subscribe();
-        let cfg = (*live.borrow()).clone();
-        let app = cfg
-            .application_list
-            .iter()
-            .find(|a| a.application_id == application_id);
-        let app = match app {
-            Some(a) => a,
-            None => {
-                warn!(
-                    event = "device_crud_rejected",
-                    reason = "application_not_found",
-                    application_id = %application_id,
-                    device_id = %device_id,
-                    source_ip = %addr.ip(),
-                    "update_device: parent application not found"
-                );
-                return Err(application_not_found_response());
-            }
-        };
-        if !app.device_list.iter().any(|d| d.device_id == device_id) {
-            warn!(
-                event = "device_crud_rejected",
-                reason = "device_not_found",
-                application_id = %application_id,
-                device_id = %device_id,
-                source_ip = %addr.ip(),
-                "update_device: device not found under application"
-            );
-            return Err(device_not_found_response());
         }
     }
 
@@ -4342,6 +4361,56 @@ pub async fn update_command(
         }
     };
 
+    // Iter-1 review E-H1: pre-flight duplicate `command_name` check.
+    // Mirrors create_command's symmetric guard (src/web/api.rs ~L3858);
+    // without this, a PUT renaming a command to a sibling's name passes
+    // field validation, writes to disk, and only fails at reload-time
+    // (`reason="validation"` → no `conflict_kind="duplicate"` audit
+    // field). C-3's audit contract requires a clean 409 + structured
+    // body at the CRUD layer.
+    {
+        let cmd_array = doc
+            .get("application")
+            .and_then(|v| v.as_array_of_tables())
+            .and_then(|arr| arr.get(app_idx))
+            .and_then(|tbl| tbl.get("device"))
+            .and_then(|v| v.as_array_of_tables())
+            .and_then(|arr| arr.get(dev_idx))
+            .and_then(|tbl| tbl.get("command"))
+            .and_then(|v| v.as_array_of_tables());
+        if let Some(arr) = cmd_array {
+            for (idx, t) in arr.iter().enumerate() {
+                if idx == cmd_idx {
+                    continue; // the command being renamed itself
+                }
+                let existing_name = t.get("command_name").and_then(|v| v.as_str());
+                if existing_name == Some(command_name.as_str()) {
+                    warn!(
+                        event = "command_crud_rejected",
+                        reason = "conflict",
+                        conflict_kind = "duplicate",
+                        application_id = %application_id,
+                        device_id = %device_id,
+                        command_id = command_id,
+                        command_name = ?command_name,
+                        source_ip = %addr.ip(),
+                        "update_command: rename target conflicts with sibling command_name within device"
+                    );
+                    return Err((
+                        StatusCode::CONFLICT,
+                        Json(ErrorResponse::duplicate(
+                            "command_name",
+                            command_name.clone(),
+                            format!("device:{}", device_id),
+                            "pick a different command_name, or DELETE the conflicting sibling first",
+                        )),
+                    )
+                        .into_response());
+                }
+            }
+        }
+    }
+
     // Mutate the command table in place — preserves any sibling
     // sub-table (none today; defensive forward compatibility).
     {
@@ -5365,13 +5434,20 @@ fn reload_error_response(
     // Iter-1 review HIGH H1: dispatch event-name literal by `resource`
     // so reload-validation/RestartRequired/Io failures from device
     // handlers emit `device_crud_rejected`, not `application_*`.
+    //
+    // Iter-1 review E-M1: Debug-format the error (`?e`) instead of
+    // Display (`%e`) so any operator-controlled field value embedded
+    // in the validator's error message (e.g. an `application_id`
+    // hand-edited with TOML multi-line strings containing `\n` or
+    // other control chars) is escaped before landing in the
+    // structured-log line. Parallel hardening to src/main.rs:1251.
     match resource {
         "device" => warn!(
             event = "device_crud_rejected",
             reason = %reason,
             site = %site,
             source_ip = %addr.ip(),
-            error = %e,
+            error = ?e,
             "CRUD reload failure"
         ),
         "application" => warn!(
@@ -5379,7 +5455,15 @@ fn reload_error_response(
             reason = %reason,
             site = %site,
             source_ip = %addr.ip(),
-            error = %e,
+            error = ?e,
+            "CRUD reload failure"
+        ),
+        "command" => warn!(
+            event = "command_crud_rejected",
+            reason = %reason,
+            site = %site,
+            source_ip = %addr.ip(),
+            error = ?e,
             "CRUD reload failure"
         ),
         _ => warn!(
@@ -5388,9 +5472,36 @@ fn reload_error_response(
             resource = resource,
             site = %site,
             source_ip = %addr.ip(),
-            error = %e,
+            error = ?e,
             "CRUD reload failure"
         ),
+    }
+    // Iter-1 review E-H2: if the validation failure is duplicate-
+    // class, emit the disambiguating `conflict_kind="duplicate"`
+    // audit event alongside the generic reload-failure line above.
+    // Without this, audit consumers grepping
+    // `<resource>_crud_rejected reason="conflict" conflict_kind=
+    // "duplicate"` would miss the post-write-reload-time path
+    // (covers the rare race where a duplicate sneaks in after
+    // pre-flight — e.g. concurrent operator hand-edit, or a
+    // duplicate that pre-flight cannot see because it cuts across
+    // applications/devices the handler doesn't iterate).
+    if e.is_duplicate() {
+        let event_name = match resource {
+            "device" => "device_crud_rejected",
+            "application" => "application_crud_rejected",
+            "command" => "command_crud_rejected",
+            _ => "crud_rejected",
+        };
+        warn!(
+            event = event_name,
+            reason = "conflict",
+            conflict_kind = "duplicate",
+            site = %site,
+            source_ip = %addr.ip(),
+            error = ?e,
+            "CRUD reload rejected: duplicate at same scope-level (post-write detection)"
+        );
     }
     let body = match reason {
         "validation" => ErrorResponse::with_hint(

@@ -714,6 +714,133 @@ async fn duplicate_rejections_emit_conflict_kind_duplicate_across_resource_types
 }
 
 // ---------------------------------------------------------------------------
+// AC#12 + iter-1 review M4 — the `malformed_existing_block` audit
+// branch (16 sites in src/web/api.rs) must carry the disambiguating
+// `conflict_kind="malformed_existing_block"` field, just like the
+// duplicate branch carries `conflict_kind="duplicate"`. Without
+// dedicated coverage, an iter-N+1 refactor that drops or renames
+// this field stays green.
+//
+// **Triggering strategy:** spawn the fixture with a valid TOML so
+// AppConfig::from_path passes, then DIRECTLY rewrite config.toml on
+// disk (bypassing the writer lock) to a TOML whose toml-edit shape
+// is structurally valid but has a `[[application.device]]` block
+// missing the required `device_id` field. The next CRUD call reads
+// the on-disk file via toml_edit (lenient parser) and the pre-flight
+// duplicate-check loop's malformed-block guard at src/web/api.rs:2484
+// emits the event before returning 409.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+#[serial(captured_logs)]
+async fn malformed_existing_block_rejection_emits_conflict_kind_malformed_existing_block() {
+    let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
+    let client = reqwest::Client::new();
+    clear_captured_logs();
+
+    // Direct-write a TOML where app-1's device block lacks device_id.
+    // AppConfig::from_path would reject this at startup (figment
+    // schema validation), but the create_device pre-flight uses
+    // toml_edit's lenient parse — the missing-field guard at
+    // src/web/api.rs:~2484 fires before any further checks.
+    let allowed_origins_line = format!("allowed_origins = [\"{}\"]", fx.base_url);
+    let malformed_toml = format!(
+        r#"# malformed-block scenario seed
+[global]
+debug = true
+prune_interval_minutes = 60
+command_delivery_poll_interval_secs = 5
+command_delivery_timeout_secs = 60
+command_timeout_check_interval_secs = 10
+history_retention_days = 7
+
+[chirpstack]
+server_address = "http://127.0.0.1:18080"
+api_token = "SECRET_SENTINEL_TOKEN_DO_NOT_LEAK"
+tenant_id = "00000000-0000-0000-0000-000000000000"
+polling_frequency = 10
+retry = 1
+delay = 1
+list_page_size = 100
+
+[opcua]
+application_name = "test"
+application_uri = "urn:test"
+product_uri = "urn:test:product"
+diagnostics_enabled = false
+hello_timeout = 5
+host_ip_address = "127.0.0.1"
+host_port = 4855
+create_sample_keypair = true
+certificate_path = "own/cert.der"
+private_key_path = "private/private.pem"
+trust_client_cert = false
+check_cert_time = false
+pki_dir = "./pki"
+user_name = "opcua-user"
+user_password = "SECRET_SENTINEL_PASSWORD_DO_NOT_LEAK"
+stale_threshold_seconds = 120
+
+[storage]
+database_path = "data/opcgw.db"
+retention_days = 7
+
+[web]
+port = 8080
+bind_address = "127.0.0.1"
+enabled = false
+auth_realm = "opcgw-c-3"
+{allowed_origins_line}
+
+[[application]]
+application_name = "Building Sensors"
+application_id = "app-1"
+
+  [[application.device]]
+  # device_id INTENTIONALLY MISSING — malformed-block guard target.
+  device_name = "MalformedDev"
+"#
+    );
+    std::fs::write(&fx.config_path, &malformed_toml).expect("write malformed");
+
+    // POST a new device under app-1 — the pre-flight reads the
+    // on-disk TOML, finds the malformed sibling, and emits the
+    // malformed_existing_block audit event before returning 409.
+    let body = r#"{"device_id":"dev-new","device_name":"New","read_metric_list":[]}"#;
+    let resp = json_request(
+        &client,
+        reqwest::Method::POST,
+        &fx.url("/api/applications/app-1/devices"),
+        Some(&fx.base_url),
+        Some(body),
+    )
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let logs = captured_logs();
+    let malformed_count = logs
+        .matches("conflict_kind=\"malformed_existing_block\"")
+        .count();
+    assert!(
+        malformed_count >= 1,
+        "expected ≥1 conflict_kind=\"malformed_existing_block\" emit; got {malformed_count}; logs:\n{logs}"
+    );
+    // Belt-and-braces: also assert the event name + reason fields.
+    assert!(
+        logs.contains("event=\"device_crud_rejected\""),
+        "expected device_crud_rejected event; logs:\n{logs}"
+    );
+    assert!(
+        logs.contains("reason=\"conflict\""),
+        "expected reason=conflict; logs:\n{logs}"
+    );
+
+    fx.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
 // AC#9 — TOML hot-reload (Story 9-7's reload primitive) refuses to
 // apply a reload that introduces a duplicate at any level. Operator
 // hand-edits config.toml to add a duplicate device_id, the file-
@@ -743,27 +870,30 @@ async fn hot_reload_rejects_duplicate_device_id_and_preserves_in_memory_snapshot
     let live_before = rx.borrow().clone();
     let tenant_before = live_before.chirpstack.tenant_id.clone();
 
-    // Hand-edit: append a duplicate [[application.device]] block under
-    // app-1 with the same device_id="dev-1" already in the seed. This
-    // triggers the per-application device_id HashSet check in
-    // AppConfig::validate() (src/config.rs:1839).
-    let mutated = format!(
-        "{APP_TOML_TEMPLATE}\n  [[application.device]]\n  device_id = \"dev-1\"\n  device_name = \"DupAppended\"\n"
-    );
-    // Sanity: the appended block lands under the LAST [[application]]
-    // (app-2) in TOML's serial parse, so to test a within-app-1
-    // duplicate we rebuild the whole file with the duplicate inserted
-    // INTO app-1's block instead.
+    // Hand-edit: inject a duplicate [[application.device]] block
+    // INTO app-1 (so the same DevEUI appears twice within ONE
+    // application — the per-application device_id HashSet check in
+    // AppConfig::validate() at src/config.rs:1839). The marker
+    // replacement targets the start of the second `[[application]]`
+    // table so the injected device block lands under app-1 (the
+    // preceding table).
     let dup_within_app1 = APP_TOML_TEMPLATE.replace(
         "[[application]]\napplication_name = \"Field Probes\"",
         "  [[application.device]]\n  device_id = \"dev-1\"\n  device_name = \"DupInApp1\"\n\n[[application]]\napplication_name = \"Field Probes\"",
     );
-    // Belt-and-braces — if the marker shift fails (e.g. template
-    // wording drifts), fall back to the simpler append (still a
-    // duplicate-class failure — same DevEUI across applications was
-    // pre-C-3 a violation; post-C-3 it's allowed. So we use a marker
-    // edit that produces a duplicate within ONE application).
-    let _ = mutated; // silence unused warning if marker path succeeds
+    // Iter-1 review B-H2: explicitly assert the marker-replacement
+    // actually changed the template. If the marker drifts in a future
+    // edit, this would otherwise silently no-op (dup_within_app1 ==
+    // APP_TOML_TEMPLATE) and the reload would succeed → expect_err
+    // panics with a misleading message instead of pinpointing the
+    // template-drift root cause. The assertion below makes the failure
+    // mode obvious.
+    assert_ne!(
+        dup_within_app1, APP_TOML_TEMPLATE,
+        "template-marker drift: the .replace() call no-oped — the marker text \
+         no longer matches APP_TOML_TEMPLATE. Update the marker in this test \
+         to match the current template wording before re-running."
+    );
     std::fs::write(&config_path, &dup_within_app1).expect("write mutated");
 
     let err = handle

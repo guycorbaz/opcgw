@@ -1837,9 +1837,25 @@ impl AppConfig {
                             // ALLOWED (see seen_device_ids declaration
                             // above for the full rationale).
                             if seen_device_ids.contains(&device.device_id) {
+                                // Iter-1 review B-H3: when application_id
+                                // is empty (operator left it blank +
+                                // duplicated a device_id in the same
+                                // pass), the error message would have
+                                // read "...within application ''" which
+                                // is confusing UX. Fall back to the
+                                // structural app_context (e.g.
+                                // `application[0]`) when application_id
+                                // is empty, matching the convention used
+                                // for every other validation error in
+                                // this loop.
+                                let app_scope: String = if app.application_id.is_empty() {
+                                    app_context.clone()
+                                } else {
+                                    format!("application '{}'", app.application_id)
+                                };
                                 errors.push(format!(
-                                    "{}.device_id: '{}' is duplicated within application '{}'",
-                                    dev_context, device.device_id, app.application_id
+                                    "{}.device_id: '{}' is duplicated within {}",
+                                    dev_context, device.device_id, app_scope
                                 ));
                             } else {
                                 seen_device_ids.insert(device.device_id.clone());

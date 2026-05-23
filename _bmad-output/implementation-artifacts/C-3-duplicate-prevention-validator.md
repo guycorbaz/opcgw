@@ -264,6 +264,41 @@ Audit consumers that grep `reason="conflict"` continue to work; consumers that w
   - [ ] 8.4 Manual smoke test: attempt to add a duplicate via picker (C-2 must be landed); verify the inline error surfacing.
   - [ ] 8.5 Commit message: `Story C-3: Server-side duplicate-prevention validator - Implementation Complete` + `Refs #<issue>`.
 
+### Review Findings — iter-1 (2026-05-23, commit `5f5b9a7`)
+
+3 parallel reviewers (Blind Hunter / Edge Case Hunter / Acceptance Auditor) produced ~38 raw findings → 26 unique after dedup → triaged as: 12 PATCH, 3 DECISION-NEEDED, 3 DEFER (LOW), 8 DISMISS. Acceptance Auditor verdict: `ELIGIBLE-FOR-DONE` (all HIGH ACs satisfied).
+
+**DECISION-NEEDED → DEFERRED with user approval (2026-05-23):**
+
+- [x] [Review][Decision→Defer] [MEDIUM] tracing_test global_buf race in audit-taxonomy test [tests/web_duplicate_prevention.rs:1817] — Guy approved defer; pre-existing pattern across 4+ test files. Logged for future tests/common cleanup alongside #102.
+- [x] [Review][Decision→Defer] [MEDIUM] No length cap on `value`/`scope` echo in ErrorResponse::duplicate [src/web/api.rs:107-133] — Guy approved defer; body-size guards belong at the axum layer, not in ErrorResponse. Truncation here would hurt operator debuggability.
+- [x] [Review][Decision→Defer] [MEDIUM] No tests for 4 update/delete TOML-state duplicate paths [src/web/api.rs:1746,1976,3016,3294] — Guy approved defer; paths fire only on pre-existing TOML corruption; covered by per-file CRUD suites; AC#16 ≥12 floor met.
+
+**PATCH** (applied in iter-1 fix commit):
+
+- [x] [Review][Patch] [HIGH] update_command lacks duplicate-command_name pre-flight — silent regression to reload-time 422 [src/web/api.rs:4039-4386] — applied: new pre-flight block at update_command after cmd_idx resolution, iterates siblings (skipping cmd_idx) and emits structured 409 + audit.
+- [x] [Review][Patch] [HIGH] Reload-after-CRUD path missing `conflict_kind="duplicate"` emit when post-write validate catches a latent duplicate [src/web/api.rs:1519 + 8 sibling sites] — applied: centralized in `reload_error_response`; all 9 CRUD reload-result Err sites now emit `<resource>_crud_rejected reason=conflict conflict_kind=duplicate` when `e.is_duplicate()`. Bonus E-M1 hardening: `error = ?e` (Debug) in same function.
+- [x] [Review][Patch] [HIGH] `is_duplicate()` substring-matcher leak — phrase-match `"is duplicated within "` / `"is duplicated across "` (multi-word) instead of bare `"duplicated"` [src/config_reload.rs:117-134] — applied; doc-comment rewritten with full B-H1 mitigation rationale.
+- [x] [Review][Patch] [HIGH] Hot-reload test vacuous — marker-replacement may no-op silently [tests/web_duplicate_prevention.rs:1925-1937] — applied: `assert_ne!(dup_within_app1, APP_TOML_TEMPLATE, "template-marker drift: ...")` guards the replace().
+- [x] [Review][Patch] [HIGH] `application_id` empty interpolated into "duplicated within application ''" error message [src/config.rs:1841] — applied: fall back to `app_context` (e.g. `application[0]`) when `application_id` is empty; new is_duplicate() phrase-match still applies.
+- [x] [Review][Patch] [MEDIUM] `error = %e` (Display) in new audit emit → log-injection sink via TOML multi-line strings [src/main.rs:1251,1270] — applied: both sites switched to `error = ?e` (Debug-format escapes control chars).
+- [x] [Review][Patch] [MEDIUM] ErrorResponse new fields `pub` but constructor `pub(crate)` — external callers can break invariant [src/web/api.rs:65-80] — applied: visibility constrained to `pub(crate)` with doc explaining the wire-shape invariant.
+- [x] [Review][Patch] [MEDIUM] update_device pre-flight duplicate-check runs BEFORE existence pre-check → 409 instead of 404 for nonexistent device [src/web/api.rs:2716-2828] — applied: existence pre-check moved BEFORE the pre-flight duplicate-check.
+- [x] [Review][Patch] [MEDIUM] Audit-taxonomy test asserts only `conflict_kind="duplicate"` — extend with `conflict_kind="malformed_existing_block"` for taxonomy coverage [tests/web_duplicate_prevention.rs:711-714] — applied: new dedicated test `malformed_existing_block_rejection_emits_conflict_kind_malformed_existing_block` direct-writes a malformed-block TOML and asserts the audit emit.
+- [x] [Review][Patch] [LOW] Removed-comment doc drift on "across applications" wording [src/config.rs:1830] — DISMISSED on second reading; the comment is functionally accurate.
+- [x] [Review][Patch] [LOW] doc-comment in `is_duplicate()` says "seven sites"; actual count is six [src/config_reload.rs:128-130] — implicitly fixed by the HIGH-3 doc rewrite (new doc cites six sites + names each).
+- [x] [Review][Patch] [LOW] No negative-case unit test for `is_duplicate()` against non-duplicate validation errors [src/config_reload.rs::tests] — applied: unit test extended with 5 negative cases including the operator-controlled `application_id="duplicated-sensors-pilot"` substring-leak regression-guard.
+
+**Iter-1 test gate:** 1435/0/65 (was 1434 pre-iter-1; +1 new from MEDIUM-4 test); clippy `--all-targets -- -D warnings` clean.
+
+**DEFER** (LOW only — pre-existing or out-of-scope):
+
+- [x] [Review][Defer] [LOW] No CI guard for `conflict_kind` coverage at all 30 sites [src/web/api.rs] — deferred, would need a `ConflictKind` enum refactor; pre-existing pattern.
+- [x] [Review][Defer] [LOW] No test pins `ErrorResponse` skip-serializing behaviour for legacy non-duplicate callers [src/web/api.rs:65-80] — deferred, defensive coverage; trust serde derive.
+- [x] [Review][Defer] [LOW] delete_application "empty_application_list" path stale post-C-0 (validator now accepts empty list) [src/web/api.rs:1894-1911] — deferred, pre-existing inconsistency; tracked separately.
+
+**DISMISSED** (8): byte-exact HashSet whitespace concern (every layer is bytewise consistent; no actual collision); SIGHUP handler integration test (unit + reload() coverage adequate; subprocess test out of scope); error attribution UX when both metric_name and chirpstack_metric_name dup'd (acceptable); empty `read_metric_list` pre-flight assertion (already exercised by AC#5 test); AC#8 dedicated cross-device same-metric_name test (covered by AC#7 via same code path); string-vs-int wire shape for command_id `value` (intentional schema homogeneity); `reason="conflict"` shared across 4 sub-kinds (documented in logging.md); AC#20 strict-zero `src/main.rs` (auditor explicitly approved — operationally required by AC#9).
+
 ---
 
 ## Dev Notes
