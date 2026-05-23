@@ -291,6 +291,43 @@ Audit consumers that grep `reason="conflict"` continue to work; consumers that w
 
 **Iter-1 test gate:** 1435/0/65 (was 1434 pre-iter-1; +1 new from MEDIUM-4 test); clippy `--all-targets -- -D warnings` clean.
 
+### Review Findings — iter-2 (2026-05-23, commit `4ad945c`)
+
+3 parallel reviewers re-ran against the iter-1 patch diff (~701 lines). Acceptance Auditor verdict: `ELIGIBLE-FOR-DONE` (iter-1 patches all still satisfy ACs). Blind + Edge caught **real patch-chain regressions** — 20th doctrine-validation streak intact.
+
+| Source | Findings |
+|---|---|
+| Blind Hunter | 9 (3 HIGH + 5 MEDIUM + 1 LOW) |
+| Edge Case Hunter | 9 (0 HIGH + 5 MEDIUM + 4 LOW) |
+| Acceptance Auditor | ELIGIBLE-FOR-DONE + 2 SATISFIED_WITH_NOTE |
+| **Unified (deduped)** | **7 PATCH + 6 DEFER (LOW) + 2 DISMISS** |
+
+**PATCH iter-2 (all applied):**
+
+- [x] [Review][Patch] [HIGH-1] CRITICAL — Wire-shape inconsistency in `reload_error_response::is_duplicate` branch: emitted `conflict_kind="duplicate"` audit but returned `ErrorResponse::with_hint` body (NOT `::duplicate`). Iter-1 patched the audit but forgot the body. **Fix:** added `ReloadError::as_duplicate_info()` structural parser (anchors on `": '"` + `"' is duplicated within|across "`) that extracts `(field, value)` from the validator's known six message patterns. `reload_error_response` now uses parsed info to build proper `ErrorResponse::duplicate(field, value, "reload", hint)` body + status 409. `scope` is the literal `"reload"` to disambiguate from pre-flight scopes; documented in logging.md.
+- [x] [Review][Patch] [HIGH-2] Centralized post-write reload duplicate emit was untested. **Fix:** new integration test `post_write_reload_duplicate_returns_structured_409_with_conflict_kind_duplicate` direct-writes a pre-existing-duplicate TOML, POSTs a fresh app, asserts 409 + structured body + single audit emit + `duplicate_field`/`duplicate_value` sibling fields.
+- [x] [Review][Patch] [HIGH-3 + BH-M1] update_command pre-flight 2nd-sibling false-negative + missing-command_name None-arm. **Fix:** extended the existing iter-1 pre-flight loop with two defensive guards mirroring create_command — (a) sibling sharing `cmd_idx`'s `command_id` → `malformed_existing_block` 409, (b) missing/non-string sibling `command_name` → `malformed_existing_block` 409. Both fire BEFORE the rename-target equality check.
+- [x] [Review][Patch] [BH-M2] Attribution drift when `application_id` is empty AND a device_id duplicates. **Fix:** skip the per-application device_id duplicate check entirely when `app.application_id.is_empty()` — the empty-id error already blocks reload; adding the duplicate error misattributes the operator-actionable root cause. Reverts iter-1 HIGH-5's `app_context` fallback (no longer reachable) for the clearer suppression behavior.
+- [x] [Review][Patch] [BH-M5] `error = ?e` Debug-format schema drift vs documented `error=<str>` in logging.md. **Fix:** documented the new C-3 emit field-format conventions in `docs/logging.md` (Debug-format rationale + `duplicate_field` / `duplicate_value` sibling fields). Pre-existing emits like `inventory_query_failed` continue to use Display.
+- [x] [Review][Patch] [ECH-MED2] `reload_error_response` emitted TWO audit lines per duplicate-class reload failure (generic + disambiguated). **Fix:** the is_duplicate() branch now early-returns after emitting the SINGLE `conflict_kind="duplicate"` line; the generic emit fires ONLY on non-duplicate validation/io/restart_required errors.
+- [x] [Review][Patch] [ECH-MED3] Hot-reload marker test was still shape-fragile against partial template drift. **Fix:** added 2 structural assertions — `dup_within_app1.contains("DupInApp1")` + `matches("[[application]]").count() == 2` — together pinpointing exactly which marker arm drifts.
+- [x] [Review][Patch] [ECH-MED5] Negative-case test missed the most-likely operator-controlled leak (operator names `application_id="rack-A is duplicated within building-3"` — iter-1 phrase-matcher would have false-positived). **Fix:** structural parser at the now-replaced is_duplicate() makes this case impossible (the quoted-value framing must align). Added 3 negative-case unit tests including this exact operator-controlled scenario.
+
+**DEFER iter-2 (6 LOW, no user-approval needed):**
+
+- [x] [Review][Defer] [LOW] Phrase fragility const refactor — obviated by the structural parser approach in HIGH-1 fix.
+- [x] [Review][Defer] [LOW] event_name lookup string-match typo-prone — deferred, pre-existing helper-extraction opportunity.
+- [x] [Review][Defer] [LOW] update_command pre-flight case-sensitivity not tested — deferred, defensive coverage; validator + pre-flight currently aligned bytewise.
+- [x] [Review][Defer] [LOW] update_device TOCTOU window between live snapshot + writer lock — deferred, pre-existing pattern; iter-1 ordering swap surface-area-shifted the race window without introducing a new bug.
+- [x] [Review][Defer] [LOW] Validator app_scope fallback quote parallelism — obviated by BH-M2 fix (the fallback path is no longer reachable; empty app_id suppresses the dup check entirely).
+- [x] [Review][Defer] [LOW] Deferred-work line numbers stale relative to current state — deferred, descriptive text still uniquely identifies targets.
+
+**DISMISS iter-2 (2):** ECH-MED4 (malformed_existing_block test listener race — based on misreading of architecture; the listener doesn't watch the file system in v1, only reacts to explicit `handle.reload()` calls); BH-M4 (pub(crate) destructure concern — wire shape is still correctly serialized via serde; pattern-match concern is theoretical and not a real defect).
+
+**Iter-2 test gate:** 1437/0/65 (was 1435 pre-iter-2; +2 new tests: `parse_duplicate_info_handles_multi_line_wrapped_format`, `post_write_reload_duplicate_returns_structured_409_with_conflict_kind_duplicate`); clippy `--all-targets -- -D warnings` clean.
+
+**Real-world doctrine validation moment (iter-2):** my own iter-2 integration test `post_write_reload_duplicate_returns_structured_409_with_conflict_kind_duplicate` initially FAILED because the parser couldn't handle the actual multi-line wrapped `ReloadError::Validation` Display format. The unit tests passed (single-line input) but the integration test exercising the real Display chain caught the bug. Pattern: **unit tests with hand-crafted inputs cannot replace integration tests that exercise the real wire format.**
+
 **DEFER** (LOW only — pre-existing or out-of-scope):
 
 - [x] [Review][Defer] [LOW] No CI guard for `conflict_kind` coverage at all 30 sites [src/web/api.rs] — deferred, would need a `ConflictKind` enum refactor; pre-existing pattern.

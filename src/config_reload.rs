@@ -119,37 +119,169 @@ impl ReloadError {
 
     /// True iff this is a `Validation` error whose underlying message
     /// came from one of the duplicate-class checks in
-    /// `AppConfig::validate()`. Used by the SIGHUP listener to emit
-    /// `event="config_reload_rejected" reason="conflict"
-    /// conflict_kind="duplicate"` per Story C-3 AC#9 in addition to the
-    /// general `config_reload_failed` line.
+    /// `AppConfig::validate()`. Used by the SIGHUP listener and
+    /// `reload_error_response` to emit `event="config_reload_rejected"
+    /// reason="conflict" conflict_kind="duplicate"` per Story C-3 AC#9.
     ///
-    /// **Iter-1 review B-H1 hardening** — the previous bare-word
-    /// match `msg.contains("duplicated")` would have false-positived
-    /// on any non-duplicate validation error that incidentally
-    /// interpolated an operator-controlled field value containing the
-    /// literal substring (e.g. an operator naming an application
-    /// `application_id="duplicated-sensors"`). This is exactly the
-    /// "substring-matcher attribution leak" finding-class flagged by
-    /// the C-1 iter-3 review. Tightened to two full multi-word
-    /// phrases that are uniquely local to the six
-    /// `errors.push(format!(... is duplicated {within,across} ...))`
-    /// sites in `src/config.rs::validate()` (the `seen_*` HashSet
-    /// checks for application_id / device_id / metric_name /
-    /// chirpstack_metric_name / command_id / command_name).
-    ///
-    /// Any future validator change that adds a new duplicate-class
-    /// error MUST use the same phrase wording (`"is duplicated within
-    /// '{scope}'"` for per-scope checks or `"is duplicated across
-    /// {collection}"` for cross-scope checks).
+    /// **Iter-1 review B-H1 + iter-2 review BH-M5/ECH-MED5 hardening**:
+    /// previous implementations were vulnerable to operator-controlled
+    /// fields embedding the matcher substring (the "substring-matcher
+    /// attribution leak" finding-class from C-1 iter-3). The current
+    /// implementation delegates to [`as_duplicate_info`] — which uses
+    /// **structural anchors** (`": '" ... "' is duplicated {within,
+    /// across} "`) rather than bare-word or even phrase matching.
+    /// Parse success is a much stronger signal than substring presence:
+    /// an operator naming `application_id = "rack-A is duplicated
+    /// within building-3"` cannot defeat the parser because the
+    /// quoted-value framing fails to align.
     pub fn is_duplicate(&self) -> bool {
-        matches!(
-            self,
-            Self::Validation(msg)
-                if msg.contains("is duplicated within ")
-                    || msg.contains("is duplicated across ")
-        )
+        self.as_duplicate_info().is_some()
     }
+
+    /// Iter-2 review BH-H1: structurally parse the validator's
+    /// duplicate-class error message into `(field, value)`. Returns
+    /// `Some(_)` iff the message matches one of the six validator
+    /// patterns; `None` otherwise.
+    ///
+    /// **Why a structural parser instead of substring-matching**: the
+    /// previous (iter-1) approach checked for the literal phrase
+    /// `"is duplicated within "` — but an operator-controlled field
+    /// value embedded in a NON-duplicate error message could carry
+    /// that phrase verbatim (e.g. operator names an app
+    /// `application_id = "rack-A is duplicated within building-3"`;
+    /// the validator's length-check error then reads
+    /// `"application[0].application_id: 'rack-A is duplicated within
+    /// building-3' must not exceed 64 characters"` and the substring
+    /// matcher false-positives). The structural parser requires the
+    /// QUOTED-value framing to align with `' is duplicated within|
+    /// across `, which is much harder to forge by accident.
+    ///
+    /// **Used by `reload_error_response`** (iter-2 BH-H1 fix) to
+    /// construct an `ErrorResponse::duplicate(field, value, "reload",
+    /// hint)` body that preserves the wire-shape contract documented
+    /// in `docs/web-api.md`: `error == "duplicate"` IFF `field/value/
+    /// scope` are all `Some`. Without the parser, the audit-vs-body
+    /// shapes diverged (audit said duplicate, body said with_hint).
+    ///
+    /// **Pattern coverage** — recognises the five quoted-value sites
+    /// (`application_id`, `device_id`, `metric_name`,
+    /// `chirpstack_metric_name`, `command_name`) and the one
+    /// unquoted-integer-value site (`command_id`).
+    pub fn as_duplicate_info(&self) -> Option<DuplicateInfo> {
+        let msg = match self {
+            Self::Validation(m) => m.as_str(),
+            _ => return None,
+        };
+        parse_duplicate_info(msg)
+    }
+}
+
+/// Iter-2 review BH-H1: extracted (field, value) from a validator
+/// duplicate-class error message. Wire-consumed by
+/// `reload_error_response` to build a contract-conforming
+/// `ErrorResponse::duplicate` body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateInfo {
+    pub field: String,
+    pub value: String,
+}
+
+/// Structural parser for the validator's six duplicate-class error
+/// message formats (see `src/config.rs::validate()`). See
+/// [`ReloadError::as_duplicate_info`] for the design rationale.
+///
+/// **Multi-line input** — the validator joins multiple per-field
+/// errors as `"Configuration validation failed:\n  - {error1}\n  -
+/// {error2}..."` and wraps the result twice (once as
+/// `OpcGwError::Configuration` → `"Configuration error: {inner}"`,
+/// once more as `ReloadError::Validation` → `"config validation
+/// error: {inner}"`). The parser iterates line-by-line, strips the
+/// `"  - "` bullet prefix, and returns the FIRST line matching the
+/// duplicate-class pattern. This naturally bypasses both wrappers
+/// (their text lives on the first line, before the per-error
+/// bullets) and tolerates multi-error reports.
+fn parse_duplicate_info(msg: &str) -> Option<DuplicateInfo> {
+    for line in msg.lines() {
+        let line = line.trim_start_matches("  - ").trim_start();
+        if let Some(info) = try_parse_duplicate_line(line) {
+            return Some(info);
+        }
+    }
+    None
+}
+
+/// Per-line parser shared by [`parse_duplicate_info`]. Recognises
+/// one of:
+///   "{path}.{field}: '{value}' is duplicated within {scope}"
+///   "{path}.{field}: '{value}' is duplicated across {scope}"
+///   "{path}.command_id: {int_value} is duplicated within {scope}"
+fn try_parse_duplicate_line(line: &str) -> Option<DuplicateInfo> {
+    // Step 1: split path-prefix from rest at the FIRST ": " on this
+    // line. The validator's per-field error always starts with a
+    // path like `application[0].device[1].metric_name:`.
+    let (prefix, rest) = line.split_once(": ")?;
+    // Field name is the last `.`-segment of the prefix.
+    let field = prefix.rsplit('.').next()?.to_string();
+    if field.is_empty() || field.contains(' ') {
+        // A `.`-less prefix or a prefix containing spaces is the
+        // outer wrapper line ("config validation error" /
+        // "Configuration error" / "Configuration validation failed")
+        // — fail-closed and let the caller try the next line.
+        return None;
+    }
+
+    // Step 2: extract value. Try quoted form first; fall back to
+    // integer-form for command_id only.
+    let (value, after_value) = if let Some(after_quote) = rest.strip_prefix('\'') {
+        // Quoted form: 'value' is duplicated within|across ...
+        let marker_within = "' is duplicated within ";
+        let marker_across = "' is duplicated across ";
+        if let Some(idx) = after_quote.find(marker_within) {
+            (
+                after_quote[..idx].to_string(),
+                &after_quote[idx + marker_within.len()..],
+            )
+        } else if let Some(idx) = after_quote.find(marker_across) {
+            (
+                after_quote[..idx].to_string(),
+                &after_quote[idx + marker_across.len()..],
+            )
+        } else {
+            return None;
+        }
+    } else {
+        // Integer form (command_id only): N is duplicated within ...
+        let marker_within = " is duplicated within ";
+        let marker_across = " is duplicated across ";
+        if let Some(idx) = rest.find(marker_within) {
+            let value = rest[..idx].to_string();
+            // Sanity: integer-form value should parse as i64;
+            // reject otherwise (defends against an operator value
+            // that happens to contain the phrase without quote
+            // framing).
+            if value.parse::<i64>().is_err() {
+                return None;
+            }
+            (value, &rest[idx + marker_within.len()..])
+        } else if let Some(idx) = rest.find(marker_across) {
+            let value = rest[..idx].to_string();
+            if value.parse::<i64>().is_err() {
+                return None;
+            }
+            (value, &rest[idx + marker_across.len()..])
+        } else {
+            return None;
+        }
+    };
+
+    // Step 3: verify there's a non-empty scope after the marker
+    // (structural sanity — if scope is empty, the validator wording
+    // drifted and we should fail-closed to avoid misclassification).
+    if after_value.is_empty() {
+        return None;
+    }
+
+    Some(DuplicateInfo { field, value })
 }
 
 impl From<ReloadError> for OpcGwError {
@@ -1666,17 +1798,12 @@ mod tests {
         );
     }
 
-    /// Story C-3 AC#9 — `is_duplicate()` is true only for `Validation`
-    /// errors whose underlying message contains the full phrase
-    /// `"is duplicated within "` or `"is duplicated across "` produced
-    /// by the six `seen_*` HashSet checks in `AppConfig::validate()`.
-    /// Drives the `conflict_kind="duplicate"` field on the hot-reload
-    /// rejected event.
-    ///
-    /// **Iter-1 review B-H1 + E-L2 hardening** — the previous
-    /// implementation matched on bare `"duplicated"`, which would have
-    /// false-positived on operator-controlled field values containing
-    /// the substring. This test now also asserts the negative cases.
+    /// Story C-3 AC#9 + iter-2 review BH-H1/BH-M5/ECH-MED5 —
+    /// `is_duplicate()` is true iff `as_duplicate_info()` produces
+    /// `Some(_)` via the structural parser. The anchors `": '"` and
+    /// `"' is duplicated within|across "` defeat the operator-
+    /// controlled-substring-in-field-value leak that the iter-1
+    /// phrase matcher was still vulnerable to.
     #[test]
     fn reload_error_is_duplicate_classifies_validation_kind() {
         // Exact wording from each of the six validator duplicate-class
@@ -1684,6 +1811,7 @@ mod tests {
         let cases_must_match = [
             "application[0].application_id: 'app-1' is duplicated across application_list",
             "application[0].device[1].device_id: 'dev-1' is duplicated within application 'app-1'",
+            "application[0].device[1].device_id: 'dev-1' is duplicated within application[0]",
             "application[0].device[0].read_metric[1].metric_name: 'temp' is duplicated within device.read_metric_list",
             "application[0].device[0].read_metric[1].chirpstack_metric_name: 'temp' is duplicated within device.read_metric_list",
             "application[0].device[0].command[1].command_id: 1 is duplicated within device.device_command_list",
@@ -1692,33 +1820,52 @@ mod tests {
         for msg in cases_must_match {
             let err = ReloadError::Validation(msg.into());
             assert!(err.is_duplicate(), "must classify as duplicate: {msg}");
+            let info = err.as_duplicate_info().expect("parser must extract");
+            assert!(!info.field.is_empty(), "field must be extracted: {msg}");
+            assert!(!info.value.is_empty(), "value must be extracted: {msg}");
         }
 
         // Negative cases — non-duplicate validation errors must NOT
         // classify as duplicates, even when they incidentally contain
-        // the literal substring "duplicated" via operator-controlled
-        // field values. This is the C-1 "substring-matcher attribution
-        // leak" finding-class regression-guard.
+        // the literal substring "duplicated" or the full phrase via
+        // operator-controlled field values. This is the C-1
+        // "substring-matcher attribution leak" finding-class +
+        // iter-2 ECH-MED5 operator-controlled-phrase regression-guard.
         let cases_must_not_match = [
             // Empty-field error.
             "application[0].application_name: must not be empty",
             // Out-of-range error.
             "opcua.stale_threshold_seconds: must be in range (0, 86400]",
             // Operator names an application with the literal word
-            // "duplicated" — must NOT trigger a false-positive
-            // is_duplicate() classification.
+            // "duplicated" — must NOT trigger a false-positive.
             "application[0].application_name: 'duplicated-sensors-pilot' must not exceed 64 characters",
             // Operator's device_name happens to contain "duplicated".
             "application[0].device[0].device_name: 'Sensor (duplicated unit replaced)' must not be empty",
             // Adjacent word — "duplicated" appears without the
-            // surrounding "is ... within|across" framing.
+            // surrounding structural framing.
             "some-future-error: the value was already duplicated upstream",
+            // Iter-2 ECH-MED5: operator-controlled field value
+            // contains the full phrase `"is duplicated within "` —
+            // must NOT classify because the structural anchors
+            // (quoted value + closing `'` immediately before
+            // ` is duplicated `) don't align. This is the case
+            // the iter-1 phrase-match would have FALSE-POSITIVED on.
+            "application[0].application_name: 'rack-A is duplicated within building-3' must not exceed 64 characters",
+            // Operator value contains the cross-scope phrase too.
+            "application[0].device[0].device_name: 'sensor is duplicated across all sites' must not be empty",
+            // Integer-form value that's not actually an integer
+            // (defensive — parser rejects via i64::parse).
+            "application[0].device[0].command[0].command_id: not_an_int is duplicated within device.device_command_list",
         ];
         for msg in cases_must_not_match {
             let err = ReloadError::Validation(msg.into());
             assert!(
                 !err.is_duplicate(),
                 "must NOT classify as duplicate (substring-leak guard): {msg}"
+            );
+            assert!(
+                err.as_duplicate_info().is_none(),
+                "parser must return None: {msg}"
             );
         }
 
@@ -1727,5 +1874,74 @@ mod tests {
         assert!(
             !ReloadError::RestartRequired { knob: "opcua.host_port".into() }.is_duplicate()
         );
+    }
+
+    /// Iter-2 review BH-H1 (multi-line wrapped form) — the actual
+    /// `ReloadError::Validation` Display output contains the
+    /// double-wrapped wording `"config validation error: Configuration
+    /// error: Configuration validation failed:\n  - <per-error>"`.
+    /// The parser must descend through the wrapper lines and the
+    /// `"  - "` bullet prefix to find the actual field-error line.
+    #[test]
+    fn parse_duplicate_info_handles_multi_line_wrapped_format() {
+        let msg = "config validation error: Configuration error: Configuration validation failed:\n  - application[0].device[2].device_id: 'dev-1' is duplicated within application 'app-1'";
+        let info = parse_duplicate_info(msg).expect("must parse wrapped form");
+        assert_eq!(info.field, "device_id");
+        assert_eq!(info.value, "dev-1");
+
+        // Multi-error wrapping — the parser should return the FIRST
+        // duplicate-class line and ignore non-duplicate sibling
+        // errors on other lines.
+        let multi = "config validation error: Configuration error: Configuration validation failed:\n  - opcua.stale_threshold_seconds: must be in range (0, 86400]\n  - application[0].device[1].device_id: 'dev-1' is duplicated within application 'app-1'\n  - global.command_delivery_poll_interval_secs: must be >= 1";
+        let info = parse_duplicate_info(multi).expect("must parse multi-error form");
+        assert_eq!(info.field, "device_id");
+        assert_eq!(info.value, "dev-1");
+    }
+
+    /// Iter-2 review BH-H1 — `parse_duplicate_info()` extracts the
+    /// (field, value) pair from each of the six validator patterns.
+    /// Used by `reload_error_response` to build a contract-conforming
+    /// `ErrorResponse::duplicate` body.
+    #[test]
+    fn parse_duplicate_info_extracts_field_and_value() {
+        // (input, expected_field, expected_value)
+        let cases = [
+            (
+                "application[0].application_id: 'app-1' is duplicated across application_list",
+                "application_id",
+                "app-1",
+            ),
+            (
+                "application[0].device[1].device_id: 'dev-1' is duplicated within application 'app-1'",
+                "device_id",
+                "dev-1",
+            ),
+            (
+                "application[2].device[0].read_metric[3].metric_name: 'temperature' is duplicated within device.read_metric_list",
+                "metric_name",
+                "temperature",
+            ),
+            (
+                "application[0].device[0].read_metric[1].chirpstack_metric_name: 'temp' is duplicated within device.read_metric_list",
+                "chirpstack_metric_name",
+                "temp",
+            ),
+            (
+                "application[0].device[0].command[1].command_id: 42 is duplicated within device.device_command_list",
+                "command_id",
+                "42",
+            ),
+            (
+                "application[0].device[0].command[1].command_name: 'reboot' is duplicated within device.device_command_list",
+                "command_name",
+                "reboot",
+            ),
+        ];
+        for (msg, expected_field, expected_value) in cases {
+            let info = parse_duplicate_info(msg)
+                .unwrap_or_else(|| panic!("parser must extract from: {msg}"));
+            assert_eq!(info.field, expected_field, "field mismatch on: {msg}");
+            assert_eq!(info.value, expected_value, "value mismatch on: {msg}");
+        }
     }
 }

@@ -1836,26 +1836,32 @@ impl AppConfig {
                             // different application is intentionally
                             // ALLOWED (see seen_device_ids declaration
                             // above for the full rationale).
-                            if seen_device_ids.contains(&device.device_id) {
-                                // Iter-1 review B-H3: when application_id
-                                // is empty (operator left it blank +
-                                // duplicated a device_id in the same
-                                // pass), the error message would have
-                                // read "...within application ''" which
-                                // is confusing UX. Fall back to the
-                                // structural app_context (e.g.
-                                // `application[0]`) when application_id
-                                // is empty, matching the convention used
-                                // for every other validation error in
-                                // this loop.
-                                let app_scope: String = if app.application_id.is_empty() {
-                                    app_context.clone()
-                                } else {
-                                    format!("application '{}'", app.application_id)
-                                };
+                            // Iter-2 review BH-M2: when application_id
+                            // is empty, the "must not be empty" error
+                            // already blocks the reload — adding a
+                            // duplicate device_id error on top would
+                            // misattribute the operator-actionable
+                            // root cause (the empty app_id) and trigger
+                            // a spurious `conflict_kind="duplicate"`
+                            // audit emit via `ReloadError::is_duplicate()`.
+                            // Skip the duplicate check entirely when
+                            // app_id is empty; operator fixes the
+                            // empty-id error first, then the validator
+                            // re-runs and catches any genuine
+                            // duplicate on the next pass.
+                            if app.application_id.is_empty() {
+                                // still record this device_id under the
+                                // (empty) per-app scope so the inner
+                                // loop's insertion semantics stay
+                                // consistent — doesn't matter because
+                                // the empty-id error already gates
+                                // success, but keeps the HashSet shape
+                                // intact for any future logic.
+                                seen_device_ids.insert(device.device_id.clone());
+                            } else if seen_device_ids.contains(&device.device_id) {
                                 errors.push(format!(
-                                    "{}.device_id: '{}' is duplicated within {}",
-                                    dev_context, device.device_id, app_scope
+                                    "{}.device_id: '{}' is duplicated within application '{}'",
+                                    dev_context, device.device_id, app.application_id
                                 ));
                             } else {
                                 seen_device_ids.insert(device.device_id.clone());

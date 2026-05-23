@@ -4361,13 +4361,17 @@ pub async fn update_command(
         }
     };
 
-    // Iter-1 review E-H1: pre-flight duplicate `command_name` check.
-    // Mirrors create_command's symmetric guard (src/web/api.rs ~L3858);
-    // without this, a PUT renaming a command to a sibling's name passes
-    // field validation, writes to disk, and only fails at reload-time
-    // (`reason="validation"` → no `conflict_kind="duplicate"` audit
-    // field). C-3's audit contract requires a clean 409 + structured
-    // body at the CRUD layer.
+    // Iter-1 review E-H1 + iter-2 review BH-H3 + BH-M1: pre-flight
+    // duplicate `command_name` check, with defensive malformed-block
+    // detection for two TOML-corruption hazards iter-2 surfaced:
+    //   (BH-H3) A second sibling sharing `cmd_idx`'s `command_id`
+    //     would otherwise reach the equality test under its own
+    //     non-skipped index — emit `malformed_existing_block` instead
+    //     of a confusing `command_name` 409 mis-attribution.
+    //   (BH-M1) A sibling with missing/non-string `command_name`
+    //     would silently fall through the equality test → 422 at
+    //     reload-time, no `conflict_kind` audit field. Mirror
+    //     create_command's symmetric None-arm guard.
     {
         let cmd_array = doc
             .get("application")
@@ -4383,7 +4387,60 @@ pub async fn update_command(
                 if idx == cmd_idx {
                     continue; // the command being renamed itself
                 }
+                // Iter-2 BH-H3: detect a second sibling with the same
+                // command_id (pre-existing TOML corruption — cmd_idx
+                // was resolved by FIRST-match earlier). Report as
+                // malformed_existing_block, not as a name-duplicate.
+                let sibling_command_id = t.get("command_id").and_then(|v| v.as_integer());
+                if sibling_command_id == Some(command_id as i64) {
+                    warn!(
+                        event = "command_crud_rejected",
+                        reason = "conflict",
+                        conflict_kind = "malformed_existing_block",
+                        application_id = %application_id,
+                        device_id = %device_id,
+                        source_ip = %addr.ip(),
+                        malformed_block_index = idx,
+                        "update_command: existing [[application.device.command]] block at index {idx} shares command_id with the rename target — manual cleanup required"
+                    );
+                    return Err((
+                        StatusCode::CONFLICT,
+                        Json(ErrorResponse::with_hint(
+                            format!(
+                                "config TOML contains a second [[application.device.command]] block at index {idx} sharing command_id={command_id}; manual cleanup required"
+                            ),
+                            "edit config/config.toml to remove the duplicate command_id block before retrying",
+                        )),
+                    )
+                        .into_response());
+                }
+                // Iter-2 BH-M1: command_name missing or non-string on
+                // a sibling block → malformed_existing_block (not a
+                // silent skip that would let the equality check below
+                // pass vacuously).
                 let existing_name = t.get("command_name").and_then(|v| v.as_str());
+                if existing_name.is_none() {
+                    warn!(
+                        event = "command_crud_rejected",
+                        reason = "conflict",
+                        conflict_kind = "malformed_existing_block",
+                        application_id = %application_id,
+                        device_id = %device_id,
+                        source_ip = %addr.ip(),
+                        malformed_block_index = idx,
+                        "update_command: existing [[application.device.command]] block at index {idx} has missing or non-string command_name; manual cleanup required"
+                    );
+                    return Err((
+                        StatusCode::CONFLICT,
+                        Json(ErrorResponse::with_hint(
+                            format!(
+                                "config TOML contains a malformed [[application.device.command]] block at index {idx} (missing or non-string command_name); manual cleanup required"
+                            ),
+                            "edit config/config.toml to fix the malformed block before retrying",
+                        )),
+                    )
+                        .into_response());
+                }
                 if existing_name == Some(command_name.as_str()) {
                     warn!(
                         event = "command_crud_rejected",
@@ -5425,6 +5482,53 @@ fn reload_error_response(
     addr: &SocketAddr,
     resource: &'static str,
 ) -> Response {
+    let event_name = match resource {
+        "device" => "device_crud_rejected",
+        "application" => "application_crud_rejected",
+        "command" => "command_crud_rejected",
+        _ => "crud_rejected",
+    };
+
+    // Iter-2 review BH-H1 + BH-H2 + ECH-MED2: if the validation
+    // failure is duplicate-class, emit a SINGLE
+    // `conflict_kind="duplicate"` audit line AND return a body that
+    // matches the wire-shape invariant documented in
+    // `docs/web-api.md` (`error == "duplicate"` IFF `field/value/
+    // scope` are all `Some`).
+    //
+    // Iter-1's centralised emit had two defects: (a) it left the
+    // body as `ErrorResponse::with_hint`, breaking the contract that
+    // picker UIs matching on `error == "duplicate"` rely on (BH-H1);
+    // (b) it emitted TWO audit lines per rejection (generic + the
+    // new duplicate-classifying one), inflating any per-line audit
+    // counter (ECH-MED2). The structural parser
+    // `ReloadError::as_duplicate_info()` extracts `(field, value)`
+    // from the validator's known six message patterns; `scope` is
+    // the constant `"reload"` to disambiguate from pre-flight scopes
+    // (`"application:<id>"`, `"device:<id>"`, etc.) — the audit log
+    // still carries the full validator error via the `error = ?e`
+    // field for forensics.
+    if let Some(info) = e.as_duplicate_info() {
+        warn!(
+            event = event_name,
+            reason = "conflict",
+            conflict_kind = "duplicate",
+            site = %site,
+            source_ip = %addr.ip(),
+            duplicate_field = %info.field,
+            duplicate_value = %info.value,
+            error = ?e,
+            "CRUD reload rejected: duplicate at same scope-level (post-write detection)"
+        );
+        let body = ErrorResponse::duplicate(
+            info.field,
+            info.value,
+            "reload",
+            "the candidate config introduces a same-scope duplicate; pick a different identifier and retry, or remove the conflicting entry",
+        );
+        return (StatusCode::CONFLICT, Json(body)).into_response();
+    }
+
     let reason = e.reason();
     let status = match reason {
         "validation" => StatusCode::UNPROCESSABLE_ENTITY,
@@ -5441,68 +5545,14 @@ fn reload_error_response(
     // hand-edited with TOML multi-line strings containing `\n` or
     // other control chars) is escaped before landing in the
     // structured-log line. Parallel hardening to src/main.rs:1251.
-    match resource {
-        "device" => warn!(
-            event = "device_crud_rejected",
-            reason = %reason,
-            site = %site,
-            source_ip = %addr.ip(),
-            error = ?e,
-            "CRUD reload failure"
-        ),
-        "application" => warn!(
-            event = "application_crud_rejected",
-            reason = %reason,
-            site = %site,
-            source_ip = %addr.ip(),
-            error = ?e,
-            "CRUD reload failure"
-        ),
-        "command" => warn!(
-            event = "command_crud_rejected",
-            reason = %reason,
-            site = %site,
-            source_ip = %addr.ip(),
-            error = ?e,
-            "CRUD reload failure"
-        ),
-        _ => warn!(
-            event = "crud_rejected",
-            reason = %reason,
-            resource = resource,
-            site = %site,
-            source_ip = %addr.ip(),
-            error = ?e,
-            "CRUD reload failure"
-        ),
-    }
-    // Iter-1 review E-H2: if the validation failure is duplicate-
-    // class, emit the disambiguating `conflict_kind="duplicate"`
-    // audit event alongside the generic reload-failure line above.
-    // Without this, audit consumers grepping
-    // `<resource>_crud_rejected reason="conflict" conflict_kind=
-    // "duplicate"` would miss the post-write-reload-time path
-    // (covers the rare race where a duplicate sneaks in after
-    // pre-flight — e.g. concurrent operator hand-edit, or a
-    // duplicate that pre-flight cannot see because it cuts across
-    // applications/devices the handler doesn't iterate).
-    if e.is_duplicate() {
-        let event_name = match resource {
-            "device" => "device_crud_rejected",
-            "application" => "application_crud_rejected",
-            "command" => "command_crud_rejected",
-            _ => "crud_rejected",
-        };
-        warn!(
-            event = event_name,
-            reason = "conflict",
-            conflict_kind = "duplicate",
-            site = %site,
-            source_ip = %addr.ip(),
-            error = ?e,
-            "CRUD reload rejected: duplicate at same scope-level (post-write detection)"
-        );
-    }
+    warn!(
+        event = event_name,
+        reason = %reason,
+        site = %site,
+        source_ip = %addr.ip(),
+        error = ?e,
+        "CRUD reload failure"
+    );
     let body = match reason {
         "validation" => ErrorResponse::with_hint(
             format!("config validation failed: {e}"),

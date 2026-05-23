@@ -841,6 +841,202 @@ application_id = "app-1"
 }
 
 // ---------------------------------------------------------------------------
+// Iter-2 review BH-H1 + BH-H2 — `reload_error_response`'s new
+// duplicate-class branch (post-write reload-time detection) returns
+// a structured `ErrorResponse::duplicate` body + emits the
+// disambiguating `<resource>_crud_rejected reason="conflict"
+// conflict_kind="duplicate"` audit. Iter-1's HIGH-2 centralised the
+// emit but left the body as `with_hint`, breaking the wire-shape
+// contract; iter-2 fixed both via `as_duplicate_info()` structural
+// parser + single-emit refactor.
+//
+// **Triggering strategy:** spawn the fixture with a valid TOML, then
+// direct-write a TOML containing a pre-existing duplicate
+// `application_id` (operator-hand-edit-window simulation), then POST
+// a NEW (non-conflicting) application. The CRUD pre-flight sees a
+// fresh app_id so it passes; the TOML write succeeds; the
+// post-write `config_reload.reload()` then runs `AppConfig::validate`
+// which catches the pre-existing duplicate. `reload_error_response`
+// extracts `(field, value)` via `as_duplicate_info` and returns
+// 409 + structured body.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+#[serial(captured_logs)]
+async fn post_write_reload_duplicate_returns_structured_409_with_conflict_kind_duplicate() {
+    let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
+    let client = reqwest::Client::new();
+    clear_captured_logs();
+
+    // Direct-write a TOML that contains a pre-existing duplicate
+    // `application_id` ("app-1" appears twice). The fixture's
+    // in-memory snapshot is still the original good config (no
+    // reload fires from a bare file-write — the gateway's reload
+    // primitive is invoked explicitly by handlers, not by a
+    // file-system watcher in v1).
+    let allowed_origins_line = format!("allowed_origins = [\"{}\"]", fx.base_url);
+    let dup_app_toml = format!(
+        r#"# pre-existing-duplicate-app-id scenario seed
+[global]
+debug = true
+prune_interval_minutes = 60
+command_delivery_poll_interval_secs = 5
+command_delivery_timeout_secs = 60
+command_timeout_check_interval_secs = 10
+history_retention_days = 7
+
+[chirpstack]
+server_address = "http://127.0.0.1:18080"
+api_token = "SECRET_SENTINEL_TOKEN_DO_NOT_LEAK"
+tenant_id = "00000000-0000-0000-0000-000000000000"
+polling_frequency = 10
+retry = 1
+delay = 1
+list_page_size = 100
+
+[opcua]
+application_name = "test"
+application_uri = "urn:test"
+product_uri = "urn:test:product"
+diagnostics_enabled = false
+hello_timeout = 5
+host_ip_address = "127.0.0.1"
+host_port = 4855
+create_sample_keypair = true
+certificate_path = "own/cert.der"
+private_key_path = "private/private.pem"
+trust_client_cert = false
+check_cert_time = false
+pki_dir = "./pki"
+user_name = "opcua-user"
+user_password = "SECRET_SENTINEL_PASSWORD_DO_NOT_LEAK"
+stale_threshold_seconds = 120
+
+[storage]
+database_path = "data/opcgw.db"
+retention_days = 7
+
+[web]
+port = 8080
+bind_address = "127.0.0.1"
+enabled = false
+auth_realm = "opcgw-c-3"
+{allowed_origins_line}
+
+[[application]]
+application_name = "App One A"
+application_id = "app-dup"
+
+  [[application.device]]
+  device_id = "dev-x"
+  device_name = "X"
+
+    [[application.device.read_metric]]
+    metric_name = "m"
+    chirpstack_metric_name = "m"
+    metric_type = "Float"
+
+[[application]]
+application_name = "App One B"
+application_id = "app-dup"
+
+  [[application.device]]
+  device_id = "dev-y"
+  device_name = "Y"
+
+    [[application.device.read_metric]]
+    metric_name = "m"
+    chirpstack_metric_name = "m"
+    metric_type = "Float"
+"#
+    );
+    std::fs::write(&fx.config_path, &dup_app_toml).expect("write dup app TOML");
+
+    // POST a NEW (non-conflicting) application. The create_application
+    // pre-flight does NOT detect the pre-existing app-dup duplicate
+    // (it only checks the request body's new application_id against
+    // existing ones). The TOML write succeeds. The post-write
+    // config_reload.reload() then runs AppConfig::validate(), which
+    // catches the pre-existing duplicate and returns
+    // ReloadError::Validation(...) that is_duplicate() classifies.
+    let body = r#"{"application_id":"brand-new-app","application_name":"Brand New"}"#;
+    let resp = json_request(
+        &client,
+        reqwest::Method::POST,
+        &fx.url("/api/applications"),
+        Some(&fx.base_url),
+        Some(body),
+    )
+    .send()
+    .await
+    .expect("send");
+
+    // Iter-2 BH-H1: the wire shape must be 409 + structured
+    // ErrorResponse::duplicate (not 422 + with_hint). The scope
+    // field uses the literal "reload" sentinel to disambiguate from
+    // pre-flight scopes (which use "application:<id>" /
+    // "device:<id>" / etc.).
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "post-write reload-time duplicate must return 409, not 422"
+    );
+    let body_json: Value = resp.json().await.expect("json");
+    assert_eq!(body_json["error"].as_str().unwrap(), "duplicate");
+    assert_eq!(
+        body_json["field"].as_str().unwrap(),
+        "application_id",
+        "field must be extracted by as_duplicate_info() structural parser"
+    );
+    assert_eq!(
+        body_json["value"].as_str().unwrap(),
+        "app-dup",
+        "value must be extracted from the validator's quoted-value pattern"
+    );
+    assert_eq!(
+        body_json["scope"].as_str().unwrap(),
+        "reload",
+        "scope sentinel must indicate the post-write reload-time source"
+    );
+    assert!(body_json["hint"].as_str().is_some(), "hint must be present");
+
+    // Iter-2 BH-H2 + ECH-MED2: the audit emit must fire exactly
+    // once with conflict_kind="duplicate" (NOT twice — iter-1
+    // accidentally emitted both the generic and the disambiguating
+    // line; iter-2 fixed via single-emit refactor).
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let logs = captured_logs();
+    let conflict_kind_dup_count = logs.matches("conflict_kind=\"duplicate\"").count();
+    assert!(
+        conflict_kind_dup_count >= 1,
+        "expected ≥1 conflict_kind=\"duplicate\" audit emit on post-write reload duplicate path; logs:\n{logs}"
+    );
+    // The generic CRUD reload failure line must NOT also fire for
+    // the same rejection — iter-2 ECH-MED2 fix (skip the generic
+    // emit when is_duplicate). A pre-iter-2 implementation would
+    // have produced TWO warns (reason=validation + reason=conflict).
+    let generic_failure_count = logs.matches("\"CRUD reload failure\"").count();
+    assert_eq!(
+        generic_failure_count, 0,
+        "duplicate-class CRUD reload must emit SINGLE audit line, not generic-then-disambiguated pair; logs:\n{logs}"
+    );
+    // The new sibling fields duplicate_field + duplicate_value must
+    // accompany the conflict_kind="duplicate" emit (iter-2 BH-H1
+    // wire-shape pinning). Tracing renders `%` (Display) fields
+    // without surrounding quotes, so the structured-log line shape
+    // is `duplicate_field=application_id` (no quotes).
+    assert!(
+        logs.contains("duplicate_field=application_id"),
+        "expected duplicate_field=application_id sibling field; logs:\n{logs}"
+    );
+    assert!(
+        logs.contains("duplicate_value=app-dup"),
+        "expected duplicate_value=app-dup sibling field; logs:\n{logs}"
+    );
+
+    fx.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
 // AC#9 — TOML hot-reload (Story 9-7's reload primitive) refuses to
 // apply a reload that introduces a duplicate at any level. Operator
 // hand-edits config.toml to add a duplicate device_id, the file-
@@ -881,18 +1077,32 @@ async fn hot_reload_rejects_duplicate_device_id_and_preserves_in_memory_snapshot
         "[[application]]\napplication_name = \"Field Probes\"",
         "  [[application.device]]\n  device_id = \"dev-1\"\n  device_name = \"DupInApp1\"\n\n[[application]]\napplication_name = \"Field Probes\"",
     );
-    // Iter-1 review B-H2: explicitly assert the marker-replacement
-    // actually changed the template. If the marker drifts in a future
-    // edit, this would otherwise silently no-op (dup_within_app1 ==
-    // APP_TOML_TEMPLATE) and the reload would succeed → expect_err
-    // panics with a misleading message instead of pinpointing the
-    // template-drift root cause. The assertion below makes the failure
-    // mode obvious.
+    // Iter-1 review B-H2 + iter-2 review ECH-MED3: assert the
+    // marker-replacement actually produced a duplicate-introducing
+    // edit, not just any byte change. Three layered assertions:
+    //   1. `assert_ne!` — caught the no-op case in iter-1.
+    //   2. The injected DupInApp1 block is present.
+    //   3. There are still exactly TWO `[[application]]` tables
+    //      (the injected device block must land UNDER app-1, NOT
+    //      promoted to a third application). If the marker drifts
+    //      to a position that lands the injected block at file-top
+    //      level, this guard fires.
+    // Together they pinpoint exactly which marker arm drifted.
     assert_ne!(
         dup_within_app1, APP_TOML_TEMPLATE,
         "template-marker drift: the .replace() call no-oped — the marker text \
          no longer matches APP_TOML_TEMPLATE. Update the marker in this test \
          to match the current template wording before re-running."
+    );
+    assert!(
+        dup_within_app1.contains("device_id = \"dev-1\"\n  device_name = \"DupInApp1\""),
+        "marker-replacement landed but the DupInApp1 block was not injected as expected"
+    );
+    assert_eq!(
+        dup_within_app1.matches("[[application]]").count(),
+        2,
+        "marker-replacement promoted the injected block to a new [[application]] table — \
+         the duplicate-within-app-1 scenario is NOT being tested"
     );
     std::fs::write(&config_path, &dup_within_app1).expect("write mutated");
 
