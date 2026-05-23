@@ -457,8 +457,16 @@
           // Iter-2 review LOW-10: explicit value="" so a programmatic
           // submit on the empty-state placeholder never posts the
           // textContent as device_id.
+          // Iter-3 review MED — symmetrise with applications.js empty
+          // state by adding `selected="selected"`. Without it, browser
+          // default-selection behaviour on disabled-only-options is UA-
+          // dependent; `selected` pins the placeholder as the visible
+          // entry and keeps `select.value === ''`.
           devPickerSelect.appendChild(
-            el('option', { value: '', disabled: 'disabled', text: '(no devices in ChirpStack)' })
+            el('option', {
+              value: '', disabled: 'disabled', selected: 'selected',
+              text: '(no devices in ChirpStack)',
+            })
           );
           applyDeviceMode('manual');
           setDevicePickerBanner(
@@ -649,8 +657,20 @@
     // -------- Wire up handlers --------
     devPickerSelect.addEventListener('change', function () {
       const opt = devPickerSelect.options[devPickerSelect.selectedIndex];
-      const devName = opt ? (opt.dataset.devName || opt.textContent || '') : '';
-      const devEui = opt ? (opt.dataset.devEui || opt.value || '') : '';
+      // Iter-3 review MED — guard against the disabled placeholder
+      // ("Choose a device…") leaking its textContent into devNameInput
+      // / devEuiFootnote / metric-picker fetch. If the option is
+      // missing / has no value / is disabled, treat as no selection.
+      if (!opt || !opt.value || opt.disabled) {
+        // Mirror the empty-devEui path: clear footnote + metric rows.
+        devEuiFootnote.textContent = '';
+        pickerState.currentDevEui = '';
+        metricPickerRows.replaceChildren();
+        setMetricPickerStatus('Choose a device above first.');
+        return;
+      }
+      const devName = opt.dataset.devName || opt.textContent || '';
+      const devEui = opt.dataset.devEui || opt.value || '';
       if (!picker.editedFlag.has(devNameInput) && devName) {
         devNameInput.value = devName;
         // Iter-2 review HIGH-4: record the picker-populated value
@@ -669,22 +689,34 @@
         return;
       }
       // Trigger metric-picker fetch when the device changes.
+      // Iter-3 review MED — apply .catch doctrine consistently.
       if (pickerState.metricsMode === 'picker') {
-        loadMetricPicker(devEui, {});
+        loadMetricPicker(devEui, {}).catch(
+          picker.warnUnlessAbort('metric picker fetch after device pick'),
+        );
       }
     });
     devPickerRefresh.addEventListener('click', function () {
       // Iter-1 review LOW-1: drop pre-fetch picker_opened emit;
       // loadDevicePicker's post-fetch emit carries the correct
       // server-provided cache_status from the ?refresh=true response.
-      loadDevicePicker({ refresh: true });
+      // Iter-3 review MED — .catch doctrine.
+      loadDevicePicker({ refresh: true }).catch(
+        picker.warnUnlessAbort('device picker refresh'),
+      );
     });
     devPickerToManual.addEventListener('click', function () {
+      // Iter-3 review HIGH-2: abort any in-flight device-picker fetch
+      // BEFORE applyDeviceMode flips the UI. Pre-fix, the stale fetch
+      // continued to mutate the now-hidden devPickerSelect DOM and
+      // emitted a `picker_opened` audit for irrelevant state.
+      if (pickerState.deviceFetchController) {
+        pickerState.deviceFetchController.abort();
+        pickerState.deviceFetchController = null;
+      }
       applyDeviceMode('manual');
       // Iter-2 review HIGH-3: switching to manual must re-enable
-      // submit even if a picker fetch was in flight (otherwise the
-      // operator is stuck in manual mode with a disabled submit
-      // until the now-irrelevant fetch resolves).
+      // submit even if a picker fetch was in flight.
       setFormSubmitEnabled(true);
       picker.auditEvent('picker_manual_fallback', {
         picker_resource: 'device',
@@ -693,7 +725,10 @@
     });
     devManualToPicker.addEventListener('click', function () {
       applyDeviceMode('picker');
-      loadDevicePicker({});
+      // Iter-3 review MED — .catch doctrine.
+      loadDevicePicker({}).catch(
+        picker.warnUnlessAbort('device picker reload after mode toggle'),
+      );
     });
     metricPickerRefresh.addEventListener('click', function () {
       if (!pickerState.currentDevEui) {
@@ -701,7 +736,10 @@
         const opt = devPickerSelect.options[devPickerSelect.selectedIndex];
         const eui = opt && opt.dataset ? opt.dataset.devEui : '';
         if (eui) {
-          loadMetricPicker(eui, {});
+          // Iter-3 review MED — .catch doctrine.
+          loadMetricPicker(eui, {}).catch(
+            picker.warnUnlessAbort('metric picker refresh'),
+          );
         } else {
           // Iter-1 review LOW-6: surface a status message instead of
           // a silent no-op so the operator knows why nothing happened.
@@ -717,7 +755,10 @@
         }
         return;
       }
-      loadMetricPicker(pickerState.currentDevEui, {});
+      // Iter-3 review MED — .catch doctrine.
+      loadMetricPicker(pickerState.currentDevEui, {}).catch(
+        picker.warnUnlessAbort('metric picker refresh'),
+      );
     });
     metricPickerToManual.addEventListener('click', function () {
       applyMetricsMode('manual');
@@ -729,7 +770,10 @@
     metricManualToPicker.addEventListener('click', function () {
       applyMetricsMode('picker');
       if (pickerState.currentDevEui) {
-        loadMetricPicker(pickerState.currentDevEui, {});
+        // Iter-3 review MED — .catch doctrine.
+        loadMetricPicker(pickerState.currentDevEui, {}).catch(
+          picker.warnUnlessAbort('metric picker reload after mode toggle'),
+        );
       }
     });
 
@@ -805,7 +849,12 @@
     // Boot the picker modes after the form is in the DOM.
     applyDeviceMode(pickerState.mode);
     applyMetricsMode(pickerState.metricsMode);
-    if (pickerState.mode === 'picker') loadDevicePicker({});
+    // Iter-3 review MED — .catch doctrine on the initial bootstrap.
+    if (pickerState.mode === 'picker') {
+      loadDevicePicker({}).catch(
+        picker.warnUnlessAbort('initial device picker load'),
+      );
+    }
     return section;
   }
 

@@ -290,6 +290,36 @@ The third (`metric_wire_type_inferred`) fires from the existing `POST /api/devic
   - [x] 7.3 `README.md` Planning table — Epic C row updated to "3/6 done" with a C-2 entry summarising the implementation.
   - [x] 7.4 DocBook user manual `<sect1 id="sec-web-pickers">` added under the Configuration chapter. Validated with `xmllint --noout --valid` — clean.
 
+### Review Findings (iter-3, 2026-05-23, same-LLM Opus 4.7 — Blind + Edge layers)
+
+Re-ran Blind Hunter + Edge Case Hunter on the iter-2 patch diff (commit `3c9a225`, 594 lines). Iter-3 found 7 PATCH (2 H / 4 M / 1 L) + 5 DEFER + 1 DISMISS. **The doctrine streak continues to hold** — both HIGH findings are real regressions in iter-2's own fixes:
+1. Autofill-races-picker: the iter-2 `recordPickerPopulation` fix only worked in the picker-first ordering. Iter-3 adds a baseline snapshot of `inputEl.value` at `attachEditedFlag` attach time so the comparison works even before any picker pre-fill.
+2. `modeToManual` / `devPickerToManual` didn't abort the in-flight picker fetch — the stale fetch continued mutating the now-hidden DOM and emitted irrelevant `picker_opened` audits. Iter-3 adds abort-before-applyMode in both handlers.
+
+Iter-3 finding sizes are converging: iter-1 was 19 patches, iter-2 was 11, iter-3 is 7. The remaining defers are all genuine edge cases (Unicode NFC/NFD, synchronous throws in `finally` / `replaceChildren`, counter overflow at 2^53) that don't manifest in realistic operator workflows.
+
+#### PATCH (all 7 applied in iter-3 commit)
+
+- [x] [Review][Patch][HIGH] Autofill-races-picker: snapshot `inputEl.value` as baseline in `attachEditedFlag` so the divergence check works even before the picker pre-fill records its own value
+- [x] [Review][Patch][HIGH] `modeToManual` / `devPickerToManual` handlers now abort the in-flight `pickerState.fetchController` / `pickerState.deviceFetchController` BEFORE `applyMode('manual')` — prevents stale fetch from mutating the hidden DOM + emitting irrelevant `picker_opened` audit
+- [x] [Review][Patch][MED] Empty-state option in `loadDevicePicker` now carries `selected: 'selected'` (symmetric with applications.js)
+- [x] [Review][Patch][MED] AbortError-filtering via new `picker.warnUnlessAbort(label)` helper — replaces `console.warn(..., err)` in all 3 applications.js + 7 devices-config.js `.catch` sites so intentional abort cancellations don't flood the operator's DevTools
+- [x] [Review][Patch][MED] Apply `.catch(picker.warnUnlessAbort(...))` to ALL `loadDevicePicker` / `loadMetricPicker` call sites in devices-config.js — 6 previously-uncaught sites (devPickerSelect change, devPickerRefresh click, devManualToPicker click, metricPickerRefresh ×2 sites, metricManualToPicker click, initial-load bootstrap). Doctrine now uniform.
+- [x] [Review][Patch][MED] Placeholder-leak guard: `pickerSelect.change` handler in both files now early-returns when the selected option has no value or is disabled — prevents "(Choose…)" placeholder textContent from leaking into nameInput / devNameInput via programmatic `selectedIndex=0`
+- [x] [Review][Patch][LOW] Pin `?-Debug` audit format in `create_device_emits_metric_wire_type_inferred_with_picker_metadata` test — asserts `application_id="<uuid>"` and `device_id="<eui>"` with quoted shape so a future regression back to `%`-Display is caught by CI
+
+#### DEFER (5)
+
+- [x] [Review][Defer][LOW] Unicode NFC/NFD normalization differences in autofill restore — extreme edge case (operator name with combining marks); not load-bearing
+- [x] [Review][Defer][LOW] `String(value == null ? '' : value)` defensive coercion — no current caller passes 0/false/NaN; doctrine breach is theoretical
+- [x] [Review][Defer][LOW] `replaceChildren()` / `setMetricPickerBanner()` synchronous-throw before abort — DOM ops on attached nodes don't throw in practice
+- [x] [Review][Defer][LOW] `setSubmitEnabled` / `setFormSubmitEnabled` synchronous-throw in `finally` — `submitBtn.disabled = ...` doesn't throw on a valid DOM element
+- [x] [Review][Defer][LOW] `_metricCheckboxIdSeq` counter unbounded — `Number.MAX_SAFE_INTEGER` ~2^53; one-line comment added per iter-2 already documents the choice
+
+#### DISMISS (1)
+
+- Blind Hunter HIGH-2 (`?application_id` Display→Debug wire-format break) — **FALSE POSITIVE**. For `&str` values, tracing's `Format` layer renders both `Value::Str` (bare `field = value`) and `Value::Debug` (`field = ?value`) with the same wire shape (`field="value"` with quotes). The 1417 passing tests confirm — the existing assertions on `picker_resource="application"` etc. survived the iter-2 switch unchanged. The reviewer extrapolated from non-string types where Display vs Debug genuinely differ. (Verified by running the test suite post-patch and observing the format unchanged.)
+
 ### Review Findings (iter-2, 2026-05-23, same-LLM Opus 4.7 — Blind + Edge layers only)
 
 Re-ran Blind Hunter + Edge Case Hunter on the iter-1 patch diff (commit `104d46f`, 877 lines). Acceptance Auditor skipped — iter-1 was pure defect fixes, not AC scope changes. Iter-2 found 11 PATCH (5 H / 3 M / 3 L) + 3 DEFER + 3 DISMISS — **all 11 PATCH items are regressions in iter-1's own fixes**, validating the 18th-story iter-N+1 doctrine streak.

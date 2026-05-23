@@ -756,3 +756,15 @@ iter-2 of bmad-code-review C-1 caught **2 HIGH + 2 MED + several LOW** in iter-1
 - **DEF-iter2-C2-docbook-vocab (LOW — doc-maintenance):** The DocBook user manual documents `event="picker_audit_rejected"` as carrying `reason` values `unknown_event | csrf` — a closed vocabulary. Future iterations adding additional rejection reasons (e.g., rate-limited per issue #88, malformed-body) must remember to extend the manual. Add a "see docs/logging.md for full event vocabulary" pointer the next time the section is touched.
 
 - **DEF-iter2-C2-metadata-cap-forward (LOW — forward-compat):** `PICKER_METADATA_STRING_CAP = 64` is justified in the docstring with reference to current legal `OpcMetricTypeConfig` values (3-6 chars). A future contributor might invite tightening to 16 bytes; the docstring should note "headroom for vocabulary growth". Address in a follow-up pass.
+
+## Deferred from: code review of C-2-inventory-pickers-web-ui — iter-3 (2026-05-23)
+
+- **DEF-iter3-C2-nfc-normalisation (LOW — extreme-edge):** `attachEditedFlag` divergence check compares `inputEl.value` to recorded baseline byte-for-byte. Operator names containing combining marks (NFD form) where autofill restores in NFC form (or vice versa) would false-positive the edited flag. Affects only Unicode strings with combining marks — Latin / ASCII / typical CJK is unaffected. Address with `.normalize('NFC')` on both sides if it ever becomes operator-visible.
+
+- **DEF-iter3-C2-string-coercion (LOW — doctrine):** `recordPickerPopulation` uses `String(value || '')` which coerces 0 / false / NaN to ''. No current caller passes those types (the picker always passes a `String`), but a more defensive `String(value == null ? '' : value)` would future-proof. Address in a follow-up doctrine pass.
+
+- **DEF-iter3-C2-domop-throw (LOW — improbable):** `loadMetricPicker` calls `metricPickerRows.replaceChildren()` and `setMetricPickerBanner('')` BEFORE the abort runs. If those DOM operations throw synchronously (only possible if the element was detached / removed from the DOM tree between renders), the prior in-flight uplinks fetch would never abort. Wrapping the pre-abort DOM ops in `try { ... } finally { abort }` would close the gap; deferred because the trigger is extremely unlikely (detached node would already break a dozen other unrelated paths first).
+
+- **DEF-iter3-C2-finally-throw (LOW — improbable):** `loadPicker` / `loadDevicePicker` `finally` blocks call `setSubmitEnabled(true)` / `setFormSubmitEnabled(true)` unconditionally; if those throw (which they don't — they just set a DOM property), any awaiting caller's continuation would be corrupted. Wrap in `try { ... } catch (_) { /* log */ }` for paranoid defence. Deferred — `submitBtn.disabled = ...` is infallible on a valid DOM element.
+
+- **DEF-iter3-C2-counter-bound (LOW — doc):** `_metricCheckboxIdSeq` is a page-lifetime monotonic counter (declared inside the IIFE). No overflow guard before `Number.MAX_SAFE_INTEGER` (~9 quadrillion increments). One-line comment documents the choice; deferred any explicit bound check until a SPA-style page that lives 10+ years sees realistic risk.

@@ -305,7 +305,15 @@
     // operator has not edited the field).
     pickerSelect.addEventListener('change', function () {
       var opt = pickerSelect.options[pickerSelect.selectedIndex];
-      var appName = opt ? (opt.dataset.appName || opt.textContent || '') : '';
+      // Iter-3 review MED — guard against the disabled placeholder
+      // ("Choose an application…") being re-selected programmatically
+      // via selectedIndex=0: pre-iter-3, the change handler would
+      // write the placeholder's textContent into nameInput AND record
+      // it as the picker-populated baseline, leaking "Choose…" into
+      // the create-form submission. Skip pre-fill when the option is
+      // missing, has no value, or is disabled.
+      if (!opt || !opt.value || opt.disabled) return;
+      var appName = opt.dataset.appName || opt.textContent || '';
       if (!picker.editedFlag.has(nameInput) && appName) {
         nameInput.value = appName;
         // Iter-2 review HIGH-4: record the picker-populated value so
@@ -323,6 +331,15 @@
       loadPicker({ refresh: true });
     });
     modeToManual.addEventListener('click', function () {
+      // Iter-3 review HIGH-2: abort any in-flight picker fetch BEFORE
+      // applyMode flips the visible UI. Without this, the stale fetch
+      // continues to mutate the now-hidden pickerSelect DOM and emits
+      // a `picker_opened` audit for state that's no longer
+      // operator-visible.
+      if (pickerState.fetchController) {
+        pickerState.fetchController.abort();
+        pickerState.fetchController = null;
+      }
       applyMode('manual');
       // Iter-2 review HIGH-3: switching to manual must re-enable the
       // submit button even if a picker fetch was in flight (otherwise
@@ -336,12 +353,10 @@
     });
     modeToPicker.addEventListener('click', function () {
       applyMode('picker');
-      loadPicker({}).catch(function (err) {
-        // Iter-2 review HIGH-4: log instead of swallowing so a real
-        // bug (e.g. AbortError from a legit nav-away) is at least
-        // visible in the operator's browser console.
-        console.warn('opcgw: picker reload after mode toggle failed:', err);
-      });
+      // Iter-3 review MED: filter AbortError out of the warn (abort
+      // is the EXPECTED outcome on rapid mode-toggle); other failures
+      // still surface to DevTools.
+      loadPicker({}).catch(picker.warnUnlessAbort('picker reload after mode toggle'));
     });
     picker.editedFlag.attach(nameInput);
   }
@@ -376,15 +391,9 @@
       fetchApplications();
       // Refetch on next form open: cache may serve a hit (AC#17, #20).
       // Iter-1 review HIGH-5: read pickerState.mode, not DOM hidden.
-      // Iter-2 review HIGH-4: replace silent swallow with console.warn
-      // so a failed post-create reload (e.g., ChirpStack went down
-      // between Create and refetch) is visible in the operator's
-      // browser console. The new app already landed; the warning is
-      // diagnostic-only.
+      // Iter-3 review MED: AbortError-filtered warning.
       if (pickerState.mode !== 'manual') {
-        loadPicker({}).catch(function (err) {
-          console.warn('opcgw: picker reload after create failed:', err);
-        });
+        loadPicker({}).catch(picker.warnUnlessAbort('picker reload after create'));
       }
     } catch (e) {
       showError(createError, 'Create failed: ' + e);
@@ -395,11 +404,9 @@
     setupPickerEventListeners();
     applyMode(picker.mode.get(PAGE_KEY));
     // Iter-1 review HIGH-5: read pickerState.mode, not DOM hidden.
-    // Iter-2 review HIGH-4: console.warn on failure (non-fatal).
+    // Iter-3 review MED: AbortError-filtered warning.
     if (pickerState.mode !== 'manual') {
-      loadPicker({}).catch(function (err) {
-        console.warn('opcgw: initial picker load failed:', err);
-      });
+      loadPicker({}).catch(picker.warnUnlessAbort('initial picker load'));
     }
     fetchApplications();
   });

@@ -565,6 +565,19 @@ async fn create_device_emits_metric_wire_type_inferred_with_picker_metadata() {
         "expected source + inferred_type + operator_chosen_type + sample_values_count; got: {}",
         logs
     );
+    // Iter-3 review LOW — pin the ?-Debug audit format for
+    // application_id / device_id so a future regression back to
+    // %-Display formatting (which would produce bare/unquoted output
+    // for some types) is caught by CI. For &str values, both forms
+    // currently produce the same quoted shape via tracing's fmt
+    // layer, but the iter-2 doctrine was explicit about ?-Debug for
+    // upstream-provided fields; this assertion encodes that contract.
+    assert!(
+        logs.contains("application_id=\"ae2012c2-c7f1-4fbd-8f87-4025e1d49242\"")
+            && logs.contains("device_id=\"a84041b8a1867e21\""),
+        "expected application_id + device_id rendered with quoted ?-Debug shape; got: {}",
+        logs
+    );
 
     fix.shutdown().await;
 }

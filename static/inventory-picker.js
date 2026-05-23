@@ -182,17 +182,25 @@
     // drag-drop, IME composition) and does NOT fire for arrow keys /
     // Tab / modifier keys that wouldn't change the value.
     //
-    // Iter-2 review HIGH-4 fix: comparing against the last
-    // picker-populated value (recorded by `recordPickerPopulation`
-    // below) ensures that browser-autofill restoring the picker's own
-    // pre-fill does NOT false-positive the edited flag. Only a value
-    // that genuinely diverges from what the picker last set is
-    // considered operator-edited intent.
+    // Iter-2 review HIGH-4 fix: compare against the last
+    // picker-populated value so browser-autofill restoring the picker
+    // pre-fill is a no-op.
+    //
+    // Iter-3 review HIGH-1 fix: snapshot the CURRENT value as the
+    // baseline at attach time. Pre-iter-3, if browser autofill fired
+    // `input` BEFORE the picker first resolved, `opcgwLastPopulated`
+    // was undefined → first branch flipped the edited flag → picker
+    // pre-fill subsequently skipped (because editedFlag.has() was
+    // true). Recording the as-attached value as the baseline means
+    // autofill-restoring-the-same-already-present value is a no-op
+    // regardless of whether the picker has populated yet.
+    inputEl.dataset.opcgwLastPopulated = inputEl.value || '';
     inputEl.addEventListener('input', function () {
       const populated = inputEl.dataset.opcgwLastPopulated;
-      // If no picker-populate has happened yet, ANY input is operator
-      // intent (the field started empty; the operator typed). If a
-      // populate HAS happened, only divergence from that value counts.
+      // After the iter-3 baseline-snapshot above, `populated` is
+      // never undefined at this point — but keep the undefined-branch
+      // for defensiveness against future code paths that delete the
+      // dataset attribute without calling resetEditedFlag.
       if (populated === undefined || (inputEl.value || '') !== populated) {
         inputEl.dataset.opcgwEdited = '1';
       }
@@ -239,6 +247,20 @@
       has: hasEditedFlag,
       reset: resetEditedFlag,
       recordPickerPopulation: recordPickerPopulation,
+    },
+    /// Iter-3 review MED — caller wraps a fetch promise in this
+    /// helper to log any non-abort rejection. Abort rejections (from
+    /// intentional AbortController cancellation) are silenced because
+    /// they are EXPECTED on rapid refresh / mode-toggle workflows and
+    /// would otherwise flood the operator's DevTools with noise.
+    warnUnlessAbort: function (label) {
+      return function (err) {
+        if (err && (err.name === 'AbortError' || err.code === 20)) {
+          return;
+        }
+        // eslint-disable-next-line no-console
+        console.warn('opcgw: ' + label + ' failed:', err);
+      };
     },
   };
 })();
