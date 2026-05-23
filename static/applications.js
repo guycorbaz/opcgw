@@ -28,6 +28,23 @@
   var modeToPicker = document.getElementById('application-mode-to-picker');
   var manualInput = document.getElementById('new-application-id');
   var nameInput = document.getElementById('new-application-name');
+  var submitButton = createForm.querySelector('button[type="submit"]');
+
+  // Iter-1 review HIGH-5 + HIGH-7 state:
+  // - `pickerState.mode` is the authoritative source of truth for
+  //   whether the form submit reads from the picker `<select>` or the
+  //   manual `<input>`. NEVER read this from DOM hidden attributes;
+  //   the CSS/HTML hidden state and this in-memory flag are kept in
+  //   sync by applyMode(), but the in-memory flag is what reflects
+  //   the operator's intent.
+  // - `pickerState.fetchController` holds the AbortController for the
+  //   most recent inventory fetch so a rapid second click aborts the
+  //   first request before starting the second (prevents stale-wins
+  //   races).
+  var pickerState = {
+    mode: 'picker',
+    fetchController: null,
+  };
 
   function showError(el, msg) {
     el.textContent = msg;
@@ -151,6 +168,11 @@
   // Story C-2 picker mode (AC#1 / #2 / #3 / #16 / #18).
   // ----------------------------------------------------------------
   function applyMode(mode) {
+    // Iter-1 review HIGH-5: pickerState.mode is the authoritative
+    // source of truth — the DOM `hidden` flags below are just the
+    // visual presentation. readApplicationIdFromActiveMode() must
+    // consult pickerState.mode, NOT the DOM hidden state.
+    pickerState.mode = mode;
     if (mode === 'manual') {
       pickerWrap.hidden = true;
       manualWrap.hidden = false;
@@ -163,13 +185,36 @@
     picker.mode.set(PAGE_KEY, mode);
   }
 
+  function setSubmitEnabled(enabled) {
+    // Iter-1 review HIGH-7: disable submit while picker fetch in
+    // flight so the operator cannot accidentally post "Loading…"
+    // (or the placeholder's empty-value) as application_id.
+    if (submitButton) submitButton.disabled = !enabled;
+  }
+
   async function loadPicker(opts) {
+    // Iter-1 review HIGH-7: abort any in-flight fetch before starting
+    // a new one. Without this, rapid refresh-clicks can produce
+    // out-of-order resolutions where the older fetch overwrites the
+    // newer picker contents.
+    if (pickerState.fetchController) {
+      pickerState.fetchController.abort();
+    }
+    var controller = new AbortController();
+    pickerState.fetchController = controller;
+    setSubmitEnabled(false);
     pickerSelect.disabled = true;
-    pickerSelect.innerHTML = '<option>Loading…</option>';
+    // Iter-1 review HIGH-7: Loading option carries value="" so the
+    // submit handler's empty-string check rejects mid-load submits
+    // (defence-in-depth alongside the submit-disable above).
+    pickerSelect.innerHTML = '<option value="">Loading…</option>';
     setPickerBanner(null);
     var cacheStatus = 'unknown';
     try {
       var data = await picker.fetchApplications({ refresh: !!(opts && opts.refresh) });
+      // Iter-1 review HIGH-7: if a newer fetch aborted us, drop the
+      // stale resolution silently.
+      if (controller.signal.aborted) return;
       cacheStatus = data.cache_status || 'unknown';
       picker.auditEvent('picker_opened', {
         picker_resource: 'application',
@@ -207,10 +252,14 @@
         pickerSelect.appendChild(opt);
       });
       pickerSelect.disabled = false;
+      setSubmitEnabled(true);
     } catch (err) {
+      // Iter-1 review HIGH-7: drop stale aborted fetches silently.
+      if (controller.signal.aborted) return;
       // AC#1 / AC#2: auto-fallback on 502 or any other error.
       var reason = err && err.status === 502 ? 'chirpstack_unreachable' : 'chirpstack_error';
       applyMode('manual');
+      setSubmitEnabled(true);
       setPickerBanner('Could not reach ChirpStack — switched to manual entry.');
       picker.auditEvent('picker_manual_fallback', {
         picker_resource: 'application',
@@ -224,7 +273,11 @@
   // Form submit: assemble payload from whichever mode is active.
   // ----------------------------------------------------------------
   function readApplicationIdFromActiveMode() {
-    if (manualWrap.hidden === false) {
+    // Iter-1 review HIGH-5: read from pickerState.mode, NOT
+    // manualWrap.hidden. The DOM hidden attribute can desync from the
+    // logical mode (CSS override, future style refactor); the
+    // in-memory mode tracked by applyMode() is the source of truth.
+    if (pickerState.mode === 'manual') {
       return (manualInput.value || '').trim();
     }
     var sel = pickerSelect;
@@ -242,10 +295,11 @@
       }
     });
     pickerRefresh.addEventListener('click', function () {
-      picker.auditEvent('picker_opened', {
-        picker_resource: 'application',
-        cache_status: 'bypassed',
-      });
+      // Iter-1 review LOW-1 fix: drop the pre-fetch picker_opened
+      // emit — loadPicker() emits its own picker_opened on success
+      // with the server-provided cache_status, which will be the
+      // "bypassed" / "miss" value reflecting the actual ?refresh=true
+      // bypass result. Pre-fix produced double-emits.
       loadPicker({ refresh: true });
     });
     modeToManual.addEventListener('click', function () {
@@ -291,7 +345,14 @@
       picker.editedFlag.reset(nameInput);
       fetchApplications();
       // Refetch on next form open: cache may serve a hit (AC#17, #20).
-      if (manualWrap.hidden) loadPicker({});
+      // Iter-1 review MED-4: .catch to prevent unhandled-rejection if
+      // the post-create picker reload fails (the new app already
+      // landed; a picker-reload failure should not surface another
+      // alert on top of the existing fetchApplications error path).
+      // Iter-1 review HIGH-5: read pickerState.mode, not DOM hidden.
+      if (pickerState.mode !== 'manual') {
+        loadPicker({}).catch(function () { /* swallowed; non-fatal */ });
+      }
     } catch (e) {
       showError(createError, 'Create failed: ' + e);
     }
@@ -300,7 +361,10 @@
   document.addEventListener('DOMContentLoaded', function () {
     setupPickerEventListeners();
     applyMode(picker.mode.get(PAGE_KEY));
-    if (manualWrap.hidden) loadPicker({});
+    // Iter-1 review HIGH-5: read pickerState.mode, not DOM hidden.
+    if (pickerState.mode !== 'manual') {
+      loadPicker({}).catch(function () { /* swallowed; non-fatal */ });
+    }
     fetchApplications();
   });
 })();

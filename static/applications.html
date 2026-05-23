@@ -62,7 +62,10 @@
         <div class="picker-toolbar">
           <label class="sr-only" for="application-picker">Application from ChirpStack</label>
           <select id="application-picker" disabled aria-label="Application from ChirpStack">
-            <option>Loading…</option>
+            <!-- Story C-2 iter-1 review HIGH-7: explicit value="" so a
+                 form-submit during initial Loading state never posts
+                 the literal string "Loading…" as application_id. -->
+            <option value="">Loading…</option>
           </select>
           <button type="button" id="application-picker-refresh" title="Refresh from ChirpStack (cache bypass)">↻</button>
           <a id="application-mode-to-manual" role="button" tabindex="0">Switch to manual entry</a>

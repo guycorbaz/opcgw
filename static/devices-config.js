@@ -255,12 +255,20 @@
     // Story C-2: per-form picker state object captures all the
     // operator-set bits the submit handler needs to read at submit
     // time (NOT at picker-render time, AC#14).
+    //
+    // Iter-1 review HIGH-7: `deviceFetchController` / `uplinkFetchController`
+    // hold the AbortController for the most recent inventory fetch
+    // per-picker so a rapid second selection / refresh aborts the
+    // first request (prevents stale-wins races where slower-resolving
+    // fetch overwrites the freshly-clicked one).
     const pickerState = {
       mode: picker.mode.get(DEVICES_PAGE_KEY),
       metricsMode: picker.mode.get(METRICS_PAGE_KEY),
       pickedDevices: [],   // [{id, name, dev_eui}]
       observedKeys: [],    // [{key, wire_type, sample_value}]
       currentDevEui: '',   // selected dev_eui (lowercase, normalized by API)
+      deviceFetchController: null,  // iter-1 HIGH-7
+      uplinkFetchController: null,  // iter-1 HIGH-7
     };
     const form = el('form', {
       class: 'crud-form',
@@ -274,7 +282,10 @@
     const devPickerToolbar = el('div', { class: 'picker-toolbar' });
     const devPickerSelect = el('select', { 'aria-label': 'Device from ChirpStack' });
     devPickerSelect.disabled = true;
-    devPickerSelect.appendChild(el('option', { text: 'Loading…' }));
+    // Iter-1 review HIGH-7: explicit value="" on the Loading
+    // placeholder so a form submit during initial loading state
+    // never POSTs the literal string "Loading…" as device_id.
+    devPickerSelect.appendChild(el('option', { value: '', text: 'Loading…' }));
     const devPickerRefresh = el('button', {
       type: 'button', text: '↻', title: 'Refresh from ChirpStack (cache bypass)',
     });
@@ -405,14 +416,24 @@
     }
 
     async function loadDevicePicker(opts) {
+      // Iter-1 review HIGH-7: abort prior in-flight fetch.
+      if (pickerState.deviceFetchController) {
+        pickerState.deviceFetchController.abort();
+      }
+      const controller = new AbortController();
+      pickerState.deviceFetchController = controller;
+      setFormSubmitEnabled(false);
       devPickerSelect.disabled = true;
       devPickerSelect.replaceChildren();
-      devPickerSelect.appendChild(el('option', { text: 'Loading…' }));
+      // Iter-1 review HIGH-7: Loading option carries value="" so
+      // mid-load submit is safe.
+      devPickerSelect.appendChild(el('option', { value: '', text: 'Loading…' }));
       setDevicePickerBanner('');
       try {
         const data = await picker.fetchDevices(app.application_id, {
           refresh: !!(opts && opts.refresh),
         });
+        if (controller.signal.aborted) return; // iter-1 HIGH-7
         picker.auditEvent('picker_opened', {
           picker_resource: 'device',
           application_id: app.application_id,
@@ -452,8 +473,11 @@
           devPickerSelect.appendChild(opt);
         });
         devPickerSelect.disabled = false;
+        setFormSubmitEnabled(true);
       } catch (err) {
+        if (controller.signal.aborted) return; // iter-1 HIGH-7
         applyDeviceMode('manual');
+        setFormSubmitEnabled(true);
         setDevicePickerBanner('Could not reach ChirpStack — switched to manual entry.', true);
         picker.auditEvent('picker_manual_fallback', {
           picker_resource: 'device',
@@ -472,9 +496,16 @@
         setMetricPickerStatus('Choose a device above first.');
         return;
       }
+      // Iter-1 review HIGH-7: abort prior in-flight uplinks fetch.
+      if (pickerState.uplinkFetchController) {
+        pickerState.uplinkFetchController.abort();
+      }
+      const controller = new AbortController();
+      pickerState.uplinkFetchController = controller;
       setMetricPickerStatus('Loading recent uplinks…');
       try {
         const data = await picker.fetchUplinks(devEui, { limit: 10 });
+        if (controller.signal.aborted) return; // iter-1 HIGH-7
         picker.auditEvent('picker_opened', {
           picker_resource: 'uplink',
           application_id: app.application_id,
@@ -497,13 +528,20 @@
         setMetricPickerStatus('Tick metric keys to include; override wire type per row if needed.');
         data.observed_keys.forEach(function (k, idx) {
           const row = el('div', { class: 'metric-pick-row' });
+          // Iter-1 review HIGH-6: prefix checkbox id with the parent
+          // application_id so multiple application sections rendered
+          // on the same page do NOT collide on HTML id (which would
+          // cause a <label for="mk-0"> click to toggle the wrong-
+          // section checkbox). Use a sanitised app id segment so any
+          // exotic chars in application_id can't break attribute syntax.
+          const idSafeAppId = String(app.application_id).replace(/[^A-Za-z0-9_-]/g, '_');
+          const checkboxId = 'mk-' + idSafeAppId + '-' + idx;
           const checkbox = el('input', {
-            type: 'checkbox', id: 'mk-' + idx,
+            type: 'checkbox', id: checkboxId,
             'data-key': k.key,
             'data-inferred': k.wire_type,
-            'data-sample-count': '1',
           });
-          const label = el('label', { for: 'mk-' + idx, text: k.key });
+          const label = el('label', { for: checkboxId, text: k.key });
           const typeSelect = el('select');
           METRIC_TYPES.forEach(function (t) {
             const opt = el('option', { value: t, text: t });
@@ -511,9 +549,15 @@
             typeSelect.appendChild(opt);
           });
           typeSelect.dataset.role = 'wire-type';
+          // Iter-1 review MED — cap stringified sample to ~200 chars
+          // so a large nested JSON value cannot blow up the DOM /
+          // freeze the operator's browser. textContent path is XSS-
+          // safe; this is a denial-of-readability guard only.
+          const rawSample = JSON.stringify(k.sample_value);
+          const sampleText = rawSample.length > 200 ? rawSample.slice(0, 200) + '…' : rawSample;
           const sample = el('span', {
             class: 'sample-cell',
-            text: 'sample: ' + JSON.stringify(k.sample_value),
+            text: 'sample: ' + sampleText,
           });
           row.appendChild(checkbox);
           row.appendChild(label);
@@ -522,6 +566,7 @@
           metricPickerRows.appendChild(row);
         });
       } catch (err) {
+        if (controller.signal.aborted) return; // iter-1 HIGH-7
         setMetricPickerStatus('Could not fetch recent uplinks.');
         setMetricPickerBanner('You can still add metrics manually below.');
         applyMetricsMode('manual');
@@ -542,6 +587,15 @@
         const key = checkbox.dataset.key;
         const inferred = checkbox.dataset.inferred || '';
         const chosen = row.querySelector('select[data-role="wire-type"]').value;
+        // Iter-1 review MED-1: omit `sample_values_count` rather than
+        // sending a hardcoded `1`. The C-1 `/api/inventory/uplinks`
+        // response carries one ObservedKey per distinct key (with the
+        // LAST sample value seen, not a per-key occurrence count), so
+        // we genuinely don't know how many uplinks contributed to the
+        // inference. The server-side `unwrap_or(0)` then represents
+        // "unknown count" in the audit emit — which is the truthful
+        // value. A future C-1 extension that tracks per-key counts can
+        // re-add this field with the real number.
         result.push({
           metric_name: key,
           chirpstack_metric_name: key,
@@ -549,7 +603,6 @@
           picker_metadata: {
             inferred_type: inferred,
             operator_chosen_type: chosen,
-            sample_values_count: 1,
           },
         });
       }
@@ -560,22 +613,30 @@
     devPickerSelect.addEventListener('change', function () {
       const opt = devPickerSelect.options[devPickerSelect.selectedIndex];
       const devName = opt ? (opt.dataset.devName || opt.textContent || '') : '';
-      const devEui = opt ? (opt.dataset.devEui || opt.value) : '';
+      const devEui = opt ? (opt.dataset.devEui || opt.value || '') : '';
       if (!picker.editedFlag.has(devNameInput) && devName) {
         devNameInput.value = devName;
       }
       devEuiFootnote.textContent = devEui ? 'DevEUI: ' + devEui : '';
+      // Iter-1 review MED-3: clear stale currentDevEui + metric rows
+      // when the operator re-selects the disabled placeholder option
+      // (devEui === ''). Otherwise the subsequent metric-refresh
+      // click would re-fetch a dead DevEUI.
+      if (!devEui) {
+        pickerState.currentDevEui = '';
+        metricPickerRows.replaceChildren();
+        setMetricPickerStatus('Choose a device above first.');
+        return;
+      }
       // Trigger metric-picker fetch when the device changes.
-      if (devEui && pickerState.metricsMode === 'picker') {
+      if (pickerState.metricsMode === 'picker') {
         loadMetricPicker(devEui, {});
       }
     });
     devPickerRefresh.addEventListener('click', function () {
-      picker.auditEvent('picker_opened', {
-        picker_resource: 'device',
-        application_id: app.application_id,
-        cache_status: 'bypassed',
-      });
+      // Iter-1 review LOW-1: drop pre-fetch picker_opened emit;
+      // loadDevicePicker's post-fetch emit carries the correct
+      // server-provided cache_status from the ?refresh=true response.
       loadDevicePicker({ refresh: true });
     });
     devPickerToManual.addEventListener('click', function () {
@@ -594,7 +655,13 @@
         // Try to read from the picker selection (if any).
         const opt = devPickerSelect.options[devPickerSelect.selectedIndex];
         const eui = opt && opt.dataset ? opt.dataset.devEui : '';
-        if (eui) loadMetricPicker(eui, {});
+        if (eui) {
+          loadMetricPicker(eui, {});
+        } else {
+          // Iter-1 review LOW-6: surface a status message instead of
+          // a silent no-op so the operator knows why nothing happened.
+          setMetricPickerStatus('Select a device first.');
+        }
         return;
       }
       loadMetricPicker(pickerState.currentDevEui, {});
@@ -613,8 +680,19 @@
       }
     });
 
-    form.appendChild(el('button', { type: 'submit', text: 'Create device' }));
+    const submitBtn = el('button', { type: 'submit', text: 'Create device' });
+    form.appendChild(submitBtn);
     form.appendChild(createErr);
+
+    // Iter-1 review HIGH-7 helper: disable submit while picker fetch
+    // is in flight. Picker mode only — manual entry is always allowed.
+    function setFormSubmitEnabled(enabled) {
+      if (pickerState.mode === 'manual') {
+        submitBtn.disabled = false; // manual entry is always submittable
+        return;
+      }
+      submitBtn.disabled = !enabled;
+    }
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();
       clearError(createErr);

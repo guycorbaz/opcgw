@@ -738,3 +738,13 @@ iter-2 of bmad-code-review C-1 caught **2 HIGH + 2 MED + several LOW** in iter-1
 - **DEF-iter2-C1-LOW-builderConnectTimeout (LOW — tonic default):** `build_channel` doesn't set an explicit `.connect_timeout(...)` on the tonic Endpoint, so cancellation can be blocked on tonic's default connect timeout (typically 60s) when ChirpStack is unreachable. Set an explicit small timeout (e.g. 5s) so the gateway's shutdown SLO is project-controlled. Defer to a hardening pass.
 
 - **DEF-iter2-C1-LOW-testcountclaim (LOW — process hygiene):** Iter-1 commit message claimed "1392/0/10 tests pass" — verified accurate (post-iter-2 is 1398/0/10 with +6 regression-guards from iter-2's P1 fix). Iter-2 commit will pin 1398/0/10. No action needed beyond this confirmation.
+
+## Deferred from: code review of C-2-inventory-pickers-web-ui — iter-1 (2026-05-23)
+
+- **DEF-iter1-C2-update-emit (MED):** `update_device` would emit `metric_wire_type_inferred` on PUT-replace for any pre-existing metric carrying a `picker_metadata` envelope. Today this is latent — the JS edit modal (`buildMetricRow` in static/devices-config.js) does NOT attach picker_metadata when re-rendering pre-existing rows, so the emit only fires on create. Once a future picker-driven edit modal lands, the audit semantic must either (a) strip picker_metadata from re-saved metrics client-side, or (b) be relaxed to "emit per metric carrying picker_metadata at write time" and documented in docs/inventory-api.md.
+
+- **DEF-iter1-C2-key-charclass (MED — UX polish):** ChirpStack `observed_keys[].key` values containing spaces or non-ASCII chars (e.g. "Battery Voltage" from a permissive codec) will appear in the metric-picker checkbox list but fail the server-side validator with HTTP 400 on submit. Server returns a clear error today; client-side pre-validation (disable + tooltip on invalid keys) is UX polish for a future iteration.
+
+- **DEF-iter1-C2-picker-opened-shape (LOW — refactor):** `audit_picker_event` `picker_opened` arm always emits `application_id` / `dev_eui` / `cache_status` even when they're empty for the resource scope (e.g. `picker_resource="application"` doesn't need `dev_eui`). Per-resource conditional emit is non-trivial in tracing (no fully-dynamic field names); current verbose-but-correct form is parseable by downstream consumers. Refactor to per-arm conditional fields if log volume becomes an issue.
+
+- **DEF-iter1-C2-audit-rate-limit (LOW — carry-forward #88):** `auditEvent` JS helper has no client-side debounce; combined with no server-side per-IP rate limit (issue #88, still open), bursty picker UX (e.g. operator clicking through 5 devices in rapid succession) can flood the audit log. Shared concern with the entire `/api/*` surface; fix lands when #88 is addressed.

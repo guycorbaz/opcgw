@@ -295,3 +295,13 @@ audit per metric carrying a `picker_metadata` envelope, then drops the
 envelope before persisting to TOML. Manual-entry metrics (no envelope)
 stay silent — they remain covered by the existing
 `event="device_created"` / `device_updated` audits.
+
+**Audit field vocabulary.** `inferred_type` and `operator_chosen_type`
+in the emitted audit line are constrained to a closed set:
+- `Float`, `Int`, `Bool`, `String` — the legal `OpcMetricTypeConfig`
+  values (passed through verbatim from the request).
+- `unknown` — the request supplied a non-empty value that did not
+  match any of the four legal types (the metric itself was NOT
+  rejected; the optional audit envelope is informational and a typo
+  in this field should never block the CRUD write).
+- `unset` — the request omitted the field (`Option::None` deserialized).

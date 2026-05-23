@@ -177,7 +177,12 @@
     // helper is called more than once on the same element.
     if (inputEl.dataset.opcgwEditedAttached === '1') return;
     inputEl.dataset.opcgwEditedAttached = '1';
-    inputEl.addEventListener('keydown', function () {
+    // Iter-1 review MED — listen to `input` rather than `keydown`. The
+    // `input` event fires only when the value actually changes (cover
+    // context-menu paste, drag-drop, autofill, and IME composition) and
+    // does NOT fire for arrow keys / Tab / modifier keys (which would
+    // false-positive the edited flag on keydown).
+    inputEl.addEventListener('input', function () {
       inputEl.dataset.opcgwEdited = '1';
     });
   }

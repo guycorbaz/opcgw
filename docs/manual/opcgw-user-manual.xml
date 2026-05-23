@@ -1265,7 +1265,7 @@ curl -sS -u "$OPCGW_OPCUA__USER_NAME:$OPCGW_OPCUA__USER_PASSWORD" \
         wants to see it in opcgw immediately.</para>
 
         <para><emphasis role="strong">Audit signals.</emphasis> The
-        picker emits three audit events into the canonical structured
+        picker emits four audit events into the canonical structured
         log:</para>
         <itemizedlist>
           <listitem>
@@ -1284,6 +1284,15 @@ curl -sS -u "$OPCGW_OPCUA__USER_NAME:$OPCGW_OPCUA__USER_PASSWORD" \
             <literal>chirpstack_error</literal>,
             <literal>chirpstack_empty</literal>, or
             <literal>no_recent_uplinks</literal>).</para>
+          </listitem>
+          <listitem>
+            <para><literal>event="picker_audit_rejected"</literal> —
+            <literal>POST /api/audit/picker-event</literal> rejected
+            an unknown event name or a cross-origin CSRF attempt;
+            carries <literal>reason</literal>
+            (<literal>unknown_event</literal> or
+            <literal>csrf</literal>) and the rejected event name (cap
+            at 256 bytes).</para>
           </listitem>
           <listitem>
             <para><literal>event="metric_wire_type_inferred"</literal>

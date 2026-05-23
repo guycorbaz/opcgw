@@ -2108,15 +2108,46 @@ pub struct MetricMappingRequest {
 /// string `"unknown"` in the audit event — the field is informational,
 /// not load-bearing, and rejecting the whole metric on a typo in this
 /// optional audit envelope would be operator-hostile.
+///
+/// **Iter-1 review HIGH-3 fix:** `inferred_type` and `operator_chosen_type`
+/// are length-capped at deserialize time to [`PICKER_METADATA_STRING_CAP`]
+/// bytes. The audit-only envelope has no legitimate use case for long
+/// strings (the legal values are 3-6 chars: `Float|Int|Bool|String`);
+/// the cap bounds the in-memory allocation per request below the path
+/// where `sanitise_wire_type` would coerce the value to `"unknown"`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PickerMetadata {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_capped_picker_metadata_string")]
     pub inferred_type: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_capped_picker_metadata_string")]
     pub operator_chosen_type: Option<String>,
     #[serde(default)]
     pub sample_values_count: Option<u32>,
+}
+
+/// Iter-1 review HIGH-3 — deserialize cap for [`PickerMetadata`]
+/// string fields. 64 bytes is comfortably above the legal
+/// `OpcMetricTypeConfig` values (max 6 chars) while still bounding
+/// pathological inputs.
+const PICKER_METADATA_STRING_CAP: usize = 64;
+
+fn deserialize_capped_picker_metadata_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    if let Some(ref s) = opt {
+        if s.len() > PICKER_METADATA_STRING_CAP {
+            return Err(serde::de::Error::custom(format!(
+                "picker_metadata string field exceeds {}-byte cap",
+                PICKER_METADATA_STRING_CAP
+            )));
+        }
+    }
+    Ok(opt)
 }
 
 impl PickerMetadata {
@@ -5386,6 +5417,11 @@ fn picker_event_field_allowlist(event: &str) -> &'static [&'static str] {
 /// Truncate `value` to [`PICKER_EVENT_FIELD_VALUE_CAP`] bytes on a UTF-8
 /// boundary. Caller passes the raw string; the helper guarantees the
 /// returned string is valid UTF-8 and at most the cap.
+///
+/// **Iter-1 review LOW-5 comment:** the inner `while` loop terminates in
+/// at most 3 iterations because UTF-8 characters are at most 4 bytes
+/// long; if `end` is not on a char boundary, the previous boundary is
+/// within 3 bytes. No worst-case pathological inputs.
 fn truncate_audit_value(value: &str) -> String {
     if value.len() <= PICKER_EVENT_FIELD_VALUE_CAP {
         return value.to_string();
@@ -5426,18 +5462,29 @@ pub async fn audit_picker_event(
     Json(body): Json<PickerEventRequest>,
 ) -> Response {
     // Reject unknown event names (AC#11).
+    //
+    // **Iter-1 review HIGH-2 fix:** cap `body.event` BEFORE Debug-logging it
+    // AND BEFORE format!-interpolating it into the 400 response body. The
+    // value is attacker-controlled (basic-auth-gated but a logged-in
+    // operator's compromised browser, or a malicious extension, can issue
+    // arbitrary POSTs); without the cap a 4 KiB event name (the new
+    // body-limit ceiling per HIGH-1) would still produce a 4 KiB log line
+    // AND a 4 KiB response body per request. Truncating to
+    // PICKER_EVENT_FIELD_VALUE_CAP (256 bytes) on a UTF-8 boundary bounds
+    // the per-request log/response footprint to a known constant.
     if !PICKER_EVENT_ALLOWED.contains(&body.event.as_str()) {
+        let capped_event = truncate_audit_value(&body.event);
         warn!(
             event = "picker_audit_rejected",
             reason = "unknown_event",
             source_ip = %addr.ip(),
-            received_event = ?body.event,
+            received_event = ?capped_event,
             "POST /api/audit/picker-event: unknown event name rejected"
         );
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::with_hint(
-                format!("unknown picker event name '{}'", body.event),
+                format!("unknown picker event name '{}'", capped_event),
                 "expected one of: picker_opened, picker_manual_fallback",
             )),
         )
@@ -5461,24 +5508,33 @@ pub async fn audit_picker_event(
     // Emit a single tracing event per dispatch. Literal match arms
     // preserve the source-grep contract `git grep -hoE 'event =
     // "picker_[a-z_]+"' src/`.
+    //
+    // **Iter-1 review HIGH-4 fix (NEW audit-emit injection sink, memory
+    // pattern feedback_iter3_validation):** sanitised field values are
+    // Debug-formatted (`?pick(...)`) rather than Display-formatted
+    // (`%pick(...)` / bare-`pick(...)`) so a newline / ANSI escape /
+    // control character in an attacker-supplied field cannot inject a
+    // faked structured-log line. Pre-fix, `dev_eui = "real-eui\n[CRIT]
+    // FAKE LOG LINE"` would have written two log lines; Debug formatting
+    // escapes the newline as `\n` inside the string literal.
     let pick = |k: &str| sanitised.get(k).map(String::as_str).unwrap_or("");
     match body.event.as_str() {
         "picker_opened" => info!(
             event = "picker_opened",
             source = "web_picker",
-            picker_resource = pick("picker_resource"),
-            application_id = pick("application_id"),
-            dev_eui = pick("dev_eui"),
-            cache_status = pick("cache_status"),
+            picker_resource = ?pick("picker_resource"),
+            application_id = ?pick("application_id"),
+            dev_eui = ?pick("dev_eui"),
+            cache_status = ?pick("cache_status"),
             source_ip = %addr.ip(),
             "Picker opened by operator"
         ),
         "picker_manual_fallback" => info!(
             event = "picker_manual_fallback",
             source = "web_picker",
-            picker_resource = pick("picker_resource"),
-            reason = pick("reason"),
-            error_detail = pick("error_detail"),
+            picker_resource = ?pick("picker_resource"),
+            reason = ?pick("reason"),
+            error_detail = ?pick("error_detail"),
             source_ip = %addr.ip(),
             "Picker switched to manual entry"
         ),

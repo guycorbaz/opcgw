@@ -290,8 +290,59 @@ The third (`metric_wire_type_inferred`) fires from the existing `POST /api/devic
   - [x] 7.3 `README.md` Planning table — Epic C row updated to "3/6 done" with a C-2 entry summarising the implementation.
   - [x] 7.4 DocBook user manual `<sect1 id="sec-web-pickers">` added under the Configuration chapter. Validated with `xmllint --noout --valid` — clean.
 
+### Review Findings (iter-1, 2026-05-23, same-LLM Opus 4.7)
+
+Reviewers: Blind Hunter (19 findings: 5 H / 10 M / 4 L) + Edge Case Hunter (18 findings, mostly MED) + Acceptance Auditor (verdict: ELIGIBLE-FOR-DONE with 4 LOW). After dedup: 19 PATCH / 4 DEFER / 11 DISMISS / 0 DECISION-NEEDED.
+
+**Iter-1 doctrine validation** — Auditor returned ELIGIBLE-FOR-DONE but Blind+Edge surfaced 7 HIGH + 6 MED real defects. Strong validation of the iter-N+1 doctrine; the 18th story in a row where Blind/Edge catch real regressions the Auditor missed.
+
+#### PATCH
+
+- [ ] [Review][Patch][HIGH] Add `DefaultBodyLimit::max(4096)` to `/api/audit/picker-event` route — mirrors Story C-0 pattern on `/api/setup/password` [src/web/mod.rs:540-549]
+- [ ] [Review][Patch][HIGH] Cap `body.event` via `truncate_audit_value` BEFORE Debug-logging it and BEFORE `format!` interpolation in 400-response path [src/web/api.rs::audit_picker_event]
+- [ ] [Review][Patch][HIGH] Cap `PickerMetadata.inferred_type` + `PickerMetadata.operator_chosen_type` at deserialize time (limit ≤ 32 chars; sanitise_wire_type can only return 6 distinct values anyway) [src/web/api.rs::PickerMetadata]
+- [ ] [Review][Patch][HIGH] **NEW audit-emit injection sink** (memory pattern): switch all `pick("dev_eui")`/`pick("application_id")`/`pick("cache_status")`/etc. audit field emits from `%`-Display to `?`-Debug formatting OR pre-strip control chars from sanitised values [src/web/api.rs::audit_picker_event]
+- [ ] [Review][Patch][HIGH] Stop relying on `manualWrap.hidden === false` to determine active mode — read from `pickerState.mode` (track it explicitly) so a CSS desync can't cause empty `application_id` submissions [static/applications.js::readApplicationIdFromActiveMode]
+- [ ] [Review][Patch][HIGH] Prefix metric-picker checkbox ids with `app.application_id` to prevent HTML id collisions across per-application sections — multi-application installations currently see `<label for="mk-0">` toggling the wrong checkbox [static/devices-config.js::loadMetricPicker]
+- [ ] [Review][Patch][HIGH] Cascade-fetch race: add per-picker `AbortController` to `loadDevicePicker` + `loadMetricPicker` (devices-config.js) + `loadPicker` (applications.js); abort the previous controller before each fetch [static/devices-config.js + static/applications.js]
+- [ ] [Review][Patch][HIGH] Loading-state submit bypass: add `value=""` attribute to "Loading…" placeholder options + disable submit button while picker `disabled` flag is true [static/applications.html + static/devices-config.js]
+- [ ] [Review][Patch][MED] Drop hardcoded `sample_values_count: 1` from picker_metadata envelope — the value is misleading (we don't actually count); let server-side `unwrap_or(0)` represent "unknown" [static/devices-config.js::readPickerMetrics]
+- [ ] [Review][Patch][MED] Switch `attachEditedFlag` from `keydown` to `input` event — context-menu paste produces no keydown; arrow/Tab keys false-positive on keydown [static/inventory-picker.js::attachEditedFlag]
+- [ ] [Review][Patch][MED] Clear `pickerState.currentDevEui` when device-picker re-selects placeholder (and clear `metricPickerRows`); prevents stale-DevEUI refresh [static/devices-config.js::devPickerSelect change handler]
+- [ ] [Review][Patch][MED] Cap `JSON.stringify(k.sample_value)` to ~200 chars before rendering — large nested sample blows up DOM [static/devices-config.js::loadMetricPicker]
+- [ ] [Review][Patch][MED] Add `.catch(function(){})` to post-create `loadPicker({})` call — unhandled promise rejection on error [static/applications.js::createForm submit handler]
+- [ ] [Review][Patch][MED] Use `dir.path().join("secrets.toml")` for `tests/web_picker.rs::secrets_path` instead of hardcoded `/tmp/test-secrets-c-2.toml` [tests/web_picker.rs::spawn_fixture]
+- [ ] [Review][Patch][MED] Fix fake regression-guard in `audit_picker_event_drops_unknown_fields_silently` — add positive assertion that `picker_resource="uplink"` + `cache_status="bypassed"` ARE present (currently only checks marker absence; would pass if entire log emit broke) [tests/web_picker.rs]
+- [ ] [Review][Patch][LOW] Drop pre-fetch `picker_opened` emit from refresh-icon handlers — `loadPicker` already emits post-fetch with the correct server-provided cache_status [static/applications.js + static/devices-config.js]
+- [ ] [Review][Patch][LOW] Fix "1417/0/65" → "1417/0/10" in spec Completion Note + sprint-status yaml (the "65" conflates 10 integration-test-ignored + 55 doctest-ignored)
+- [ ] [Review][Patch][LOW] DocBook user manual says "three audit events" — add 4th (`picker_audit_rejected`) and correct count [docs/manual/opcgw-user-manual.xml::sec-web-pickers]
+- [ ] [Review][Patch][LOW] Document the `"unset"` and `"unknown"` values in `sanitise_wire_type` audit field [docs/inventory-api.md]
+- [ ] [Review][Patch][LOW] Add one-line comment to `truncate_audit_value` while-loop documenting UTF-8-max-3-iterations [src/web/api.rs::truncate_audit_value]
+- [ ] [Review][Patch][LOW] Add status message ("Select a device first.") to empty-devEui metric-refresh handler [static/devices-config.js::metricPickerRefresh click handler]
+
+#### DEFER
+
+- [x] [Review][Defer][MED] `update_device` would emit `metric_wire_type_inferred` on PUT-replace for pre-existing picker_metadata — DEFERRED: no current code path attaches picker_metadata to edit-flow metrics; latent until a future picker-driven edit modal lands. Document in `deferred-work.md` + note the relaxed audit semantic ("per metric carrying picker_metadata at write time")
+- [x] [Review][Defer][MED] ChirpStack metric keys with spaces / non-ASCII would tick fine in the picker but fail server validation with 400 — DEFERRED: server returns a clear error; client-side pre-validation is UX polish for a future iteration
+- [x] [Review][Defer][LOW] `picker_opened` audit emit always renders 4 fields even when only 1-2 are scope-relevant (verbose-but-correct) — DEFERRED: per-resource conditional emit needs a non-trivial refactor; downstream log consumers handle the verbose form fine
+- [x] [Review][Defer][LOW] `auditEvent` lacks client-side rate-limit — DEFERRED to issue #88 (per-IP rate limiting); shared with the entire `/api/*` surface
+
+#### DISMISS (11)
+
+- `escapeHtml` duplication between modules — no duplicate actually exists in devices-config.js (uses `el()` helper with textContent)
+- `PickerEventRequest.fields` HashMap unbounded keys — implicitly capped by the 4 KiB body limit (PATCH HIGH-1)
+- `serde_json::Map` duplicate JSON keys = last-write-wins — documented serde_json behaviour, not a defect
+- `auditEvent` legit-flow not test-pinned — covered transitively by `audit_picker_event_picker_opened_emits_audit_204`
+- `auditEvent` doesn't surface server errors to operator — by-design (audit endpoint is best-effort)
+- `sample_values_count > u32::MAX` — unreachable today (picker JS sends literal `1` or, post-fix, nothing)
+- `setMode` pageKey unbounded — all callers use literal strings; unreachable
+- `applyMode` unknown mode — getMode validates input + setMode validates output; unreachable
+- GET/HEAD/OPTIONS on `/api/audit/picker-event` not test-pinned — route is POST-only; axum returns 405 and `is_state_changing(GET)==false` skips CSRF entirely so `picker_audit_rejected` cannot misfire
+- `setPickerBanner` rebuilds DOM (button stacking) — `replaceChildren()` is called first, no stacking possible
+- "10 server-side tests" vs "13 integration tests" framing — both numbers correct (10 tokio tests of own + 3 `common::tests` helpers inherited via `mod common`)
+
 - [x] **Task 8 — Regression gate + commit (AC: #23, #24, #25, #26)**
-  - [x] 8.1 `cargo test --all-targets` → **1417 / 0 / 65** (baseline 1404 + 13 new picker tests; AC#23 target ≥ 1291 met comfortably).
+  - [x] 8.1 `cargo test --all-targets` → **1417 / 0 / 10** integration + **0 / 0 / 55** doctest (baseline 1404 + 13 new picker tests; AC#23 target ≥ 1291 met comfortably; iter-1 LOW-2 corrected the prior "1417/0/65" mis-merge).
   - [x] 8.2 `cargo clippy --all-targets -- -D warnings` → clean.
   - [x] 8.3 `cargo test --doc` → 0 failed / 55 ignored. No regression vs the C-1 baseline (the iter-3 doctest count is unchanged within the noise floor).
   - [ ] 8.4 Manual end-to-end smoke against Guy's real ChirpStack — deferred to Guy / batched-validation doctrine (per the 2026-05-20 main-deadlock incident memo: "cargo test does NOT replace real-world testing"; this is the right point to hand off).
@@ -441,7 +492,7 @@ Tracking issue title (suggested): **"C-2: Inventory pickers in the web UI"** (Re
 
 **Implementation Complete — 2026-05-23.** Status flipped `ready-for-dev → in-progress → review` in one bmad-dev-story execution.
 
-**Test count delta.** 1417 / 0 / 65 (baseline 1404 / 0 / 65 post-C-1; +13 from new `tests/web_picker.rs`). Comfortably above the AC#23 target of ≥ 1291 / 0 / ≥ 10. `cargo clippy --all-targets -- -D warnings` clean. `cargo test --doc` 0 failed / 55 ignored.
+**Test count delta.** 1417 / 0 / 10 integration + 0 / 0 / 55 doctest (baseline 1404 / 0 / 10 post-C-1; +13 from new `tests/web_picker.rs`). Comfortably above the AC#23 target of ≥ 1291. `cargo clippy --all-targets -- -D warnings` clean. **(Iter-1 review LOW-2 fix:** prior "1417/0/65" mis-merged the 10 integration-test-ignored count with the 55 doctest-ignored count.)
 
 **Test-to-AC mapping (Task 6 / AC#21).** The 10 named tests from the spec map to these 8 entries in `tests/web_picker.rs` (some tests carry multiple AC concerns to keep the suite tight):
 

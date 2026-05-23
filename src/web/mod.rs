@@ -537,9 +537,19 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
         // stack below) and CSRF-protected. No state mutation — the
         // handler validates the event-name allowlist + sanitises the
         // fields per-event before emitting one tracing line.
+        //
+        // **Iter-1 review HIGH-1 fix:** 4 KiB per-route body limit
+        // mirrors the Story C-0 pattern on `/api/setup/password`. This
+        // route is basic-auth-gated (so it's NOT operator-unauthenticated
+        // like the wizard) but the audit-event JSON envelope is small
+        // by construction (event name + ≤3 fields × ≤256 chars each =
+        // ~1 KiB worst case); a 4 KiB cap leaves headroom while
+        // bounding the DoS amplifier blast radius from axum's 2 MiB
+        // default.
         .route(
             "/api/audit/picker-event",
-            axum::routing::post(api::audit_picker_event),
+            axum::routing::post(api::audit_picker_event)
+                .layer(axum::extract::DefaultBodyLimit::max(4096)),
         )
         // Epic C C-0 (2026-05-21): wizard routes. Reachable BEFORE
         // auth+CSRF when `AppState.is_first_run = true` (the basic-auth

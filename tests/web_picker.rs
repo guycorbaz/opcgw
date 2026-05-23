@@ -217,7 +217,12 @@ async fn spawn_fixture(seed_toml: &str) -> PickerFixture {
         config_writer,
         static_dir: PathBuf::from("static"),
         is_first_run: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        secrets_path: PathBuf::from("/tmp/test-secrets-c-2.toml"),
+        // Iter-1 review MED — per-test tempdir-relative path rather than
+        // a hardcoded /tmp filename. The picker tests don't touch the
+        // secrets file but the test infrastructure should match the
+        // CRUD-test pattern so any future code path that wrote through
+        // this field would not cross-contaminate parallel test runs.
+        secrets_path: dir.path().join("secrets.toml"),
         shutdown_token: CancellationToken::new(),
         inventory_cache: Arc::new(opcgw::chirpstack_inventory::InventoryCache::new(60)),
     });
@@ -430,9 +435,20 @@ async fn audit_picker_event_drops_unknown_fields_silently() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     let logs = captured_logs();
+    // Iter-1 review MED — positive assertion that the KNOWN fields
+    // are present + correctly rendered. Pre-fix, the test only
+    // checked marker absence, which would silently pass if the audit
+    // emit broke entirely (panic-and-recover before info! macro). The
+    // legitimate fields MUST land for the test to confirm the
+    // sanitisation path actually emitted a structured event.
     assert!(
         logs.contains("picker_opened") && logs.contains("picker_resource=\"uplink\""),
-        "expected picker_opened with picker_resource; got: {}",
+        "expected picker_opened with picker_resource=uplink (positive emit assertion); got: {}",
+        logs
+    );
+    assert!(
+        logs.contains("cache_status=\"bypassed\""),
+        "expected cache_status=bypassed to land in the audit emit (positive field-passthrough assertion); got: {}",
         logs
     );
     assert!(
