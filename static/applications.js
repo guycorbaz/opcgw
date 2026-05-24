@@ -400,13 +400,66 @@
     }
   });
 
+  // Story C-4 (AC#8): honour deep-link prefill query params from the
+  // drift view. `prefill_app_id` selects the matching picker option
+  // (or falls back to manual mode if the id isn't in the picker's
+  // option set); `prefill_name` pre-fills the application_name input
+  // unless the operator has already edited it. The drift view never
+  // mutates state directly — this prefill is the deep-link contract
+  // it relies on.
+  function applyPrefillFromUrl() {
+    var params;
+    try {
+      params = new URLSearchParams(window.location.search || '');
+    } catch (e) {
+      return;
+    }
+    var prefillId = params.get('prefill_app_id') || '';
+    var prefillName = params.get('prefill_name') || '';
+    if (!prefillId && !prefillName) return;
+
+    if (prefillName && !picker.editedFlag.has(nameInput)) {
+      nameInput.value = prefillName;
+      picker.editedFlag.recordPickerPopulation(nameInput, prefillName);
+    }
+    if (!prefillId) return;
+
+    // Try to select the matching picker option. If the picker isn't
+    // populated yet (still loading) or the id isn't an option, fall
+    // back to manual mode with the id pre-filled.
+    var matched = false;
+    if (pickerSelect && pickerSelect.options) {
+      for (var i = 0; i < pickerSelect.options.length; i++) {
+        if (pickerSelect.options[i].value === prefillId) {
+          pickerSelect.selectedIndex = i;
+          matched = true;
+          break;
+        }
+      }
+    }
+    if (!matched) {
+      applyMode('manual');
+      if (manualInput) manualInput.value = prefillId;
+    }
+    // Scroll the create form into view so the operator lands on it.
+    var form = document.getElementById('create-form');
+    if (form && typeof form.scrollIntoView === 'function') {
+      form.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     setupPickerEventListeners();
     applyMode(picker.mode.get(PAGE_KEY));
     // Iter-1 review HIGH-5: read pickerState.mode, not DOM hidden.
     // Iter-3 review MED: AbortError-filtered warning.
     if (pickerState.mode !== 'manual') {
-      loadPicker({}).catch(picker.warnUnlessAbort('initial picker load'));
+      loadPicker({})
+        .then(applyPrefillFromUrl)
+        .catch(picker.warnUnlessAbort('initial picker load'));
+    } else {
+      // Manual mode: no picker options to wait for; apply prefill now.
+      applyPrefillFromUrl();
     }
     fetchApplications();
   });

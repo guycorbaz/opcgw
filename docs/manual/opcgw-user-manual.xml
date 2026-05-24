@@ -1310,6 +1310,123 @@ curl -sS -u "$OPCGW_OPCUA__USER_NAME:$OPCGW_OPCUA__USER_PASSWORD" \
         for the full request/response contract.</para>
       </section>
 
+      <section id="sec-inventory-drift">
+        <title>Reconciling drift between opcgw and ChirpStack (Epic C C-4)</title>
+        <para>From Epic C C-4 onward, the
+        <filename>/inventory-drift.html</filename> page compares
+        opcgw's configured applications, devices, and metrics against
+        ChirpStack's current inventory and highlights stale, missing,
+        available, and renamed resources. This closes the long-tail
+        operational loop that the pickers (C-2) and duplicate
+        prevention (C-3) do not address — what happens when the
+        ChirpStack-side inventory changes after opcgw has been
+        configured.</para>
+
+        <para>Every resource is classified into one of four buckets:</para>
+
+        <itemizedlist>
+          <listitem><para><literal>ok</literal> — present in both opcgw
+          and ChirpStack, names match. Information only; no action
+          needed.</para></listitem>
+          <listitem><para><literal>stale</literal> — configured in
+          opcgw, no longer in ChirpStack (or, for metrics, not seen in
+          the last 10 uplinks). Operator can <emphasis>Remove from
+          opcgw</emphasis> or <emphasis>Keep as alias</emphasis>.
+          Soft-stale metrics (codec emits the key conditionally) are
+          rendered in a softer yellow tone vs hard-stale red.</para></listitem>
+          <listitem><para><literal>available</literal> — present in
+          ChirpStack, not in opcgw. <emphasis>Add to opcgw</emphasis>
+          deep-links to the C-2 picker page with the chosen resource
+          pre-selected.</para></listitem>
+          <listitem><para><literal>drifted</literal> — present in both
+          but names (applications/devices) or wire types (metrics) do
+          not match. <emphasis>Update opcgw name to ChirpStack's</emphasis>
+          or <emphasis>Keep opcgw alias</emphasis>.</para></listitem>
+        </itemizedlist>
+
+        <note>
+          <title>No background polling</title>
+          <para>The drift view is operator-triggered only — opcgw does
+          not periodically compute drift. Every page load (and
+          <emphasis>Refresh now</emphasis> click) forces a fresh fetch
+          from ChirpStack (<literal>?refresh=true</literal>), bypassing
+          the C-1 inventory cache. This bounds the ChirpStack-side load
+          to active reconciliation sessions.</para>
+        </note>
+
+        <para>Typical scenarios:</para>
+
+        <variablelist>
+          <varlistentry>
+            <term>Device retired in ChirpStack</term>
+            <listitem><para>The device shows as
+            <literal>stale</literal>. <emphasis>Remove from
+            opcgw</emphasis> deletes the device + its metric mappings
+            (cascade scope shown in the confirmation modal).
+            ChirpStack-side resources are untouched.</para></listitem>
+          </varlistentry>
+          <varlistentry>
+            <term>New device enrolled in ChirpStack</term>
+            <listitem><para>The device shows as
+            <literal>available</literal>. <emphasis>Add to
+            opcgw</emphasis> deep-links to
+            <filename>/devices-config.html</filename> with the device
+            picker pre-selected; the operator picks metrics from the
+            recent-uplinks list and saves.</para></listitem>
+          </varlistentry>
+          <varlistentry>
+            <term>Application renamed in ChirpStack</term>
+            <listitem><para>The application shows as
+            <literal>drifted</literal> with both names visible.
+            <emphasis>Update opcgw name to ChirpStack's</emphasis> issues
+            a <literal>PUT /api/applications/&lt;id&gt;</literal> with
+            the new name; <emphasis>Keep opcgw alias</emphasis> emits a
+            <literal>drift_dismissed</literal> audit event so the
+            deliberate choice is traceable.</para></listitem>
+          </varlistentry>
+          <varlistentry>
+            <term>Codec firmware adds a metric key</term>
+            <listitem><para>The metric shows as
+            <literal>available</literal>. <emphasis>Add to opcgw</emphasis>
+            deep-links to the metric picker with the key pre-ticked.</para></listitem>
+          </varlistentry>
+          <varlistentry>
+            <term>Configured wire-type doesn't match observed uplinks</term>
+            <listitem><para>The metric shows as <literal>drifted</literal>
+            with <literal>drift_details.reason="wire_type_mismatch"</literal>.
+            The drift view links to the devices-config page so the
+            operator can edit the metric type via the canonical edit
+            flow.</para></listitem>
+          </varlistentry>
+        </variablelist>
+
+        <para>When ChirpStack is unreachable, the page renders the
+        opcgw-side rows as <literal>ok</literal> placeholders, surfaces
+        a banner explaining the situation, and disables all destructive
+        action buttons + hides <emphasis>Add to opcgw</emphasis>
+        buttons. A <emphasis>Retry</emphasis> button next to the banner
+        re-fires the drift fetch.</para>
+
+        <para>Audit events fired by the drift view:</para>
+
+        <itemizedlist>
+          <listitem><para><literal>drift_view_opened</literal> on every
+          <literal>GET /api/inventory/drift</literal> call, carrying the
+          summary counts.</para></listitem>
+          <listitem><para><literal>drift_action</literal> when the
+          operator clicks an action button (carries the action verb,
+          resource scope, and optional <literal>operator_choice</literal>
+          text).</para></listitem>
+          <listitem><para><literal>drift_dismissed</literal> when the
+          operator clicks <emphasis>Keep as alias</emphasis> or
+          <emphasis>Keep opcgw alias</emphasis> — the deliberate
+          "known divergence" signal.</para></listitem>
+        </itemizedlist>
+
+        <para>See <filename>docs/web-api.md § Story C-4</filename> for
+        the full endpoint contract.</para>
+      </section>
+
       <section id="sec-global-config">
         <title>[global] — Global Settings</title>
         <para>The <literal>[global]</literal> section currently carries a

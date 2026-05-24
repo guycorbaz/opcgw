@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>opcgw &mdash; Inventory drift</title>
+<link rel="stylesheet" href="/dashboard.css">
+<style>
+  /* Story C-4 drift view — minimal-footprint overrides on top of
+     dashboard.css. Class-coloured row borders + section collapsibles. */
+  .drift-toolbar {
+    display: flex; gap: 0.6rem; align-items: center;
+    margin: 0.5rem 0 1rem; flex-wrap: wrap;
+  }
+  .drift-toolbar button { padding: 0.4rem 0.8rem; cursor: pointer; }
+  .drift-fetched-at { font-size: 0.85rem; color: #555; }
+  .drift-unreachable-banner {
+    background: #fcf3cf; color: #7d6608; padding: 0.75rem;
+    border-left: 4px solid #f1c40f; margin: 0.5rem 0;
+  }
+  .drift-large-banner {
+    background: #eef; color: #224; padding: 0.5rem;
+    border-left: 4px solid #5577cc; margin: 0.5rem 0; font-size: 0.9rem;
+  }
+  .drift-section { margin: 1rem 0; }
+  .drift-section summary {
+    cursor: pointer; padding: 0.4rem; background: #f4f4f4;
+    font-weight: bold; font-size: 1rem; border-radius: 3px;
+  }
+  .drift-section[data-class="stale"] summary { background: #fadbd8; }
+  .drift-section[data-class="available"] summary { background: #d6eaf8; }
+  .drift-section[data-class="drifted"] summary { background: #fff3cd; }
+  .drift-section[data-class="ok"] summary { background: #d4edda; }
+  table.drift { width: 100%; border-collapse: collapse; margin-top: 0.4rem; }
+  table.drift th, table.drift td {
+    padding: 0.4rem; border-bottom: 1px solid #ddd;
+    text-align: left; font-size: 0.92rem;
+  }
+  table.drift th { background: #fafafa; }
+  table.drift td.soft-stale { color: #7d6608; font-style: italic; }
+  .drift-row-actions { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+  .drift-row-actions button {
+    padding: 0.25rem 0.55rem; cursor: pointer; font-size: 0.85rem;
+  }
+  .drift-row-actions button:disabled {
+    cursor: not-allowed; opacity: 0.5;
+  }
+  .btn-add { background: #28a745; color: #fff; border: none; }
+  .btn-remove { background: #c0392b; color: #fff; border: none; }
+  .btn-update { background: #f39c12; color: #fff; border: none; }
+  .btn-keep { background: #95a5a6; color: #fff; border: none; }
+  .error-banner { color: #c0392b; padding: 0.5rem; }
+  .drift-summary-counts {
+    display: flex; gap: 1rem; flex-wrap: wrap;
+    font-size: 0.9rem; padding: 0.3rem 0;
+  }
+  .drift-summary-counts .pill {
+    padding: 0.2rem 0.5rem; border-radius: 3px; background: #eee;
+  }
+  .drift-summary-counts .pill[data-class="ok"]        { background: #d4edda; color: #155724; }
+  .drift-summary-counts .pill[data-class="stale"]     { background: #fadbd8; color: #7d2818; }
+  .drift-summary-counts .pill[data-class="available"] { background: #d6eaf8; color: #1f4978; }
+  .drift-summary-counts .pill[data-class="drifted"]   { background: #fff3cd; color: #856404; }
+  /* Modal pattern mirrored from devices-config.html. */
+  dialog.modal::backdrop { background: rgba(0, 0, 0, 0.4); }
+  dialog.modal { border: none; border-radius: 4px; max-width: 460px; }
+  dialog.modal .modal-content { padding: 1rem; }
+  dialog.modal .actions { display: flex; gap: 0.5rem; margin-top: 1rem; }
+  @media (max-width: 600px) {
+    table.drift, table.drift thead, table.drift tbody,
+    table.drift tr, table.drift th, table.drift td { display: block; }
+    table.drift tr { margin-bottom: 0.8rem; border: 1px solid #ddd; padding: 0.4rem; }
+    .drift-row-actions { flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>opcgw &mdash; Inventory drift</h1>
+  <nav><a href="/index.html">Dashboard</a> | <a href="/applications.html">Applications</a> | <a href="/devices-config.html">Devices configuration</a> | <a href="/metrics.html">Live Metrics</a> | <a href="/commands.html">Commands</a> | <strong>Inventory drift</strong></nav>
+</header>
+
+<main>
+  <section>
+    <h2>Reconcile opcgw with ChirpStack</h2>
+    <p>
+      Compare opcgw's configured applications, devices, and metrics against ChirpStack's current
+      inventory. The view is operator-triggered; click <em>Refresh now</em> to re-fetch from ChirpStack.
+    </p>
+    <div class="drift-toolbar">
+      <button type="button" id="drift-refresh">Refresh now</button>
+      <span id="drift-fetched-at" class="drift-fetched-at">Loading&hellip;</span>
+    </div>
+    <div id="drift-summary" class="drift-summary-counts" aria-live="polite"></div>
+    <div id="drift-error" class="error-banner" hidden></div>
+    <div id="drift-unreachable" class="drift-unreachable-banner" hidden>
+      <strong>Unable to reach ChirpStack &mdash; drift cannot be computed.</strong>
+      The list below shows only opcgw's configured resources. Destructive actions are disabled until
+      ChirpStack is reachable again.
+      <button type="button" id="drift-retry" style="margin-left: 0.6rem;">Retry</button>
+    </div>
+    <div id="drift-large-banner" class="drift-large-banner" hidden>
+      Showing all <span id="drift-large-total">0</span> rows; consider filtering by class using the
+      section toggles above.
+    </div>
+  </section>
+
+  <details class="drift-section" data-class="drifted" id="drift-section-drifted" open>
+    <summary><span id="drift-count-drifted">0</span> drifted &mdash; opcgw and ChirpStack disagree on name or type</summary>
+    <table class="drift" id="drift-table-drifted">
+      <thead>
+        <tr><th>Scope</th><th>Resource</th><th>opcgw value</th><th>ChirpStack value</th><th>Actions</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </details>
+
+  <details class="drift-section" data-class="stale" id="drift-section-stale" open>
+    <summary><span id="drift-count-stale">0</span> stale &mdash; configured in opcgw, not in ChirpStack (or not seen recently)</summary>
+    <table class="drift" id="drift-table-stale">
+      <thead>
+        <tr><th>Scope</th><th>Resource</th><th>opcgw value</th><th>Reason</th><th>Actions</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </details>
+
+  <details class="drift-section" data-class="available" id="drift-section-available" open>
+    <summary><span id="drift-count-available">0</span> available &mdash; present in ChirpStack, not in opcgw</summary>
+    <table class="drift" id="drift-table-available">
+      <thead>
+        <tr><th>Scope</th><th>Resource</th><th>ChirpStack value</th><th>Actions</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </details>
+
+  <details class="drift-section" data-class="ok" id="drift-section-ok">
+    <summary><span id="drift-count-ok">0</span> ok &mdash; configured and matching (collapse for noise reduction)</summary>
+    <table class="drift" id="drift-table-ok">
+      <thead>
+        <tr><th>Scope</th><th>Resource</th><th>Value</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </details>
+</main>
+
+<dialog id="drift-confirm-modal" class="modal">
+  <div class="modal-content">
+    <h2 id="drift-confirm-title">Confirm action</h2>
+    <p id="drift-confirm-message"></p>
+    <div class="actions">
+      <button type="button" id="drift-confirm-yes" class="btn-remove">Yes, proceed</button>
+      <button type="button" id="drift-confirm-cancel">Cancel</button>
+    </div>
+  </div>
+</dialog>
+
+<script src="/inventory-drift.js"></script>
+</body>
+</html>

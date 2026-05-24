@@ -15,6 +15,29 @@
   // Story C-2: namespace-aliased global from inventory-picker.js (must
   // be loaded BEFORE this script — see static/devices-config.html).
   const picker = window.opcgwPicker;
+
+  // Story C-4 (AC#8): deep-link prefill from the inventory drift view.
+  // Parsed once at module load; consumed by buildApplicationSection when
+  // the section being built matches `appId`. Fields beyond `appId` are
+  // optional — `devEui` alone is enough for a device deep-link, with
+  // `metricKey` adding the metric-checkbox pre-tick.
+  function parsePrefillFromUrl() {
+    var params;
+    try {
+      params = new URLSearchParams(window.location.search || '');
+    } catch (e) {
+      return null;
+    }
+    var appId = params.get('prefill_app_id') || '';
+    if (!appId) return null;
+    return {
+      appId: appId,
+      devEui: params.get('prefill_dev_eui') || '',
+      devName: params.get('prefill_name') || '',
+      metricKey: params.get('prefill_metric_key') || '',
+    };
+  }
+  const urlPrefill = parsePrefillFromUrl();
   // Iter-2 review MED-6: page-wide monotonic counter for metric-pick
   // checkbox ids. Pre-iter-2 used `'mk-' + sanitised_app_id + '-' + idx`
   // which collided when two distinct app_ids contained different
@@ -276,7 +299,19 @@
       currentDevEui: '',   // selected dev_eui (lowercase, normalized by API)
       deviceFetchController: null,  // iter-1 HIGH-7
       uplinkFetchController: null,  // iter-1 HIGH-7
+      // Story C-4 (AC#8): drift-view deep-link targets. Populated only
+      // when this section's application_id matches `prefill_app_id`.
+      // Cleared once consumed so a manual refresh / mode-toggle doesn't
+      // re-fire the prefill on top of an operator-driven selection.
+      prefillDevEui: '',
+      prefillDevName: '',
+      prefillMetricKey: '',
     };
+    if (urlPrefill && urlPrefill.appId === app.application_id) {
+      pickerState.prefillDevEui = urlPrefill.devEui || '';
+      pickerState.prefillDevName = urlPrefill.devName || '';
+      pickerState.prefillMetricKey = urlPrefill.metricKey || '';
+    }
     const form = el('form', {
       class: 'crud-form',
       action: '/api/applications/' + encodeURIComponent(app.application_id) + '/devices',
@@ -499,6 +534,54 @@
           devPickerSelect.appendChild(opt);
         });
         devPickerSelect.disabled = false;
+
+        // Story C-4 (AC#8): if a drift-view deep-link targeted this
+        // section, select the prefilled DevEUI now that the options
+        // are populated. Fall back to manual mode if the dev_eui isn't
+        // in the picker's option set (drift-view fetched fresh but the
+        // device was deleted from ChirpStack between fetch and click).
+        if (pickerState.prefillDevEui) {
+          let matched = false;
+          for (let i = 0; i < devPickerSelect.options.length; i++) {
+            if (devPickerSelect.options[i].value === pickerState.prefillDevEui) {
+              devPickerSelect.selectedIndex = i;
+              matched = true;
+              break;
+            }
+          }
+          if (matched) {
+            if (pickerState.prefillDevName && !picker.editedFlag.has(devNameInput)) {
+              devNameInput.value = pickerState.prefillDevName;
+              picker.editedFlag.recordPickerPopulation(
+                devNameInput,
+                pickerState.prefillDevName,
+              );
+            }
+            // Trigger the metric-picker fetch so the prefill_metric_key
+            // (if any) can be auto-ticked once observed_keys arrive.
+            devEuiFootnote.textContent = 'DevEUI: ' + pickerState.prefillDevEui;
+            if (pickerState.metricsMode === 'picker') {
+              loadMetricPicker(pickerState.prefillDevEui, {}).catch(
+                picker.warnUnlessAbort('metric picker fetch after drift prefill'),
+              );
+            }
+          } else {
+            applyDeviceMode('manual');
+            if (devIdInput) devIdInput.value = pickerState.prefillDevEui;
+            if (pickerState.prefillDevName && !picker.editedFlag.has(devNameInput)) {
+              devNameInput.value = pickerState.prefillDevName;
+              picker.editedFlag.recordPickerPopulation(
+                devNameInput,
+                pickerState.prefillDevName,
+              );
+            }
+          }
+          // Consume the device-level prefill so subsequent refreshes /
+          // mode-toggles don't re-fire it. The metric-key prefill
+          // is consumed separately in loadMetricPicker.
+          pickerState.prefillDevEui = '';
+          pickerState.prefillDevName = '';
+        }
       } catch (err) {
         if (controller.signal.aborted) return; // iter-1 HIGH-7
         applyDeviceMode('manual');
@@ -572,6 +655,12 @@
         }
         pickerState.observedKeys = data.observed_keys;
         setMetricPickerStatus('Tick metric keys to include; override wire type per row if needed.');
+        // Story C-4 (AC#8): consume the metric-key prefill once so a
+        // checkbox is pre-ticked when this device was reached via a
+        // drift-view deep-link. Captured BEFORE the loop because the
+        // forEach builds checkboxes incrementally.
+        const prefillMetricKey = pickerState.prefillMetricKey || '';
+        pickerState.prefillMetricKey = '';
         data.observed_keys.forEach(function (k, idx) {
           const row = el('div', { class: 'metric-pick-row' });
           // Iter-2 review MED-6 fix: use a page-wide monotonic
@@ -586,6 +675,10 @@
             'data-key': k.key,
             'data-inferred': k.wire_type,
           });
+          // Story C-4 (AC#8): drift-view metric deep-link auto-tick.
+          if (prefillMetricKey && k.key === prefillMetricKey) {
+            checkbox.checked = true;
+          }
           const label = el('label', { for: checkboxId, text: k.key });
           const typeSelect = el('select');
           METRIC_TYPES.forEach(function (t) {
@@ -965,6 +1058,19 @@
         return;
       }
       for (const app of apps) container.appendChild(buildApplicationSection(app));
+      // Story C-4 (AC#8): if a drift-view deep-link targeted a specific
+      // application, scroll its section into view so the operator lands
+      // on the correct "Add device" form.
+      if (urlPrefill && urlPrefill.appId) {
+        const target = container.querySelector(
+          'section[data-application-id="' +
+            (window.CSS && CSS.escape ? CSS.escape(urlPrefill.appId) : urlPrefill.appId) +
+            '"]',
+        );
+        if (target && typeof target.scrollIntoView === 'function') {
+          target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }
     } catch (err) {
       container.replaceChildren();
       showError(banner, 'Failed to load applications: ' + err.message);

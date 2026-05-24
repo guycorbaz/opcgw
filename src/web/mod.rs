@@ -35,6 +35,8 @@ pub mod api;
 pub mod auth;
 pub mod config_writer;
 pub mod csrf;
+/// Story C-4: `/api/inventory/drift` handler + 4-class diff computation.
+pub mod drift;
 /// Story C-1: `/api/inventory/*` handlers.
 pub mod inventory;
 pub mod setup;
@@ -493,6 +495,10 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
             "/api/inventory/uplinks",
             get(inventory::inventory_uplinks),
         )
+        // Story C-4: drift view between opcgw config and ChirpStack
+        // inventory. Read-only, GET-only, basic-auth gated, CSRF-exempt.
+        // Forces ?refresh=true on every underlying C-1 fetch.
+        .route("/api/inventory/drift", get(drift::inventory_drift))
         // Story 9-4 CRUD routes (FR34).
         .route(
             "/api/applications",
@@ -549,6 +555,15 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
         .route(
             "/api/audit/picker-event",
             axum::routing::post(api::audit_picker_event)
+                .layer(axum::extract::DefaultBodyLimit::max(4096)),
+        )
+        // Story C-4 (AC#12 / #13): drift-action audit endpoint. Same
+        // 4 KiB body-limit pattern as `/api/audit/picker-event` —
+        // drift-action JSON envelopes are similarly small (event name
+        // + ≤6 fields × ≤256 chars each ≈ 2 KiB worst case).
+        .route(
+            "/api/audit/drift-action",
+            axum::routing::post(api::audit_drift_action)
                 .layer(axum::extract::DefaultBodyLimit::max(4096)),
         )
         // Epic C C-0 (2026-05-21): wizard routes. Reachable BEFORE

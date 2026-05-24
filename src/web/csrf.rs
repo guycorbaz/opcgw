@@ -184,6 +184,7 @@ fn is_state_changing(method: &Method) -> bool {
 /// name by URL path so each resource gets its own grep contract.
 ///
 /// - `/api/audit/picker-event`                                 → `"picker_audit"` (Story C-2)
+/// - `/api/audit/drift-action`                                 → `"drift_audit"` (Story C-4)
 /// - `/api/applications/:application_id/devices/.../commands*` → `"command"` (Story 9-6 future)
 /// - `/api/applications/:application_id/devices*`              → `"device"`
 /// - `/api/applications/...`                                   → `"application"` (Story 9-4)
@@ -199,6 +200,10 @@ pub(crate) fn csrf_event_resource_for_path(path: &str) -> &'static str {
     // application_crud_rejected grep contract.
     if path == "/api/audit/picker-event" || path == "/api/audit/picker-event/" {
         return "picker_audit";
+    }
+    // Story C-4: same pattern for the drift-action audit surface.
+    if path == "/api/audit/drift-action" || path == "/api/audit/drift-action/" {
+        return "drift_audit";
     }
     // Match the bare LIST/CREATE surface FIRST so POST /api/applications
     // (no application_id) emits `event="application_crud_rejected"` on
@@ -371,6 +376,18 @@ pub async fn csrf_middleware(
                 origin = origin_str,
                 "CSRF rejected: missing or cross-origin Origin"
             ),
+            // Story C-4 AC#12 / #13: literal match arm so the
+            // drift-audit surface gets its own grep contract
+            // (`git grep -hoE 'event = "drift_[a-z_]+"' src/`).
+            "drift_audit" => warn!(
+                event = "drift_audit_rejected",
+                reason = "csrf",
+                path = %path,
+                method = %method,
+                source_ip = %addr.ip(),
+                origin = origin_str,
+                "CSRF rejected: missing or cross-origin Origin"
+            ),
             _ => warn!(
                 event = "crud_rejected",
                 reason = "csrf",
@@ -424,6 +441,15 @@ pub async fn csrf_middleware(
             // Content-Type rejection.
             "picker_audit" => warn!(
                 event = "picker_audit_rejected",
+                reason = "csrf",
+                path = %path,
+                method = %method,
+                source_ip = %addr.ip(),
+                "CSRF rejected: Content-Type is not application/json"
+            ),
+            // Story C-4: same pattern for the drift-action endpoint.
+            "drift_audit" => warn!(
+                event = "drift_audit_rejected",
                 reason = "csrf",
                 path = %path,
                 method = %method,
@@ -841,6 +867,18 @@ mod tests {
         assert_eq!(
             csrf_event_resource_for_path("/api/audit/picker-event/"),
             "picker_audit"
+        );
+
+        // Story C-4: drift-action surface routes to its own
+        // "drift_audit" bucket so CSRF rejections emit
+        // `event="drift_audit_rejected"`.
+        assert_eq!(
+            csrf_event_resource_for_path("/api/audit/drift-action"),
+            "drift_audit"
+        );
+        assert_eq!(
+            csrf_event_resource_for_path("/api/audit/drift-action/"),
+            "drift_audit"
         );
     }
 }

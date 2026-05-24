@@ -67,3 +67,105 @@ Two patterns explicitly remain allowed (verified by `tests/web_duplicate_prevent
 - **Same `chirpstack_metric_name` on different devices** is allowed. The common case — multiple sensors of the same kind (`temperature` on every probe).
 
 The validator scopes its uniqueness HashSets per-application (for `device_id`) and per-device (for metric/command identifiers). Cross-scope reuse is intentional and tested.
+
+## Story C-4 — inventory drift view
+
+The drift view compares opcgw's configured applications, devices, and metrics against ChirpStack's current inventory and classifies each resource into one of four buckets. It is operator-triggered (no background polling) and read-only — the endpoint never mutates opcgw state. Action buttons in the UI dispatch through the existing CRUD paths.
+
+### `GET /api/inventory/drift`
+
+Basic-auth gated, CSRF-exempt (GET-only). Forces `?refresh=true` on every underlying C-1 fetch so the comparison is never against a stale cache.
+
+Response body:
+
+```json
+{
+  "applications": [
+    {
+      "class": "ok|stale|available|drifted",
+      "opcgw":      { "application_id": "...", "application_name": "..." },
+      "chirpstack": { "id": "...", "name": "..." },
+      "drift_details": { "reason": "name_differs", "opcgw_name": "...", "chirpstack_name": "..." }
+    }
+  ],
+  "devices": [
+    {
+      "class": "...",
+      "application_id": "...",
+      "opcgw":      { "device_id": "...", "device_name": "..." },
+      "chirpstack": { "dev_eui": "...", "name": "...", "last_seen_at": "..." },
+      "drift_details": { "reason": "name_differs", "opcgw_name": "...", "chirpstack_name": "..." }
+    }
+  ],
+  "metrics": [
+    {
+      "class": "...",
+      "application_id": "...",
+      "device_id": "...",
+      "opcgw":              { "chirpstack_metric_name": "...", "metric_name": "...", "metric_type": "Float" },
+      "chirpstack_observed": { "key": "...", "inferred_wire_type": "Float", "sample_value": ... },
+      "drift_details": { "reason": "wire_type_mismatch|not_in_recent_uplinks", "opcgw_type": "Int", "inferred_type": "Float" }
+    }
+  ],
+  "fetched_at": "<RFC3339 timestamp>",
+  "chirpstack_reachable": true,
+  "summary": { "ok": N, "stale": N, "available": N, "drifted": N, "total": N }
+}
+```
+
+The `class` discriminator follows the 4-class matrix:
+
+| Class | In opcgw? | In ChirpStack? | Names match? | `opcgw` field | `chirpstack` field |
+|---|---|---|---|---|---|
+| `ok` | yes | yes | yes | populated | populated |
+| `stale` | yes | no | n/a | populated | `null` |
+| `available` | no | yes | n/a | `null` | populated |
+| `drifted` | yes | yes | NO | populated | populated |
+
+#### Metric-row `drift_details.reason` values
+
+- `name_differs` — applications/devices only. Populates `opcgw_name` + `chirpstack_name`.
+- `wire_type_mismatch` — metrics only. Configured `metric_type` doesn't match the wire-type inferred from observed uplinks. Populates `opcgw_type` + `inferred_type`.
+- `not_in_recent_uplinks` — metrics only. Configured `chirpstack_metric_name` hasn't appeared in the last 10 uplinks. Classified as `stale` BUT with this soft reason so the UI can colour-code it differently (codecs may emit keys conditionally).
+
+#### ChirpStack-unreachable graceful degradation
+
+When ANY underlying ChirpStack fetch fails (applications list, per-app device list, or per-device uplinks), the endpoint returns **HTTP 200** with:
+
+- `chirpstack_reachable: false`
+- All opcgw-side rows emitted as `class: "ok"` placeholders with `chirpstack: null` (since we can't classify without ChirpStack data).
+- `summary.total = summary.ok = (opcgw applications + devices + metrics)`.
+
+The UI's responsibility is to recognise this state and disable destructive action buttons + hide `[Add to opcgw]` buttons + surface a banner with a retry button.
+
+### `POST /api/audit/drift-action`
+
+Thin client-side audit-event recorder for operator intent. Basic-auth gated, CSRF-protected (same Origin / Content-Type contract as `/api/audit/picker-event`). 4 KiB body limit.
+
+Request body:
+
+```json
+{
+  "event": "drift_action|drift_dismissed",
+  "fields": { /* per-event allowlist; unknown fields silently dropped */ }
+}
+```
+
+| `event` | Allowed `fields` keys |
+|---|---|
+| `drift_action` | `action`, `resource_type`, `application_id`, `device_id`, `metric_name`, `operator_choice` |
+| `drift_dismissed` | `class`, `resource_type`, `application_id`, `device_id`, `metric_name`, `drift_reason` |
+
+Returns **204 No Content** on success. **400 Bad Request** with `{"error": "unknown drift event name '...'", "hint": "..."}` on unrecognised event names. Field values are length-capped at 256 bytes (UTF-8-aware boundary) before audit emission. The actual CRUD execution (`DELETE`, `PUT`) emits its own audit event — `drift_action` is the layer-above operator-intent signal.
+
+### Deep-link contract from the drift view
+
+The drift view's `[Add to opcgw]` buttons navigate to the C-2 picker pages with the chosen resource pre-selected via query parameters:
+
+| Resource | Target URL |
+|---|---|
+| Application | `/applications.html?prefill_app_id=<id>&prefill_name=<name>` |
+| Device | `/devices-config.html?prefill_app_id=<app_id>&prefill_dev_eui=<dev_eui>&prefill_name=<name>` |
+| Metric | `/devices-config.html?prefill_app_id=<app_id>&prefill_dev_eui=<dev_eui>&prefill_metric_key=<key>` |
+
+`applications.js` and `devices-config.js` consume these parameters on page load and pre-select the picker option / pre-fill the name input / pre-tick the metric checkbox. If the prefilled `application_id` or `dev_eui` isn't in the picker's current option set (e.g. operator clicked, then ChirpStack inventory changed), the page falls back to manual mode with the prefilled id populated.

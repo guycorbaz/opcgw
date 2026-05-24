@@ -5898,6 +5898,138 @@ pub async fn audit_picker_event(
     StatusCode::NO_CONTENT.into_response()
 }
 
+// ---------------------------------------------------------------------------
+// Story C-4 — drift-action audit endpoint
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /api/audit/drift-action` (Story C-4 AC#12 / #13).
+///
+/// Same flat shape as [`PickerEventRequest`]: an `event` discriminator +
+/// a free-form `fields` map that the handler filters through a per-event
+/// allowlist before emitting the audit line.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DriftActionRequest {
+    pub event: String,
+    #[serde(default)]
+    pub fields: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Allowlist of `event` names accepted by `POST /api/audit/drift-action`.
+/// Adding a new event name requires:
+///   1. Updating this list,
+///   2. Updating [`drift_event_field_allowlist`] for the field shape,
+///   3. Adding the new event to `docs/logging.md`.
+const DRIFT_EVENT_ALLOWED: &[&str] = &["drift_action", "drift_dismissed"];
+
+/// Per-event whitelist of accepted client-supplied field names. Unknown
+/// fields are dropped before the audit line is emitted.
+fn drift_event_field_allowlist(event: &str) -> &'static [&'static str] {
+    match event {
+        // AC#12 — `drift_action` carries operator-intent context.
+        "drift_action" => &[
+            "action",
+            "resource_type",
+            "application_id",
+            "device_id",
+            "metric_name",
+            "operator_choice",
+        ],
+        // AC#13 — `drift_dismissed` carries the divergence snapshot the
+        // operator deliberately chose to keep as-is.
+        "drift_dismissed" => &[
+            "class",
+            "resource_type",
+            "application_id",
+            "device_id",
+            "metric_name",
+            "drift_reason",
+        ],
+        _ => &[],
+    }
+}
+
+/// `POST /api/audit/drift-action` — Story C-4 AC#12 + #13.
+///
+/// Thin counterpart to [`audit_picker_event`]: validates the event name
+/// against [`DRIFT_EVENT_ALLOWED`], filters fields per
+/// [`drift_event_field_allowlist`], sanitises every value through
+/// [`truncate_audit_value`] (UTF-8-aware 256-byte cap), and emits a
+/// single `tracing::info!(event=…, source="web_drift", …)` line. Returns
+/// 204 No Content on success, 400 on validation failure. The actual
+/// CRUD execution (DELETE / PUT) emits its own audit event — this
+/// endpoint is the layer-above operator-intent signal.
+pub async fn audit_drift_action(
+    State(_state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<DriftActionRequest>,
+) -> Response {
+    if !DRIFT_EVENT_ALLOWED.contains(&body.event.as_str()) {
+        let capped_event = truncate_audit_value(&body.event);
+        warn!(
+            event = "drift_audit_rejected",
+            reason = "unknown_event",
+            source_ip = %addr.ip(),
+            received_event = ?capped_event,
+            "POST /api/audit/drift-action: unknown event name rejected"
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                format!("unknown drift event name '{}'", capped_event),
+                "expected one of: drift_action, drift_dismissed",
+            )),
+        )
+            .into_response();
+    }
+
+    let allowlist = drift_event_field_allowlist(&body.event);
+    let mut sanitised: HashMap<&'static str, String> = HashMap::new();
+    for (key, value) in body.fields.iter() {
+        let Some(allowed_key) = allowlist.iter().find(|k| **k == key.as_str()) else {
+            continue;
+        };
+        if let Some(rendered) = json_value_to_audit_string(value) {
+            sanitised.insert(allowed_key, rendered);
+        }
+    }
+
+    // Debug-formatting on every field — same log-injection defence as
+    // `audit_picker_event` (see feedback_iter3_validation memory). A
+    // newline / control character in `operator_choice` cannot inject a
+    // faked structured-log line.
+    let pick = |k: &str| sanitised.get(k).map(String::as_str).unwrap_or("");
+    match body.event.as_str() {
+        "drift_action" => info!(
+            event = "drift_action",
+            source = "web_drift",
+            action = ?pick("action"),
+            resource_type = ?pick("resource_type"),
+            application_id = ?pick("application_id"),
+            device_id = ?pick("device_id"),
+            metric_name = ?pick("metric_name"),
+            operator_choice = ?pick("operator_choice"),
+            source_ip = %addr.ip(),
+            "Operator clicked a drift action button"
+        ),
+        "drift_dismissed" => info!(
+            event = "drift_dismissed",
+            source = "web_drift",
+            class = ?pick("class"),
+            resource_type = ?pick("resource_type"),
+            application_id = ?pick("application_id"),
+            device_id = ?pick("device_id"),
+            metric_name = ?pick("metric_name"),
+            drift_reason = ?pick("drift_reason"),
+            source_ip = %addr.ip(),
+            "Operator dismissed a drift row (kept opcgw alias as-is)"
+        ),
+        _ => unreachable!("event name was validated against DRIFT_EVENT_ALLOWED above"),
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
