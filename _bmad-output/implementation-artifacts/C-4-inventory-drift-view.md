@@ -5,7 +5,7 @@
 | Story key       | `C-4-inventory-drift-view`                                                                                  |
 | Epic            | C — Auto-Discovery and Web-First Configuration (post-v2.0 GA)                                               |
 | FRs             | none (Epic C is post-PRD)                                                                                   |
-| Status          | review                                                                                                      |
+| Status          | done                                                                                                        |
 | Created         | 2026-05-21                                                                                                  |
 | Source epic     | `_bmad-output/planning-artifacts/epics.md § Epic C § Story C.4`                                             |
 | Depends on      | C-1 (`/api/inventory/*` endpoints), C-2 (picker UX for "Add to opcgw" deep-links), C-3 (duplicate-prevention |
@@ -388,3 +388,31 @@ I picked option (b) for this story spec — Task 3 explicitly extends `static/ap
 - `docs/manual/opcgw-user-manual.xml` — new `<section id="sec-inventory-drift">` (xmllint clean).
 - `README.md` — Planning row Epic C 5/6 done.
 - `_bmad-output/implementation-artifacts/sprint-status.yaml` — `C-4-inventory-drift-view: review`.
+
+---
+
+## Review Findings
+
+*Code review iter-1 — 2026-05-24 — Sonnet 4.6 (Blind Hunter + Edge Case Hunter + Acceptance Auditor)*
+
+### Decision-needed
+
+- [x] [Review][Decision] DN1 (MEDIUM): O(N²) ChirpStack fetch cost — `inventory_drift` handler does 1 + N_apps + N_both_devices sequential awaited calls; wall-clock cost = `N_apps × M_devices × inventory_uplink_max_wait_seconds`; no cap or documentation. Anticipated finding from session-pause memory ("Document or guard"). Options: (a) add a note to `docs/web-api.md` documenting the cost formula + recommend keeping `inventory_uplink_max_wait_seconds` low for large inventories, (b) add a max-cap clamp in the handler, (c) defer as known operational concern. [`src/web/drift.rs:729-771`]
+
+### Patches
+
+- [x] [Review][Patch] P1 (HIGH): `rename-dev` handler missing in `handleAction` — `actionsForDriftedDevice` renders `data-act="rename-dev"` button but no `if (act === 'rename-dev')` branch exists; clicking "Update opcgw name" for a drifted device is a silent no-op [Blind Hunter + Edge Case Hunter + Acceptance Auditor] [`static/inventory-drift.js` near `rename-app` handler ~line 599]
+- [x] [Review][Patch] P2 (MEDIUM): `remove-metric`/`update-metric-type` redirects omit `prefill_metric_key` — deep-link to `devices-config.html` includes `prefill_app_id` + `prefill_dev_eui` but drops `prefill_metric_key`, so operator lands on the device form without the correct metric pre-selected; `devices-config.js` already consumes `prefill_metric_key` [Edge Case Hunter + Acceptance Auditor] [`static/inventory-drift.js` lines 679–683]
+- [x] [Review][Patch] P3 (MEDIUM): Confirmation modal inverted guard — `if (!dialog) { onYes(); return; }` silently fires the destructive action if `#drift-confirm-modal` is absent; should abort not proceed [Blind Hunter] [`static/inventory-drift.js:458-461`]
+- [x] [Review][Patch] P4 (MEDIUM): Confirmation message shows UUID not human name — `remove-app` confirmation says `"Remove application '" + appId + "'"` using UUID; AC#7 example uses human name `"Arrosage"`; same for `remove-dev` [Acceptance Auditor] [`static/inventory-drift.js:545-548, 571-576`]
+- [x] [Review][Patch] P5 (LOW): `remove-metric` button label "Remove from opcgw" misleads — button navigates to `devices-config.html` instead of executing an inline delete; label should reflect navigation intent [Acceptance Auditor] [`static/inventory-drift.js:672-693`]
+
+### Deferred
+
+- [x] [Review][Defer] DEF1 (LOW): `renderRows` no null-guard on `row.opcgw`/`row.chirpstack` before class-specific access — server invariants from `compute_drift` guarantee correctness; defensive-only concern [`static/inventory-drift.js` renderRows] — deferred, server-side invariants guaranteed by pure function
+- [x] [Review][Defer] DEF2 (LOW): Modal child elements (`drift-confirm-title`, `drift-confirm-yes`, `drift-confirm-cancel`) accessed without null-checks after outer `dialog` null-check passes — all four elements present in current HTML [`static/inventory-drift.js:463-477`] — deferred, DOM matches current HTML template
+- [x] [Review][Defer] DEF3 (LOW): Sequential uplink fetches — no `FuturesUnordered` concurrency; K × D × `inventory_uplink_max_wait_seconds` worst-case latency [`src/web/drift.rs:731-771`] — deferred, architectural trade-off consistent with operator-triggered-only spec
+- [x] [Review][Defer] DEF4 (LOW): `drift_view_opened` success path (line 788) not covered by integration tests — requires tonic mock, same deferral precedent as C-1's 12-test suite [`tests/web_inventory_drift.rs`] — deferred, pending tonic mock infrastructure
+- [x] [Review][Defer] DEF5 (LOW): `drift_view_opened` emits flat `summary_ok`/`summary_stale`/… fields; AC#11 shows nested `summary: { ok: N, … }` shape — `docs/logging.md` documents the flat form; grep-ability motivation documented [`src/web/drift.rs:801-814`] — deferred, logging.md documents actual format
+- [x] [Review][Defer] DEF6 (LOW): `drift_view_opened_audit_fires_with_summary` only asserts `summary_total`; per-class counts (`summary_ok=5`, etc.) not pinned — AC#15 item 9 says "correct summary counts" [`tests/web_inventory_drift.rs:397-407`] — deferred, test improvement opportunity
+- [x] [Review][Defer] DEF7 (LOW): `drift_dismissed` emits `drift_reason` string; AC#13 says "drift_details snapshot" implying structured shape — information-equivalent; `logging.md` documents actual field name [`src/web/api.rs drift_event_field_allowlist`] — deferred, documentation covers actual shape

@@ -172,11 +172,13 @@
    * carry the scope so the click-handler (event delegation) can
    * reconstruct the CRUD endpoint / deep-link / audit payload. */
 
-  function actionsForStaleApplication(appId) {
+  function actionsForStaleApplication(appId, appName) {
     const disabled = state.chirpstackReachable ? '' : 'disabled';
     return (
       '<button type="button" class="btn-remove" data-act="remove-app" data-app-id="' +
       escapeHtml(appId) +
+      '" data-app-name="' +
+      escapeHtml(appName) +
       '" ' +
       disabled +
       '>Remove from opcgw</button>' +
@@ -213,13 +215,15 @@
     );
   }
 
-  function actionsForStaleDevice(appId, devId, reason) {
+  function actionsForStaleDevice(appId, devId, devName, reason) {
     const disabled = state.chirpstackReachable ? '' : 'disabled';
     return (
       '<button type="button" class="btn-remove" data-act="remove-dev" data-app-id="' +
       escapeHtml(appId) +
       '" data-dev-id="' +
       escapeHtml(devId) +
+      '" data-dev-name="' +
+      escapeHtml(devName) +
       '" ' +
       disabled +
       '>Remove from opcgw</button>' +
@@ -269,7 +273,7 @@
   function actionsForStaleMetric(appId, devId, metricKey, reason) {
     const disabled = state.chirpstackReachable ? '' : 'disabled';
     return (
-      '<button type="button" class="btn-remove" data-act="remove-metric" data-app-id="' +
+      '<button type="button" class="btn-update" data-act="remove-metric" data-app-id="' +
       escapeHtml(appId) +
       '" data-dev-id="' +
       escapeHtml(devId) +
@@ -277,7 +281,7 @@
       escapeHtml(metricKey) +
       '" ' +
       disabled +
-      '>Remove from opcgw</button>' +
+      '>Edit in devices-config</button>' +
       '<button type="button" class="btn-keep" data-act="keep-stale-metric" data-app-id="' +
       escapeHtml(appId) +
       '" data-dev-id="' +
@@ -303,7 +307,7 @@
       escapeHtml(inferredType) +
       '" ' +
       disabled +
-      '>Update wire type to inferred</button>' +
+      '>Edit in devices-config</button>' +
       '<button type="button" class="btn-keep" data-act="keep-drifted-metric" data-app-id="' +
       escapeHtml(appId) +
       '" data-dev-id="' +
@@ -346,7 +350,7 @@
             row.opcgw.application_id,
             row.opcgw.application_name,
             'No longer in ChirpStack',
-            actionsForStaleApplication(row.opcgw.application_id),
+            actionsForStaleApplication(row.opcgw.application_id, row.opcgw.application_name),
             false
           );
           break;
@@ -382,7 +386,7 @@
             row.opcgw.device_id,
             row.opcgw.device_name,
             'No longer in ChirpStack',
-            actionsForStaleDevice(row.application_id, row.opcgw.device_id, 'stale'),
+            actionsForStaleDevice(row.application_id, row.opcgw.device_id, row.opcgw.device_name, 'stale'),
             false
           );
           break;
@@ -456,10 +460,7 @@
 
   function confirmDestructive(title, message, onYes) {
     const dialog = document.getElementById('drift-confirm-modal');
-    if (!dialog) {
-      onYes();
-      return;
-    }
+    if (!dialog) return;
     document.getElementById('drift-confirm-title').textContent = title;
     document.getElementById('drift-confirm-message').textContent = message;
     const yesBtn = document.getElementById('drift-confirm-yes');
@@ -541,10 +542,11 @@
       return;
     }
     if (act === 'remove-app') {
+      const appName = btn.getAttribute('data-app-name') || appId;
       confirmDestructive(
         'Remove application from opcgw?',
         "Remove application '" +
-          appId +
+          appName +
           "' from opcgw? This removes the application AND all its configured devices and metrics. Resources are not deleted from ChirpStack — they will reappear here as 'available' on the next refresh.",
         async () => {
           await emitAudit('drift_action', {
@@ -566,13 +568,12 @@
       return;
     }
     if (act === 'remove-dev') {
+      const devName = btn.getAttribute('data-dev-name') || devId;
       confirmDestructive(
         'Remove device from opcgw?',
         "Remove device '" +
-          devId +
-          "' (under application '" +
-          appId +
-          "') from opcgw? This removes the device AND its configured metrics.",
+          devName +
+          "' from opcgw? This removes the device AND its configured metrics.",
         async () => {
           await emitAudit('drift_action', {
             action: 'remove',
@@ -614,6 +615,28 @@
       } else {
         alert('Rename failed: HTTP ' + resp.status);
       }
+      return;
+    }
+    if (act === 'rename-dev') {
+      const newName = btn.getAttribute('data-new-name') || '';
+      await emitAudit('drift_action', {
+        action: 'update_name',
+        resource_type: 'device',
+        application_id: appId,
+        device_id: devId,
+        operator_choice: newName,
+      });
+      // Device PUT requires device_name + read_metric_list (Story 9-5 contract).
+      // Navigate to the devices-config page pre-filled so the operator applies
+      // the rename in the canonical edit flow, preserving existing metrics.
+      const url =
+        '/devices-config.html?prefill_app_id=' +
+        encodeURIComponent(appId) +
+        '&prefill_dev_eui=' +
+        encodeURIComponent(devId) +
+        '&prefill_name=' +
+        encodeURIComponent(newName);
+      window.location.href = url;
       return;
     }
     if (act === 'keep-stale-app') {
@@ -680,7 +703,9 @@
         '/devices-config.html?prefill_app_id=' +
         encodeURIComponent(appId) +
         '&prefill_dev_eui=' +
-        encodeURIComponent(devId);
+        encodeURIComponent(devId) +
+        '&prefill_metric_key=' +
+        encodeURIComponent(metricKey);
       await emitAudit('drift_action', {
         action: act === 'remove-metric' ? 'remove' : 'update_wire_type',
         resource_type: 'metric',

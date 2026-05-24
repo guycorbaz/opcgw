@@ -128,6 +128,10 @@ The `class` discriminator follows the 4-class matrix:
 - `wire_type_mismatch` — metrics only. Configured `metric_type` doesn't match the wire-type inferred from observed uplinks. Populates `opcgw_type` + `inferred_type`.
 - `not_in_recent_uplinks` — metrics only. Configured `chirpstack_metric_name` hasn't appeared in the last 10 uplinks. Classified as `stale` BUT with this soft reason so the UI can colour-code it differently (codecs may emit keys conditionally).
 
+#### Request cost and latency
+
+Each `GET /api/inventory/drift` call triggers **1 + N_apps + N_both_devices** sequential ChirpStack round-trips: one applications fetch, one per-app device fetch for every app in the union of opcgw + ChirpStack sets, and one uplinks fetch for every device present in both sets. Worst-case request latency ≈ `N_both_devices × inventory_uplink_max_wait_seconds`. For large inventories, keep `inventory_uplink_max_wait_seconds` at 5 s or below (the config field defaults to 5 s). Because the endpoint is operator-triggered with no background polling, this cost is bounded to explicit operator visits.
+
 #### ChirpStack-unreachable graceful degradation
 
 When ANY underlying ChirpStack fetch fails (applications list, per-app device list, or per-device uplinks), the endpoint returns **HTTP 200** with:
