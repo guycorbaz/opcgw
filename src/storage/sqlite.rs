@@ -3105,6 +3105,25 @@ impl SqliteBackend {
     }
 
     /// Count rows in the `applications` table — used by the migration guard.
+    /// Returns `true` if the C-6 migration done-flag has been written to the
+    /// `meta` table. Used as the primary idempotency guard in
+    /// `migrate_toml_to_sqlite` so deliberate operator deletions of all
+    /// applications via the web UI cannot re-trigger migration on restart.
+    pub fn is_c6_migration_done(&self) -> Result<bool, OpcGwError> {
+        let conn = self.pool.checkout(Duration::from_secs(5)).map_err(|e| {
+            trace!(error = %e, "Pool checkout timeout for is_c6_migration_done");
+            e
+        })?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM meta WHERE key='c6_migration_done'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| OpcGwError::Database(format!("is_c6_migration_done: {}", e)))?;
+        Ok(count > 0)
+    }
+
     pub fn count_applications(&self) -> Result<usize, OpcGwError> {
         let conn = self.pool.checkout(Duration::from_secs(5)).map_err(|e| {
             trace!(error = %e, "Pool checkout timeout for count_applications");
@@ -3391,7 +3410,7 @@ impl SqliteBackend {
                 }
             }
 
-            // Row-count verification
+            // Row-count verification — all four tables
             let db_apps = conn
                 .query_row("SELECT COUNT(*) FROM applications", [], |r| {
                     r.get::<_, i64>(0)
@@ -3400,14 +3419,34 @@ impl SqliteBackend {
             let db_devs = conn
                 .query_row("SELECT COUNT(*) FROM devices", [], |r| r.get::<_, i64>(0))
                 .map_err(|e| OpcGwError::Database(format!("migrate count check devs: {}", e)))? as usize;
+            let db_mets = conn
+                .query_row("SELECT COUNT(*) FROM metrics", [], |r| r.get::<_, i64>(0))
+                .map_err(|e| OpcGwError::Database(format!("migrate count check metrics: {}", e)))? as usize;
+            let db_cmds = conn
+                .query_row("SELECT COUNT(*) FROM commands", [], |r| r.get::<_, i64>(0))
+                .map_err(|e| OpcGwError::Database(format!("migrate count check commands: {}", e)))? as usize;
 
-            if db_apps != app_count || db_devs != dev_count {
+            if db_apps != app_count || db_devs != dev_count
+                || db_mets != met_count || db_cmds != cmd_count
+            {
                 return Err(OpcGwError::Database(format!(
                     "row_count_mismatch: apps expected={} actual={}, \
-                     devices expected={} actual={}",
-                    app_count, db_apps, dev_count, db_devs
+                     devices expected={} actual={}, \
+                     metrics expected={} actual={}, \
+                     commands expected={} actual={}",
+                    app_count, db_apps, dev_count, db_devs,
+                    met_count, db_mets, cmd_count, db_cmds,
                 )));
             }
+
+            // Write migration done-flag (F2): primary idempotency guard.
+            // Inside the same EXCLUSIVE TRANSACTION so it either commits
+            // with the data or rolls back atomically.
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('c6_migration_done', ?1)",
+                params![now],
+            )
+            .map_err(|e| OpcGwError::Database(format!("migrate write meta done-flag: {}", e)))?;
 
             Ok(())
         })();

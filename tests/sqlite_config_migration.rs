@@ -521,6 +521,7 @@ fn migration_large_inventory_completes_in_time() {
     let mut cfg =
         AppConfig::from_path(config_path.to_str().unwrap()).expect("parse config");
     cfg.application_list = apps;
+    cfg.validate().expect("large-inventory cfg must be valid");
 
     let db_path = dir.path().join("large.db");
     let backend = SqliteBackend::new(db_path.to_str().unwrap()).expect("sqlite");
@@ -633,4 +634,34 @@ fn migration_duration_ms_is_populated() {
     } else {
         panic!("expected Migrated");
     }
+}
+
+/// F14 (iter-1 patch): AlreadyMigrated path returns correct data from
+/// load_all_applications_config so the boot-time watch-channel seeding
+/// in main.rs (F1 patch) receives the right application list.
+#[test]
+fn migration_already_migrated_returns_sqlite_data_for_watch_seeding() {
+    // First boot: migrate.
+    let (_dir, cfg, backend) = setup(TOML_TWO_APPS);
+    let outcome = migrate_toml_to_sqlite(&cfg, &backend).expect("first migrate");
+    assert!(matches!(outcome, MigrationOutcome::Migrated(_)), "expected Migrated on first boot");
+
+    // Simulate a subsequent boot: run migrate_toml_to_sqlite again with the same
+    // TOML config — the done-flag in `meta` must trigger AlreadyMigrated.
+    let outcome2 = migrate_toml_to_sqlite(&cfg, &backend).expect("second migrate");
+    assert!(
+        matches!(outcome2, MigrationOutcome::AlreadyMigrated),
+        "expected AlreadyMigrated on second boot"
+    );
+
+    // The watch-channel seeding logic (main.rs F1) calls
+    // load_all_applications_config after migration. Verify it returns the
+    // migrated data correctly so the watch channel can be populated.
+    let apps = backend
+        .load_all_applications_config()
+        .expect("load after AlreadyMigrated");
+    assert_eq!(apps.len(), 2, "both apps must be readable after AlreadyMigrated");
+    let ids: Vec<&str> = apps.iter().map(|a| a.application_id.as_str()).collect();
+    assert!(ids.contains(&"app-alpha"), "app-alpha present");
+    assert!(ids.contains(&"app-beta"), "app-beta present");
 }

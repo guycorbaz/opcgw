@@ -334,7 +334,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("Failed to count tables");
-        assert_eq!(table_count, 9, "Should have 9 tables (metric_values, metric_history, command_queue, gateway_status, retention_config, applications, devices, metrics, commands)");
+        assert_eq!(table_count, 10, "Should have 10 tables (metric_values, metric_history, command_queue, gateway_status, retention_config, applications, devices, metrics, commands, meta)");
 
         // Cleanup
         let _ = fs::remove_file(&path);

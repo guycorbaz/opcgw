@@ -10,7 +10,6 @@
 
 #![allow(dead_code)]
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use tempfile::TempDir;
@@ -69,7 +68,7 @@ pub fn make_test_reload_handle_and_writer_with_apps(
         }
     }
     let initial = Arc::new(stub_app_config_with_apps(apps));
-    let (handle, _rx) = ConfigReloadHandle::new(initial, PathBuf::from("/dev/null"));
+    let (handle, _rx) = ConfigReloadHandle::new(initial);
     (Arc::new(handle), Arc::new(backend), dir)
 }
 

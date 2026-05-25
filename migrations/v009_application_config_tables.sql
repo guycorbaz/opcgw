@@ -60,3 +60,10 @@ CREATE INDEX IF NOT EXISTS idx_metrics_by_device
 
 CREATE INDEX IF NOT EXISTS idx_commands_by_device
     ON commands(application_id, device_id);
+
+-- Migration metadata: persists the C-6 done-flag so the idempotency guard
+-- survives operator-driven deletions of all applications via the web UI.
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT NOT NULL PRIMARY KEY,
+    value TEXT NOT NULL
+);

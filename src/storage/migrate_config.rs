@@ -46,6 +46,20 @@ pub fn migrate_toml_to_sqlite(
     backend: &SqliteBackend,
 ) -> Result<MigrationOutcome, OpcGwError> {
     // ── Guard 1: already migrated ─────────────────────────────────────────
+    // Primary check: meta done-flag (survives operator deletion of all
+    // applications via the web UI — row-count alone would false-trigger
+    // re-migration in that scenario).
+    if backend.is_c6_migration_done()? {
+        let existing = backend.count_applications().unwrap_or(0);
+        info!(
+            event = "config_migration",
+            stage = "already_migrated",
+            applications = existing,
+        );
+        return Ok(MigrationOutcome::AlreadyMigrated);
+    }
+    // Secondary check: non-empty applications table without the done-flag
+    // (e.g. a direct SQLite import that bypassed migrate_applications_config).
     let existing = backend.count_applications()?;
     if existing > 0 {
         info!(

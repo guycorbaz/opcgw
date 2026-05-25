@@ -167,9 +167,9 @@ pub fn build_http_client(request_timeout: std::time::Duration) -> reqwest::Clien
 /// calls re-read from disk consistently.
 pub fn make_test_reload_handle(
     initial: std::sync::Arc<opcgw::config::AppConfig>,
-    config_path: std::path::PathBuf,
+    _config_path: std::path::PathBuf,
 ) -> std::sync::Arc<opcgw::config_reload::ConfigReloadHandle> {
-    let (handle, _rx) = opcgw::config_reload::ConfigReloadHandle::new(initial, config_path);
+    let (handle, _rx) = opcgw::config_reload::ConfigReloadHandle::new(initial);
     std::sync::Arc::new(handle)
 }
 

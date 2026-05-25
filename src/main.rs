@@ -551,10 +551,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `_name` is a real binding, not an immediate drop). The pinned
     // Arc was harmless but the comment lied. Now actually dropped.
     let (reload_handle, _) =
-        crate::config_reload::ConfigReloadHandle::new(
-            application_config.clone(),
-            std::path::PathBuf::from(&config_path),
-        );
+        crate::config_reload::ConfigReloadHandle::new(application_config.clone());
     let reload_handle = Arc::new(reload_handle);
 
     // Create connection pool for per-task SQLite access (Story 2-2x: per-task connections)
@@ -637,6 +634,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 error = %e,
                 "TOML→SQLite config migration failed; \
                  continuing with TOML-driven config (transition safety net)"
+            );
+        }
+    }
+
+    // Story C-6 F1: seed the watch channel from SQLite so subsystems
+    // (OPC UA, poller, web) operate on the authoritative SQLite state,
+    // not the TOML snapshot that was in place at handle construction time.
+    // This matters on every boot after the first migration — CRUD writes
+    // update SQLite but the TOML file stays unchanged, so `reload_handle`
+    // was initialised with stale TOML data. Runs for Migrated,
+    // AlreadyMigrated, and SkippedEmptySource paths alike (no-op on
+    // empty-bootstrap since load_all_applications_config returns []).
+    match sqlite_backend.load_all_applications_config() {
+        Ok(sqlite_apps) if !sqlite_apps.is_empty() => {
+            reload_handle.notify_crud_write(sqlite_apps).await;
+        }
+        Ok(_) => {
+            // Empty bootstrap (C-0) or migration failure fallback — TOML
+            // snapshot in the watch channel is the correct state.
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "Failed to load applications from SQLite for boot-time watch-channel \
+                 seeding; subsystems will operate on TOML snapshot until next CRUD write"
             );
         }
     }

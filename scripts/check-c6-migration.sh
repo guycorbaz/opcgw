@@ -42,10 +42,8 @@ echo "---------------------------------------"
 # ------------------------------------------------------------------
 # 1. Schema version
 # ------------------------------------------------------------------
-SCHEMA_VER=$(sqlite3 "$DB" "SELECT value FROM meta WHERE key='schemaVersion';" 2>/dev/null || echo "")
-if [[ -z "$SCHEMA_VER" ]]; then
-    SCHEMA_VER=$(sqlite3 "$DB" "SELECT MAX(version) FROM schema_migrations;" 2>/dev/null || echo "unknown")
-fi
+# opcgw tracks schema version via PRAGMA user_version (not a meta table).
+SCHEMA_VER=$(sqlite3 "$DB" "PRAGMA user_version;" 2>/dev/null || echo "0")
 
 if [[ "$SCHEMA_VER" -ge 9 ]] 2>/dev/null; then
     pass "Schema version: $SCHEMA_VER (>= 9, migration schema applied)"
@@ -54,13 +52,15 @@ else
 fi
 
 # ------------------------------------------------------------------
-# 2. Migration timestamp
+# 2. Migration done-flag
 # ------------------------------------------------------------------
-MIG_TS=$(sqlite3 "$DB" "SELECT value FROM meta WHERE key='config_migrated_from_toml_at';" 2>/dev/null || echo "")
+# Written by migrate_applications_config() inside the EXCLUSIVE TRANSACTION.
+# Key is 'c6_migration_done'; value is the ISO-8601 timestamp of migration.
+MIG_TS=$(sqlite3 "$DB" "SELECT value FROM meta WHERE key='c6_migration_done';" 2>/dev/null || echo "")
 if [[ -n "$MIG_TS" ]]; then
-    pass "Migration timestamp: $MIG_TS"
+    pass "Migration done-flag: $MIG_TS"
 else
-    info "No migration timestamp found. Migration may not have run yet, or the gateway was started fresh (C-0 empty-bootstrap path)."
+    info "No migration done-flag found. Migration may not have run yet, or the gateway was started fresh (C-0 empty-bootstrap path)."
 fi
 
 # ------------------------------------------------------------------
@@ -84,12 +84,13 @@ if [[ "$APP_COUNT" -lt 0 ]]; then
 fi
 
 if [[ "$APP_COUNT" -eq 0 && -z "$MIG_TS" ]]; then
-    info "No applications in SQLite and no migration timestamp. The gateway has likely not started yet, or is running in C-0 empty-bootstrap mode."
+    info "No applications in SQLite and no migration done-flag. The gateway has likely not started yet, or is running in C-0 empty-bootstrap mode."
     exit 0
 fi
 
 if [[ "$APP_COUNT" -eq 0 && -n "$MIG_TS" ]]; then
-    fail "Migration timestamp exists but applications table is empty. This indicates a migration failure. Check the gateway log for 'config_migration_failed'." 1
+    info "Migration done-flag is set ($MIG_TS) but applications table is empty — operator has deleted all applications via the web UI (normal post-migration state)."
+    exit 0
 fi
 
 # ------------------------------------------------------------------

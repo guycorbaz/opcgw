@@ -1843,7 +1843,7 @@ impl AppConfig {
                             // misattribute the operator-actionable
                             // root cause (the empty app_id) and trigger
                             // a spurious `conflict_kind="duplicate"`
-                            // audit emit via `ReloadError::is_duplicate()`.
+                            // audit emit via a duplicate-class error.
                             // Skip the duplicate check entirely when
                             // app_id is empty; operator fixes the
                             // empty-id error first, then the validator

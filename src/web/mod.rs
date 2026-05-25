@@ -1075,12 +1075,7 @@ mod tests {
         let cfg = snapshot_test_config(vec![]);
         let snapshot = Arc::new(DashboardConfigSnapshot::from_config(&cfg));
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let toml_path = tmp.path().join("config.toml");
-        std::fs::write(&toml_path, "[global]\ndebug = true\n").expect("write toml");
-        let (handle, _rx) = crate::config_reload::ConfigReloadHandle::new(
-            Arc::new(cfg),
-            toml_path.clone(),
-        );
+        let (handle, _rx) = crate::config_reload::ConfigReloadHandle::new(Arc::new(cfg));
         let app_state = Arc::new(AppState {
             auth,
             backend,

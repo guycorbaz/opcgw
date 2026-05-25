@@ -793,3 +793,12 @@ iter-2 of bmad-code-review C-1 caught **2 HIGH + 2 MED + several LOW** in iter-1
 - DEF5 (LOW): `drift_view_opened` emits flat `summary_ok/stale/available/drifted/total` fields; AC#11 notation shows nested `summary: { ok: N, … }`; `docs/logging.md` documents the actual flat form. `src/web/drift.rs:801-814`.
 - DEF6 (LOW): `drift_view_opened_audit_fires_with_summary` only asserts `summary_total`; per-class counts not pinned; AC#15 item 9 says "correct summary counts". `tests/web_inventory_drift.rs:397-407`.
 - DEF7 (LOW): `drift_dismissed` emits `drift_reason` string; AC#13 spec says "drift_details snapshot" implying structured shape; information equivalent, `logging.md` documents actual field name. `src/web/api.rs`.
+
+## Deferred from: code review iter-1 of C-6-toml-to-sqlite-config-migration (2026-05-25)
+
+- F10 (LOW): `command_port` not range-validated during migration — `src/storage/sqlite.rs:3371-3383` inserts `cmd.command_port` without checking the 1-65535 spec range. Pre-existing gap in command validation predating C-6; not a C-6-introduced regression.
+- F11 (LOW): `commands` config table missing `created_at`/`updated_at` columns — `migrations/v009_application_config_tables.sql`. The `applications`, `devices`, and `metrics` tables have audit timestamps; `commands` does not. Requires a v010 schema migration; out of C-6 scope.
+- F12 (LOW): `config_reload.rs::reload()` unreachable and untested — moot if F5 (dead-code decision) resolves to deletion; else pre-existing coverage gap for the SIGHUP-era reload path.
+- F13 (LOW): FK pragma must be enabled per-connection — `src/storage/sqlite.rs`. `PRAGMA foreign_keys = ON` is set on each connection via `connection_hook`. Pre-existing pattern across codebase; risk that a raw connection bypasses the hook. Not a C-6-specific regression.
+- F15 (LOW): `duration_ms` includes pool-checkout time — `src/storage/migrate_config.rs:66`. Timer starts before `migrate_applications_config()` which internally does a pool checkout (up to 5 s timeout). Cosmetic accuracy issue; pool checkout is typically sub-millisecond.
+- F17 (LOW): Unstructured `info!` startup log block in `main.rs` — pre-existing style inconsistency; not a C-6 regression.

@@ -219,10 +219,7 @@ async fn spawn_fixture(seed_toml: &str) -> DriftFixture {
         opcgw::config::AppConfig::from_path(config_path.to_str().expect("utf-8 path"))
             .expect("seed config validates"),
     );
-    let (handle, _rx) = opcgw::config_reload::ConfigReloadHandle::new(
-        initial.clone(),
-        config_path.clone(),
-    );
+    let (handle, _rx) = opcgw::config_reload::ConfigReloadHandle::new(initial.clone());
     let config_reload = Arc::new(handle);
     let db_path = dir.path().join("test.db");
     let sqlite_backend = SqliteBackend::new(db_path.to_str().expect("db path"))
