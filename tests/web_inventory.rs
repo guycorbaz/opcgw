@@ -55,7 +55,7 @@ fn build_test_app_state() -> (Arc<AppState>, TempDir) {
         device_count: 0,
         applications: vec![],
     });
-    let (config_reload, config_writer, dir2) =
+    let (config_reload, sqlite_config, dir2) =
         opcgw::web::test_support::make_test_reload_handle_and_writer();
     std::mem::forget(dir2);
 
@@ -66,7 +66,7 @@ fn build_test_app_state() -> (Arc<AppState>, TempDir) {
         start_time: std::time::Instant::now(),
         stale_threshold_secs: std::sync::atomic::AtomicU64::new(120),
         config_reload,
-        config_writer,
+        sqlite_config,
         static_dir: static_dir(),
         is_first_run: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         secrets_path: dir.path().join("secrets.toml"),

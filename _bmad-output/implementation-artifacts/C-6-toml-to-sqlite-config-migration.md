@@ -5,7 +5,7 @@
 | Story key       | `C-6-toml-to-sqlite-config-migration`                                                                       |
 | Epic            | C — Auto-Discovery and Web-First Configuration (post-v2.0 GA)                                               |
 | FRs             | none (Epic C is post-PRD)                                                                                   |
-| Status          | ready-for-dev                                                                                               |
+| Status          | review                                                                                                      |
 | Created         | 2026-05-21                                                                                                  |
 | Source epic     | `_bmad-output/planning-artifacts/epics.md § Epic C § Story C.6`                                             |
 | Depends on      | C-0 (empty-bootstrap so the gateway no longer treats TOML as a hard requirement), C-2 (web UI is the       |

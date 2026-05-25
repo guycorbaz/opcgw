@@ -191,10 +191,13 @@ index of the event names introduced so far.
 | `web_server_started` | `info` (diag) | 9-1 | `security.md` § Web UI authentication |
 | `api_status_storage_error` | `warn` (diag) | 9-2 | `security.md` § Web UI authentication → API endpoints |
 | `api_devices_storage_error` | `warn` (diag) | 9-3 | `security.md` § Web UI authentication → API endpoints |
-| `config_reload_attempted` | `info` (diag) | 9-7 | `security.md` § Configuration hot-reload |
-| `config_reload_succeeded` | `info` (diag) | 9-7 | `security.md` § Configuration hot-reload |
-| `config_reload_failed` | `warn` (audit) | 9-7 | `security.md` § Configuration hot-reload |
-| `config_reload_rejected` | `warn` (audit) | C-3 | `web-api.md` § Duplicate-rejection contract — duplicate-class hot-reload failure (carries `reason="conflict"` + `conflict_kind="duplicate"`) |
+| `config_reload_attempted` | `info` (diag) | 9-7 | ~~`security.md` § Configuration hot-reload~~ **(removed C-6 — SIGHUP listener removed; event no longer emitted)** |
+| `config_reload_succeeded` | `info` (diag) | 9-7 | ~~`security.md` § Configuration hot-reload~~ **(removed C-6 — SIGHUP listener removed; event no longer emitted)** |
+| `config_reload_failed` | `warn` (audit) | 9-7 | ~~`security.md` § Configuration hot-reload~~ **(removed C-6 — SIGHUP listener removed; event no longer emitted)** |
+| `config_reload_rejected` | `warn` (audit) | C-3 | ~~`web-api.md` § Duplicate-rejection contract~~ **(removed C-6 — this event was only emitted from the SIGHUP duplicate-validation path, which was removed in C-6)** |
+| `config_reload` | `info` (audit) | C-6 | Emitted by `notify_crud_write` after each successful CRUD write (POST / PUT / DELETE on applications, devices, metrics, or commands) rebuilds the in-memory snapshot from SQLite. Fields: `trigger="crud_write"`, `application_count=<usize>`. Replaces the now-removed SIGHUP-triggered `config_reload_attempted` / `config_reload_succeeded` pair. Grep: `event="config_reload" trigger="crud_write"`. |
+| `config_migration` | `info` (audit) | C-6 | Boot-time TOML→SQLite one-shot migration audit. `stage="toml_to_sqlite"` (migration ran): carries `applications=<N>`, `devices=<N>`, `metrics=<N>`, `commands=<N>`, `duration_ms=<u64>`. `stage="skipped_empty_source"` fires when the TOML `application_list` is empty (C-0 fresh-bootstrap or already-migrated DB on re-boot). See `docs/c-6-migration-runbook.md`. |
+| `config_migration_failed` | `warn` (audit) | C-6 | Boot-time migration failure. `reason="row_count_mismatch"`: SQLite row count after insert differs from the TOML source count — transaction rolled back; fields `expected=<N>`, `actual=<N>`. `reason="insert_failed"`: SQLite threw an error during insert; field `error=<str>`. On failure the gateway falls back to TOML-driven boot for the current start-up only; the migration is retried idempotently on the next boot. See `docs/c-6-migration-runbook.md` for the rollback + recovery runbook. |
 | `application_created` | `info` (audit) | 9-4 | `security.md` § Configuration mutations |
 | `application_updated` | `info` (audit) | 9-4 | `security.md` § Configuration mutations |
 | `application_deleted` | `info` (audit) | 9-4 | `security.md` § Configuration mutations |
@@ -328,3 +331,4 @@ A metric near the staleness threshold flips between Good and Uncertain on consec
 - **Story 6-2** — configurable log level via `OPCGW_LOG_LEVEL` and `[logging].level` (this document).
 - **Story 6-3** — microsecond-precision timestamps and remote diagnostics for known failures (this document, sections "Future operations" and the operations table).
 - **Story 4-4** (implemented 2026-05-05) — auto-recovery from ChirpStack outages; defines `recovery_attempt` / `recovery_complete` / `recovery_failed` operations (catalogued above).
+- **Story C-6** — TOML→SQLite configuration migration + SQLite-driven hot-reload. Removes the SIGHUP listener (and its `config_reload_attempted/succeeded/failed` events); adds `config_reload trigger="crud_write"`, `config_migration`, and `config_migration_failed` events.

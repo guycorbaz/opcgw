@@ -5,7 +5,7 @@
 //! sub-modules and integration tests under `tests/`. Story 9-4
 //! introduced this module so api.rs / web/mod.rs / external
 //! integration tests can construct an `AppState` without
-//! duplicating the `ConfigReloadHandle` + `ConfigWriter` plumbing
+//! duplicating the `ConfigReloadHandle` + `SqliteBackend` plumbing
 //! at every call site.
 
 #![allow(dead_code)]
@@ -17,101 +17,90 @@ use tempfile::TempDir;
 
 use crate::config::AppConfig;
 use crate::config_reload::ConfigReloadHandle;
-use crate::web::config_writer::ConfigWriter;
+use crate::storage::SqliteBackend;
 
-/// Build a `ConfigReloadHandle` + `ConfigWriter` pair pointing at a
-/// fresh per-test tempdir holding a minimal `config.toml`. Returns
-/// the handle, the writer, and the `TempDir` (caller is responsible
-/// for keeping the tempdir alive for the duration of the test —
-/// dropping it would unlink the TOML file).
+/// Build a `ConfigReloadHandle` + `SqliteBackend` pair pointing at a
+/// fresh per-test tempdir. The SQLite backend is created with
+/// migrations applied and the `MINIMAL_TOML`'s application list seeded.
+/// The `TempDir` keeps the on-disk DB alive; callers must not drop it
+/// before the test completes (or call `std::mem::forget`).
 pub fn make_test_reload_handle_and_writer(
-) -> (Arc<ConfigReloadHandle>, Arc<ConfigWriter>, TempDir) {
-    make_test_reload_handle_and_writer_with_toml(MINIMAL_TOML)
+) -> (Arc<ConfigReloadHandle>, Arc<SqliteBackend>, TempDir) {
+    make_test_reload_handle_and_writer_with_apps(
+        &stub_app_config().application_list,
+    )
 }
 
-/// Variant accepting custom TOML content. Useful for tests that
+/// Variant accepting a custom application list. Useful for tests that
 /// need specific application_list shapes for CRUD pre-conditions.
-pub fn make_test_reload_handle_and_writer_with_toml(
-    toml_str: &str,
-) -> (Arc<ConfigReloadHandle>, Arc<ConfigWriter>, TempDir) {
+pub fn make_test_reload_handle_and_writer_with_apps(
+    apps: &[crate::config::ChirpStackApplications],
+) -> (Arc<ConfigReloadHandle>, Arc<SqliteBackend>, TempDir) {
     let dir = TempDir::new().expect("tempdir");
-    let toml_path: PathBuf = dir.path().join("config.toml");
-    std::fs::write(&toml_path, toml_str).expect("write fixture toml");
-    // Construct a stub initial AppConfig — for tests that don't
-    // exercise reload(), the initial doesn't have to match the
-    // file. For tests that DO exercise reload(), the call to
-    // `handle.reload()` re-reads the file and that determines
-    // behaviour, not the initial.
-    let initial = Arc::new(stub_app_config());
-    let (handle, _rx) = ConfigReloadHandle::new(initial, toml_path.clone());
-    (Arc::new(handle), ConfigWriter::new(toml_path), dir)
+    let db_path = dir.path().join("test.db");
+    let backend = SqliteBackend::new(db_path.to_str().expect("db path"))
+        .expect("sqlite backend");
+    // Seed the SQLite backend with the supplied application list so
+    // CRUD handlers that read from SQLite have consistent initial state.
+    for app in apps {
+        backend
+            .insert_application(&crate::config::ChirpStackApplications {
+                application_id: app.application_id.clone(),
+                application_name: app.application_name.clone(),
+                device_list: vec![],
+            })
+            .unwrap_or(());
+        for dev in &app.device_list {
+            backend
+                .insert_device_with_metrics(
+                    &app.application_id,
+                    &dev.device_id,
+                    &dev.device_name,
+                    &dev.read_metric_list,
+                )
+                .unwrap_or(());
+            if let Some(cmds) = &dev.device_command_list {
+                for cmd in cmds {
+                    backend
+                        .insert_command(&app.application_id, &dev.device_id, cmd)
+                        .unwrap_or(());
+                }
+            }
+        }
+    }
+    let initial = Arc::new(stub_app_config_with_apps(apps));
+    let (handle, _rx) = ConfigReloadHandle::new(initial, PathBuf::from("/dev/null"));
+    (Arc::new(handle), Arc::new(backend), dir)
 }
 
-const MINIMAL_TOML: &str = r#"
-[global]
-debug = true
-prune_interval_minutes = 60
-command_delivery_poll_interval_secs = 5
-command_delivery_timeout_secs = 60
-command_timeout_check_interval_secs = 10
-history_retention_days = 7
-
-[chirpstack]
-server_address = "http://127.0.0.1:18080"
-api_token = "t"
-tenant_id = "00000000-0000-0000-0000-000000000000"
-polling_frequency = 10
-retry = 1
-delay = 1
-list_page_size = 100
-
-[opcua]
-application_name = "test"
-application_uri = "urn:test"
-product_uri = "urn:test:product"
-diagnostics_enabled = false
-hello_timeout = 5
-host_ip_address = "127.0.0.1"
-host_port = 4855
-create_sample_keypair = true
-certificate_path = "own/cert.der"
-private_key_path = "private/private.pem"
-trust_client_cert = false
-check_cert_time = false
-pki_dir = "./pki"
-user_name = "opcua-user"
-user_password = "secret"
-stale_threshold_seconds = 120
-
-[storage]
-database_path = "data/opcgw.db"
-retention_days = 7
-
-[web]
-port = 8080
-bind_address = "127.0.0.1"
-enabled = false
-auth_realm = "opcgw-test"
-
-[[application]]
-application_name = "Building Sensors"
-application_id = "app-1"
-
-  [[application.device]]
-  device_id = "dev-1"
-  device_name = "Dev One"
-
-    [[application.device.read_metric]]
-    metric_name = "temperature"
-    chirpstack_metric_name = "temperature"
-    metric_type = "Float"
-    metric_unit = "C"
-"#;
 
 /// Stub `AppConfig` mirroring `MINIMAL_TOML`. For tests that don't
 /// call `reload()` the actual values don't matter — the consumer
 /// only needs the type to satisfy `Arc<AppConfig>`.
-fn stub_app_config() -> AppConfig {
+pub fn stub_app_config() -> AppConfig {
+    use crate::config::*;
+    let apps = vec![ChirpStackApplications {
+        application_name: "Building Sensors".to_string(),
+        application_id: "app-1".to_string(),
+        device_list: vec![ChirpstackDevice {
+            device_id: "dev-1".to_string(),
+            device_name: "Dev One".to_string(),
+            read_metric_list: vec![ReadMetric {
+                metric_name: "temperature".to_string(),
+                chirpstack_metric_name: "temperature".to_string(),
+                metric_type: OpcMetricTypeConfig::Float,
+                metric_unit: Some("C".to_string()),
+            }],
+            device_command_list: None,
+        }],
+    }];
+    stub_app_config_with_apps(&apps)
+}
+
+/// Build an `AppConfig` with a custom application list. Reuses the
+/// fixed global/chirpstack/opcua/storage/web stubs so test helpers
+/// only need to vary the application shape.
+pub fn stub_app_config_with_apps(apps: &[crate::config::ChirpStackApplications]) -> AppConfig {
     use crate::config::*;
     AppConfig {
         global: Global {
@@ -170,20 +159,6 @@ fn stub_app_config() -> AppConfig {
             allowed_origins: None,
         },
         command_validation: CommandValidationConfig::default(),
-        application_list: vec![ChirpStackApplications {
-            application_name: "Building Sensors".to_string(),
-            application_id: "app-1".to_string(),
-            device_list: vec![ChirpstackDevice {
-                device_id: "dev-1".to_string(),
-                device_name: "Dev One".to_string(),
-                read_metric_list: vec![ReadMetric {
-                    metric_name: "temperature".to_string(),
-                    chirpstack_metric_name: "temperature".to_string(),
-                    metric_type: OpcMetricTypeConfig::Float,
-                    metric_unit: Some("C".to_string()),
-                }],
-                device_command_list: None,
-            }],
-        }],
+        application_list: apps.to_vec(),
     }
 }

@@ -33,8 +33,6 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::config::OpcMetricTypeConfig;
-use crate::config_reload::{ReloadError, ReloadOutcome};
-use crate::utils::OpcGwError;
 use crate::web::AppState;
 
 /// Shape returned by `GET /api/status` on success (Story 9-2 AC#2).
@@ -670,9 +668,9 @@ pub async fn api_devices(
 // Five routes, all behind Basic auth (Story 9-1 layer-after-route
 // invariant) and the new CSRF middleware (Story 9-4 Task 3) for
 // state-changing methods. Read paths consume the auto-refreshed
-// `dashboard_snapshot` (Story 9-2/9-7); write paths take the
-// `ConfigWriter::lock()` across the entire `write+reload+(rollback)`
-// critical section so concurrent CRUD requests cannot lose updates.
+// `dashboard_snapshot`; write paths serialise through the SQLite
+// backend and then call `notify_crud_write` to update the watch channel
+// so concurrent CRUD requests cannot lose updates (Story C-6).
 // ----------------------------------------------------------------------
 
 /// Per-application entry returned by `GET /api/applications`.
@@ -1251,6 +1249,30 @@ fn command_not_found_response() -> Response {
         .into_response()
 }
 
+fn application_not_found_response() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse::from_error("application not found")),
+    )
+        .into_response()
+}
+
+fn device_not_found_response() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse::from_error("device not found")),
+    )
+        .into_response()
+}
+
+fn internal_error_response() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse::internal_server_error()),
+    )
+        .into_response()
+}
+
 fn is_valid_app_name_char(c: char) -> bool {
     // Human-readable display names accept Unicode letters and digits across
     // all scripts — so "Bâtiments", "Über", "日本語", "Ёлка" are valid — plus
@@ -1336,9 +1358,9 @@ pub async fn get_application(
     }
 }
 
-/// `POST /api/applications` — create a new application. Holds the
-/// ConfigWriter lock across write + reload + rollback per the
-/// AC#4 lost-update race fix.
+/// `POST /api/applications` — create a new application. Writes to
+/// SQLite then calls `notify_crud_write` to update the watch channel
+/// (Story C-6; replaces Story 9-5 TOML write path).
 pub async fn create_application(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -1348,191 +1370,90 @@ pub async fn create_application(
     validate_application_field("application_id", &body.application_id, &addr)?;
     validate_application_field("application_name", &body.application_name, &addr)?;
 
-    let _guard = state.config_writer.lock().await;
-
-    let original_bytes = state
-        .config_writer
-        .read_raw()
-        .map_err(|e| io_error_response(&e, "create_application", &addr, "application"))?;
-    // Iter-2 review P30: parse the SAME bytes we snapshotted for
-    // rollback. Eliminates the TOCTOU window between read_raw and
-    // a subsequent load_document call.
-    let mut doc = state
-        .config_writer
-        .parse_document_from_bytes(&original_bytes)
-        .map_err(|e| io_error_response(&e, "create_application", &addr, "application"))?;
-
-    // Iter-2 review H1: explicit top-level shape check. The
-    // application handlers iterate `application` array directly
-    // (they don't go through `find_application_index`), so the
-    // iter-1 B-H6 protection didn't reach them. Without this guard,
-    // an operator with `[application]` (single table) sees a clean
-    // 409 from device/command CRUD but a confusing 404/5xx from
-    // application CRUD — asymmetric UX.
-    check_top_level_application_shape(&doc, &body.application_id, &addr, "application")?;
-
-    // Iter-1 review P2 + Iter-2 review P35 (load-bearing):
-    // duplicate-id check INSIDE the write_lock-held critical section,
-    // BEFORE append. Without this, two concurrent POSTs with the
-    // same `application_id` would both pass pre-lock validation,
-    // both append, second reload fails, rollback restores the first
-    // request's bytes, both clients see 201.
-    //
-    // P35 additionally pre-flights malformed `[[application]]`
-    // blocks: if any existing block has a missing or non-string
-    // `application_id`, the POST is rejected with 409 + a
-    // "manual cleanup required" hint. Otherwise the dup-check
-    // silently skips that block and the post-write reload's
-    // `AppConfig::validate` fails with `application_id: must not be
-    // empty` for the pre-existing broken block; rollback then
-    // restores the BROKEN state. Pre-flight catches it cleanly.
+    // Duplicate check via watch channel (C-3 pre-flight; SQLite UNIQUE
+    // constraint is the final concurrent-write guard).
     {
-        let array_ref = doc.get("application").and_then(|v| v.as_array_of_tables());
-        if let Some(arr) = array_ref {
-            for (idx, tbl) in arr.iter().enumerate() {
-                let id_value = tbl.get("application_id");
-                let existing_id = match id_value.and_then(|v| v.as_str()) {
-                    Some(s) => s,
-                    None => {
-                        // P35: malformed block — reject up-front.
-                        warn!(
-                            event = "application_crud_rejected",
-                            reason = "conflict",
-                            conflict_kind = "malformed_existing_block",
-                            source_ip = %addr.ip(),
-                            malformed_block_index = idx,
-                            id_value_present = id_value.is_some(),
-                            "create_application: existing [[application]] block at index {idx} has missing or non-string application_id; manual cleanup required"
-                        );
-                        return Err((
-                            StatusCode::CONFLICT,
-                            Json(ErrorResponse::with_hint(
-                                format!(
-                                    "config TOML contains a malformed [[application]] block at index {idx} (missing or non-string application_id); manual cleanup required"
-                                ),
-                                "edit config/config.toml to fix the malformed block before retrying",
-                            )),
-                        )
-                            .into_response());
-                    }
-                };
-                if existing_id == body.application_id {
-                    warn!(
-                        event = "application_crud_rejected",
-                        reason = "conflict",
-                        conflict_kind = "duplicate",
-                        application_id = %body.application_id,
-                        source_ip = %addr.ip(),
-                        "create_application: duplicate application_id rejected before write"
-                    );
-                    // Story C-3 AC#1: structured duplicate body so the
-                    // picker UI can surface inline errors near the
-                    // application_id field without regexing the message.
-                    return Err((
-                        StatusCode::CONFLICT,
-                        Json(ErrorResponse::duplicate(
-                            "application_id",
-                            body.application_id.clone(),
-                            "application_list",
-                            "PUT to rename or DELETE the existing application before recreating",
-                        )),
-                    )
-                        .into_response());
-                }
-            }
-        }
-    }
-
-    // Append a new [[application]] table.
-    let array = doc
-        .entry("application")
-        .or_insert_with(|| toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()))
-        .as_array_of_tables_mut();
-    let array = match array {
-        Some(a) => a,
-        None => {
+        let live = state.config_reload.subscribe();
+        let cfg = live.borrow().clone();
+        if cfg
+            .application_list
+            .iter()
+            .any(|a| a.application_id == body.application_id)
+        {
             warn!(
                 event = "application_crud_rejected",
-                reason = "io",
-                source_ip = %addr.ip(),
-                "create_application: existing TOML 'application' key is not an array of tables"
-            );
-            return Err(internal_error_response());
-        }
-    };
-    let mut new_table = toml_edit::Table::new();
-    new_table.insert(
-        "application_name",
-        toml_edit::value(body.application_name.clone()),
-    );
-    new_table.insert(
-        "application_id",
-        toml_edit::value(body.application_id.clone()),
-    );
-    array.push(new_table);
-
-    let candidate_bytes = doc.to_string().into_bytes();
-    if let Err(e) = state.config_writer.write_atomically(&candidate_bytes) {
-        // Iter-3 review EH3-H1: `write_atomically` may return Err
-        // AFTER the rename has already committed (e.g., post-persist
-        // dir-fsync surfaced a non-Unsupported IO error per iter-2
-        // P32). The on-disk file then holds the candidate bytes
-        // even though we're returning 5xx. Rollback restores the
-        // pre-write state so the next CRUD / SIGHUP / restart sees
-        // a known-good file. If rollback itself fails, the
-        // ConfigWriter is poisoned (D3-P / iter-2 P27) and
-        // subsequent CRUD short-circuits with 503.
-        handle_rollback(&state, &original_bytes, "create_application", &addr, "write_atomically_err", "application");
-        return Err(io_error_response(&e, "create_application", &addr, "application"));
-    }
-
-    match state.config_reload.reload().await {
-        Ok(_) => {
-            // Story C-1: invalidate inventory cache so the next
-            // `/api/inventory/applications` query is a fresh miss.
-            let tenant_id = state.config_reload.subscribe().borrow().chirpstack.tenant_id.clone();
-            state.inventory_cache.invalidate_applications(&tenant_id).await;
-            info!(
-                event = "inventory_cache_invalidated",
-                cache_scope = "applications",
-                triggered_by = "crud_post",
-                "inventory cache invalidated after application_created"
-            );
-            info!(
-                event = "application_created",
+                reason = "conflict",
+                conflict_kind = "duplicate",
                 application_id = %body.application_id,
-                application_name = %body.application_name,
                 source_ip = %addr.ip(),
-                "Application created via web UI"
+                "create_application: duplicate application_id"
             );
-            let location = format!("/api/applications/{}", body.application_id);
-            let response_body = ApplicationResponse {
-                application_id: body.application_id,
-                application_name: body.application_name,
-                device_count: 0,
-            };
-            Ok((
-                StatusCode::CREATED,
-                [(axum::http::header::LOCATION, location)],
-                Json(response_body),
-            ))
-        }
-        Err(ReloadError::RestartRequired { knob }) => {
-            // Iter-1 review D1-P: drift-aware handling.
-            let (should_rollback, response) = handle_restart_required(&knob,
-                &original_bytes,
-                &doc, "create_application", &addr, "application");
-            if should_rollback {
-                handle_rollback(&state, &original_bytes, "create_application", &addr, &knob, "application");
-            }
-            Err(response)
-        }
-        Err(e) => {
-            let reason = e.reason().to_string();
-            handle_rollback(&state, &original_bytes, "create_application", &addr, &reason, "application");
-            Err(reload_error_response(e, "create_application", &addr, "application"))
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse::duplicate(
+                    "application_id",
+                    body.application_id.clone(),
+                    "application_list",
+                    "PUT to rename or DELETE the existing application before recreating",
+                )),
+            )
+                .into_response());
         }
     }
+
+    let new_app = crate::config::ChirpStackApplications {
+        application_id: body.application_id.clone(),
+        application_name: body.application_name.clone(),
+        device_list: vec![],
+    };
+    state
+        .sqlite_config
+        .insert_application(&new_app)
+        .map_err(|e| sqlite_crud_error(e, "application", "create_application", &addr))?;
+
+    let all_apps = state
+        .sqlite_config
+        .load_all_applications_config()
+        .map_err(|e| {
+            warn!(event = "application_crud_error", error = %e, source_ip = %addr.ip(), "create_application: load_all failed");
+            internal_error_response()
+        })?;
+    state.config_reload.notify_crud_write(all_apps).await;
+
+    let tenant_id = state
+        .config_reload
+        .subscribe()
+        .borrow()
+        .chirpstack
+        .tenant_id
+        .clone();
+    state
+        .inventory_cache
+        .invalidate_applications(&tenant_id)
+        .await;
+    info!(
+        event = "inventory_cache_invalidated",
+        cache_scope = "applications",
+        triggered_by = "crud_post",
+        "inventory cache invalidated after application_created"
+    );
+    info!(
+        event = "application_created",
+        application_id = %body.application_id,
+        application_name = %body.application_name,
+        source_ip = %addr.ip(),
+        "Application created via web UI"
+    );
+    let location = format!("/api/applications/{}", body.application_id);
+    Ok((
+        StatusCode::CREATED,
+        [(axum::http::header::LOCATION, location)],
+        Json(ApplicationResponse {
+            application_id: body.application_id,
+            application_name: body.application_name,
+            device_count: 0,
+        }),
+    ))
 }
 
 /// `PUT /api/applications/:application_id` — rename an existing
@@ -1682,174 +1603,62 @@ pub async fn update_application(
         }
     }
 
-    let _guard = state.config_writer.lock().await;
-    let original_bytes = state
-        .config_writer
-        .read_raw()
-        .map_err(|e| io_error_response(&e, "update_application", &addr, "application"))?;
-    // Iter-2 review P30: parse the SAME bytes we snapshotted.
-    let mut doc = state
-        .config_writer
-        .parse_document_from_bytes(&original_bytes)
-        .map_err(|e| io_error_response(&e, "update_application", &addr, "application"))?;
-
-    // Iter-2 review H1: explicit top-level shape check (see
-    // `check_top_level_application_shape` doc-comment for rationale).
-    check_top_level_application_shape(&doc, &application_id, &addr, "application")?;
-
-    let array = match doc
-        .get_mut("application")
-        .and_then(|v| v.as_array_of_tables_mut())
-    {
-        Some(a) => a,
-        None => {
-            return Err(internal_error_response());
-        }
+    let upd_app = crate::config::ChirpStackApplications {
+        application_id: application_id.clone(),
+        application_name: application_name.clone(),
+        device_list: vec![],
     };
-    // Iter-3 review HR2-2: same malformed-block pre-flight as
-    // create_application's iter-2 P35. Without it, PUT silently
-    // coerces a malformed block's id to "" via `unwrap_or_default()`,
-    // mutates the well-formed match, post-write reload's validate
-    // fails on the pre-existing broken block, rollback restores the
-    // broken state. Pre-flight catches it cleanly.
-    for (idx, tbl) in array.iter().enumerate() {
-        if tbl
-            .get("application_id")
-            .and_then(|v| v.as_str())
-            .is_none()
-        {
-            warn!(
-                event = "application_crud_rejected",
-                reason = "conflict",
-                conflict_kind = "malformed_existing_block",
-                source_ip = %addr.ip(),
-                malformed_block_index = idx,
-                "update_application: existing [[application]] block at index {idx} has missing or non-string application_id; manual cleanup required"
-            );
-            return Err((
-                StatusCode::CONFLICT,
-                Json(ErrorResponse::with_hint(
-                    format!(
-                        "config TOML contains a malformed [[application]] block at index {idx} (missing or non-string application_id); manual cleanup required"
-                    ),
-                    "edit config/config.toml to fix the malformed block before retrying",
-                )),
-            )
-                .into_response());
-        }
-    }
-    // Iter-1 review P3: count occurrences. If the on-disk TOML
-    // somehow has duplicate ids (manual edit, botched rollback),
-    // refuse to mutate — operating on first-match alone produces
-    // silent partial updates.
-    let match_count = array
+    state
+        .sqlite_config
+        .update_application(&upd_app)
+        .map_err(|e| sqlite_crud_error(e, "application", "update_application", &addr))?;
+
+    let all_apps = state
+        .sqlite_config
+        .load_all_applications_config()
+        .map_err(|e| {
+            warn!(event = "application_crud_error", error = %e, source_ip = %addr.ip(), "update_application: load_all failed");
+            internal_error_response()
+        })?;
+    state.config_reload.notify_crud_write(all_apps).await;
+
+    let tenant_id = state
+        .config_reload
+        .subscribe()
+        .borrow()
+        .chirpstack
+        .tenant_id
+        .clone();
+    state
+        .inventory_cache
+        .invalidate_applications(&tenant_id)
+        .await;
+    info!(
+        event = "inventory_cache_invalidated",
+        cache_scope = "applications",
+        triggered_by = "crud_put",
+        "inventory cache invalidated after application_updated"
+    );
+    info!(
+        event = "application_updated",
+        application_id = %application_id,
+        application_name = %application_name,
+        source_ip = %addr.ip(),
+        "Application updated via web UI"
+    );
+    let live = state.config_reload.subscribe();
+    let cfg = (*live.borrow()).clone();
+    let device_count = cfg
+        .application_list
         .iter()
-        .filter(|tbl| {
-            tbl.get("application_id")
-                .and_then(|v| v.as_str())
-                == Some(application_id.as_str())
-        })
-        .count();
-    if match_count > 1 {
-        warn!(
-            event = "application_crud_rejected",
-            reason = "conflict",
-            conflict_kind = "duplicate",
-            application_id = %application_id,
-            source_ip = %addr.ip(),
-            duplicate_count = match_count,
-            "update_application: duplicate application_id in TOML; manual cleanup required"
-        );
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ErrorResponse::with_hint(
-                format!(
-                    "config TOML contains {} entries with application_id '{}'; manual cleanup required",
-                    match_count, application_id
-                ),
-                "edit config/config.toml to remove the duplicate [[application]] block before retrying",
-            )),
-        )
-            .into_response());
-    }
-    let mut found = false;
-    for tbl in array.iter_mut() {
-        let id_in_toml = tbl
-            .get("application_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if id_in_toml == application_id {
-            tbl.insert(
-                "application_name",
-                toml_edit::value(application_name.clone()),
-            );
-            found = true;
-            break;
-        }
-    }
-    if !found {
-        // Should be impossible — pre-check above said it exists.
-        return Err(application_not_found_response());
-    }
-
-    let candidate_bytes = doc.to_string().into_bytes();
-    if let Err(e) = state.config_writer.write_atomically(&candidate_bytes) {
-        // Iter-3 review EH3-H1: rollback to recover from post-persist
-        // failures (e.g., dir-fsync IO error AFTER the rename
-        // committed). Same shape as create_application.
-        handle_rollback(&state, &original_bytes, "update_application", &addr, "write_atomically_err", "application");
-        return Err(io_error_response(&e, "update_application", &addr, "application"));
-    }
-
-    match state.config_reload.reload().await {
-        Ok(_) => {
-            // Story C-1: invalidate inventory cache so the next
-            // `/api/inventory/applications` query is a fresh miss.
-            let tenant_id = state.config_reload.subscribe().borrow().chirpstack.tenant_id.clone();
-            state.inventory_cache.invalidate_applications(&tenant_id).await;
-            info!(
-                event = "inventory_cache_invalidated",
-                cache_scope = "applications",
-                triggered_by = "crud_put",
-                "inventory cache invalidated after application_updated"
-            );
-            info!(
-                event = "application_updated",
-                application_id = %application_id,
-                application_name = %application_name,
-                source_ip = %addr.ip(),
-                "Application updated via web UI"
-            );
-            // Compute device_count from the post-reload live config.
-            let live = state.config_reload.subscribe();
-            let cfg = (*live.borrow()).clone();
-            let device_count = cfg
-                .application_list
-                .iter()
-                .find(|a| a.application_id == application_id)
-                .map(|a| a.device_list.len())
-                .unwrap_or(0);
-            Ok(Json(ApplicationResponse {
-                application_id,
-                application_name,
-                device_count,
-            }))
-        }
-        Err(ReloadError::RestartRequired { knob }) => {
-            let (should_rollback, response) = handle_restart_required(&knob,
-                &original_bytes,
-                &doc, "update_application", &addr, "application");
-            if should_rollback {
-                handle_rollback(&state, &original_bytes, "update_application", &addr, &knob, "application");
-            }
-            Err(response)
-        }
-        Err(e) => {
-            let reason = e.reason().to_string();
-            handle_rollback(&state, &original_bytes, "update_application", &addr, &reason, "application");
-            Err(reload_error_response(e, "update_application", &addr, "application"))
-        }
-    }
+        .find(|a| a.application_id == application_id)
+        .map(|a| a.device_list.len())
+        .unwrap_or(0);
+    Ok(Json(ApplicationResponse {
+        application_id,
+        application_name,
+        device_count,
+    }))
 }
 
 /// `DELETE /api/applications/:application_id` — remove an
@@ -1921,145 +1730,44 @@ pub async fn delete_application(
             .into_response());
     }
 
-    let _guard = state.config_writer.lock().await;
-    let original_bytes = state
-        .config_writer
-        .read_raw()
-        .map_err(|e| io_error_response(&e, "delete_application", &addr, "application"))?;
-    // Iter-2 review P30: parse the SAME bytes we snapshotted.
-    let mut doc = state
-        .config_writer
-        .parse_document_from_bytes(&original_bytes)
-        .map_err(|e| io_error_response(&e, "delete_application", &addr, "application"))?;
+    state
+        .sqlite_config
+        .delete_application(&application_id)
+        .map_err(|e| sqlite_crud_error(e, "application", "delete_application", &addr))?;
 
-    // Iter-2 review H1: explicit top-level shape check (see
-    // `check_top_level_application_shape` doc-comment for rationale).
-    check_top_level_application_shape(&doc, &application_id, &addr, "application")?;
+    let all_apps = state
+        .sqlite_config
+        .load_all_applications_config()
+        .map_err(|e| {
+            warn!(event = "application_crud_error", error = %e, source_ip = %addr.ip(), "delete_application: load_all failed");
+            internal_error_response()
+        })?;
+    state.config_reload.notify_crud_write(all_apps).await;
 
-    let array = match doc
-        .get_mut("application")
-        .and_then(|v| v.as_array_of_tables_mut())
-    {
-        Some(a) => a,
-        None => return Err(internal_error_response()),
-    };
-    // Iter-3 review HR2-2: malformed-block pre-flight (same shape
-    // as update_application).
-    for (idx, tbl) in array.iter().enumerate() {
-        if tbl
-            .get("application_id")
-            .and_then(|v| v.as_str())
-            .is_none()
-        {
-            warn!(
-                event = "application_crud_rejected",
-                reason = "conflict",
-                conflict_kind = "malformed_existing_block",
-                source_ip = %addr.ip(),
-                malformed_block_index = idx,
-                "delete_application: existing [[application]] block at index {idx} has missing or non-string application_id; manual cleanup required"
-            );
-            return Err((
-                StatusCode::CONFLICT,
-                Json(ErrorResponse::with_hint(
-                    format!(
-                        "config TOML contains a malformed [[application]] block at index {idx} (missing or non-string application_id); manual cleanup required"
-                    ),
-                    "edit config/config.toml to fix the malformed block before retrying",
-                )),
-            )
-                .into_response());
-        }
-    }
-    // Iter-1 review P3: count occurrences before mutating.
-    let match_count = array
-        .iter()
-        .filter(|tbl| {
-            tbl.get("application_id")
-                .and_then(|v| v.as_str())
-                == Some(application_id.as_str())
-        })
-        .count();
-    if match_count > 1 {
-        warn!(
-            event = "application_crud_rejected",
-            reason = "conflict",
-            conflict_kind = "duplicate",
-            application_id = %application_id,
-            source_ip = %addr.ip(),
-            duplicate_count = match_count,
-            "delete_application: duplicate application_id in TOML; manual cleanup required"
-        );
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ErrorResponse::with_hint(
-                format!(
-                    "config TOML contains {} entries with application_id '{}'; manual cleanup required",
-                    match_count, application_id
-                ),
-                "edit config/config.toml to remove the duplicate [[application]] block before retrying",
-            )),
-        )
-            .into_response());
-    }
-    let mut idx_to_remove: Option<usize> = None;
-    for (i, tbl) in array.iter().enumerate() {
-        let id_in_toml = tbl
-            .get("application_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if id_in_toml == application_id {
-            idx_to_remove = Some(i);
-            break;
-        }
-    }
-    let Some(idx) = idx_to_remove else {
-        return Err(application_not_found_response());
-    };
-    array.remove(idx);
-
-    let candidate_bytes = doc.to_string().into_bytes();
-    if let Err(e) = state.config_writer.write_atomically(&candidate_bytes) {
-        // Iter-3 review EH3-H1: rollback on post-persist failure.
-        handle_rollback(&state, &original_bytes, "delete_application", &addr, "write_atomically_err", "application");
-        return Err(io_error_response(&e, "delete_application", &addr, "application"));
-    }
-
-    match state.config_reload.reload().await {
-        Ok(_) => {
-            // Story C-1: invalidate inventory cache so the next
-            // `/api/inventory/applications` query is a fresh miss.
-            let tenant_id = state.config_reload.subscribe().borrow().chirpstack.tenant_id.clone();
-            state.inventory_cache.invalidate_applications(&tenant_id).await;
-            info!(
-                event = "inventory_cache_invalidated",
-                cache_scope = "applications",
-                triggered_by = "crud_delete",
-                "inventory cache invalidated after application_deleted"
-            );
-            info!(
-                event = "application_deleted",
-                application_id = %application_id,
-                source_ip = %addr.ip(),
-                "Application deleted via web UI"
-            );
-            Ok(StatusCode::NO_CONTENT)
-        }
-        Err(ReloadError::RestartRequired { knob }) => {
-            let (should_rollback, response) = handle_restart_required(&knob,
-                &original_bytes,
-                &doc, "delete_application", &addr, "application");
-            if should_rollback {
-                handle_rollback(&state, &original_bytes, "delete_application", &addr, &knob, "application");
-            }
-            Err(response)
-        }
-        Err(e) => {
-            let reason = e.reason().to_string();
-            handle_rollback(&state, &original_bytes, "delete_application", &addr, &reason, "application");
-            Err(reload_error_response(e, "delete_application", &addr, "application"))
-        }
-    }
+    let tenant_id = state
+        .config_reload
+        .subscribe()
+        .borrow()
+        .chirpstack
+        .tenant_id
+        .clone();
+    state
+        .inventory_cache
+        .invalidate_applications(&tenant_id)
+        .await;
+    info!(
+        event = "inventory_cache_invalidated",
+        cache_scope = "applications",
+        triggered_by = "crud_delete",
+        "inventory cache invalidated after application_deleted"
+    );
+    info!(
+        event = "application_deleted",
+        application_id = %application_id,
+        source_ip = %addr.ip(),
+        "Application deleted via web UI"
+    );
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ----------------------------------------------------------------------
@@ -2075,10 +1783,10 @@ pub async fn delete_application(
 // `state.config_reload.subscribe().borrow()` because the snapshot's
 // `MetricSpec` does NOT carry `chirpstack_metric_name` / `metric_unit`
 // (Story 9-3 design — see `Existing Infrastructure` table in 9-5 spec).
-// Write paths take the `ConfigWriter::lock()` across the entire
-// `write+reload+(rollback)` critical section (Story 9-4 lost-update
-// fix). PUT-replace-device mutates ONLY the `device_name` field +
-// `read_metric` sub-array; any existing `[[application.device.command]]`
+// Write paths serialise through the SQLite backend and then call
+// `notify_crud_write` (Story C-6). PUT-replace-device mutates ONLY
+// the `device_name` field + `read_metric` sub-array; any existing
+// device commands are preserved via the FK cascade.
 // sub-table is preserved byte-for-byte (Story 9-6 territory).
 // ----------------------------------------------------------------------
 
@@ -2368,9 +2076,8 @@ pub async fn get_device(
 }
 
 /// `POST /api/applications/:application_id/devices` — create a new
-/// device under the named application. Holds the ConfigWriter lock
-/// across write + reload + rollback per the Story 9-4 lost-update
-/// race fix.
+/// device under the named application. Writes to SQLite then calls
+/// `notify_crud_write` to propagate the change (Story C-6).
 ///
 /// Pre-flight rejects: malformed sibling `[[application.device]]`
 /// blocks (409), duplicate `device_id` within the application (409 —
@@ -2448,211 +2155,133 @@ pub async fn create_device(
         }
     }
 
-    let _guard = state.config_writer.lock().await;
-
-    let original_bytes = state
-        .config_writer
-        .read_raw()
-        .map_err(|e| io_error_response(&e, "create_device", &addr, "device"))?;
-    let mut doc = state
-        .config_writer
-        .parse_document_from_bytes(&original_bytes)
-        .map_err(|e| io_error_response(&e, "create_device", &addr, "device"))?;
-
-    // Locate the parent application's `[[application]]` table.
-    let app_idx = match find_application_index(&doc, &application_id, &addr, "device") {
-        Ok(Some(idx)) => idx,
-        Ok(None) => {
-            // Parent application not found → 404 + audit event
-            // (Story 9-5 AC#6 — `device_crud_rejected reason=
-            // application_not_found`).
-            warn!(
-                event = "device_crud_rejected",
-                reason = "application_not_found",
-                application_id = %application_id,
-                source_ip = %addr.ip(),
-                "create_device: parent application not found"
-            );
-            return Err(application_not_found_response());
-        }
-        Err(resp) => return Err(resp),
-    };
-
-    // Pre-flight + duplicate-id check on the existing `device`
-    // sub-array under this application.
-    let device_array_existing = doc
-        .get("application")
-        .and_then(|v| v.as_array_of_tables())
-        .and_then(|arr| arr.get(app_idx))
-        .and_then(|tbl| tbl.get("device"))
-        .and_then(|v| v.as_array_of_tables());
-    if let Some(arr) = device_array_existing {
-        for (idx, tbl) in arr.iter().enumerate() {
-            let id_value = tbl.get("device_id");
-            let existing_id = match id_value.and_then(|v| v.as_str()) {
-                Some(s) => s,
-                None => {
+    // Pre-checks via watch channel: application exists + device_id unique.
+    {
+        let live = state.config_reload.subscribe();
+        let cfg = live.borrow().clone();
+        let app = cfg
+            .application_list
+            .iter()
+            .find(|a| a.application_id == application_id);
+        match app {
+            None => {
+                warn!(
+                    event = "device_crud_rejected",
+                    reason = "application_not_found",
+                    application_id = %application_id,
+                    source_ip = %addr.ip(),
+                    "create_device: parent application not found"
+                );
+                return Err(application_not_found_response());
+            }
+            Some(a) => {
+                if a.device_list.iter().any(|d| d.device_id == body.device_id) {
                     warn!(
                         event = "device_crud_rejected",
                         reason = "conflict",
-                        conflict_kind = "malformed_existing_block",
+                        conflict_kind = "duplicate",
                         application_id = %application_id,
+                        device_id = %body.device_id,
                         source_ip = %addr.ip(),
-                        malformed_block_index = idx,
-                        id_value_present = id_value.is_some(),
-                        "create_device: existing [[application.device]] block at index {idx} has missing or non-string device_id; manual cleanup required"
+                        "create_device: duplicate device_id within application"
                     );
                     return Err((
                         StatusCode::CONFLICT,
-                        Json(ErrorResponse::with_hint(
-                            format!(
-                                "config TOML contains a malformed [[application.device]] block at index {idx} (missing or non-string device_id); manual cleanup required"
-                            ),
-                            "edit config/config.toml to fix the malformed block before retrying",
+                        Json(ErrorResponse::duplicate(
+                            "device_id",
+                            body.device_id.clone(),
+                            format!("application:{}", application_id),
+                            "PUT to rename or DELETE the existing device before recreating",
                         )),
                     )
                         .into_response());
                 }
-            };
-            if existing_id == body.device_id {
-                warn!(
-                    event = "device_crud_rejected",
-                    reason = "conflict",
-                    conflict_kind = "duplicate",
-                    application_id = %application_id,
-                    device_id = %body.device_id,
-                    source_ip = %addr.ip(),
-                    "create_device: duplicate device_id within application rejected before write"
-                );
-                // Story C-3 AC#3: structured duplicate body.
-                return Err((
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse::duplicate(
-                        "device_id",
-                        body.device_id.clone(),
-                        format!("application:{}", application_id),
-                        "PUT to rename or DELETE the existing device before recreating",
-                    )),
-                )
-                    .into_response());
             }
         }
     }
 
-    // Mutate: append a new [[application.device]] table under the
-    // matching parent application.
-    {
-        let app_array = doc
-            .get_mut("application")
-            .and_then(|v| v.as_array_of_tables_mut());
-        let app_array = match app_array {
-            Some(a) => a,
-            None => return Err(internal_error_response()),
-        };
-        let app_table = match app_array.get_mut(app_idx) {
-            Some(t) => t,
-            None => return Err(internal_error_response()),
-        };
-        let device_array = app_table
-            .entry("device")
-            .or_insert_with(|| toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()))
-            .as_array_of_tables_mut();
-        let device_array = match device_array {
-            Some(a) => a,
-            None => {
-                warn!(
-                    event = "device_crud_rejected",
-                    reason = "io",
-                    application_id = %application_id,
-                    source_ip = %addr.ip(),
-                    "create_device: existing TOML 'device' key is not an array of tables"
-                );
-                return Err(internal_error_response());
-            }
-        };
+    let read_metrics: Vec<crate::config::ReadMetric> = body
+        .read_metric_list
+        .iter()
+        .map(|m| crate::config::ReadMetric {
+            metric_name: m.metric_name.clone(),
+            chirpstack_metric_name: m.chirpstack_metric_name.clone(),
+            metric_type: parse_metric_type_cfg(&m.metric_type),
+            metric_unit: m.metric_unit.clone(),
+        })
+        .collect();
 
-        let new_table = build_device_table(&body.device_id, &body.device_name, &body.read_metric_list);
-        device_array.push(new_table);
-    }
+    state
+        .sqlite_config
+        .insert_device_with_metrics(&application_id, &body.device_id, &body.device_name, &read_metrics)
+        .map_err(|e| sqlite_crud_error(e, "device", "create_device", &addr))?;
 
-    let candidate_bytes = doc.to_string().into_bytes();
-    if let Err(e) = state.config_writer.write_atomically(&candidate_bytes) {
-        handle_rollback(&state, &original_bytes, "create_device", &addr, "write_atomically_err", "device");
-        return Err(io_error_response(&e, "create_device", &addr, "device"));
-    }
+    let all_apps = state
+        .sqlite_config
+        .load_all_applications_config()
+        .map_err(|e| {
+            warn!(event = "device_crud_error", error = %e, source_ip = %addr.ip(), "create_device: load_all failed");
+            internal_error_response()
+        })?;
+    state.config_reload.notify_crud_write(all_apps).await;
 
-    match state.config_reload.reload().await {
-        Ok(_) => {
-            // Story C-1: invalidate inventory cache so the next
-            // `/api/inventory/devices` query is a fresh miss.
-            let tenant_id = state.config_reload.subscribe().borrow().chirpstack.tenant_id.clone();
-            state.inventory_cache.invalidate_devices(&tenant_id, &application_id).await;
-            info!(
-                event = "inventory_cache_invalidated",
-                cache_scope = "devices",
-                application_id = %application_id,
-                triggered_by = "crud_post",
-                "inventory cache invalidated after device_created"
-            );
-            info!(
-                event = "device_created",
-                application_id = %application_id,
-                device_id = %body.device_id,
-                device_name = %body.device_name,
-                metric_count = body.read_metric_list.len(),
-                source_ip = %addr.ip(),
-                "Device created via web UI"
-            );
-            // Story C-2 AC#10 — emit per-metric picker audit BEFORE
-            // we consume `body.read_metric_list`. Fires only for
-            // picker-attributed metrics (manual entry stays silent).
-            emit_metric_wire_type_inferred_events(
-                &application_id,
-                &body.device_id,
-                &body.read_metric_list,
-                &addr,
-                "create_device",
-            );
-            let location = format!(
-                "/api/applications/{}/devices/{}",
-                application_id, body.device_id
-            );
-            let read_metric_list = body
-                .read_metric_list
-                .into_iter()
-                .map(|m| MetricMappingResponse {
-                    metric_name: m.metric_name,
-                    chirpstack_metric_name: m.chirpstack_metric_name,
-                    metric_type: m.metric_type,
-                    metric_unit: m.metric_unit,
-                })
-                .collect();
-            let response_body = DeviceResponse {
-                device_id: body.device_id,
-                device_name: body.device_name,
-                read_metric_list,
-            };
-            Ok((
-                StatusCode::CREATED,
-                [(axum::http::header::LOCATION, location)],
-                Json(response_body),
-            ))
-        }
-        Err(ReloadError::RestartRequired { knob }) => {
-            let (should_rollback, response) = handle_restart_required(&knob,
-                &original_bytes,
-                &doc, "create_device", &addr, "device");
-            if should_rollback {
-                handle_rollback(&state, &original_bytes, "create_device", &addr, &knob, "device");
-            }
-            Err(response)
-        }
-        Err(e) => {
-            let reason = e.reason().to_string();
-            handle_rollback(&state, &original_bytes, "create_device", &addr, &reason, "device");
-            Err(reload_error_response(e, "create_device", &addr, "device"))
-        }
-    }
+    let tenant_id = state
+        .config_reload
+        .subscribe()
+        .borrow()
+        .chirpstack
+        .tenant_id
+        .clone();
+    state
+        .inventory_cache
+        .invalidate_devices(&tenant_id, &application_id)
+        .await;
+    info!(
+        event = "inventory_cache_invalidated",
+        cache_scope = "devices",
+        application_id = %application_id,
+        triggered_by = "crud_post",
+        "inventory cache invalidated after device_created"
+    );
+    info!(
+        event = "device_created",
+        application_id = %application_id,
+        device_id = %body.device_id,
+        device_name = %body.device_name,
+        metric_count = body.read_metric_list.len(),
+        source_ip = %addr.ip(),
+        "Device created via web UI"
+    );
+    emit_metric_wire_type_inferred_events(
+        &application_id,
+        &body.device_id,
+        &body.read_metric_list,
+        &addr,
+        "create_device",
+    );
+    let location = format!(
+        "/api/applications/{}/devices/{}",
+        application_id, body.device_id
+    );
+    let read_metric_list = body
+        .read_metric_list
+        .into_iter()
+        .map(|m| MetricMappingResponse {
+            metric_name: m.metric_name,
+            chirpstack_metric_name: m.chirpstack_metric_name,
+            metric_type: m.metric_type,
+            metric_unit: m.metric_unit,
+        })
+        .collect();
+    Ok((
+        StatusCode::CREATED,
+        [(axum::http::header::LOCATION, location)],
+        Json(DeviceResponse {
+            device_id: body.device_id,
+            device_name: body.device_name,
+            read_metric_list,
+        }),
+    ))
 }
 
 /// `PUT /api/applications/:application_id/devices/:device_id` —
@@ -2938,228 +2567,78 @@ pub async fn update_device(
         }
     }
 
-    let _guard = state.config_writer.lock().await;
-    let original_bytes = state
-        .config_writer
-        .read_raw()
-        .map_err(|e| io_error_response(&e, "update_device", &addr, "device"))?;
-    let mut doc = state
-        .config_writer
-        .parse_document_from_bytes(&original_bytes)
-        .map_err(|e| io_error_response(&e, "update_device", &addr, "device"))?;
+    let new_metrics: Vec<crate::config::ReadMetric> = read_metric_list
+        .iter()
+        .map(|m| crate::config::ReadMetric {
+            metric_name: m.metric_name.clone(),
+            chirpstack_metric_name: m.chirpstack_metric_name.clone(),
+            metric_type: parse_metric_type_cfg(&m.metric_type),
+            metric_unit: m.metric_unit.clone(),
+        })
+        .collect();
 
-    // Locate parent application table.
-    let app_idx = match find_application_index(&doc, &application_id, &addr, "device") {
-        Ok(Some(idx)) => idx,
-        Ok(None) => {
-            warn!(
-                event = "device_crud_rejected",
-                reason = "application_not_found",
-                application_id = %application_id,
-                device_id = %device_id,
-                source_ip = %addr.ip(),
-                "update_device: parent application not found (race vs pre-check)"
-            );
-            return Err(application_not_found_response());
-        }
-        Err(resp) => return Err(resp),
-    };
+    state
+        .sqlite_config
+        .update_device_name_and_metrics(&application_id, &device_id, &device_name, &new_metrics)
+        .map_err(|e| sqlite_crud_error(e, "device", "update_device", &addr))?;
 
-    // Mutate the matching device table in place.
-    {
-        let app_array = doc
-            .get_mut("application")
-            .and_then(|v| v.as_array_of_tables_mut());
-        let app_array = match app_array {
-            Some(a) => a,
-            None => return Err(internal_error_response()),
-        };
-        let app_table = match app_array.get_mut(app_idx) {
-            Some(t) => t,
-            None => return Err(internal_error_response()),
-        };
-        let device_array = app_table
-            .get_mut("device")
-            .and_then(|v| v.as_array_of_tables_mut());
-        let device_array = match device_array {
-            Some(a) => a,
-            None => {
-                warn!(
-                    event = "device_crud_rejected",
-                    reason = "device_not_found",
-                    application_id = %application_id,
-                    device_id = %device_id,
-                    source_ip = %addr.ip(),
-                    "update_device: parent application has no `[[application.device]]` blocks (race vs pre-check)"
-                );
-                return Err(device_not_found_response());
-            }
-        };
+    let all_apps = state
+        .sqlite_config
+        .load_all_applications_config()
+        .map_err(|e| {
+            warn!(event = "device_crud_error", error = %e, source_ip = %addr.ip(), "update_device: load_all failed");
+            internal_error_response()
+        })?;
+    state.config_reload.notify_crud_write(all_apps).await;
 
-        // Pre-flight: malformed-block rejection before mutation.
-        for (idx, tbl) in device_array.iter().enumerate() {
-            if tbl.get("device_id").and_then(|v| v.as_str()).is_none() {
-                warn!(
-                    event = "device_crud_rejected",
-                    reason = "conflict",
-                    conflict_kind = "malformed_existing_block",
-                    application_id = %application_id,
-                    source_ip = %addr.ip(),
-                    malformed_block_index = idx,
-                    "update_device: existing [[application.device]] block at index {idx} has missing or non-string device_id; manual cleanup required"
-                );
-                return Err((
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse::with_hint(
-                        format!(
-                            "config TOML contains a malformed [[application.device]] block at index {idx} (missing or non-string device_id); manual cleanup required"
-                        ),
-                        "edit config/config.toml to fix the malformed block before retrying",
-                    )),
-                )
-                    .into_response());
-            }
-        }
-
-        // Duplicate device_id detection.
-        let match_count = device_array
-            .iter()
-            .filter(|tbl| {
-                tbl.get("device_id").and_then(|v| v.as_str()) == Some(device_id.as_str())
-            })
-            .count();
-        if match_count > 1 {
-            warn!(
-                event = "device_crud_rejected",
-                reason = "conflict",
-                conflict_kind = "duplicate",
-                application_id = %application_id,
-                device_id = %device_id,
-                source_ip = %addr.ip(),
-                duplicate_count = match_count,
-                "update_device: duplicate device_id in TOML; manual cleanup required"
-            );
-            return Err((
-                StatusCode::CONFLICT,
-                Json(ErrorResponse::with_hint(
-                    format!(
-                        "config TOML contains {} entries with device_id '{}' under application '{}'; manual cleanup required",
-                        match_count, device_id, application_id
-                    ),
-                    "edit config/config.toml to remove the duplicate [[application.device]] block before retrying",
-                )),
-            )
-                .into_response());
-        }
-
-        let mut found = false;
-        for tbl in device_array.iter_mut() {
-            let id_in_toml = tbl
-                .get("device_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            if id_in_toml == device_id {
-                // In-place mutate device_name. Removing + re-inserting
-                // would lose any decor (comments) on the key; `insert`
-                // updates the existing key in place when present.
-                tbl.insert("device_name", toml_edit::value(device_name.clone()));
-                // Replace the read_metric sub-array. Remove first so
-                // the new array picks up fresh decor; the [[application
-                // .device.command]] sibling sub-table is left untouched
-                // (Task 6 anti-pattern guard).
-                tbl.remove("read_metric");
-                if !read_metric_list.is_empty() {
-                    let new_metrics = build_read_metric_array(&read_metric_list);
-                    tbl.insert(
-                        "read_metric",
-                        toml_edit::Item::ArrayOfTables(new_metrics),
-                    );
-                }
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            warn!(
-                event = "device_crud_rejected",
-                reason = "device_not_found",
-                application_id = %application_id,
-                device_id = %device_id,
-                source_ip = %addr.ip(),
-                "update_device: device not found in TOML at mutate time (race vs pre-check)"
-            );
-            return Err(device_not_found_response());
-        }
-    }
-
-    let candidate_bytes = doc.to_string().into_bytes();
-    if let Err(e) = state.config_writer.write_atomically(&candidate_bytes) {
-        handle_rollback(&state, &original_bytes, "update_device", &addr, "write_atomically_err", "device");
-        return Err(io_error_response(&e, "update_device", &addr, "device"));
-    }
-
-    match state.config_reload.reload().await {
-        Ok(_) => {
-            // Story C-1: invalidate inventory cache so the next
-            // `/api/inventory/devices` query is a fresh miss.
-            let tenant_id = state.config_reload.subscribe().borrow().chirpstack.tenant_id.clone();
-            state.inventory_cache.invalidate_devices(&tenant_id, &application_id).await;
-            info!(
-                event = "inventory_cache_invalidated",
-                cache_scope = "devices",
-                application_id = %application_id,
-                triggered_by = "crud_put",
-                "inventory cache invalidated after device_updated"
-            );
-            info!(
-                event = "device_updated",
-                application_id = %application_id,
-                device_id = %device_id,
-                device_name = %device_name,
-                metric_count = read_metric_list.len(),
-                source_ip = %addr.ip(),
-                "Device updated via web UI"
-            );
-            // Story C-2 AC#10 — emit per-metric picker audit BEFORE
-            // we consume `read_metric_list`. Fires only for
-            // picker-attributed metrics; manual-entry stays silent.
-            emit_metric_wire_type_inferred_events(
-                &application_id,
-                &device_id,
-                &read_metric_list,
-                &addr,
-                "update_device",
-            );
-            let read_metric_list_resp = read_metric_list
-                .into_iter()
-                .map(|m| MetricMappingResponse {
-                    metric_name: m.metric_name,
-                    chirpstack_metric_name: m.chirpstack_metric_name,
-                    metric_type: m.metric_type,
-                    metric_unit: m.metric_unit,
-                })
-                .collect();
-            Ok(Json(DeviceResponse {
-                device_id,
-                device_name,
-                read_metric_list: read_metric_list_resp,
-            }))
-        }
-        Err(ReloadError::RestartRequired { knob }) => {
-            let (should_rollback, response) = handle_restart_required(&knob,
-                &original_bytes,
-                &doc, "update_device", &addr, "device");
-            if should_rollback {
-                handle_rollback(&state, &original_bytes, "update_device", &addr, &knob, "device");
-            }
-            Err(response)
-        }
-        Err(e) => {
-            let reason = e.reason().to_string();
-            handle_rollback(&state, &original_bytes, "update_device", &addr, &reason, "device");
-            Err(reload_error_response(e, "update_device", &addr, "device"))
-        }
-    }
+    let tenant_id = state
+        .config_reload
+        .subscribe()
+        .borrow()
+        .chirpstack
+        .tenant_id
+        .clone();
+    state
+        .inventory_cache
+        .invalidate_devices(&tenant_id, &application_id)
+        .await;
+    info!(
+        event = "inventory_cache_invalidated",
+        cache_scope = "devices",
+        application_id = %application_id,
+        triggered_by = "crud_put",
+        "inventory cache invalidated after device_updated"
+    );
+    info!(
+        event = "device_updated",
+        application_id = %application_id,
+        device_id = %device_id,
+        device_name = %device_name,
+        metric_count = read_metric_list.len(),
+        source_ip = %addr.ip(),
+        "Device updated via web UI"
+    );
+    emit_metric_wire_type_inferred_events(
+        &application_id,
+        &device_id,
+        &read_metric_list,
+        &addr,
+        "update_device",
+    );
+    let read_metric_list_resp = read_metric_list
+        .into_iter()
+        .map(|m| MetricMappingResponse {
+            metric_name: m.metric_name,
+            chirpstack_metric_name: m.chirpstack_metric_name,
+            metric_type: m.metric_type,
+            metric_unit: m.metric_unit,
+        })
+        .collect();
+    Ok(Json(DeviceResponse {
+        device_id,
+        device_name,
+        read_metric_list: read_metric_list_resp,
+    }))
 }
 
 /// `DELETE /api/applications/:application_id/devices/:device_id` —
@@ -3217,193 +2696,34 @@ pub async fn delete_device(
         }
     }
 
-    let _guard = state.config_writer.lock().await;
-    let original_bytes = state
-        .config_writer
-        .read_raw()
-        .map_err(|e| io_error_response(&e, "delete_device", &addr, "device"))?;
-    let mut doc = state
-        .config_writer
-        .parse_document_from_bytes(&original_bytes)
-        .map_err(|e| io_error_response(&e, "delete_device", &addr, "device"))?;
+    state
+        .sqlite_config
+        .delete_device(&application_id, &device_id)
+        .map_err(|e| sqlite_crud_error(e, "device", "delete_device", &addr))?;
 
-    let app_idx = match find_application_index(&doc, &application_id, &addr, "device") {
-        Ok(Some(idx)) => idx,
-        Ok(None) => {
-            warn!(
-                event = "device_crud_rejected",
-                reason = "application_not_found",
-                application_id = %application_id,
-                device_id = %device_id,
-                source_ip = %addr.ip(),
-                "delete_device: parent application not found (race vs pre-check)"
-            );
-            return Err(application_not_found_response());
-        }
-        Err(resp) => return Err(resp),
-    };
+    let all_apps = state
+        .sqlite_config
+        .load_all_applications_config()
+        .map_err(|e| sqlite_crud_error(e, "device", "delete_device", &addr))?;
+    state.config_reload.notify_crud_write(all_apps).await;
 
-    {
-        let app_array = doc
-            .get_mut("application")
-            .and_then(|v| v.as_array_of_tables_mut());
-        let app_array = match app_array {
-            Some(a) => a,
-            None => return Err(internal_error_response()),
-        };
-        let app_table = match app_array.get_mut(app_idx) {
-            Some(t) => t,
-            None => return Err(internal_error_response()),
-        };
-        let device_array = app_table
-            .get_mut("device")
-            .and_then(|v| v.as_array_of_tables_mut());
-        let device_array = match device_array {
-            Some(a) => a,
-            None => {
-                warn!(
-                    event = "device_crud_rejected",
-                    reason = "device_not_found",
-                    application_id = %application_id,
-                    device_id = %device_id,
-                    source_ip = %addr.ip(),
-                    "delete_device: parent application has no `[[application.device]]` blocks (race vs pre-check)"
-                );
-                return Err(device_not_found_response());
-            }
-        };
-
-        // Pre-flight: malformed-block rejection.
-        for (idx, tbl) in device_array.iter().enumerate() {
-            if tbl.get("device_id").and_then(|v| v.as_str()).is_none() {
-                warn!(
-                    event = "device_crud_rejected",
-                    reason = "conflict",
-                    conflict_kind = "malformed_existing_block",
-                    application_id = %application_id,
-                    source_ip = %addr.ip(),
-                    malformed_block_index = idx,
-                    "delete_device: existing [[application.device]] block at index {idx} has missing or non-string device_id; manual cleanup required"
-                );
-                return Err((
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse::with_hint(
-                        format!(
-                            "config TOML contains a malformed [[application.device]] block at index {idx} (missing or non-string device_id); manual cleanup required"
-                        ),
-                        "edit config/config.toml to fix the malformed block before retrying",
-                    )),
-                )
-                    .into_response());
-            }
-        }
-
-        // Duplicate device_id detection — refuse to mutate if the
-        // TOML has duplicates (manual edit, botched rollback).
-        let match_count = device_array
-            .iter()
-            .filter(|tbl| {
-                tbl.get("device_id").and_then(|v| v.as_str()) == Some(device_id.as_str())
-            })
-            .count();
-        if match_count > 1 {
-            warn!(
-                event = "device_crud_rejected",
-                reason = "conflict",
-                conflict_kind = "duplicate",
-                application_id = %application_id,
-                device_id = %device_id,
-                source_ip = %addr.ip(),
-                duplicate_count = match_count,
-                "delete_device: duplicate device_id in TOML; manual cleanup required"
-            );
-            return Err((
-                StatusCode::CONFLICT,
-                Json(ErrorResponse::with_hint(
-                    format!(
-                        "config TOML contains {} entries with device_id '{}' under application '{}'; manual cleanup required",
-                        match_count, device_id, application_id
-                    ),
-                    "edit config/config.toml to remove the duplicate [[application.device]] block before retrying",
-                )),
-            )
-                .into_response());
-        }
-
-        let mut idx_to_remove: Option<usize> = None;
-        for (i, tbl) in device_array.iter().enumerate() {
-            let id_in_toml = tbl
-                .get("device_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            if id_in_toml == device_id {
-                idx_to_remove = Some(i);
-                break;
-            }
-        }
-        let Some(idx) = idx_to_remove else {
-            warn!(
-                event = "device_crud_rejected",
-                reason = "device_not_found",
-                application_id = %application_id,
-                device_id = %device_id,
-                source_ip = %addr.ip(),
-                "delete_device: device not found in TOML at mutate time (race vs pre-check)"
-            );
-            return Err(device_not_found_response());
-        };
-        // `array_of_tables.remove(idx)` removes the table along with
-        // its sub-tables (including [[application.device.command]]
-        // and [[application.device.read_metric]]). Operator-visible:
-        // the deleted device is gone in its entirety from the config;
-        // orphaned storage rows persist per the v1 cascade-delete
-        // limitation documented in docs/security.md.
-        device_array.remove(idx);
-    }
-
-    let candidate_bytes = doc.to_string().into_bytes();
-    if let Err(e) = state.config_writer.write_atomically(&candidate_bytes) {
-        handle_rollback(&state, &original_bytes, "delete_device", &addr, "write_atomically_err", "device");
-        return Err(io_error_response(&e, "delete_device", &addr, "device"));
-    }
-
-    match state.config_reload.reload().await {
-        Ok(_) => {
-            // Story C-1: invalidate inventory cache so the next
-            // `/api/inventory/devices` query is a fresh miss.
-            let tenant_id = state.config_reload.subscribe().borrow().chirpstack.tenant_id.clone();
-            state.inventory_cache.invalidate_devices(&tenant_id, &application_id).await;
-            info!(
-                event = "inventory_cache_invalidated",
-                cache_scope = "devices",
-                application_id = %application_id,
-                triggered_by = "crud_delete",
-                "inventory cache invalidated after device_deleted"
-            );
-            info!(
-                event = "device_deleted",
-                application_id = %application_id,
-                device_id = %device_id,
-                source_ip = %addr.ip(),
-                "Device deleted via web UI"
-            );
-            Ok(StatusCode::NO_CONTENT)
-        }
-        Err(ReloadError::RestartRequired { knob }) => {
-            let (should_rollback, response) = handle_restart_required(&knob,
-                &original_bytes,
-                &doc, "delete_device", &addr, "device");
-            if should_rollback {
-                handle_rollback(&state, &original_bytes, "delete_device", &addr, &knob, "device");
-            }
-            Err(response)
-        }
-        Err(e) => {
-            let reason = e.reason().to_string();
-            handle_rollback(&state, &original_bytes, "delete_device", &addr, &reason, "device");
-            Err(reload_error_response(e, "delete_device", &addr, "device"))
-        }
-    }
+    let tenant_id = state.config_reload.subscribe().borrow().chirpstack.tenant_id.clone();
+    state.inventory_cache.invalidate_devices(&tenant_id, &application_id).await;
+    info!(
+        event = "inventory_cache_invalidated",
+        cache_scope = "devices",
+        application_id = %application_id,
+        triggered_by = "crud_delete",
+        "inventory cache invalidated after device_deleted"
+    );
+    info!(
+        event = "device_deleted",
+        application_id = %application_id,
+        device_id = %device_id,
+        source_ip = %addr.ip(),
+        "Device deleted via web UI"
+    );
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ============================================================
@@ -3573,9 +2893,8 @@ pub async fn get_command(
 }
 
 /// `POST /api/applications/:application_id/devices/:device_id/commands`
-/// — create a new command under the named device. Holds the
-/// ConfigWriter lock across write + reload + rollback per the Story
-/// 9-4 lost-update race fix.
+/// — create a new command under the named device. Writes to SQLite
+/// then calls `notify_crud_write` to propagate the change (Story C-6).
 ///
 /// Pre-flight rejects: malformed sibling `[[application.device.command]]`
 /// blocks (409), duplicate `command_id` within the device (409),
@@ -3772,274 +3091,132 @@ pub async fn create_command(
     validate_command_port(command_port, &addr)?;
     // `command_confirmed` is bool — type-checked above.
 
-    let _guard = state.config_writer.lock().await;
-
-    let original_bytes = state
-        .config_writer
-        .read_raw()
-        .map_err(|e| io_error_response(&e, "create_command", &addr, "command"))?;
-    let mut doc = state
-        .config_writer
-        .parse_document_from_bytes(&original_bytes)
-        .map_err(|e| io_error_response(&e, "create_command", &addr, "command"))?;
-
-    // Locate the parent application's `[[application]]` table.
-    let app_idx = match find_application_index(&doc, &application_id, &addr, "command") {
-        Ok(Some(idx)) => idx,
-        Ok(None) => {
-            warn!(
-                event = "command_crud_rejected",
-                reason = "application_not_found",
-                application_id = %application_id,
-                device_id = %device_id,
-                source_ip = %addr.ip(),
-                "create_command: parent application not found"
-            );
-            return Err(application_not_found_response());
-        }
-        Err(resp) => return Err(resp),
-    };
-
-    // Locate the parent device's index within the application's
-    // `device` array. Also pre-flight check sibling command blocks
-    // and duplicate command_id.
-    let dev_idx = {
-        let device_array = doc
-            .get("application")
-            .and_then(|v| v.as_array_of_tables())
-            .and_then(|arr| arr.get(app_idx))
-            .and_then(|tbl| tbl.get("device"))
-            .and_then(|v| v.as_array_of_tables());
-        match device_array {
-            Some(arr) => arr.iter().position(|t| {
-                t.get("device_id").and_then(|v| v.as_str()) == Some(device_id.as_str())
-            }),
-            None => None,
-        }
-    };
-    let dev_idx = match dev_idx {
-        Some(idx) => idx,
-        None => {
-            warn!(
-                event = "command_crud_rejected",
-                reason = "device_not_found",
-                application_id = %application_id,
-                device_id = %device_id,
-                source_ip = %addr.ip(),
-                "create_command: device not found under application"
-            );
-            return Err(device_not_found_response());
-        }
-    };
-
-    // Pre-flight on sibling [[application.device.command]] blocks.
-    let command_array_existing = doc
-        .get("application")
-        .and_then(|v| v.as_array_of_tables())
-        .and_then(|arr| arr.get(app_idx))
-        .and_then(|tbl| tbl.get("device"))
-        .and_then(|v| v.as_array_of_tables())
-        .and_then(|arr| arr.get(dev_idx))
-        .and_then(|tbl| tbl.get("command"))
-        .and_then(|v| v.as_array_of_tables());
-    if let Some(arr) = command_array_existing {
-        for (idx, tbl) in arr.iter().enumerate() {
-            let id_value = tbl.get("command_id");
-            let existing_id = match id_value.and_then(|v| v.as_integer()) {
-                Some(n) => n,
-                None => {
-                    warn!(
-                        event = "command_crud_rejected",
-                        reason = "conflict",
-                        conflict_kind = "malformed_existing_block",
-                        application_id = %application_id,
-                        device_id = %device_id,
-                        source_ip = %addr.ip(),
-                        malformed_block_index = idx,
-                        id_value_present = id_value.is_some(),
-                        "create_command: existing [[application.device.command]] block at index {idx} has missing or non-integer command_id; manual cleanup required"
-                    );
-                    return Err((
-                        StatusCode::CONFLICT,
-                        Json(ErrorResponse::with_hint(
-                            format!(
-                                "config TOML contains a malformed [[application.device.command]] block at index {idx} (missing or non-integer command_id); manual cleanup required"
-                            ),
-                            "edit config/config.toml to fix the malformed block before retrying",
-                        )),
-                    )
-                        .into_response());
-                }
-            };
-            // toml_edit returns i64 for integers; cast to i32 for
-            // comparison with the body's command_id.
-            if existing_id == command_id as i64 {
-                warn!(
-                    event = "command_crud_rejected",
-                    reason = "conflict",
-                    conflict_kind = "duplicate",
-                    application_id = %application_id,
-                    device_id = %device_id,
-                    command_id = command_id,
-                    source_ip = %addr.ip(),
-                    "create_command: duplicate command_id within device rejected before write"
-                );
-                // Story C-3 AC#6: structured duplicate body (same shape
-                // as the device/application duplicate handlers).
-                return Err((
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse::duplicate(
-                        "command_id",
-                        command_id.to_string(),
-                        format!("device:{}", device_id),
-                        "PUT to modify or DELETE the existing command before recreating",
-                    )),
-                )
-                    .into_response());
-            }
-            // Iter-1 review E-M4: symmetric pre-flight on
-            // command_name. Without this, a duplicate command_name
-            // POST traverses to disk write → reload →
-            // AppConfig::validate failure → rollback (5xx), instead
-            // of a clean 409 with `reason="conflict"`. Aligns with
-            // Story 9-5's metric_name duplicate guard at
-            // create_device.
-            let existing_name = tbl.get("command_name").and_then(|v| v.as_str());
-            if existing_name == Some(command_name.as_str()) {
-                warn!(
-                    event = "command_crud_rejected",
-                    reason = "conflict",
-                    conflict_kind = "duplicate",
-                    application_id = %application_id,
-                    device_id = %device_id,
-                    command_name = ?command_name,
-                    source_ip = %addr.ip(),
-                    "create_command: duplicate command_name within device rejected before write"
-                );
-                // Story C-3 AC#6: structured duplicate body.
-                return Err((
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse::duplicate(
-                        "command_name",
-                        command_name.clone(),
-                        format!("device:{}", device_id),
-                        "PUT to modify or DELETE the existing command before recreating",
-                    )),
-                )
-                    .into_response());
-            }
-        }
-    }
-
-    // Mutate: append a new [[application.device.command]] table
-    // under the matching device. The TOML mutation preserves any
-    // existing [[application.device.read_metric]] sub-table byte-for-
-    // byte (load-bearing regression guard for Story 9-5).
+    // Pre-check via watch channel: app + device must exist; no
+    // duplicate command_id or command_name.
     {
-        let app_array = doc
-            .get_mut("application")
-            .and_then(|v| v.as_array_of_tables_mut());
-        let app_array = match app_array {
-            Some(a) => a,
-            None => return Err(internal_error_response()),
-        };
-        let app_table = match app_array.get_mut(app_idx) {
-            Some(t) => t,
-            None => return Err(internal_error_response()),
-        };
-        let device_array = app_table
-            .get_mut("device")
-            .and_then(|v| v.as_array_of_tables_mut());
-        let device_array = match device_array {
-            Some(a) => a,
-            None => return Err(internal_error_response()),
-        };
-        let device_table = match device_array.get_mut(dev_idx) {
-            Some(t) => t,
-            None => return Err(internal_error_response()),
-        };
-        let command_array = device_table
-            .entry("command")
-            .or_insert_with(|| toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()))
-            .as_array_of_tables_mut();
-        let command_array = match command_array {
+        let live = state.config_reload.subscribe();
+        let cfg = (*live.borrow()).clone();
+        let app = cfg
+            .application_list
+            .iter()
+            .find(|a| a.application_id == application_id);
+        let app = match app {
             Some(a) => a,
             None => {
                 warn!(
                     event = "command_crud_rejected",
-                    reason = "io",
+                    reason = "application_not_found",
                     application_id = %application_id,
                     device_id = %device_id,
                     source_ip = %addr.ip(),
-                    "create_command: existing TOML 'command' key is not an array of tables"
+                    "create_command: parent application not found"
                 );
-                return Err(internal_error_response());
+                return Err(application_not_found_response());
             }
         };
-        let new_table = build_command_table(
-            command_id,
-            &command_name,
-            command_port,
-            command_confirmed,
-        );
-        command_array.push(new_table);
-    }
-
-    let candidate_bytes = doc.to_string().into_bytes();
-    if let Err(e) = state.config_writer.write_atomically(&candidate_bytes) {
-        handle_rollback(&state, &original_bytes, "create_command", &addr, "write_atomically_err", "command");
-        return Err(io_error_response(&e, "create_command", &addr, "command"));
-    }
-
-    match state.config_reload.reload().await {
-        Ok(_) => {
-            info!(
-                event = "command_created",
+        let dev = app.device_list.iter().find(|d| d.device_id == device_id);
+        let dev = match dev {
+            Some(d) => d,
+            None => {
+                warn!(
+                    event = "command_crud_rejected",
+                    reason = "device_not_found",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    source_ip = %addr.ip(),
+                    "create_command: device not found under application"
+                );
+                return Err(device_not_found_response());
+            }
+        };
+        let existing_cmds = dev.device_command_list.as_deref().unwrap_or(&[]);
+        if existing_cmds.iter().any(|c| c.command_id == command_id) {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "conflict",
+                conflict_kind = "duplicate",
                 application_id = %application_id,
                 device_id = %device_id,
                 command_id = command_id,
-                // Iter-1 review B-H5: Debug-format command_name (same
-                // rationale as the update_command info! emission).
+                source_ip = %addr.ip(),
+                "create_command: duplicate command_id within device rejected before write"
+            );
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse::duplicate(
+                    "command_id",
+                    command_id.to_string(),
+                    format!("device:{}", device_id),
+                    "PUT to modify or DELETE the existing command before recreating",
+                )),
+            )
+                .into_response());
+        }
+        if existing_cmds.iter().any(|c| c.command_name == command_name) {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "conflict",
+                conflict_kind = "duplicate",
+                application_id = %application_id,
+                device_id = %device_id,
                 command_name = ?command_name,
                 source_ip = %addr.ip(),
-                "Command created via web UI"
+                "create_command: duplicate command_name within device rejected before write"
             );
-            let location = format!(
-                "/api/applications/{}/devices/{}/commands/{}",
-                application_id, device_id, command_id
-            );
-            let response_body = CommandResponse {
-                command_id,
-                command_name,
-                command_port,
-                command_confirmed,
-            };
-            Ok((
-                StatusCode::CREATED,
-                [(axum::http::header::LOCATION, location)],
-                Json(response_body),
-            ))
-        }
-        Err(ReloadError::RestartRequired { knob }) => {
-            let (should_rollback, response) = handle_restart_required(
-                &knob,
-                &original_bytes,
-                &doc,
-                "create_command",
-                &addr,
-                "command",
-            );
-            if should_rollback {
-                handle_rollback(&state, &original_bytes, "create_command", &addr, &knob, "command");
-            }
-            Err(response)
-        }
-        Err(e) => {
-            let reason = e.reason().to_string();
-            handle_rollback(&state, &original_bytes, "create_command", &addr, &reason, "command");
-            Err(reload_error_response(e, "create_command", &addr, "command"))
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse::duplicate(
+                    "command_name",
+                    command_name.clone(),
+                    format!("device:{}", device_id),
+                    "PUT to modify or DELETE the existing command before recreating",
+                )),
+            )
+                .into_response());
         }
     }
+
+    let cmd = crate::config::DeviceCommandCfg {
+        command_id,
+        command_name: command_name.clone(),
+        command_confirmed,
+        command_port,
+    };
+    state
+        .sqlite_config
+        .insert_command(&application_id, &device_id, &cmd)
+        .map_err(|e| sqlite_crud_error(e, "command", "create_command", &addr))?;
+
+    let all_apps = state
+        .sqlite_config
+        .load_all_applications_config()
+        .map_err(|e| sqlite_crud_error(e, "command", "create_command", &addr))?;
+    state.config_reload.notify_crud_write(all_apps).await;
+
+    info!(
+        event = "command_created",
+        application_id = %application_id,
+        device_id = %device_id,
+        command_id = command_id,
+        command_name = ?command_name,
+        source_ip = %addr.ip(),
+        "Command created via web UI"
+    );
+    let location = format!(
+        "/api/applications/{}/devices/{}/commands/{}",
+        application_id, device_id, command_id
+    );
+    let response_body = CommandResponse {
+        command_id,
+        command_name,
+        command_port,
+        command_confirmed,
+    };
+    Ok((
+        StatusCode::CREATED,
+        [(axum::http::header::LOCATION, location)],
+        Json(response_body),
+    ))
 }
 
 /// `PUT /api/applications/:application_id/devices/:device_id/commands/:command_id`
@@ -4233,121 +3410,48 @@ pub async fn update_command(
     validate_command_name(&command_name, &addr)?;
     validate_command_port(command_port, &addr)?;
 
-    let _guard = state.config_writer.lock().await;
-
-    let original_bytes = state
-        .config_writer
-        .read_raw()
-        .map_err(|e| io_error_response(&e, "update_command", &addr, "command"))?;
-    let mut doc = state
-        .config_writer
-        .parse_document_from_bytes(&original_bytes)
-        .map_err(|e| io_error_response(&e, "update_command", &addr, "command"))?;
-
-    // Locate the parent application + device.
-    let app_idx = match find_application_index(&doc, &application_id, &addr, "command") {
-        Ok(Some(idx)) => idx,
-        Ok(None) => {
-            warn!(
-                event = "command_crud_rejected",
-                reason = "application_not_found",
-                application_id = %application_id,
-                device_id = %device_id,
-                command_id = command_id,
-                source_ip = %addr.ip(),
-                "update_command: parent application not found"
-            );
-            return Err(application_not_found_response());
-        }
-        Err(resp) => return Err(resp),
-    };
-    let dev_idx = {
-        let device_array = doc
-            .get("application")
-            .and_then(|v| v.as_array_of_tables())
-            .and_then(|arr| arr.get(app_idx))
-            .and_then(|tbl| tbl.get("device"))
-            .and_then(|v| v.as_array_of_tables());
-        match device_array {
-            Some(arr) => arr.iter().position(|t| {
-                t.get("device_id").and_then(|v| v.as_str()) == Some(device_id.as_str())
-            }),
-            None => None,
-        }
-    };
-    let dev_idx = match dev_idx {
-        Some(idx) => idx,
-        None => {
-            warn!(
-                event = "command_crud_rejected",
-                reason = "device_not_found",
-                application_id = %application_id,
-                device_id = %device_id,
-                command_id = command_id,
-                source_ip = %addr.ip(),
-                "update_command: device not found under application"
-            );
-            return Err(device_not_found_response());
-        }
-    };
-
-    // Locate the command table within the device's `command` array,
-    // and mutate it in place. Pre-flight rejects malformed sibling
-    // command blocks (any block with missing/non-integer command_id).
-    let cmd_idx = {
-        let cmd_array = doc
-            .get("application")
-            .and_then(|v| v.as_array_of_tables())
-            .and_then(|arr| arr.get(app_idx))
-            .and_then(|tbl| tbl.get("device"))
-            .and_then(|v| v.as_array_of_tables())
-            .and_then(|arr| arr.get(dev_idx))
-            .and_then(|tbl| tbl.get("command"))
-            .and_then(|v| v.as_array_of_tables());
-        match cmd_array {
-            Some(arr) => {
-                let mut found: Option<usize> = None;
-                for (idx, t) in arr.iter().enumerate() {
-                    let id_value = t.get("command_id");
-                    match id_value.and_then(|v| v.as_integer()) {
-                        Some(n) if n == command_id as i64 => {
-                            found = Some(idx);
-                            break;
-                        }
-                        Some(_) => continue,
-                        None => {
-                            warn!(
-                                event = "command_crud_rejected",
-                                reason = "conflict",
-                                conflict_kind = "malformed_existing_block",
-                                application_id = %application_id,
-                                device_id = %device_id,
-                                source_ip = %addr.ip(),
-                                malformed_block_index = idx,
-                                id_value_present = id_value.is_some(),
-                                "update_command: existing [[application.device.command]] block at index {idx} has missing or non-integer command_id; manual cleanup required"
-                            );
-                            return Err((
-                                StatusCode::CONFLICT,
-                                Json(ErrorResponse::with_hint(
-                                    format!(
-                                        "config TOML contains a malformed [[application.device.command]] block at index {idx} (missing or non-integer command_id); manual cleanup required"
-                                    ),
-                                    "edit config/config.toml to fix the malformed block before retrying",
-                                )),
-                            )
-                                .into_response());
-                        }
-                    }
-                }
-                found
+    // Pre-check via watch channel: app + device + command must exist;
+    // new command_name must not collide with a sibling.
+    {
+        let live = state.config_reload.subscribe();
+        let cfg = (*live.borrow()).clone();
+        let app = cfg
+            .application_list
+            .iter()
+            .find(|a| a.application_id == application_id);
+        let app = match app {
+            Some(a) => a,
+            None => {
+                warn!(
+                    event = "command_crud_rejected",
+                    reason = "application_not_found",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    command_id = command_id,
+                    source_ip = %addr.ip(),
+                    "update_command: parent application not found"
+                );
+                return Err(application_not_found_response());
             }
-            None => None,
-        }
-    };
-    let cmd_idx = match cmd_idx {
-        Some(idx) => idx,
-        None => {
+        };
+        let dev = app.device_list.iter().find(|d| d.device_id == device_id);
+        let dev = match dev {
+            Some(d) => d,
+            None => {
+                warn!(
+                    event = "command_crud_rejected",
+                    reason = "device_not_found",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    command_id = command_id,
+                    source_ip = %addr.ip(),
+                    "update_command: device not found under application"
+                );
+                return Err(device_not_found_response());
+            }
+        };
+        let existing_cmds = dev.device_command_list.as_deref().unwrap_or(&[]);
+        if !existing_cmds.iter().any(|c| c.command_id == command_id) {
             warn!(
                 event = "command_crud_rejected",
                 reason = "command_not_found",
@@ -4359,215 +3463,68 @@ pub async fn update_command(
             );
             return Err(command_not_found_response());
         }
-    };
-
-    // Iter-1 review E-H1 + iter-2 review BH-H3 + BH-M1: pre-flight
-    // duplicate `command_name` check, with defensive malformed-block
-    // detection for two TOML-corruption hazards iter-2 surfaced:
-    //   (BH-H3) A second sibling sharing `cmd_idx`'s `command_id`
-    //     would otherwise reach the equality test under its own
-    //     non-skipped index — emit `malformed_existing_block` instead
-    //     of a confusing `command_name` 409 mis-attribution.
-    //   (BH-M1) A sibling with missing/non-string `command_name`
-    //     would silently fall through the equality test → 422 at
-    //     reload-time, no `conflict_kind` audit field. Mirror
-    //     create_command's symmetric None-arm guard.
-    {
-        let cmd_array = doc
-            .get("application")
-            .and_then(|v| v.as_array_of_tables())
-            .and_then(|arr| arr.get(app_idx))
-            .and_then(|tbl| tbl.get("device"))
-            .and_then(|v| v.as_array_of_tables())
-            .and_then(|arr| arr.get(dev_idx))
-            .and_then(|tbl| tbl.get("command"))
-            .and_then(|v| v.as_array_of_tables());
-        if let Some(arr) = cmd_array {
-            for (idx, t) in arr.iter().enumerate() {
-                if idx == cmd_idx {
-                    continue; // the command being renamed itself
-                }
-                // Iter-2 BH-H3: detect a second sibling with the same
-                // command_id (pre-existing TOML corruption — cmd_idx
-                // was resolved by FIRST-match earlier). Report as
-                // malformed_existing_block, not as a name-duplicate.
-                let sibling_command_id = t.get("command_id").and_then(|v| v.as_integer());
-                if sibling_command_id == Some(command_id as i64) {
-                    warn!(
-                        event = "command_crud_rejected",
-                        reason = "conflict",
-                        conflict_kind = "malformed_existing_block",
-                        application_id = %application_id,
-                        device_id = %device_id,
-                        source_ip = %addr.ip(),
-                        malformed_block_index = idx,
-                        "update_command: existing [[application.device.command]] block at index {idx} shares command_id with the rename target — manual cleanup required"
-                    );
-                    return Err((
-                        StatusCode::CONFLICT,
-                        Json(ErrorResponse::with_hint(
-                            format!(
-                                "config TOML contains a second [[application.device.command]] block at index {idx} sharing command_id={command_id}; manual cleanup required"
-                            ),
-                            "edit config/config.toml to remove the duplicate command_id block before retrying",
-                        )),
-                    )
-                        .into_response());
-                }
-                // Iter-2 BH-M1: command_name missing or non-string on
-                // a sibling block → malformed_existing_block (not a
-                // silent skip that would let the equality check below
-                // pass vacuously).
-                let existing_name = t.get("command_name").and_then(|v| v.as_str());
-                if existing_name.is_none() {
-                    warn!(
-                        event = "command_crud_rejected",
-                        reason = "conflict",
-                        conflict_kind = "malformed_existing_block",
-                        application_id = %application_id,
-                        device_id = %device_id,
-                        source_ip = %addr.ip(),
-                        malformed_block_index = idx,
-                        "update_command: existing [[application.device.command]] block at index {idx} has missing or non-string command_name; manual cleanup required"
-                    );
-                    return Err((
-                        StatusCode::CONFLICT,
-                        Json(ErrorResponse::with_hint(
-                            format!(
-                                "config TOML contains a malformed [[application.device.command]] block at index {idx} (missing or non-string command_name); manual cleanup required"
-                            ),
-                            "edit config/config.toml to fix the malformed block before retrying",
-                        )),
-                    )
-                        .into_response());
-                }
-                if existing_name == Some(command_name.as_str()) {
-                    warn!(
-                        event = "command_crud_rejected",
-                        reason = "conflict",
-                        conflict_kind = "duplicate",
-                        application_id = %application_id,
-                        device_id = %device_id,
-                        command_id = command_id,
-                        command_name = ?command_name,
-                        source_ip = %addr.ip(),
-                        "update_command: rename target conflicts with sibling command_name within device"
-                    );
-                    return Err((
-                        StatusCode::CONFLICT,
-                        Json(ErrorResponse::duplicate(
-                            "command_name",
-                            command_name.clone(),
-                            format!("device:{}", device_id),
-                            "pick a different command_name, or DELETE the conflicting sibling first",
-                        )),
-                    )
-                        .into_response());
-                }
-            }
-        }
-    }
-
-    // Mutate the command table in place — preserves any sibling
-    // sub-table (none today; defensive forward compatibility).
-    {
-        let app_array = doc
-            .get_mut("application")
-            .and_then(|v| v.as_array_of_tables_mut());
-        let app_array = match app_array {
-            Some(a) => a,
-            None => return Err(internal_error_response()),
-        };
-        let app_table = match app_array.get_mut(app_idx) {
-            Some(t) => t,
-            None => return Err(internal_error_response()),
-        };
-        let device_array = app_table
-            .get_mut("device")
-            .and_then(|v| v.as_array_of_tables_mut());
-        let device_array = match device_array {
-            Some(a) => a,
-            None => return Err(internal_error_response()),
-        };
-        let device_table = match device_array.get_mut(dev_idx) {
-            Some(t) => t,
-            None => return Err(internal_error_response()),
-        };
-        let command_array = device_table
-            .get_mut("command")
-            .and_then(|v| v.as_array_of_tables_mut());
-        let command_array = match command_array {
-            Some(a) => a,
-            None => return Err(internal_error_response()),
-        };
-        let cmd_table = match command_array.get_mut(cmd_idx) {
-            Some(t) => t,
-            None => return Err(internal_error_response()),
-        };
-        cmd_table.insert("command_name", toml_edit::value(command_name.clone()));
-        cmd_table.insert("command_confirmed", toml_edit::value(command_confirmed));
-        cmd_table.insert("command_port", toml_edit::value(command_port as i64));
-        // command_id is left untouched (immutable; also rejected
-        // from the body above).
-    }
-
-    let candidate_bytes = doc.to_string().into_bytes();
-    if let Err(e) = state.config_writer.write_atomically(&candidate_bytes) {
-        handle_rollback(&state, &original_bytes, "update_command", &addr, "write_atomically_err", "command");
-        return Err(io_error_response(&e, "update_command", &addr, "command"));
-    }
-
-    match state.config_reload.reload().await {
-        Ok(_) => {
-            info!(
-                event = "command_updated",
+        // Duplicate command_name check: reject if a *sibling* (different
+        // command_id) already owns the new name.
+        if existing_cmds
+            .iter()
+            .any(|c| c.command_id != command_id && c.command_name == command_name)
+        {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "conflict",
+                conflict_kind = "duplicate",
                 application_id = %application_id,
                 device_id = %device_id,
                 command_id = command_id,
-                // Iter-1 review B-H5: Debug-format command_name so any
-                // future char-class loosening (or operator-supplied
-                // value that slips past validation) cannot inject
-                // CR/LF/control chars into the structured log line.
                 command_name = ?command_name,
                 source_ip = %addr.ip(),
-                "Command updated via web UI"
+                "update_command: rename target conflicts with sibling command_name within device"
             );
-            Ok(Json(CommandResponse {
-                command_id,
-                command_name,
-                command_port,
-                command_confirmed,
-            }))
-        }
-        Err(ReloadError::RestartRequired { knob }) => {
-            let (should_rollback, response) = handle_restart_required(
-                &knob,
-                &original_bytes,
-                &doc,
-                "update_command",
-                &addr,
-                "command",
-            );
-            if should_rollback {
-                handle_rollback(&state, &original_bytes, "update_command", &addr, &knob, "command");
-            }
-            Err(response)
-        }
-        Err(e) => {
-            let reason = e.reason().to_string();
-            handle_rollback(&state, &original_bytes, "update_command", &addr, &reason, "command");
-            Err(reload_error_response(e, "update_command", &addr, "command"))
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse::duplicate(
+                    "command_name",
+                    command_name.clone(),
+                    format!("device:{}", device_id),
+                    "pick a different command_name, or DELETE the conflicting sibling first",
+                )),
+            )
+                .into_response());
         }
     }
+
+    state
+        .sqlite_config
+        .update_command_by_id(&application_id, &device_id, command_id, &command_name, command_port, command_confirmed)
+        .map_err(|e| sqlite_crud_error(e, "command", "update_command", &addr))?;
+
+    let all_apps = state
+        .sqlite_config
+        .load_all_applications_config()
+        .map_err(|e| sqlite_crud_error(e, "command", "update_command", &addr))?;
+    state.config_reload.notify_crud_write(all_apps).await;
+
+    info!(
+        event = "command_updated",
+        application_id = %application_id,
+        device_id = %device_id,
+        command_id = command_id,
+        command_name = ?command_name,
+        source_ip = %addr.ip(),
+        "Command updated via web UI"
+    );
+    Ok(Json(CommandResponse {
+        command_id,
+        command_name,
+        command_port,
+        command_confirmed,
+    }))
 }
 
 /// `DELETE /api/applications/:application_id/devices/:device_id/commands/:command_id`
-/// — remove the named command from the device's `device_command_list`.
-/// Per Task 6 pinning: removing the last command leaves the
-/// `[[application.device.command]]` array in place (toml_edit
-/// serialises an empty `ArrayOfTables` as nothing on the wire, and
-/// a subsequent POST re-populates without needing to re-create the
-/// array key).
+/// — remove the named command from the device's command list.
+/// Deletes from SQLite (FK cascade removes associated rows) and
+/// calls `notify_crud_write` to propagate the change (Story C-6).
 pub async fn delete_command(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -4577,222 +3534,85 @@ pub async fn delete_command(
     validate_path_device_id(&device_id, &addr, "command")?;
     let command_id = validate_path_command_id(&command_id_str, &addr)?;
 
-    let _guard = state.config_writer.lock().await;
-
-    let original_bytes = state
-        .config_writer
-        .read_raw()
-        .map_err(|e| io_error_response(&e, "delete_command", &addr, "command"))?;
-    let mut doc = state
-        .config_writer
-        .parse_document_from_bytes(&original_bytes)
-        .map_err(|e| io_error_response(&e, "delete_command", &addr, "command"))?;
-
-    let app_idx = match find_application_index(&doc, &application_id, &addr, "command") {
-        Ok(Some(idx)) => idx,
-        Ok(None) => {
-            warn!(
-                event = "command_crud_rejected",
-                reason = "application_not_found",
-                application_id = %application_id,
-                device_id = %device_id,
-                command_id = command_id,
-                source_ip = %addr.ip(),
-                "delete_command: parent application not found"
-            );
-            return Err(application_not_found_response());
-        }
-        Err(resp) => return Err(resp),
-    };
-    let dev_idx = {
-        let device_array = doc
-            .get("application")
-            .and_then(|v| v.as_array_of_tables())
-            .and_then(|arr| arr.get(app_idx))
-            .and_then(|tbl| tbl.get("device"))
-            .and_then(|v| v.as_array_of_tables());
-        match device_array {
-            Some(arr) => arr.iter().position(|t| {
-                t.get("device_id").and_then(|v| v.as_str()) == Some(device_id.as_str())
-            }),
-            None => None,
-        }
-    };
-    let dev_idx = match dev_idx {
-        Some(idx) => idx,
-        None => {
-            warn!(
-                event = "command_crud_rejected",
-                reason = "device_not_found",
-                application_id = %application_id,
-                device_id = %device_id,
-                command_id = command_id,
-                source_ip = %addr.ip(),
-                "delete_command: device not found under application"
-            );
-            return Err(device_not_found_response());
-        }
-    };
-
-    // Find the command's index + pre-flight on sibling blocks.
-    let cmd_idx = {
-        let cmd_array = doc
-            .get("application")
-            .and_then(|v| v.as_array_of_tables())
-            .and_then(|arr| arr.get(app_idx))
-            .and_then(|tbl| tbl.get("device"))
-            .and_then(|v| v.as_array_of_tables())
-            .and_then(|arr| arr.get(dev_idx))
-            .and_then(|tbl| tbl.get("command"))
-            .and_then(|v| v.as_array_of_tables());
-        match cmd_array {
-            Some(arr) => {
-                let mut found: Option<usize> = None;
-                for (idx, t) in arr.iter().enumerate() {
-                    let id_value = t.get("command_id");
-                    match id_value.and_then(|v| v.as_integer()) {
-                        Some(n) if n == command_id as i64 => {
-                            found = Some(idx);
-                            break;
-                        }
-                        Some(_) => continue,
-                        None => {
-                            warn!(
-                                event = "command_crud_rejected",
-                                reason = "conflict",
-                                conflict_kind = "malformed_existing_block",
-                                application_id = %application_id,
-                                device_id = %device_id,
-                                source_ip = %addr.ip(),
-                                malformed_block_index = idx,
-                                id_value_present = id_value.is_some(),
-                                "delete_command: existing [[application.device.command]] block at index {idx} has missing or non-integer command_id; manual cleanup required"
-                            );
-                            return Err((
-                                StatusCode::CONFLICT,
-                                Json(ErrorResponse::with_hint(
-                                    format!(
-                                        "config TOML contains a malformed [[application.device.command]] block at index {idx} (missing or non-integer command_id); manual cleanup required"
-                                    ),
-                                    "edit config/config.toml to fix the malformed block before retrying",
-                                )),
-                            )
-                                .into_response());
-                        }
-                    }
-                }
-                found
+    // Pre-check via watch channel: look up the command_name by
+    // command_id (SQLite delete uses command_name as the PK).
+    let command_name = {
+        let live = state.config_reload.subscribe();
+        let cfg = (*live.borrow()).clone();
+        let app = cfg
+            .application_list
+            .iter()
+            .find(|a| a.application_id == application_id);
+        let app = match app {
+            Some(a) => a,
+            None => {
+                warn!(
+                    event = "command_crud_rejected",
+                    reason = "application_not_found",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    command_id = command_id,
+                    source_ip = %addr.ip(),
+                    "delete_command: parent application not found"
+                );
+                return Err(application_not_found_response());
             }
-            None => None,
-        }
-    };
-    let cmd_idx = match cmd_idx {
-        Some(idx) => idx,
-        None => {
-            warn!(
-                event = "command_crud_rejected",
-                reason = "command_not_found",
-                application_id = %application_id,
-                device_id = %device_id,
-                command_id = command_id,
-                source_ip = %addr.ip(),
-                "delete_command: command not found under device"
-            );
-            return Err(command_not_found_response());
-        }
-    };
-
-    // Mutate: remove the command table from the device's command
-    // array. Leave an empty ArrayOfTables in place if this was the
-    // last command (Task 6 pinned decision).
-    {
-        let app_array = doc
-            .get_mut("application")
-            .and_then(|v| v.as_array_of_tables_mut());
-        let app_array = match app_array {
-            Some(a) => a,
-            None => return Err(internal_error_response()),
         };
-        let app_table = match app_array.get_mut(app_idx) {
-            Some(t) => t,
-            None => return Err(internal_error_response()),
-        };
-        let device_array = app_table
-            .get_mut("device")
-            .and_then(|v| v.as_array_of_tables_mut());
-        let device_array = match device_array {
-            Some(a) => a,
-            None => return Err(internal_error_response()),
-        };
-        let device_table = match device_array.get_mut(dev_idx) {
-            Some(t) => t,
-            None => return Err(internal_error_response()),
-        };
-        let command_array = device_table
-            .get_mut("command")
-            .and_then(|v| v.as_array_of_tables_mut());
-        let command_array = match command_array {
-            Some(a) => a,
-            None => return Err(internal_error_response()),
-        };
-        command_array.remove(cmd_idx);
-    }
-
-    let candidate_bytes = doc.to_string().into_bytes();
-    if let Err(e) = state.config_writer.write_atomically(&candidate_bytes) {
-        handle_rollback(&state, &original_bytes, "delete_command", &addr, "write_atomically_err", "command");
-        return Err(io_error_response(&e, "delete_command", &addr, "command"));
-    }
-
-    match state.config_reload.reload().await {
-        Ok(_) => {
-            info!(
-                event = "command_deleted",
-                application_id = %application_id,
-                device_id = %device_id,
-                command_id = command_id,
-                source_ip = %addr.ip(),
-                "Command deleted via web UI"
-            );
-            Ok(StatusCode::NO_CONTENT)
-        }
-        Err(ReloadError::RestartRequired { knob }) => {
-            let (should_rollback, response) = handle_restart_required(
-                &knob,
-                &original_bytes,
-                &doc,
-                "delete_command",
-                &addr,
-                "command",
-            );
-            if should_rollback {
-                handle_rollback(&state, &original_bytes, "delete_command", &addr, &knob, "command");
+        let dev = app.device_list.iter().find(|d| d.device_id == device_id);
+        let dev = match dev {
+            Some(d) => d,
+            None => {
+                warn!(
+                    event = "command_crud_rejected",
+                    reason = "device_not_found",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    command_id = command_id,
+                    source_ip = %addr.ip(),
+                    "delete_command: device not found under application"
+                );
+                return Err(device_not_found_response());
             }
-            Err(response)
+        };
+        let existing_cmds = dev.device_command_list.as_deref().unwrap_or(&[]);
+        let cmd = existing_cmds.iter().find(|c| c.command_id == command_id);
+        match cmd {
+            Some(c) => c.command_name.clone(),
+            None => {
+                warn!(
+                    event = "command_crud_rejected",
+                    reason = "command_not_found",
+                    application_id = %application_id,
+                    device_id = %device_id,
+                    command_id = command_id,
+                    source_ip = %addr.ip(),
+                    "delete_command: command not found under device"
+                );
+                return Err(command_not_found_response());
+            }
         }
-        Err(e) => {
-            let reason = e.reason().to_string();
-            handle_rollback(&state, &original_bytes, "delete_command", &addr, &reason, "command");
-            Err(reload_error_response(e, "delete_command", &addr, "command"))
-        }
-    }
-}
+    };
 
-/// Story 9-6 Task 6: build a fresh `[[application.device.command]]`
-/// table with the 4 fields in declaration order matching
-/// `DeviceCommandCfg` at `src/config.rs:660-670`.
-fn build_command_table(
-    command_id: i32,
-    command_name: &str,
-    command_port: i32,
-    command_confirmed: bool,
-) -> toml_edit::Table {
-    let mut tbl = toml_edit::Table::new();
-    tbl.insert("command_id", toml_edit::value(command_id as i64));
-    tbl.insert("command_name", toml_edit::value(command_name.to_string()));
-    tbl.insert("command_confirmed", toml_edit::value(command_confirmed));
-    tbl.insert("command_port", toml_edit::value(command_port as i64));
-    tbl
+    state
+        .sqlite_config
+        .delete_command(&application_id, &device_id, &command_name)
+        .map_err(|e| sqlite_crud_error(e, "command", "delete_command", &addr))?;
+
+    let all_apps = state
+        .sqlite_config
+        .load_all_applications_config()
+        .map_err(|e| sqlite_crud_error(e, "command", "delete_command", &addr))?;
+    state.config_reload.notify_crud_write(all_apps).await;
+
+    info!(
+        event = "command_deleted",
+        application_id = %application_id,
+        device_id = %device_id,
+        command_id = command_id,
+        source_ip = %addr.ip(),
+        "Command deleted via web UI"
+    );
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ----------------------------------------------------------------------
@@ -4821,9 +3641,8 @@ fn validate_metric_mapping_fields(
     validate_device_field("metric_type", &m.metric_type, addr)?;
     if let Some(unit) = m.metric_unit.as_deref() {
         // Iter-1 review L5 (Edge E3): reject control characters in
-        // `metric_unit` — toml_edit emits the value verbatim, so a
-        // raw newline/CR/ANSI escape would corrupt the round-trip
-        // and could pollute logs that interpolate the value.
+        // `metric_unit` — control chars would pollute logs that
+        // interpolate the value.
         if let Some(bad) = unit.chars().find(|c| c.is_control()) {
             warn!(
                 event = "device_crud_rejected",
@@ -4846,215 +3665,6 @@ fn validate_metric_mapping_fields(
         validate_device_field("metric_unit", unit, addr)?;
     }
     Ok(())
-}
-
-/// Locate the index of the `[[application]]` table whose
-/// `application_id` matches `application_id`. Returns `Ok(Some(idx))`
-/// on hit, `Ok(None)` if no match. On malformed-block detection
-/// (existing `[[application]]` block with missing or non-string
-/// `application_id`), emits `<resource>_crud_rejected reason=conflict`
-/// and returns `Err(response)`. The `resource` parameter mirrors the
-/// iter-1 H1 dispatch pattern in `handle_rollback` / `io_error_response`
-/// / `validate_path_application_id` so callers from device handlers
-/// emit `device_crud_rejected` and any future Story 9-6 command-handler
-/// reuse can emit `command_crud_rejected` without changing this helper.
-///
-/// Iter-3 review (Blind #3): added `resource` parameter to defuse the
-/// Story 9-6 landmine where this helper would otherwise misroute
-/// command-handler malformed-block warns through the device event-name
-/// literal.
-///
-/// Iter-2 review H1: shared shape-check extracted from
-/// `find_application_index`. Distinguishes "application key absent"
-/// from "application key exists but is not an array of tables" — the
-/// latter is an operator-edited TOML with `[application]` (single
-/// table) instead of `[[application]]` (array-of-tables). Without
-/// this check, the array-iteration code-path silently treats the
-/// malformed shape as "zero applications" and returns 404 (or 5xx
-/// downstream), confusing operators who can see their config has an
-/// application but the API claims none exist.
-///
-/// Iter-1 patched this only at the `find_application_index` entry
-/// (used by device + command CRUD). Iter-2 H1 extends the check to
-/// the 3 mutating application handlers (create / update / delete)
-/// which iterate the `application` array directly without going
-/// through `find_application_index`. Read-path application handlers
-/// (`list_applications`, `get_application`) read the dashboard
-/// snapshot built from the already-figment-validated `AppConfig`,
-/// so the malformed shape is unreachable on those paths.
-#[allow(clippy::result_large_err)]
-fn check_top_level_application_shape(
-    doc: &toml_edit::DocumentMut,
-    application_id: &str,
-    addr: &SocketAddr,
-    resource: &'static str,
-) -> Result<(), Response> {
-    if let Some(item) = doc.get("application") {
-        if item.as_array_of_tables().is_none() {
-            match resource {
-                // Iter-3 review B-LOW-2: Debug-format application_id
-                // so any operator-supplied value (e.g. POST body
-                // application_id called from create_application
-                // BEFORE the body-validator runs) cannot inject
-                // CR/LF/control chars into the audit log line.
-                // Parallel to iter-1 B-H5 audit-log hardening.
-                "device" => warn!(
-                    event = "device_crud_rejected",
-                    reason = "conflict",
-                    conflict_kind = "malformed_existing_block",
-                    application_id = ?application_id,
-                    source_ip = %addr.ip(),
-                    "handler: top-level `application` exists but is not an array-of-tables (`[[application]]`); manual cleanup required"
-                ),
-                "application" => warn!(
-                    event = "application_crud_rejected",
-                    reason = "conflict",
-                    conflict_kind = "malformed_existing_block",
-                    application_id = ?application_id,
-                    source_ip = %addr.ip(),
-                    "handler: top-level `application` exists but is not an array-of-tables (`[[application]]`); manual cleanup required"
-                ),
-                "command" => warn!(
-                    event = "command_crud_rejected",
-                    reason = "conflict",
-                    conflict_kind = "malformed_existing_block",
-                    application_id = ?application_id,
-                    source_ip = %addr.ip(),
-                    "handler: top-level `application` exists but is not an array-of-tables (`[[application]]`); manual cleanup required"
-                ),
-                _ => warn!(
-                    event = "crud_rejected",
-                    reason = "conflict",
-                    conflict_kind = "malformed_existing_block",
-                    resource = resource,
-                    application_id = ?application_id,
-                    source_ip = %addr.ip(),
-                    "handler: top-level `application` exists but is not an array-of-tables; manual cleanup required"
-                ),
-            }
-            return Err((
-                StatusCode::CONFLICT,
-                Json(ErrorResponse::with_hint(
-                    "config TOML has top-level `application` in a non-array-of-tables shape (probably `[application]` instead of `[[application]]`); manual cleanup required",
-                    "edit config/config.toml so applications are declared as `[[application]]` array-of-tables; restart the gateway after the fix",
-                )),
-            )
-                .into_response());
-        }
-    }
-    Ok(())
-}
-
-#[allow(clippy::result_large_err)]
-fn find_application_index(
-    doc: &toml_edit::DocumentMut,
-    application_id: &str,
-    addr: &SocketAddr,
-    resource: &'static str,
-) -> Result<Option<usize>, Response> {
-    // Iter-2 H1: shape-check is now in `check_top_level_application_shape`
-    // so the 3 mutating application handlers can also call it (they
-    // iterate `application` array directly, bypassing this function).
-    check_top_level_application_shape(doc, application_id, addr, resource)?;
-    let arr = match doc.get("application").and_then(|v| v.as_array_of_tables()) {
-        Some(a) => a,
-        None => return Ok(None),
-    };
-    for (idx, tbl) in arr.iter().enumerate() {
-        let id_value = tbl.get("application_id");
-        match id_value.and_then(|v| v.as_str()) {
-            Some(s) if s == application_id => return Ok(Some(idx)),
-            Some(_) => continue,
-            None => {
-                match resource {
-                    "device" => warn!(
-                        event = "device_crud_rejected",
-                        reason = "conflict",
-                        conflict_kind = "malformed_existing_block",
-                        application_id = %application_id,
-                        source_ip = %addr.ip(),
-                        malformed_block_index = idx,
-                        "handler: existing [[application]] block at index {idx} has missing or non-string application_id; manual cleanup required"
-                    ),
-                    "application" => warn!(
-                        event = "application_crud_rejected",
-                        reason = "conflict",
-                        conflict_kind = "malformed_existing_block",
-                        application_id = %application_id,
-                        source_ip = %addr.ip(),
-                        malformed_block_index = idx,
-                        "handler: existing [[application]] block at index {idx} has missing or non-string application_id; manual cleanup required"
-                    ),
-                    _ => warn!(
-                        event = "crud_rejected",
-                        reason = "conflict",
-                        conflict_kind = "malformed_existing_block",
-                        resource = resource,
-                        application_id = %application_id,
-                        source_ip = %addr.ip(),
-                        malformed_block_index = idx,
-                        "handler: existing [[application]] block at index {idx} has missing or non-string application_id; manual cleanup required"
-                    ),
-                }
-                return Err((
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse::with_hint(
-                        format!(
-                            "config TOML contains a malformed [[application]] block at index {idx} (missing or non-string application_id); manual cleanup required"
-                        ),
-                        "edit config/config.toml to fix the malformed block before retrying",
-                    )),
-                )
-                    .into_response());
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// Build a fresh `[[application.device]]` table with the given fields
-/// and the `[[application.device.read_metric]]` sub-array. Used by
-/// POST (whole-device construction). PUT cannot use this because PUT
-/// must preserve the existing `[[application.device.command]]`
-/// sub-table in place (Task 6 anti-pattern guard).
-fn build_device_table(
-    device_id: &str,
-    device_name: &str,
-    metric_list: &[MetricMappingRequest],
-) -> toml_edit::Table {
-    let mut tbl = toml_edit::Table::new();
-    tbl.insert("device_id", toml_edit::value(device_id.to_string()));
-    tbl.insert("device_name", toml_edit::value(device_name.to_string()));
-    if !metric_list.is_empty() {
-        let metrics_array = build_read_metric_array(metric_list);
-        tbl.insert(
-            "read_metric",
-            toml_edit::Item::ArrayOfTables(metrics_array),
-        );
-    }
-    tbl
-}
-
-/// Build a fresh `[[application.device.read_metric]]` array of tables
-/// from the request's `metric_list`. Order is preserved (load-bearing
-/// per Story 9-3 iter-1 H1 — TOML-declaration order drives dashboard
-/// rendering order and address-space registration order).
-fn build_read_metric_array(metric_list: &[MetricMappingRequest]) -> toml_edit::ArrayOfTables {
-    let mut arr = toml_edit::ArrayOfTables::new();
-    for m in metric_list {
-        let mut row = toml_edit::Table::new();
-        row.insert("metric_name", toml_edit::value(m.metric_name.clone()));
-        row.insert(
-            "chirpstack_metric_name",
-            toml_edit::value(m.chirpstack_metric_name.clone()),
-        );
-        row.insert("metric_type", toml_edit::value(m.metric_type.clone()));
-        if let Some(unit) = &m.metric_unit {
-            row.insert("metric_unit", toml_edit::value(unit.clone()));
-        }
-        arr.push(row);
-    }
-    arr
 }
 
 // ----------------------------------------------------------------------
@@ -5275,372 +3885,93 @@ fn validate_device_field(field: &str, value: &str, addr: &SocketAddr) -> Result<
 /// Distinct from [`APP_FIELD_MAX_LEN`] which covers ID-shaped fields.
 const METRIC_UNIT_MAX_LEN: usize = 64;
 
-/// Iter-1 review (refactor): centralise the rollback + audit-event
-/// pattern shared by all three CRUD handlers. Logs `rollback_failed`
-/// at warn level if `rollback()` itself returns `Err(_)`. The
-/// `cause` parameter feeds the audit-log context (typically the
-/// failing reason / knob).
-fn handle_rollback(
-    state: &Arc<AppState>,
-    original_bytes: &[u8],
-    site: &'static str,
-    addr: &SocketAddr,
-    cause: &str,
-    resource: &'static str,
-) {
-    // Iter-1 review HIGH H1: dispatch event-name literal by `resource`
-    // so device-CRUD failures emit `event="device_crud_rejected"` and
-    // application-CRUD failures emit `event="application_crud_rejected"`.
-    // Match arms preserve the AC#8 source-grep contract (unique names).
-    if let Err(rb) = state.config_writer.rollback(original_bytes) {
-        match resource {
-            "device" => warn!(
-                event = "device_crud_rejected",
-                reason = "rollback_failed",
-                site = %site,
-                source_ip = %addr.ip(),
-                rollback_error = %rb,
-                reload_cause = %cause,
-                "rollback FAILED — config TOML on disk is now in an inconsistent state; ConfigWriter is poisoned"
-            ),
-            "application" => warn!(
-                event = "application_crud_rejected",
-                reason = "rollback_failed",
-                site = %site,
-                source_ip = %addr.ip(),
-                rollback_error = %rb,
-                reload_cause = %cause,
-                "rollback FAILED — config TOML on disk is now in an inconsistent state; ConfigWriter is poisoned"
-            ),
-            _ => warn!(
-                event = "crud_rejected",
-                reason = "rollback_failed",
-                resource = resource,
-                site = %site,
-                source_ip = %addr.ip(),
-                rollback_error = %rb,
-                reload_cause = %cause,
-                "rollback FAILED — config TOML on disk is now in an inconsistent state; ConfigWriter is poisoned"
-            ),
-        }
-    }
-}
-
-fn application_not_found_response() -> Response {
-    (
-        StatusCode::NOT_FOUND,
-        Json(ErrorResponse::from_error("application not found")),
-    )
-        .into_response()
-}
-
-/// Story 9-5 AC#6: parallel to `application_not_found_response` for
-/// the new `:device_id` URL segment. Returns 404 with the same body
-/// shape; the audit-event emission is the caller's responsibility
-/// (the `_crud_rejected` warn fires only on mutating-method paths,
-/// not on GET 404s — Story 9-5 audit-event semantic).
-fn device_not_found_response() -> Response {
-    (
-        StatusCode::NOT_FOUND,
-        Json(ErrorResponse::from_error("device not found")),
-    )
-        .into_response()
-}
-
-fn internal_error_response() -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse::internal_server_error()),
-    )
-        .into_response()
-}
-
-fn io_error_response(
-    e: &crate::utils::OpcGwError,
-    site: &'static str,
-    addr: &SocketAddr,
-    resource: &'static str,
-) -> Response {
-    // Iter-1 review D3-P: distinguish "transient IO" (500) from
-    // "writer poisoned, gateway in inconsistent state" (503). The
-    // poisoned-error wording carries the literal "poisoned" token
-    // emitted by `ConfigWriter::poisoned_err`.
-    //
-    // Iter-1 review HIGH H1: dispatch event-name literal by `resource`
-    // so device-CRUD IO/poisoned failures emit `device_crud_rejected`
-    // and application-CRUD failures emit `application_crud_rejected`.
-    let display = e.to_string();
-    if display.contains("config writer poisoned") {
-        match resource {
-            "device" => warn!(
-                event = "device_crud_rejected",
-                reason = "poisoned",
-                site = %site,
-                source_ip = %addr.ip(),
-                error = %e,
-                "CRUD rejected: ConfigWriter is poisoned (prior rollback failed); restart required"
-            ),
-            "application" => warn!(
-                event = "application_crud_rejected",
-                reason = "poisoned",
-                site = %site,
-                source_ip = %addr.ip(),
-                error = %e,
-                "CRUD rejected: ConfigWriter is poisoned (prior rollback failed); restart required"
-            ),
-            _ => warn!(
-                event = "crud_rejected",
-                reason = "poisoned",
-                resource = resource,
-                site = %site,
-                source_ip = %addr.ip(),
-                error = %e,
-                "CRUD rejected: ConfigWriter is poisoned (prior rollback failed); restart required"
-            ),
-        }
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse::with_hint(
-                "gateway in inconsistent state: prior rollback failed",
-                "restart the gateway; on-disk config may need manual review",
-            )),
-        )
-            .into_response();
-    }
-    match resource {
-        "device" => warn!(
-            event = "device_crud_rejected",
-            reason = "io",
-            site = %site,
-            source_ip = %addr.ip(),
-            error = %e,
-            "CRUD IO failure"
-        ),
-        "application" => warn!(
-            event = "application_crud_rejected",
-            reason = "io",
-            site = %site,
-            source_ip = %addr.ip(),
-            error = %e,
-            "CRUD IO failure"
-        ),
-        _ => warn!(
-            event = "crud_rejected",
-            reason = "io",
-            resource = resource,
-            site = %site,
-            source_ip = %addr.ip(),
-            error = %e,
-            "CRUD IO failure"
-        ),
-    }
-    internal_error_response()
-}
-
-/// Iter-1 review D1-P: when reload returns `RestartRequired { knob }`,
-/// determine whether the offending knob is part of the just-written
-/// CRUD delta or pre-existing operator drift on disk.
+/// Convert a validated `metric_type` string from the HTTP wire
+/// format to the internal `OpcMetricTypeConfig` enum.
 ///
-/// Returns `Ok(true)` if the delta caused the change; `Ok(false)` if
-/// the knob was already different on disk before our write (ambient
-/// drift). On parse failure, conservatively returns `Err(_)` and the
-/// caller falls back to the standard rollback path.
-fn knob_in_delta(
-    knob: &str,
-    original_bytes: &[u8],
-    candidate_doc: &toml_edit::DocumentMut,
-) -> Result<bool, OpcGwError> {
-    let original = std::str::from_utf8(original_bytes)
-        .map_err(|e| OpcGwError::Web(format!("non-UTF-8 original bytes: {e}")))?;
-    let original_doc: toml_edit::DocumentMut = original
-        .parse()
-        .map_err(|e| OpcGwError::Web(format!("failed to parse original TOML for drift check: {e}")))?;
-    // `knob` is dotted (e.g. "chirpstack.server_address"). Walk both
-    // documents; compare the resolved values.
-    let mut path = knob.split('.');
-    let head = match path.next() {
-        Some(h) => h,
-        None => return Ok(false),
-    };
-    let original_section = original_doc.get(head);
-    let candidate_section = candidate_doc.get(head);
-    let mut original_item = original_section;
-    let mut candidate_item = candidate_section;
-    for segment in path {
-        original_item = original_item.and_then(|i| i.get(segment));
-        candidate_item = candidate_item.and_then(|i| i.get(segment));
+/// The string is assumed to have passed `validate_metric_type_value`
+/// which enforces the exact four-value allowlist. An unrecognised
+/// value (impossible in practice) falls back to `Float`.
+fn parse_metric_type_cfg(s: &str) -> crate::config::OpcMetricTypeConfig {
+    match s {
+        "Bool" => crate::config::OpcMetricTypeConfig::Bool,
+        "Int" => crate::config::OpcMetricTypeConfig::Int,
+        "String" => crate::config::OpcMetricTypeConfig::String,
+        _ => crate::config::OpcMetricTypeConfig::Float,
     }
-    let original_str = original_item.map(|i| i.to_string()).unwrap_or_default();
-    let candidate_str = candidate_item.map(|i| i.to_string()).unwrap_or_default();
-    Ok(original_str != candidate_str)
 }
 
-#[allow(clippy::result_large_err)]
-fn reload_error_response(
-    e: ReloadError,
+/// Map an `OpcGwError` from a SQLite CRUD operation to an HTTP
+/// `Response`: UNIQUE constraint violations → 409, "no row" (zero
+/// rows affected on update/delete) → 404, everything else → 500.
+fn sqlite_crud_error(
+    e: crate::utils::OpcGwError,
+    resource: &'static str,
     site: &'static str,
     addr: &SocketAddr,
-    resource: &'static str,
 ) -> Response {
-    let event_name = match resource {
-        "device" => "device_crud_rejected",
-        "application" => "application_crud_rejected",
-        "command" => "command_crud_rejected",
-        _ => "crud_rejected",
-    };
-
-    // Iter-2 review BH-H1 + BH-H2 + ECH-MED2: if the validation
-    // failure is duplicate-class, emit a SINGLE
-    // `conflict_kind="duplicate"` audit line AND return a body that
-    // matches the wire-shape invariant documented in
-    // `docs/web-api.md` (`error == "duplicate"` IFF `field/value/
-    // scope` are all `Some`).
-    //
-    // Iter-1's centralised emit had two defects: (a) it left the
-    // body as `ErrorResponse::with_hint`, breaking the contract that
-    // picker UIs matching on `error == "duplicate"` rely on (BH-H1);
-    // (b) it emitted TWO audit lines per rejection (generic + the
-    // new duplicate-classifying one), inflating any per-line audit
-    // counter (ECH-MED2). The structural parser
-    // `ReloadError::as_duplicate_info()` extracts `(field, value)`
-    // from the validator's known six message patterns; `scope` is
-    // the constant `"reload"` to disambiguate from pre-flight scopes
-    // (`"application:<id>"`, `"device:<id>"`, etc.) — the audit log
-    // still carries the full validator error via the `error = ?e`
-    // field for forensics.
-    if let Some(info) = e.as_duplicate_info() {
+    let msg = e.to_string();
+    if msg.contains("UNIQUE constraint failed") {
+        let event_name = match resource {
+            "device" => "device_crud_rejected",
+            "application" => "application_crud_rejected",
+            "command" => "command_crud_rejected",
+            _ => "crud_rejected",
+        };
         warn!(
             event = event_name,
             reason = "conflict",
             conflict_kind = "duplicate",
             site = %site,
             source_ip = %addr.ip(),
-            duplicate_field = %info.field,
-            duplicate_value = %info.value,
-            error = ?e,
-            "CRUD reload rejected: duplicate at same scope-level (post-write detection)"
+            error = %e,
+            "SQLite UNIQUE constraint violation"
         );
-        let body = ErrorResponse::duplicate(
-            info.field,
-            info.value,
-            "reload",
-            "the candidate config introduces a same-scope duplicate; pick a different identifier and retry, or remove the conflicting entry",
-        );
-        return (StatusCode::CONFLICT, Json(body)).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::from_error(
+                "duplicate: a record with that identifier already exists",
+            )),
+        )
+            .into_response();
     }
-
-    let reason = e.reason();
-    let status = match reason {
-        "validation" => StatusCode::UNPROCESSABLE_ENTITY,
-        // RestartRequired and Io both map to 500 per AC#3.
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    if msg.contains("no row for") {
+        let event_name = match resource {
+            "device" => "device_crud_rejected",
+            "application" => "application_crud_rejected",
+            "command" => "command_crud_rejected",
+            _ => "crud_rejected",
+        };
+        warn!(
+            event = event_name,
+            reason = "not_found",
+            site = %site,
+            source_ip = %addr.ip(),
+            error = %e,
+            "SQLite zero rows affected (not found)"
+        );
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::from_error(
+                "record not found",
+            )),
+        )
+            .into_response();
+    }
+    let event_name = match resource {
+        "device" => "device_crud_rejected",
+        "application" => "application_crud_rejected",
+        "command" => "command_crud_rejected",
+        _ => "crud_rejected",
     };
-    // Iter-1 review HIGH H1: dispatch event-name literal by `resource`
-    // so reload-validation/RestartRequired/Io failures from device
-    // handlers emit `device_crud_rejected`, not `application_*`.
-    //
-    // Iter-1 review E-M1: Debug-format the error (`?e`) instead of
-    // Display (`%e`) so any operator-controlled field value embedded
-    // in the validator's error message (e.g. an `application_id`
-    // hand-edited with TOML multi-line strings containing `\n` or
-    // other control chars) is escaped before landing in the
-    // structured-log line. Parallel hardening to src/main.rs:1251.
     warn!(
         event = event_name,
-        reason = %reason,
+        reason = "database_error",
         site = %site,
         source_ip = %addr.ip(),
-        error = ?e,
-        "CRUD reload failure"
+        error = %e,
+        "SQLite CRUD operation failed"
     );
-    let body = match reason {
-        "validation" => ErrorResponse::with_hint(
-            format!("config validation failed: {e}"),
-            "fix the offending field and retry",
-        ),
-        _ => ErrorResponse::internal_server_error(),
-    };
-    let _ = ReloadOutcome::NoChange; // touch the symbol to keep the import live; clippy ignores the unused for the imports we need
-    (status, Json(body)).into_response()
-}
-
-/// Iter-1 review D1-P: drift-aware response for `RestartRequired`.
-/// If the offending knob is NOT in the just-written delta, refuse to
-/// roll back — the operator has unrelated disk edits and we should
-/// surface a clear 409 instead of silently reverting their work.
-/// Returns `(should_rollback, response)` so the caller decides.
-#[allow(clippy::result_large_err)]
-fn handle_restart_required(
-    knob: &str,
-    original_bytes: &[u8],
-    candidate_doc: &toml_edit::DocumentMut,
-    site: &'static str,
-    addr: &SocketAddr,
-    resource: &'static str,
-) -> (bool, Response) {
-    // Iter-1 review HIGH H1: dispatch ambient_drift event-name literal
-    // by `resource`. Delegated rollback path also forwards `resource`.
-    match knob_in_delta(knob, original_bytes, candidate_doc) {
-        Ok(false) => {
-            // Ambient drift — refuse rollback.
-            match resource {
-                "device" => warn!(
-                    event = "device_crud_rejected",
-                    reason = "ambient_drift",
-                    site = %site,
-                    source_ip = %addr.ip(),
-                    changed_knob = %knob,
-                    "CRUD rejected: TOML has unrelated changes since gateway start; refusing to roll back"
-                ),
-                "application" => warn!(
-                    event = "application_crud_rejected",
-                    reason = "ambient_drift",
-                    site = %site,
-                    source_ip = %addr.ip(),
-                    changed_knob = %knob,
-                    "CRUD rejected: TOML has unrelated changes since gateway start; refusing to roll back"
-                ),
-                _ => warn!(
-                    event = "crud_rejected",
-                    reason = "ambient_drift",
-                    resource = resource,
-                    site = %site,
-                    source_ip = %addr.ip(),
-                    changed_knob = %knob,
-                    "CRUD rejected: TOML has unrelated changes since gateway start; refusing to roll back"
-                ),
-            }
-            (
-                false,
-                (
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse::with_hint(
-                        format!(
-                            "your TOML has unrelated changes to {knob} since gateway start; review/restart the gateway before retrying"
-                        ),
-                        "the in-process Arc<AppConfig> is still on the pre-drift values; restart will pick up your TOML edit",
-                    )),
-                )
-                    .into_response(),
-            )
-        }
-        Ok(true) | Err(_) => {
-            // Our delta caused the RestartRequired (defence-in-depth)
-            // OR drift check failed; fall back to standard 500 +
-            // rollback.
-            (
-                true,
-                reload_error_response(
-                    ReloadError::RestartRequired {
-                        knob: knob.to_string(),
-                    },
-                    site,
-                    addr,
-                    resource,
-                ),
-            )
-        }
-    }
+    internal_error_response()
 }
 
 // =====================================================================
@@ -6316,11 +4647,10 @@ mod tests {
             device_count: applications.iter().map(|a| a.device_count).sum(),
             applications,
         });
-        // Story 9-4: minimal ConfigReloadHandle + ConfigWriter to
-        // satisfy AppState's new fields. The api_status / api_devices
-        // tests don't exercise CRUD paths, but they need these
-        // fields to be present for AppState to construct.
-        let (config_reload, config_writer, _keep_tempdir) =
+        // Minimal ConfigReloadHandle + SqliteBackend to satisfy
+        // AppState's fields. The api_status / api_devices tests don't
+        // exercise CRUD paths.
+        let (config_reload, sqlite_config, _keep_tempdir) =
             crate::web::test_support::make_test_reload_handle_and_writer();
         let st = Arc::new(AppState {
             auth,
@@ -6329,7 +4659,7 @@ mod tests {
             start_time: Instant::now(),
             stale_threshold_secs: std::sync::atomic::AtomicU64::new(DEFAULT_STALE_THRESHOLD_SECS),
             config_reload,
-            config_writer,
+            sqlite_config,
             // Epic C C-0 test defaults — these tests are not exercising
             // the first-run wizard, so default to post-first-run state.
             static_dir: std::path::PathBuf::from("static"),
@@ -6634,11 +4964,10 @@ mod tests {
             device_count,
             applications,
         });
-        // Story 9-4: minimal ConfigReloadHandle + ConfigWriter to
-        // satisfy AppState's new fields. The api_status / api_devices
-        // tests don't exercise CRUD paths, but they need these
-        // fields to be present for AppState to construct.
-        let (config_reload, config_writer, _keep_tempdir) =
+        // Minimal ConfigReloadHandle + SqliteBackend to satisfy
+        // AppState's fields. The api_status / api_devices tests don't
+        // exercise CRUD paths.
+        let (config_reload, sqlite_config, _keep_tempdir) =
             crate::web::test_support::make_test_reload_handle_and_writer();
         let st = Arc::new(AppState {
             auth,
@@ -6647,7 +4976,7 @@ mod tests {
             start_time: Instant::now(),
             stale_threshold_secs: std::sync::atomic::AtomicU64::new(DEFAULT_STALE_THRESHOLD_SECS),
             config_reload,
-            config_writer,
+            sqlite_config,
             // Epic C C-0 test defaults — these tests are not exercising
             // the first-run wizard, so default to post-first-run state.
             static_dir: std::path::PathBuf::from("static"),

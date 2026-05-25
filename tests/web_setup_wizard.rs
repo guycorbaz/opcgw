@@ -78,7 +78,7 @@ fn build_first_run_app_state(
         device_count: 0,
         applications: vec![],
     });
-    let (config_reload, config_writer, dir) =
+    let (config_reload, sqlite_config, dir) =
         opcgw::web::test_support::make_test_reload_handle_and_writer();
     std::mem::forget(dir);
     Arc::new(AppState {
@@ -88,7 +88,7 @@ fn build_first_run_app_state(
         start_time: std::time::Instant::now(),
         stale_threshold_secs: std::sync::atomic::AtomicU64::new(120),
         config_reload,
-        config_writer,
+        sqlite_config,
         // Use the canonical static_dir helper so the wizard handler
         // can locate setup.html regardless of test cwd (iter-1 H5/EH-H2).
         static_dir: static_dir(),
@@ -395,7 +395,7 @@ async fn post_first_run_setup_get_returns_410_gone() {
         "password",
         WEB_DEFAULT_AUTH_REALM.to_string(),
     ));
-    let (config_reload, config_writer, dir) =
+    let (config_reload, sqlite_config, dir) =
         opcgw::web::test_support::make_test_reload_handle_and_writer();
     std::mem::forget(dir);
     let token = CancellationToken::new();
@@ -406,7 +406,7 @@ async fn post_first_run_setup_get_returns_410_gone() {
         start_time: std::time::Instant::now(),
         stale_threshold_secs: std::sync::atomic::AtomicU64::new(120),
         config_reload,
-        config_writer,
+        sqlite_config,
         static_dir: static_dir(),
         is_first_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         secrets_path: PathBuf::from("/tmp/test-secrets.toml"),

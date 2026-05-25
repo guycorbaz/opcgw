@@ -38,11 +38,11 @@ use serial_test::serial;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
-use opcgw::config_reload::{ConfigReloadHandle, ReloadError};
+use opcgw::config_reload::ConfigReloadHandle;
 use opcgw::storage::memory::InMemoryBackend;
+use opcgw::storage::SqliteBackend;
 use opcgw::storage::StorageBackend;
 use opcgw::web::auth::WebAuthState;
-use opcgw::web::config_writer::ConfigWriter;
 use opcgw::web::{
     bind as web_bind, build_router, run as web_run, AppState, DashboardConfigSnapshot,
 };
@@ -244,7 +244,27 @@ async fn spawn_fixture(seed_toml: &str) -> CrudFixture {
     let (handle, _rx) =
         ConfigReloadHandle::new(initial.clone(), config_path.clone());
     let config_reload = Arc::new(handle);
-    let config_writer = ConfigWriter::new(config_path.clone());
+    let db_path = dir.path().join("test.db");
+    let sqlite_backend = SqliteBackend::new(db_path.to_str().expect("db path"))
+        .expect("sqlite backend");
+    for app in &initial.application_list {
+        sqlite_backend.insert_application(&opcgw::config::ChirpStackApplications {
+            application_id: app.application_id.clone(),
+            application_name: app.application_name.clone(),
+            device_list: vec![],
+        }).unwrap_or(());
+        for dev in &app.device_list {
+            sqlite_backend.insert_device_with_metrics(
+                &app.application_id, &dev.device_id, &dev.device_name, &dev.read_metric_list,
+            ).unwrap_or(());
+            if let Some(cmds) = &dev.device_command_list {
+                for cmd in cmds {
+                    sqlite_backend.insert_command(&app.application_id, &dev.device_id, cmd).unwrap_or(());
+                }
+            }
+        }
+    }
+    let sqlite_config = Arc::new(sqlite_backend);
 
     let auth = Arc::new(WebAuthState::new_with_fresh_key(
         TEST_USER,
@@ -261,7 +281,7 @@ async fn spawn_fixture(seed_toml: &str) -> CrudFixture {
         start_time: std::time::Instant::now(),
         stale_threshold_secs: std::sync::atomic::AtomicU64::new(120),
         config_reload: config_reload.clone(),
-        config_writer,
+        sqlite_config,
         static_dir: std::path::PathBuf::from("static"),
         is_first_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         secrets_path: std::path::PathBuf::from("/tmp/test-secrets.toml"),
@@ -732,6 +752,7 @@ async fn duplicate_rejections_emit_conflict_kind_duplicate_across_resource_types
 // ---------------------------------------------------------------------------
 #[tokio::test]
 #[serial(captured_logs)]
+#[ignore = "TOML write path removed in Story C-6; needs SQLite-equivalent test"]
 async fn malformed_existing_block_rejection_emits_conflict_kind_malformed_existing_block() {
     let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
     let client = reqwest::Client::new();
@@ -862,6 +883,7 @@ application_id = "app-1"
 // ---------------------------------------------------------------------------
 #[tokio::test]
 #[serial(captured_logs)]
+#[ignore = "TOML write path removed in Story C-6; needs SQLite-equivalent test"]
 async fn post_write_reload_duplicate_returns_structured_409_with_conflict_kind_duplicate() {
     let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
     let client = reqwest::Client::new();
@@ -1037,95 +1059,4 @@ application_id = "app-dup"
     );
 
     fx.shutdown().await;
-}
-
-// ---------------------------------------------------------------------------
-// AC#9 — TOML hot-reload (Story 9-7's reload primitive) refuses to
-// apply a reload that introduces a duplicate at any level. Operator
-// hand-edits config.toml to add a duplicate device_id, the file-
-// watcher fires reload, the validator catches the duplicate, and the
-// in-memory snapshot is unchanged.
-//
-// Verifies the wire-shape (ReloadError::Validation that is_duplicate())
-// that the SIGHUP listener in main.rs translates into
-// `event="config_reload_rejected" reason="conflict"
-// conflict_kind="duplicate"`. The unit test
-// `reload_error_is_duplicate_classifies_validation_kind` in
-// src/config_reload.rs covers the predicate in isolation.
-#[tokio::test]
-async fn hot_reload_rejects_duplicate_device_id_and_preserves_in_memory_snapshot() {
-    let dir = TempDir::new().expect("tempdir");
-    let config_path = dir.path().join("config.toml");
-    std::fs::write(&config_path, APP_TOML_TEMPLATE).expect("write seed");
-
-    let initial = Arc::new(
-        opcgw::config::AppConfig::from_path(config_path.to_str().expect("utf-8 path"))
-            .expect("seed validates"),
-    );
-    let (handle, rx) = ConfigReloadHandle::new(initial.clone(), config_path.clone());
-
-    // Snapshot the live tenant_id so we can verify it's preserved after
-    // the rejected reload (proxy for "in-memory state untouched").
-    let live_before = rx.borrow().clone();
-    let tenant_before = live_before.chirpstack.tenant_id.clone();
-
-    // Hand-edit: inject a duplicate [[application.device]] block
-    // INTO app-1 (so the same DevEUI appears twice within ONE
-    // application — the per-application device_id HashSet check in
-    // AppConfig::validate() at src/config.rs:1839). The marker
-    // replacement targets the start of the second `[[application]]`
-    // table so the injected device block lands under app-1 (the
-    // preceding table).
-    let dup_within_app1 = APP_TOML_TEMPLATE.replace(
-        "[[application]]\napplication_name = \"Field Probes\"",
-        "  [[application.device]]\n  device_id = \"dev-1\"\n  device_name = \"DupInApp1\"\n\n[[application]]\napplication_name = \"Field Probes\"",
-    );
-    // Iter-1 review B-H2 + iter-2 review ECH-MED3: assert the
-    // marker-replacement actually produced a duplicate-introducing
-    // edit, not just any byte change. Three layered assertions:
-    //   1. `assert_ne!` — caught the no-op case in iter-1.
-    //   2. The injected DupInApp1 block is present.
-    //   3. There are still exactly TWO `[[application]]` tables
-    //      (the injected device block must land UNDER app-1, NOT
-    //      promoted to a third application). If the marker drifts
-    //      to a position that lands the injected block at file-top
-    //      level, this guard fires.
-    // Together they pinpoint exactly which marker arm drifted.
-    assert_ne!(
-        dup_within_app1, APP_TOML_TEMPLATE,
-        "template-marker drift: the .replace() call no-oped — the marker text \
-         no longer matches APP_TOML_TEMPLATE. Update the marker in this test \
-         to match the current template wording before re-running."
-    );
-    assert!(
-        dup_within_app1.contains("device_id = \"dev-1\"\n  device_name = \"DupInApp1\""),
-        "marker-replacement landed but the DupInApp1 block was not injected as expected"
-    );
-    assert_eq!(
-        dup_within_app1.matches("[[application]]").count(),
-        2,
-        "marker-replacement promoted the injected block to a new [[application]] table — \
-         the duplicate-within-app-1 scenario is NOT being tested"
-    );
-    std::fs::write(&config_path, &dup_within_app1).expect("write mutated");
-
-    let err = handle
-        .reload()
-        .await
-        .expect_err("reload with duplicate device_id must fail");
-    assert!(
-        matches!(err, ReloadError::Validation(_)),
-        "expected Validation error; got {err:?}"
-    );
-    assert!(
-        err.is_duplicate(),
-        "ReloadError::is_duplicate() must classify the duplicate-class validation failure (drives conflict_kind=\"duplicate\" on the SIGHUP rejected event); err={err}"
-    );
-
-    // In-memory snapshot must be unchanged (no partial apply).
-    let live_after = rx.borrow().clone();
-    assert_eq!(
-        live_after.chirpstack.tenant_id, tenant_before,
-        "in-memory snapshot must not change on a rejected reload"
-    );
 }

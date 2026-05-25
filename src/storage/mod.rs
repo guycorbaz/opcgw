@@ -63,6 +63,7 @@ pub mod memory;
 pub mod sqlite;
 pub mod schema;
 pub mod pool;
+pub mod migrate_config;
 
 pub use types::{ChirpstackStatus, Command, CommandFilter, CommandStatus, DeviceCommand, MetricType, MetricValue, MAX_LORA_PAYLOAD_SIZE};
 pub use sqlite::SqliteBackend;

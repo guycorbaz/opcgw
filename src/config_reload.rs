@@ -42,11 +42,12 @@ use tokio::sync::{watch, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::config::{AppConfig, Global, CommandValidationConfig, LoggingConfig};
+use crate::config::{AppConfig, ChirpStackApplications, Global, CommandValidationConfig, LoggingConfig};
 use crate::utils::OpcGwError;
 
 /// Public outcome of a successful reload — the SIGHUP listener turns
 /// this into the `event="config_reload_succeeded"` info-level log line.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReloadOutcome {
     /// Candidate config equals the live config; no swap was performed.
@@ -79,6 +80,7 @@ pub enum ReloadOutcome {
 /// Spec forbids new `OpcGwError` enum variants; this is a sibling type
 /// that wraps strings so the failed-event log can carry a structured
 /// `reason` field without polluting the global error taxonomy.
+#[allow(dead_code)]
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ReloadError {
     /// Figment failed to load + parse the TOML / env overlay (file
@@ -95,6 +97,7 @@ pub enum ReloadError {
     RestartRequired { knob: String },
 }
 
+#[allow(dead_code)]
 impl ReloadError {
     /// Stable string for the `reason=` field on the failed-event log
     /// line. Pinned by the docs/logging.md operations table — do not
@@ -185,6 +188,7 @@ impl ReloadError {
 /// the only consumer is `reload_error_response` in the same crate.
 /// Avoids accidentally making the parsed-shape a semver-stable
 /// public API.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DuplicateInfo {
     pub field: String,
@@ -203,6 +207,7 @@ pub(crate) struct DuplicateInfo {
 /// occurrence) AND (b) this allowlist on the extracted scope
 /// string — only the four wordings the validator actually emits
 /// pass.
+#[allow(dead_code)]
 fn is_known_duplicate_scope(s: &str) -> bool {
     if matches!(
         s,
@@ -234,6 +239,7 @@ fn is_known_duplicate_scope(s: &str) -> bool {
 /// duplicate-class pattern. This naturally bypasses both wrappers
 /// (their text lives on the first line, before the per-error
 /// bullets) and tolerates multi-error reports.
+#[allow(dead_code)]
 fn parse_duplicate_info(msg: &str) -> Option<DuplicateInfo> {
     for line in msg.lines() {
         let line = line.trim_start_matches("  - ").trim_start();
@@ -271,6 +277,7 @@ fn parse_duplicate_info(msg: &str) -> Option<DuplicateInfo> {
 ///    pass. An operator value containing the phrase produces
 ///    `after_value = "<scope-junk>' must not exceed N characters"`
 ///    which fails the allowlist.
+#[allow(dead_code)]
 fn try_parse_duplicate_line(line: &str) -> Option<DuplicateInfo> {
     // Step 1: split path-prefix from rest at the FIRST ": " on this
     // line. The validator's per-field error always starts with a
@@ -366,6 +373,7 @@ impl From<ReloadError> for OpcGwError {
 /// produced via [`subscribe`](Self::subscribe).
 pub struct ConfigReloadHandle {
     tx: watch::Sender<Arc<AppConfig>>,
+    #[allow(dead_code)]
     config_path: PathBuf,
     /// Serialises concurrent `reload()` calls. Without this, two
     /// near-simultaneous SIGHUPs could both call `tx.borrow().clone()`,
@@ -408,6 +416,7 @@ impl ConfigReloadHandle {
     /// (whether or not anything changed) or a structured
     /// [`ReloadError`] on failure. The watch channel is updated
     /// **only** on `Ok(Changed { .. })`.
+    #[allow(dead_code)]
     pub async fn reload(&self) -> Result<ReloadOutcome, ReloadError> {
         // Iter-1 review P7: serialise concurrent reloads. Two
         // near-simultaneous SIGHUPs would otherwise race on
@@ -446,12 +455,39 @@ impl ConfigReloadHandle {
             duration_ms: start.elapsed().as_millis() as u64,
         })
     }
+
+    /// Push a new application list from a SQLite write into the watch
+    /// channel without re-reading the TOML file. Used by CRUD handlers
+    /// after each successful SQLite mutation (Story C-6): the handler
+    /// writes to SQLite, loads the new full state, then calls this to
+    /// propagate the change to all watch-channel subscribers
+    /// (`run_web_config_listener`, the ChirpStack poller, etc.).
+    ///
+    /// Serialised by the same `reload_lock` as `reload()` so a
+    /// concurrent CRUD notify_crud_write cannot race on
+    /// `borrow → build → send`. Story C-6: SIGHUP listener removed;
+    /// this is now the sole reload-trigger for the application tree.
+    pub async fn notify_crud_write(&self, new_apps: Vec<ChirpStackApplications>) {
+        let _guard = self.reload_lock.lock().await;
+        let live = self.tx.borrow().clone();
+        let mut candidate = (*live).clone();
+        let app_count = new_apps.len();
+        candidate.application_list = new_apps;
+        let _ = self.tx.send(Arc::new(candidate));
+        info!(
+            event = "config_reload",
+            trigger = "crud_write",
+            application_count = app_count,
+            "Application config snapshot rebuilt from SQLite"
+        );
+    }
 }
 
 /// Internal reload step 1+2 — re-invoke the figment chain (TOML +
 /// `OPCGW_*` env overlay) and run `AppConfig::validate()`. Distinguishes
 /// `io` vs `validation` failures so the failed-event log line can carry
 /// the right `reason=` field.
+#[allow(dead_code)]
 fn load_and_validate(path: &std::path::Path) -> Result<AppConfig, ReloadError> {
     // Pre-flight existence check — gives a more specific error
     // than figment's "no provider had a value" wrapping. The
@@ -484,6 +520,7 @@ fn load_and_validate(path: &std::path::Path) -> Result<AppConfig, ReloadError> {
 /// Coarse summary of what changed between two configs. Used internally
 /// by [`ConfigReloadHandle::reload`] to decide whether to swap and to
 /// populate the success-event log fields.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DiffSummary {
     pub(crate) changed_section_count: usize,
@@ -501,6 +538,7 @@ pub(crate) struct DiffSummary {
 ///
 /// Visible to integration tests via `pub(crate)`; not in the public
 /// API surface.
+#[allow(dead_code)]
 pub(crate) fn classify_diff(
     old: &AppConfig,
     new: &AppConfig,

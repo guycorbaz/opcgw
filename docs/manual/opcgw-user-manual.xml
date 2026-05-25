@@ -1017,11 +1017,54 @@ curl -sS -u "$OPCGW_OPCUA__USER_NAME:$OPCGW_OPCUA__USER_PASSWORD" \
     <title>Configuration</title>
 
       <section id="sec-config-overview">
-        <title>Configuration Overview</title>
-        <para>opcgw is configured through a single TOML file (typically
-        <filename>config/config.toml</filename>). Every value can be
-        overridden by an environment variable. The location of the
-        configuration file is resolved in this order:</para>
+        <title>Configuration Overview (post-Story C-6)</title>
+
+        <para>opcgw uses a <emphasis>two-tier configuration model</emphasis>
+        as of Story C-6:</para>
+
+        <variablelist>
+          <varlistentry>
+            <term>Tier 1 — TOML file (singleton settings, read at boot)</term>
+            <listitem>
+              <para><filename>config/config.toml</filename> holds the
+              infrastructure sections <literal>[global]</literal>,
+              <literal>[chirpstack]</literal>, <literal>[opcua]</literal>,
+              <literal>[web]</literal>, <literal>[logging]</literal>, and
+              <literal>[command_delivery]</literal>. These are read once
+              at startup. Changing them requires restarting opcgw.
+              Environment variable overrides (<literal>OPCGW_</literal>
+              prefix) remain in effect for all TOML keys.</para>
+            </listitem>
+          </varlistentry>
+          <varlistentry>
+            <term>Tier 2 — SQLite database (application tree, web-UI-driven)</term>
+            <listitem>
+              <para>The <literal>[[application]]</literal> tree
+              (applications, devices, metric mappings, commands) is stored
+              in the SQLite database and managed exclusively via the
+              embedded web UI. The web UI writes to SQLite; opcgw rebuilds
+              the in-memory snapshot immediately and the OPC UA address
+              space is updated without a restart.</para>
+            </listitem>
+          </varlistentry>
+        </variablelist>
+
+        <note>
+          <title>TOML [[application]] section — bootstrap seed only</title>
+          <para>The <literal>[[application]]</literal> blocks in
+          <filename>config/config.toml</filename> are read
+          <emphasis>once</emphasis> on the first post-C-6 boot and migrated
+          into SQLite automatically. After that, the TOML file's
+          <literal>[[application]]</literal> section is ignored at runtime.
+          Do <emphasis>not</emphasis> edit the TOML application blocks
+          to change the running configuration — use the web UI instead.
+          See <xref linkend="sec-application-config"/> for the schema
+          reference (useful when writing the initial bootstrap seed) and
+          <xref linkend="sec-web-pickers"/> for the web-UI CRUD
+          workflow.</para>
+        </note>
+
+        <para>The TOML configuration file location is resolved in this order:</para>
         <orderedlist>
           <listitem>
             <para>The <literal>-c PATH</literal> CLI flag.</para>
@@ -1033,30 +1076,25 @@ curl -sS -u "$OPCGW_OPCUA__USER_NAME:$OPCGW_OPCUA__USER_PASSWORD" \
           <listitem>
             <para>Default: <filename>config/config.toml</filename>
             (the <filename>config</filename> directory under the
-            binary's working directory). Only the
-            <literal>CONFIG_PATH</literal> environment variable above
-            and the <literal>-c PATH</literal> CLI flag override this
-            default; there is no <literal>OPCGW_CONFIG_PATH</literal>
-            environment variable.</para>
+            binary's working directory).</para>
           </listitem>
         </orderedlist>
 
         <para>Environment variable overrides use the
-        <literal>OPCGW_</literal> prefix. Nested keys use
-        <literal>__</literal> (double underscore) as the separator. For
-        example, <literal>[chirpstack].polling_frequency</literal> can be
-        overridden by <literal>OPCGW_CHIRPSTACK__POLLING_FREQUENCY=30</literal>.
+        <literal>OPCGW_</literal> prefix with <literal>__</literal>
+        (double underscore) as the nested-key separator. For example,
+        <literal>[chirpstack].polling_frequency</literal> can be overridden
+        by <literal>OPCGW_CHIRPSTACK__POLLING_FREQUENCY=30</literal>.
         Two convenience aliases bypass the nesting convention:</para>
         <itemizedlist>
           <listitem>
             <para><literal>OPCGW_LOG_DIR</literal> — quick override for
-            <literal>[logging].dir</literal>, read directly in
-            <filename>main.rs</filename> before tracing initialises.</para>
+            <literal>[logging].dir</literal>, read before tracing
+            initialises.</para>
           </listitem>
           <listitem>
             <para><literal>OPCGW_LOG_LEVEL</literal> — quick override for
-            <literal>[logging].level</literal>, read directly in
-            <filename>main.rs</filename>.</para>
+            <literal>[logging].level</literal>.</para>
           </listitem>
         </itemizedlist>
       </section>
@@ -1969,11 +2007,28 @@ history_retention_days = 7</programlisting>
       </section>
 
       <section id="sec-application-config">
-        <title>[[application]] — Devices and Metrics</title>
-        <para>The address space exposed via OPC UA mirrors the configured
-        application → device → metric hierarchy. Each application is an
-        array entry under <literal>[[application]]</literal> and may contain
-        any number of devices and metrics.</para>
+        <title>[[application]] — Bootstrap Seed Schema Reference (post-Story C-6)</title>
+
+        <important>
+          <title>Canonical write path: use the web UI, not the TOML file</title>
+          <para>As of Story C-6, the <literal>[[application]]</literal> tree
+          is stored in SQLite and managed exclusively via the embedded web
+          UI (<filename>/applications.html</filename> and
+          <filename>/devices-config.html</filename>). The TOML
+          <literal>[[application]]</literal> section is read
+          <emphasis>once</emphasis> on the first post-C-6 boot and migrated
+          into SQLite automatically. After migration, editing the TOML file
+          has no effect on the running configuration.</para>
+          <para>Use this section as a reference when writing an initial
+          bootstrap seed (to pre-populate SQLite on first boot) or when
+          restoring from a TOML backup. For day-to-day configuration
+          changes, use the web UI.</para>
+        </important>
+
+        <para>The <literal>[[application]]</literal> TOML schema matches the
+        internal <literal>ChirpStackApplications</literal> struct. Each block
+        declares one application (ChirpStack application UUID + human name)
+        and contains nested device and metric blocks.</para>
 
         <programlisting language="ini">[[application]]
 application_id   = "ae2012c2-75a1-407d-98ab-1520fb511edf"
@@ -2017,11 +2072,8 @@ application_name = "Arrosage"
           <listitem>
             <para>
             <literal>[[application.device.read_metric]]</literal> declares
-            uplink metrics. <emphasis>As of Epic A (v2.0 GA) the
-            <literal>MetricType</literal> enum is payload-bearing</emphasis>
-            — values carry real measurements end-to-end. The
-            <literal>metric_type</literal> string in TOML drives both the
-            persisted variant in SQLite and the OPC UA
+            uplink metrics. The <literal>metric_type</literal> string drives
+            both the persisted variant in SQLite and the OPC UA
             <literal>Variant</literal> projection:</para>
           </listitem>
         </itemizedlist>
@@ -2051,8 +2103,7 @@ application_name = "Arrosage"
                 <entry><literal>Int(i64)</literal></entry>
                 <entry><literal>Variant::Int32(i32)</literal> when the
                 value fits in i32; <literal>Variant::Int64(i64)</literal>
-                otherwise (counters, large-magnitude
-                metrics)</entry>
+                otherwise (counters, large-magnitude metrics)</entry>
               </row>
               <row>
                 <entry><literal>"Bool"</literal></entry>
@@ -2071,23 +2122,11 @@ application_name = "Arrosage"
 
         <itemizedlist>
           <listitem>
-            <para><literal>metric_unit</literal> (Story A-6) is an
-            optional human-readable unit string surfaced on the web
-            dashboard as a value suffix (e.g. <literal>34.2 %</literal>,
+            <para><literal>metric_unit</literal> is an optional
+            human-readable unit string surfaced on the web dashboard as a
+            value suffix (e.g. <literal>34.2 %</literal>,
             <literal>17.5 cm</literal>). Empty-string units coalesce to
-            no-suffix. <emphasis>Not yet</emphasis> exposed via the OPC UA
-            <literal>EngineeringUnits</literal> property — that is
-            tracked as a future enhancement.</para>
-          </listitem>
-          <listitem>
-            <para>The OPC UA NodeId for each metric is built as
-            <literal>format!("{}/{}", device.device_id, metric_name)</literal>
-            — the post-issue-#99 fix
-            (<filename>docs/security.md § "OPC UA NodeId format
-            (Issue #99 fix, 2026-05-02)"</filename>) replaced the
-            pre-Epic-7 collision-prone format that conflated
-            different-application metrics sharing the same metric
-            name.</para>
+            no-suffix.</para>
           </listitem>
           <listitem>
             <para>
@@ -2102,44 +2141,35 @@ application_name = "Arrosage"
         </itemizedlist>
 
         <note>
-          <title>Constraints</title>
-          <para>The TOML may be empty (no <literal>[[application]]</literal>
-          blocks at all) — the gateway will start with an empty OPC UA
-          browse tree and the web UI is then used to add applications,
-          devices and metrics interactively. When applications
-          <emphasis>are</emphasis> declared in the TOML, each application
-          must contain at least one device, each device at least one read
-          metric (commands are optional), and metric names must be unique
-          within a device. <literal>application_id</literal> must be
-          unique across the configuration; <literal>device_id</literal>
-          must be unique within one application;
-          <literal>chirpstack_metric_name</literal> must be unique within
-          one device.</para>
+          <title>Uniqueness constraints (enforced by validator and SQLite schema)</title>
+          <para><literal>application_id</literal> must be unique across the
+          application list; <literal>device_id</literal> must be unique
+          within one application (the same DevEUI under different
+          applications is explicitly allowed); <literal>chirpstack_metric_name</literal>
+          and <literal>metric_name</literal> must be unique within one
+          device; <literal>command_id</literal> and
+          <literal>command_name</literal> must be unique within one device.
+          These constraints are enforced by both the
+          <literal>AppConfig::validate()</literal> function (Story C-3) and
+          the SQLite composite primary keys (Story C-6 schema v009).</para>
         </note>
 
         <note>
           <title>Audit-event Taxonomy</title>
-          <para>Configuration mutations via the web CRUD endpoints
-          (Stories 9-4 / 9-5 / 9-6) and OPC UA address-space mutations
-          (Story 9-8) emit a closed-enum audit-event taxonomy:
+          <para>Configuration mutations via the web CRUD endpoints emit a
+          closed-enum audit-event taxonomy:
           <literal>application_created</literal> /
           <literal>application_updated</literal> /
-          <literal>application_deleted</literal> /
-          <literal>application_crud_rejected</literal>;
+          <literal>application_deleted</literal>;
           <literal>device_created</literal> /
           <literal>device_updated</literal> /
-          <literal>device_deleted</literal> /
-          <literal>device_crud_rejected</literal>;
+          <literal>device_deleted</literal>;
           <literal>command_created</literal> /
           <literal>command_updated</literal> /
-          <literal>command_deleted</literal> /
-          <literal>command_crud_rejected</literal>;
-          <literal>topology_change_detected</literal> +
-          <literal>address_space_mutation_succeeded</literal> /
-          <literal>address_space_mutation_failed</literal>. See
-          <filename>docs/logging.md § "Audit and diagnostic
-          events"</filename> and
-          <filename>docs/security.md § "Configuration mutations"</filename>
+          <literal>command_deleted</literal>;
+          <literal>config_reload trigger="crud_write"</literal> after each
+          successful SQLite commit. See
+          <filename>docs/logging.md § "Audit and diagnostic events"</filename>
           for the full reference.</para>
         </note>
       </section>

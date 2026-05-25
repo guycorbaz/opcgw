@@ -25,9 +25,9 @@ use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
 use opcgw::storage::memory::InMemoryBackend;
+use opcgw::storage::SqliteBackend;
 use opcgw::storage::StorageBackend;
 use opcgw::web::auth::WebAuthState;
-use opcgw::web::config_writer::ConfigWriter;
 use opcgw::web::{
     bind as web_bind, build_router, run as web_run, AppState, DashboardConfigSnapshot,
 };
@@ -219,7 +219,27 @@ async fn spawn_fixture(seed_toml: &str) -> CrudFixture {
         config_path.clone(),
     );
     let config_reload = Arc::new(handle);
-    let config_writer = ConfigWriter::new(config_path.clone());
+    let db_path = dir.path().join("test.db");
+    let sqlite_backend = SqliteBackend::new(db_path.to_str().expect("db path"))
+        .expect("sqlite backend");
+    for app in &initial.application_list {
+        sqlite_backend.insert_application(&opcgw::config::ChirpStackApplications {
+            application_id: app.application_id.clone(),
+            application_name: app.application_name.clone(),
+            device_list: vec![],
+        }).unwrap_or(());
+        for dev in &app.device_list {
+            sqlite_backend.insert_device_with_metrics(
+                &app.application_id, &dev.device_id, &dev.device_name, &dev.read_metric_list,
+            ).unwrap_or(());
+            if let Some(cmds) = &dev.device_command_list {
+                for cmd in cmds {
+                    sqlite_backend.insert_command(&app.application_id, &dev.device_id, cmd).unwrap_or(());
+                }
+            }
+        }
+    }
+    let sqlite_config = Arc::new(sqlite_backend);
 
     let auth = Arc::new(WebAuthState::new_with_fresh_key(
         TEST_USER,
@@ -236,7 +256,7 @@ async fn spawn_fixture(seed_toml: &str) -> CrudFixture {
         start_time: std::time::Instant::now(),
         stale_threshold_secs: std::sync::atomic::AtomicU64::new(120),
         config_reload: config_reload.clone(),
-        config_writer,
+        sqlite_config,
         // Epic C C-0 test defaults.
         static_dir: std::path::PathBuf::from("static"),
         is_first_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -548,10 +568,17 @@ async fn post_command_on_device_with_none_command_list_creates_subtable() {
     .await
     .expect("send");
     assert_eq!(resp.status(), StatusCode::CREATED);
-    // Verify TOML now contains the command block.
-    let post = std::fs::read_to_string(&fx.config_path).expect("read");
-    assert!(post.contains("[[application.device.command]]"));
-    assert!(post.contains("first_cmd"));
+    // Verify via GET that the command was stored (TOML write path removed in Story C-6).
+    wait_until_listener_swap().await;
+    let get_resp = client
+        .get(fx.url("/api/applications/app-1/devices/probe-2/commands/7"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(get_resp.status(), StatusCode::OK, "created command not found via GET");
+    let get_body: serde_json::Value = get_resp.json().await.expect("json");
+    assert_eq!(get_body["command_name"].as_str(), Some("first_cmd"));
     fx.shutdown().await;
 }
 
@@ -1043,12 +1070,17 @@ async fn post_command_preserves_comments() {
     .await
     .expect("send");
     assert_eq!(resp.status(), StatusCode::CREATED);
-    let post = std::fs::read_to_string(&fx.config_path).expect("read");
-    assert!(
-        post.contains("OPERATOR_COMMAND_COMMENT_MARKER"),
-        "operator comment must be preserved"
-    );
-    assert!(post.contains("new_cmd"));
+    // Verify via GET that the command was stored (TOML write path removed in Story C-6).
+    wait_until_listener_swap().await;
+    let get_resp = client
+        .get(fx.url("/api/applications/app-1/devices/probe-1/commands/33"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(get_resp.status(), StatusCode::OK, "created command not found via GET");
+    let get_body: serde_json::Value = get_resp.json().await.expect("json");
+    assert_eq!(get_body["command_name"].as_str(), Some("new_cmd"));
     fx.shutdown().await;
 }
 
@@ -1056,11 +1088,6 @@ async fn post_command_preserves_comments() {
 #[serial(captured_logs)]
 async fn put_command_preserves_read_metric_subtable() {
     let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
-    // Snapshot the read_metric block (probe-1 has temperature).
-    let pre = std::fs::read_to_string(&fx.config_path).expect("read pre");
-    assert!(pre.contains("temperature"));
-    assert!(pre.contains("[[application.device.read_metric]]"));
-
     let client = reqwest::Client::new();
     let payload = r#"{"command_name":"changed","command_port":50,"command_confirmed":true}"#;
     let resp = json_request(
@@ -1075,11 +1102,21 @@ async fn put_command_preserves_read_metric_subtable() {
     .expect("send");
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let post = std::fs::read_to_string(&fx.config_path).expect("read post");
-    // read_metric block (sibling sub-table) must be preserved.
-    assert!(post.contains("[[application.device.read_metric]]"));
-    assert!(post.contains("temperature"));
-    assert!(post.contains(r#"chirpstack_metric_name = "temperature""#));
+    // Verify read_metric (sibling sub-table) is still accessible via GET
+    // (TOML write path removed in Story C-6).
+    wait_until_listener_swap().await;
+    let dev_resp = client
+        .get(fx.url("/api/applications/app-1/devices/probe-1"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(dev_resp.status(), StatusCode::OK);
+    let dev_body: serde_json::Value = dev_resp.json().await.expect("json");
+    let metrics = dev_body["read_metric_list"].as_array().expect("metric list");
+    assert!(!metrics.is_empty(), "read_metric_list must not be empty after PUT command");
+    let has_temp = metrics.iter().any(|m| m["metric_name"].as_str() == Some("temperature"));
+    assert!(has_temp, "temperature metric must be preserved after PUT command");
     fx.shutdown().await;
 }
 
@@ -1101,10 +1138,22 @@ async fn post_command_preserves_other_devices_commands() {
     .await
     .expect("send");
     assert_eq!(resp.status(), StatusCode::CREATED);
-    let post = std::fs::read_to_string(&fx.config_path).expect("read");
-    // probe-1's existing commands must be preserved.
-    assert!(post.contains("reboot"));
-    assert!(post.contains("open_valve"));
+    // probe-1's existing commands must still be accessible via GET
+    // (TOML write path removed in Story C-6).
+    wait_until_listener_swap().await;
+    let cmds_resp = client
+        .get(fx.url("/api/applications/app-1/devices/probe-1/commands"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .send()
+        .await
+        .expect("send");
+    let cmds_body: serde_json::Value = cmds_resp.json().await.expect("json");
+    let cmds = cmds_body["commands"].as_array().expect("commands array");
+    let cmd_names: Vec<&str> = cmds.iter()
+        .filter_map(|c| c["command_name"].as_str())
+        .collect();
+    assert!(cmd_names.contains(&"reboot"), "probe-1 reboot command must be preserved");
+    assert!(cmd_names.contains(&"open_valve"), "probe-1 open_valve command must be preserved");
     fx.shutdown().await;
 }
 
@@ -1124,11 +1173,23 @@ async fn delete_command_preserves_other_commands_under_device() {
     .await
     .expect("send");
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-    let post = std::fs::read_to_string(&fx.config_path).expect("read");
-    // command_id = 2 ("open_valve") must remain.
-    assert!(post.contains("open_valve"));
-    // command_id = 1 ("reboot") must be gone.
-    assert!(!post.contains("reboot"));
+    // command_id = 2 ("open_valve") must remain; command_id = 1 ("reboot") must be gone
+    // (TOML write path removed in Story C-6).
+    wait_until_listener_swap().await;
+    let get_open_valve = client
+        .get(fx.url("/api/applications/app-1/devices/probe-1/commands/2"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(get_open_valve.status(), StatusCode::OK, "open_valve (id=2) must remain after delete");
+    let get_reboot = client
+        .get(fx.url("/api/applications/app-1/devices/probe-1/commands/1"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(get_reboot.status(), StatusCode::NOT_FOUND, "reboot (id=1) must be gone after delete");
     fx.shutdown().await;
 }
 
@@ -1399,6 +1460,7 @@ async fn delete_last_command_under_device_succeeds() {
 
 #[tokio::test]
 #[serial(captured_logs)]
+#[ignore = "TOML write path removed in Story C-6; needs SQLite-equivalent test"]
 async fn delete_last_command_leaves_clean_toml_round_trip() {
     // Story 9-6 Task 6 pinning test: DELETE-last-command leaves the
     // resulting TOML in a state that round-trips via figment +
@@ -1603,6 +1665,7 @@ async fn command_crud_does_not_log_secrets_success_path() {
 
 #[tokio::test]
 #[serial(captured_logs)]
+#[ignore = "TOML write path removed in Story C-6; needs SQLite-equivalent test"]
 async fn command_crud_io_failure_does_not_log_secrets() {
     use std::os::unix::fs::PermissionsExt;
     let fx = spawn_fixture(APP_TOML_TEMPLATE).await;

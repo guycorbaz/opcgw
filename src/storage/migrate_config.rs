@@ -1,0 +1,101 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) [2024] Guy Corbaz
+
+//! One-shot TOML→SQLite configuration migration (Story C-6).
+//!
+//! Runs once on the first post-C-6 boot of an existing gateway:
+//! detects that the `applications` SQLite table is empty while
+//! `AppConfig.application_list` is non-empty, then bulk-inserts all
+//! application/device/metric/command rows in one transaction.
+//!
+//! On every subsequent boot the `applications` table is non-empty so
+//! the migration guard short-circuits immediately (idempotent).
+
+use crate::config::AppConfig;
+use crate::storage::SqliteBackend;
+use crate::utils::OpcGwError;
+use std::time::Instant;
+use tracing::{error, info};
+
+/// Outcome of a `migrate_toml_to_sqlite` call.
+pub enum MigrationOutcome {
+    /// Migration ran and committed successfully.
+    Migrated(MigrationReport),
+    /// `applications` table was already non-empty — migration skipped.
+    AlreadyMigrated,
+    /// `AppConfig.application_list` was empty (C-0 empty-bootstrap path).
+    SkippedEmptySource,
+}
+
+/// Per-entity counts written during the migration.
+pub struct MigrationReport {
+    pub applications: usize,
+    pub devices: usize,
+    pub metrics: usize,
+    pub commands: usize,
+    pub duration_ms: u64,
+}
+
+/// Detect whether a TOML→SQLite migration is needed and, if so, run it.
+///
+/// Returns `Ok(MigrationOutcome)` in all non-fatal cases.  Callers should
+/// treat `Err` as a migration failure and fall back to the TOML-driven boot
+/// path (the transition safety net defined in AC#5 / AC#12).
+pub fn migrate_toml_to_sqlite(
+    app_config: &AppConfig,
+    backend: &SqliteBackend,
+) -> Result<MigrationOutcome, OpcGwError> {
+    // ── Guard 1: already migrated ─────────────────────────────────────────
+    let existing = backend.count_applications()?;
+    if existing > 0 {
+        info!(
+            event = "config_migration",
+            stage = "already_migrated",
+            applications = existing,
+        );
+        return Ok(MigrationOutcome::AlreadyMigrated);
+    }
+
+    // ── Guard 2: nothing to migrate (C-0 empty-bootstrap) ─────────────────
+    if app_config.application_list.is_empty() {
+        info!(event = "config_migration", stage = "skipped_empty_source");
+        return Ok(MigrationOutcome::SkippedEmptySource);
+    }
+
+    // ── Run migration ─────────────────────────────────────────────────────
+    let start = Instant::now();
+    match backend.migrate_applications_config(&app_config.application_list) {
+        Ok((apps, devices, metrics, commands)) => {
+            let duration_ms = start.elapsed().as_millis() as u64;
+            info!(
+                event = "config_migration",
+                stage = "toml_to_sqlite",
+                applications = apps,
+                devices = devices,
+                metrics = metrics,
+                commands = commands,
+                duration_ms = duration_ms,
+            );
+            Ok(MigrationOutcome::Migrated(MigrationReport {
+                applications: apps,
+                devices,
+                metrics,
+                commands,
+                duration_ms,
+            }))
+        }
+        Err(e) => {
+            let reason = if e.to_string().contains("row_count_mismatch") {
+                "row_count_mismatch"
+            } else {
+                "insert_failed"
+            };
+            error!(
+                event = "config_migration_failed",
+                reason = reason,
+                error = %e,
+            );
+            Err(e)
+        }
+    }
+}

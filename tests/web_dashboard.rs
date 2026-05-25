@@ -84,7 +84,7 @@ fn build_test_app_state(snapshot: DashboardConfigSnapshot) -> Arc<AppState> {
         .update_gateway_status(Some(chrono::Utc::now()), 3, true)
         .expect("seed gateway_status");
     let backend: Arc<dyn StorageBackend> = Arc::new(backend);
-    let (config_reload, config_writer, dir) =
+    let (config_reload, sqlite_config, dir) =
         opcgw::web::test_support::make_test_reload_handle_and_writer();
     std::mem::forget(dir);
     Arc::new(AppState {
@@ -98,7 +98,7 @@ fn build_test_app_state(snapshot: DashboardConfigSnapshot) -> Arc<AppState> {
         // Story 9-3: tests use the production default (120 s).
         stale_threshold_secs: std::sync::atomic::AtomicU64::new(120),
         config_reload,
-        config_writer,
+        sqlite_config,
         // Epic C C-0 test defaults.
         static_dir: std::path::PathBuf::from("static"),
         is_first_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -799,7 +799,7 @@ async fn api_devices_emits_typed_value_and_unit_per_variant() {
         .set_metric("dev-a6", "bignum", MetricType::Int(i64::MAX))
         .expect("seed Int i64::MAX");
     let backend: Arc<dyn StorageBackend> = Arc::new(backend);
-    let (config_reload, config_writer, dir) =
+    let (config_reload, sqlite_config, dir) =
         opcgw::web::test_support::make_test_reload_handle_and_writer();
     std::mem::forget(dir);
     let state = Arc::new(AppState {
@@ -809,7 +809,7 @@ async fn api_devices_emits_typed_value_and_unit_per_variant() {
         start_time: std::time::Instant::now(),
         stale_threshold_secs: std::sync::atomic::AtomicU64::new(120),
         config_reload,
-        config_writer,
+        sqlite_config,
         // Epic C C-0 test defaults.
         static_dir: std::path::PathBuf::from("static"),
         is_first_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),

@@ -535,12 +535,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create cancellation token for graceful shutdown
     let cancel_token = CancellationToken::new();
 
-    // Story 9-7: build the configuration-reload handle now so every
+    // Story C-6: build the configuration-reload handle so every
     // subsystem we spawn below can subscribe to its watch channel.
     // The handle owns the `tokio::sync::watch::Sender<Arc<AppConfig>>`
-    // and the canonical config-file path; the SIGHUP listener (spawned
-    // later in this function) calls `handle.reload()` on each
-    // SIGHUP. The poller, web server, and OPC UA server each receive
+    // and is updated by CRUD handlers via `notify_crud_write` after
+    // each SQLite write (application_list is now SQLite-authoritative).
+    // The poller, web server, and OPC UA server each receive
     // a fresh `Receiver` clone via `handle.subscribe()`. The
     // initial-receiver returned alongside the handle is dropped
     // immediately (bare `_` not `_name`) because each subsystem
@@ -605,6 +605,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             error!(error = %e, "Failed to apply [storage].retention_days to retention_config — failing closed");
             e
         })?;
+
+    // Story C-6 Task 3: one-shot TOML→SQLite migration.
+    // Runs exactly once on the first post-C-6 boot of a gateway with an
+    // existing TOML config; is a no-op on every subsequent boot.  Failure
+    // is non-fatal: the gateway continues with the TOML-driven in-memory
+    // snapshot (transition safety net, AC#5 / AC#12).
+    match storage::migrate_config::migrate_toml_to_sqlite(
+        &application_config,
+        &sqlite_backend,
+    ) {
+        Ok(storage::migrate_config::MigrationOutcome::Migrated(report)) => {
+            info!(
+                applications = report.applications,
+                devices = report.devices,
+                metrics = report.metrics,
+                commands = report.commands,
+                duration_ms = report.duration_ms,
+                "TOML→SQLite config migration complete"
+            );
+        }
+        Ok(storage::migrate_config::MigrationOutcome::AlreadyMigrated) => {
+            // Normal path after the first-boot migration.
+        }
+        Ok(storage::migrate_config::MigrationOutcome::SkippedEmptySource) => {
+            // C-0 empty-bootstrap: no applications in TOML to migrate.
+        }
+        Err(e) => {
+            warn!(
+                event = "config_migration_failed",
+                error = %e,
+                "TOML→SQLite config migration failed; \
+                 continuing with TOML-driven config (transition safety net)"
+            );
+        }
+    }
 
     match sqlite_backend.load_all_metrics() {
         Ok(metrics) => {
@@ -886,7 +921,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(crate::utils::WEB_DEFAULT_ENABLED);
     // Iter-1 review P8: capture the web-config-listener handle alongside
     // the web-server handle so the shutdown path can await both, matching
-    // the SIGHUP and OPC UA listener join pattern.
+    // the OPC UA listener join pattern.
     let mut web_config_listener_handle: Option<tokio::task::JoinHandle<()>> = None;
     let web_handle: Option<tokio::task::JoinHandle<()>> = if web_enabled {
         let port = application_config
@@ -1026,13 +1061,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                  clamping to default so the web dashboard's 'uncertain' band stays meaningful"
             );
         }
-        // Story 9-4: ConfigWriter for CRUD-driven TOML round-trip
-        // mutations. Constructed with the same canonical config_path
-        // that ConfigReloadHandle was built with so the write path
-        // and the reload path operate on the same file.
-        let config_writer =
-            web::config_writer::ConfigWriter::new(std::path::PathBuf::from(&config_path));
-
         // Epic C C-0 (2026-05-21): derive the sibling secrets.toml
         // path from the main config_path. The first-run wizard will
         // write to this path on successful submission. Use the
@@ -1060,18 +1088,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let static_dir = std::fs::canonicalize("static")
             .unwrap_or_else(|_| std::path::PathBuf::from("static"));
 
+        // Story C-6: dedicated SqliteBackend for CRUD-driven config writes.
+        // Concrete type (not trait object) so CRUD handlers can call the
+        // config-table methods (insert/update/delete_application, etc.).
+        let crud_sqlite_backend = match crate::storage::SqliteBackend::with_pool(pool.clone()) {
+            Ok(b) => std::sync::Arc::new(b),
+            Err(e) => {
+                error!(error = %e, "Failed to create SQLite backend for CRUD config writes — aborting startup");
+                return Err(e.into());
+            }
+        };
+
         let app_state = std::sync::Arc::new(web::AppState {
             auth: auth_state,
             backend: web_backend,
             dashboard_snapshot: std::sync::RwLock::new(dashboard_snapshot),
             start_time: std::time::Instant::now(),
             stale_threshold_secs: std::sync::atomic::AtomicU64::new(stale_threshold_secs),
-            // Story 9-4: thread the existing reload_handle (already
-            // an Arc<ConfigReloadHandle> retained by the SIGHUP
-            // listener) into AppState so CRUD handlers can call
-            // config_reload.reload() after writing the TOML.
+            // Story 9-4 / C-6: thread the reload handle into AppState so
+            // CRUD handlers can call notify_crud_write after SQLite writes.
             config_reload: reload_handle.clone(),
-            config_writer,
+            sqlite_config: crud_sqlite_backend,
             // Epic C C-0 (2026-05-21): first-run state + wizard
             // persistence path + shutdown token plumbed into AppState
             // so the wizard handlers and the first-run gate middleware
@@ -1145,152 +1182,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // Story 9-7 (Task 2): SIGHUP listener task. Lives alongside
-    // ctrl_c / SIGTERM listeners but in a separate spawned task
-    // because reloads are not a shutdown signal — the gateway
-    // continues running after a successful (or failed) reload.
-    //
-    // The listener emits three event= log lines:
-    //   - `config_reload_attempted` (info) — every SIGHUP
-    //   - `config_reload_succeeded` (info) — on Ok(...)
-    //   - `config_reload_failed`    (warn) — on Err(...)
-    //
-    // Issue #110 constraint: cooperates with `cancel_token`
-    // explicitly via `tokio::select!` — no RAII drop reliance.
-    //
-    // Iter-1 review P4: register the signal handler in the main
-    // task BEFORE spawning the listener so a registration failure
-    // surfaces at startup via `?` rather than getting silently
-    // dropped into a `JoinHandle<Result<...>>` whose inner Err
-    // the shutdown await doesn't unwrap.
-    let mut sighup_signal =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
-    let sighup_listener_handle: tokio::task::JoinHandle<()> = {
-        let handle = reload_handle.clone();
-        let cancel = cancel_token.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => {
-                        info!("SIGHUP listener stopping (cancel)");
-                        return;
-                    }
-                    sig = sighup_signal.recv() => {
-                        if sig.is_none() {
-                            // Iter-1 review P9 + P19: tokio's
-                            // `Signal::recv` returns None when the
-                            // runtime's signal driver shuts down
-                            // (e.g., the runtime is being torn
-                            // down). It would be unusual to reach
-                            // this branch outside of shutdown, so
-                            // surface it loudly — once None is
-                            // returned, hot-reload is permanently
-                            // broken for the rest of the process
-                            // lifetime.
-                            warn!(
-                                operation = "config_reload_listener_stopped",
-                                subsystem = "sighup",
-                                "SIGHUP listener exiting: signal driver returned None \
-                                 (hot-reload permanently disabled until process restart)"
-                            );
-                            return;
-                        }
-                        info!(
-                            event = "config_reload_attempted",
-                            trigger = "sighup",
-                            "SIGHUP received; attempting configuration reload"
-                        );
-                        // Iter-2 review P35: wrap the reload in a
-                        // select-on-cancel so a shutdown signal
-                        // arriving mid-reload (during figment IO or
-                        // validation) aborts the reload promptly
-                        // rather than waiting for it to complete.
-                        // Dropping the reload future releases the
-                        // internal `reload_lock` (`tokio::sync::Mutex`
-                        // doesn't poison on drop).
-                        let reload_outcome = tokio::select! {
-                            res = handle.reload() => Some(res),
-                            _ = cancel.cancelled() => None,
-                        };
-                        let Some(reload_result) = reload_outcome else {
-                            info!("SIGHUP listener stopping mid-reload (cancel)");
-                            return;
-                        };
-                        match reload_result {
-                            Ok(crate::config_reload::ReloadOutcome::Changed {
-                                changed_section_count,
-                                includes_topology_change,
-                                duration_ms,
-                            }) => {
-                                info!(
-                                    event = "config_reload_succeeded",
-                                    trigger = "sighup",
-                                    changed_section_count = changed_section_count,
-                                    includes_topology_change = includes_topology_change,
-                                    duration_ms = duration_ms,
-                                    "Configuration reloaded"
-                                );
-                            }
-                            Ok(crate::config_reload::ReloadOutcome::NoChange) => {
-                                info!(
-                                    event = "config_reload_succeeded",
-                                    trigger = "sighup",
-                                    changed_section_count = 0,
-                                    includes_topology_change = false,
-                                    duration_ms = 0,
-                                    "Configuration unchanged"
-                                );
-                            }
-                            Err(e) => {
-                                let knob = e.changed_knob().unwrap_or("");
-                                // Iter-1 review E-M1: Debug-format the
-                                // error (`?e`) instead of Display
-                                // (`%e`) so any operator-controlled
-                                // field value embedded in the error
-                                // message (e.g. an `application_id`
-                                // hand-edited with a TOML multi-line
-                                // string containing `\n` or other
-                                // control chars) is escaped before
-                                // landing in the structured-log line.
-                                // Matches the iter-2 C-1 / 9-5 "new
-                                // audit-emit field is a new injection
-                                // sink" finding-class hardening.
-                                warn!(
-                                    event = "config_reload_failed",
-                                    trigger = "sighup",
-                                    reason = e.reason(),
-                                    changed_knob = knob,
-                                    error = ?e,
-                                    "Configuration reload failed"
-                                );
-                                // Story C-3 AC#9: if the validation
-                                // failure is duplicate-class, emit the
-                                // disambiguating `config_reload_rejected`
-                                // event so audit consumers grepping
-                                // `reason="conflict" conflict_kind=
-                                // "duplicate"` see the hot-reload
-                                // rejection alongside the web-CRUD
-                                // rejections. The general
-                                // `config_reload_failed` line above is
-                                // preserved (AC#11 reason-taxonomy).
-                                if e.is_duplicate() {
-                                    warn!(
-                                        event = "config_reload_rejected",
-                                        trigger = "sighup",
-                                        reason = "conflict",
-                                        conflict_kind = "duplicate",
-                                        error = ?e,
-                                        "Configuration reload rejected: duplicate at same scope-level"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        })
-    };
-
     // Wait for shutdown signal (SIGINT or SIGTERM)
     let mut sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -1335,15 +1226,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     error!(error = %e, "Web server task error during shutdown");
                 }
             }
-            // Story 9-7: join the SIGHUP + OPC UA config-listener
-            // tasks asymmetrically (same shape as the web handle —
-            // they are not part of the core try_join because they
-            // are not load-bearing for the gateway's data plane).
-            // Both observe `cancel_token.cancelled()` and exit
-            // promptly; their error paths are best-effort logged.
-            if let Err(e) = sighup_listener_handle.await {
-                error!(error = %e, "SIGHUP listener task error during shutdown");
-            }
+            // Join the OPC UA config-listener task asymmetrically
+            // (same shape as the web handle — not part of the core
+            // try_join because it is not load-bearing for the data
+            // plane). Observes `cancel_token.cancelled()` and exits
+            // promptly; error path is best-effort logged.
             if let Err(e) = opcua_listener_handle.await {
                 error!(error = %e, "OPC UA config-listener task error during shutdown");
             }

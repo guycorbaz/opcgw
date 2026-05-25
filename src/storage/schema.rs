@@ -22,6 +22,7 @@ const MIGRATION_V005: &str = include_str!("../../migrations/v005_gateway_status.
 const MIGRATION_V006: &str = include_str!("../../migrations/v006_gateway_status_health_metrics.sql");
 const MIGRATION_V007: &str = include_str!("../../migrations/v007_typed_value_columns.sql");
 const MIGRATION_V008: &str = include_str!("../../migrations/v008_typed_value_constraints.sql");
+const MIGRATION_V009: &str = include_str!("../../migrations/v009_application_config_tables.sql");
 
 /// Run all pending migrations based on current schema version.
 ///
@@ -58,7 +59,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
 
     // Latest available schema version
     #[allow(dead_code)]
-    const LATEST_VERSION: u32 = 8;
+    const LATEST_VERSION: u32 = 9;
 
     // Apply migrations in order
     if current_version < 1 {
@@ -257,6 +258,28 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
         info!(version = 8, "Applied migration v008_typed_value_constraints");
     }
 
+    if current_version < 9 {
+        debug!("Applying migration v009_application_config_tables");
+
+        conn.execute_batch(MIGRATION_V009)
+            .map_err(|e| {
+                OpcGwError::Database(format!(
+                    "Failed to execute migration v009_application_config_tables: {}",
+                    e
+                ))
+            })?;
+
+        conn.pragma_update(None, "user_version", 9u32.to_string())
+            .map_err(|e| {
+                OpcGwError::Database(format!(
+                    "Failed to set schema version to 9: {}",
+                    e
+                ))
+            })?;
+
+        info!(version = 9, "Applied migration v009_application_config_tables");
+    }
+
     // Verify final version
     let final_version: u32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -297,11 +320,11 @@ mod tests {
         let result = run_migrations(&conn);
         assert!(result.is_ok(), "Migration on fresh DB should succeed");
 
-        // Verify version was set to the latest (8 — Epic A migration v008 cross-column CHECK constraints)
+        // Verify version was set to the latest (9 — Story C-6 application config tables)
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read version");
-        assert_eq!(version, 8, "Schema version should be 8 (latest — Epic A v008 cross-column CHECK)");
+        assert_eq!(version, 9, "Schema version should be 9 (latest — C-6 application config tables)");
 
         // Verify tables were created (excluding sqlite_sequence which is created automatically for AUTOINCREMENT)
         let table_count: i32 = conn
@@ -311,7 +334,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("Failed to count tables");
-        assert_eq!(table_count, 5, "Should have 5 tables (metric_values, metric_history, command_queue, gateway_status, retention_config)");
+        assert_eq!(table_count, 9, "Should have 9 tables (metric_values, metric_history, command_queue, gateway_status, retention_config, applications, devices, metrics, commands)");
 
         // Cleanup
         let _ = fs::remove_file(&path);
@@ -330,7 +353,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read version");
-        assert_eq!(version, 8, "Version should still be 8 (latest)");
+        assert_eq!(version, 9, "Version should still be 9 (latest)");
 
         // Cleanup
         let _ = fs::remove_file(&path);
@@ -347,6 +370,10 @@ mod tests {
             "command_queue",
             "gateway_status",
             "retention_config",
+            "applications",
+            "devices",
+            "metrics",
+            "commands",
         ];
 
         for table in expected_tables {
@@ -503,7 +530,7 @@ mod tests {
         let post_version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read post-migration version");
-        assert_eq!(post_version, 8, "Post-upgrade version must be 8 (v006 → v007 → v008 in one pass)");
+        assert_eq!(post_version, 9, "Post-upgrade version must be 9 (v006 → v007 → v008 → v009 in one pass)");
 
         // Row counts preserved
         let mv_count: i32 = conn
@@ -1280,7 +1307,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 8, "v008 migration must have advanced user_version to 8");
+        assert_eq!(version, 9, "run_migrations must have advanced user_version to 9 (v008 + v009)");
 
         // Sanity: row counts preserved through the recreate
         let mv_count: i32 = conn
@@ -1414,8 +1441,8 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(
-            version, 8,
-            "run_migrations must advance v006 -> v008 in a single call (real \
+            version, 9,
+            "run_migrations must advance v006 -> v009 in a single call (real \
              operator upgrade path)"
         );
 
@@ -1538,6 +1565,107 @@ mod tests {
              — v008's CHECK is over-broad and rejects valid rows: {:?}",
             exactly_one_non_null.err()
         );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    // ===== Story C-6: migration v009 application config tables =====
+
+    /// AC#3 (fresh DB): applying run_migrations to a fresh DB lands on v009
+    /// with all 4 application-config tables present.
+    #[test]
+    fn test_v009_creates_application_config_tables() {
+        let (conn, path) = temp_db();
+        run_migrations(&conn).expect("migration must succeed");
+
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("read version");
+        assert_eq!(version, 9, "fresh DB must land at v009");
+
+        for table in &["applications", "devices", "metrics", "commands"] {
+            let exists: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM sqlite_master \
+                         WHERE type='table' AND name='{}'",
+                        table
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| panic!("failed to check table {}", table));
+            assert!(exists, "table {} must exist after v009", table);
+        }
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// AC#3 (idempotent): running run_migrations on an already-v9 DB is a no-op.
+    #[test]
+    fn test_v009_idempotent() {
+        let (conn, path) = temp_db();
+        run_migrations(&conn).expect("first migration");
+        run_migrations(&conn).expect("second migration must be idempotent");
+
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("read version");
+        assert_eq!(version, 9, "version must stay at 9 after second run");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// AC#1: cascade delete — removing an application removes devices, metrics,
+    /// and commands via FK ON DELETE CASCADE.
+    #[test]
+    fn test_v009_cascade_delete() {
+        let (conn, path) = temp_db();
+        run_migrations(&conn).expect("migration");
+
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+
+        conn.execute(
+            "INSERT INTO applications (application_id, application_name, created_at, updated_at) \
+             VALUES ('a1', 'App One', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO devices (application_id, device_id, device_name, created_at, updated_at) \
+             VALUES ('a1', 'd1', 'Dev 1', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO metrics (application_id, device_id, chirpstack_metric_name, metric_name, metric_type, created_at, updated_at) \
+             VALUES ('a1', 'd1', 'temp', 'temperature', 'Float', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO commands (application_id, device_id, command_name, command_id) \
+             VALUES ('a1', 'd1', 'reset', 1)",
+            [],
+        )
+        .unwrap();
+
+        conn.execute("DELETE FROM applications WHERE application_id = 'a1'", []).unwrap();
+
+        let dev_count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM devices", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(dev_count, 0, "devices must be cascade-deleted with their application");
+
+        let metric_count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(metric_count, 0, "metrics must be cascade-deleted with their application");
+
+        let cmd_count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM commands", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cmd_count, 0, "commands must be cascade-deleted with their application");
 
         let _ = fs::remove_file(&path);
     }

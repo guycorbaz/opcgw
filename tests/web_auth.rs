@@ -76,7 +76,7 @@ fn wrap_in_app_state(auth: Arc<WebAuthState>) -> Arc<AppState> {
     // Story 9-4: minimal ConfigReloadHandle + ConfigWriter for the
     // post-9-4 AppState shape. The 9-1 auth tests don't exercise
     // CRUD paths; the handle exists only to satisfy the type.
-    let (config_reload, config_writer, dir) =
+    let (config_reload, sqlite_config, dir) =
         opcgw::web::test_support::make_test_reload_handle_and_writer();
     // Leak the tempdir so the file persists for the entire test
     // process; `wrap_in_app_state` is called once per test.
@@ -92,7 +92,7 @@ fn wrap_in_app_state(auth: Arc<WebAuthState>) -> Arc<AppState> {
         // Story 9-3: 9-1 tests don't exercise /api/devices; default fine.
         stale_threshold_secs: std::sync::atomic::AtomicU64::new(120),
         config_reload,
-        config_writer,
+        sqlite_config,
         // Epic C C-0 test defaults.
         static_dir: std::path::PathBuf::from("static"),
         is_first_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),

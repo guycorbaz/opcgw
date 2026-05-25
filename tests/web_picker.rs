@@ -33,9 +33,9 @@ use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
 use opcgw::storage::memory::InMemoryBackend;
+use opcgw::storage::SqliteBackend;
 use opcgw::storage::StorageBackend;
 use opcgw::web::auth::WebAuthState;
-use opcgw::web::config_writer::ConfigWriter;
 use opcgw::web::{
     bind as web_bind, build_router, run as web_run, AppState, DashboardConfigSnapshot,
 };
@@ -197,7 +197,27 @@ async fn spawn_fixture(seed_toml: &str) -> PickerFixture {
         config_path.clone(),
     );
     let config_reload = Arc::new(handle);
-    let config_writer = ConfigWriter::new(config_path.clone());
+    let db_path = dir.path().join("test.db");
+    let sqlite_backend = SqliteBackend::new(db_path.to_str().expect("db path"))
+        .expect("sqlite backend");
+    for app in &initial.application_list {
+        sqlite_backend.insert_application(&opcgw::config::ChirpStackApplications {
+            application_id: app.application_id.clone(),
+            application_name: app.application_name.clone(),
+            device_list: vec![],
+        }).unwrap_or(());
+        for dev in &app.device_list {
+            sqlite_backend.insert_device_with_metrics(
+                &app.application_id, &dev.device_id, &dev.device_name, &dev.read_metric_list,
+            ).unwrap_or(());
+            if let Some(cmds) = &dev.device_command_list {
+                for cmd in cmds {
+                    sqlite_backend.insert_command(&app.application_id, &dev.device_id, cmd).unwrap_or(());
+                }
+            }
+        }
+    }
+    let sqlite_config = Arc::new(sqlite_backend);
 
     let auth = Arc::new(WebAuthState::new_with_fresh_key(
         TEST_USER,
@@ -214,7 +234,7 @@ async fn spawn_fixture(seed_toml: &str) -> PickerFixture {
         start_time: std::time::Instant::now(),
         stale_threshold_secs: std::sync::atomic::AtomicU64::new(120),
         config_reload: config_reload.clone(),
-        config_writer,
+        sqlite_config,
         static_dir: PathBuf::from("static"),
         is_first_run: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         // Iter-1 review MED — per-test tempdir-relative path rather than

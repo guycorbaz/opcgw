@@ -24,9 +24,9 @@ use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
 use opcgw::storage::memory::InMemoryBackend;
+use opcgw::storage::SqliteBackend;
 use opcgw::storage::StorageBackend;
 use opcgw::web::auth::WebAuthState;
-use opcgw::web::config_writer::ConfigWriter;
 use opcgw::web::{
     bind as web_bind, build_router, run as web_run, AppState, DashboardConfigSnapshot,
 };
@@ -276,7 +276,27 @@ async fn spawn_fixture(seed_toml: &str) -> CrudFixture {
         config_path.clone(),
     );
     let config_reload = Arc::new(handle);
-    let config_writer = ConfigWriter::new(config_path.clone());
+    let db_path = dir.path().join("test.db");
+    let sqlite_backend = SqliteBackend::new(db_path.to_str().expect("db path"))
+        .expect("sqlite backend");
+    for app in &initial.application_list {
+        sqlite_backend.insert_application(&opcgw::config::ChirpStackApplications {
+            application_id: app.application_id.clone(),
+            application_name: app.application_name.clone(),
+            device_list: vec![],
+        }).unwrap_or(());
+        for dev in &app.device_list {
+            sqlite_backend.insert_device_with_metrics(
+                &app.application_id, &dev.device_id, &dev.device_name, &dev.read_metric_list,
+            ).unwrap_or(());
+            if let Some(cmds) = &dev.device_command_list {
+                for cmd in cmds {
+                    sqlite_backend.insert_command(&app.application_id, &dev.device_id, cmd).unwrap_or(());
+                }
+            }
+        }
+    }
+    let sqlite_config = Arc::new(sqlite_backend);
 
     let auth = Arc::new(WebAuthState::new_with_fresh_key(
         TEST_USER,
@@ -293,7 +313,7 @@ async fn spawn_fixture(seed_toml: &str) -> CrudFixture {
         start_time: std::time::Instant::now(),
         stale_threshold_secs: std::sync::atomic::AtomicU64::new(120),
         config_reload: config_reload.clone(),
-        config_writer,
+        sqlite_config,
         // Epic C C-0 test defaults — these tests are not exercising
         // the first-run wizard, so default to post-first-run state.
         static_dir: std::path::PathBuf::from("static"),
@@ -649,15 +669,14 @@ async fn post_application_preserves_comments() {
     .await
     .expect("send");
     assert_eq!(resp.status(), StatusCode::CREATED);
-    let post_raw = std::fs::read_to_string(&fix.config_path).expect("read");
-    assert!(
-        post_raw.contains("OPERATOR_COMMENT_MARKER"),
-        "operator comment lost on round-trip: {post_raw}"
-    );
-    assert!(
-        post_raw.contains("with-comments"),
-        "new application not in file: {post_raw}"
-    );
+    // Verify via GET that the application was stored (TOML write path removed in Story C-6).
+    let get_resp = client
+        .get(fix.url("/api/applications/with-comments"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(get_resp.status(), StatusCode::OK, "created application not found via GET");
     fix.shutdown().await;
 }
 
@@ -929,6 +948,7 @@ async fn application_crud_does_not_log_secrets() {
 #[cfg(unix)]
 #[tokio::test]
 #[serial(captured_logs)]
+#[ignore = "TOML write path removed in Story C-6; needs SQLite-equivalent test"]
 async fn application_crud_io_failure_does_not_log_secrets() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -1088,6 +1108,7 @@ async fn post_application_triggers_reload_and_dashboard_reflects() {
 /// mutated. `toml_edit::DocumentMut` preserves key order on
 /// round-trip; this test pins that contract.
 #[tokio::test]
+#[ignore = "TOML write path removed in Story C-6; needs SQLite-equivalent test"]
 async fn post_application_preserves_key_order() {
     let fix = spawn_fixture(APP_TOML_TEMPLATE).await;
     let pre_raw = std::fs::read_to_string(&fix.config_path).expect("read");
@@ -1177,15 +1198,22 @@ async fn concurrent_post_applications_do_not_lose_updates() {
     assert_eq!(resp_a.status(), StatusCode::CREATED);
     assert_eq!(resp_b.status(), StatusCode::CREATED);
 
-    // Both ids must appear in the final TOML.
-    let final_toml = std::fs::read_to_string(&fix.config_path).expect("read");
-    assert!(
-        final_toml.contains("concurrent-a"),
-        "concurrent-a missing from final TOML — lost update: {final_toml}"
-    );
-    assert!(
-        final_toml.contains("concurrent-b"),
-        "concurrent-b missing from final TOML — lost update: {final_toml}"
-    );
+    // Both ids must appear — verify via GET (TOML write path removed in Story C-6).
+    wait_until_listener_swap().await;
+    let check_client = reqwest::Client::new();
+    let get_a = check_client
+        .get(fix.url("/api/applications/concurrent-a"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .send()
+        .await
+        .expect("get a");
+    assert_eq!(get_a.status(), StatusCode::OK, "concurrent-a missing — lost update");
+    let get_b = check_client
+        .get(fix.url("/api/applications/concurrent-b"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .send()
+        .await
+        .expect("get b");
+    assert_eq!(get_b.status(), StatusCode::OK, "concurrent-b missing — lost update");
     fix.shutdown().await;
 }

@@ -33,7 +33,6 @@
 
 pub mod api;
 pub mod auth;
-pub mod config_writer;
 pub mod csrf;
 /// Story C-4: `/api/inventory/drift` handler + 4-class diff computation.
 pub mod drift;
@@ -297,12 +296,12 @@ pub struct AppState {
     /// retained by the SIGHUP listener task is reused here — no
     /// new construction).
     pub config_reload: Arc<crate::config_reload::ConfigReloadHandle>,
-    /// Story 9-4: TOML round-trip helper for CRUD-driven config
-    /// mutations. `figment` (`src/config.rs`) is the read side;
-    /// this is the write side. Held lock serialises concurrent
-    /// CRUD requests across the entire write+reload critical
-    /// section.
-    pub config_writer: Arc<crate::web::config_writer::ConfigWriter>,
+    /// Story C-6: SQLite backend for CRUD-driven config mutations.
+    /// All application/device/metric/command writes go here. After each
+    /// write the handler calls `config_reload.notify_crud_write(apps)`
+    /// to propagate the change to all watch-channel subscribers.
+    /// Story C-6: SQLite is the authoritative store for the application tree.
+    pub sqlite_config: Arc<crate::storage::SqliteBackend>,
     /// Epic C C-0 (iter-1 H5 / EH-H2 fix): static-asset directory
     /// captured at boot, used by `setup_get` to locate `setup.html`.
     /// The wizard handler previously read from a hardcoded
@@ -1091,7 +1090,12 @@ mod tests {
                 api::DEFAULT_STALE_THRESHOLD_SECS,
             ),
             config_reload: Arc::new(handle),
-            config_writer: crate::web::config_writer::ConfigWriter::new(toml_path),
+            sqlite_config: {
+                let db_path = tmp.path().join("test.db");
+                let b = crate::storage::SqliteBackend::new(db_path.to_str().unwrap())
+                    .expect("sqlite backend");
+                Arc::new(b)
+            },
             // Epic C C-0 test defaults: smoke-test, never enters first-run mode.
             static_dir: PathBuf::from("static"),
             is_first_run: Arc::new(std::sync::atomic::AtomicBool::new(false)),
