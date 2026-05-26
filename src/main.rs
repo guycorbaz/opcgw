@@ -671,6 +671,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Operator hasn't supplied secrets yet — retry on next boot.
         }
         Err(e) => {
+            // I1-F7 (iter-1): ordering is load-bearing — the more-specific
+            // `"singleton_row_count_mismatch"` substring MUST be checked
+            // before `"row_count_mismatch"` since the former contains the
+            // latter as a substring. If the two arms were swapped, D-0
+            // failures would be silently mis-classified as C-6 errors and
+            // emit `reason="row_count_mismatch"` instead. See AI-C-1 in
+            // deferred-work.md for the typed-error-variant refactor that
+            // would eliminate this substring-classifier anti-pattern
+            // (D-0-FOLLOWUP-1, deferred to v2.x skill-codification epic).
             let reason = if e.to_string().contains("singleton_row_count_mismatch") {
                 "singleton_row_count_mismatch"
             } else if e.to_string().contains("row_count_mismatch") {

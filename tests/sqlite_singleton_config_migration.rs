@@ -95,6 +95,16 @@ fn singleton_fresh_db_populated_toml_returns_migrated() {
     );
     let count = backend.count_singleton_config().expect("count");
     assert!(count > 0, "singleton_config must have rows after migration");
+
+    // I1-F9 (iter-1): verify PRAGMA user_version == 10 via a raw
+    // connection to the temp DB. The docstring promised this assertion;
+    // the body now delivers it.
+    let db_path = _dir.path().join("test.db");
+    let raw = rusqlite::Connection::open(&db_path).expect("raw open");
+    let version: u32 = raw
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("read user_version");
+    assert_eq!(version, 10, "fresh DB after migration must be at v010");
 }
 
 /// Test 2 — Already-migrated DB → second call is no-op via primary guard.
@@ -280,16 +290,52 @@ fn singleton_is_done_false_on_fresh_db() {
     );
 }
 
-/// Test 11 — `write_d0_migration_done` is idempotent (INSERT OR IGNORE).
+/// Test 11 — `write_d0_migration_done` is idempotent under `INSERT OR
+/// IGNORE` semantics: the original timestamp is preserved across repeat
+/// calls. I1-F5 (iter-1) closes D-0-FOLLOWUP-3 — the previous version of
+/// this test asserted `bool == bool` (always true) and would have passed
+/// even under `INSERT OR REPLACE`. The new body reads the raw timestamp
+/// string and asserts byte-equality across re-calls.
 #[test]
-fn singleton_write_done_is_idempotent() {
-    let (_dir, _cfg, backend) = setup(TOML_FULL);
+fn singleton_write_done_preserves_timestamp_across_calls() {
+    let (dir, _cfg, backend) = setup(TOML_FULL);
     backend.write_d0_migration_done().expect("first write");
-    let ts1 = backend.is_d0_migration_done().expect("after first");
+    let db_path = dir.path().join("test.db");
+
+    // Read the raw timestamp via direct connection (bypassing the
+    // boolean `is_d0_migration_done` helper) so we can assert preservation
+    // at the byte level.
+    let raw = rusqlite::Connection::open(&db_path).expect("raw open");
+    let ts_after_first: String = raw
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'd0_migration_done'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read first timestamp");
+    assert!(
+        !ts_after_first.is_empty(),
+        "first write must set a non-empty timestamp"
+    );
+
+    // SQLite `strftime` resolution is one second; sleep slightly more
+    // than that so a hypothetical INSERT OR REPLACE would produce a
+    // different timestamp value (defeating the byte-equality check).
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+
     backend.write_d0_migration_done().expect("second write");
-    let ts2 = backend.is_d0_migration_done().expect("after second");
-    assert_eq!(ts1, ts2, "done-flag presence must be idempotent");
-    assert!(ts1, "done-flag must be set after first write");
+    let ts_after_second: String = raw
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'd0_migration_done'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read second timestamp");
+    assert_eq!(
+        ts_after_first, ts_after_second,
+        "INSERT OR IGNORE must preserve the original timestamp across re-calls; \
+         if this assertion fails the implementation switched to INSERT OR REPLACE"
+    );
 }
 
 /// Test 12 — Per-section row count > 0 for each migrated section.
@@ -354,5 +400,68 @@ fn singleton_stage_values_documented_in_logging_md() {
     assert!(
         doc.contains("storage_init"),
         "docs/logging.md must document the storage_init event"
+    );
+}
+
+/// Test 15 (AC#17 #11, added in I1-F6 iter-1) — Fresh SQLite database
+/// creation lands at file mode 0o600 per AI-C-SEC-2. Unix-only — Windows
+/// uses ACLs and the atomic-create probe is `#[cfg(unix)]`-gated.
+#[cfg(unix)]
+#[test]
+fn singleton_fresh_db_has_chmod_0o600() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().expect("tempdir");
+    let db_path = dir.path().join("fresh-chmod.db");
+    let _backend = SqliteBackend::new(db_path.to_str().unwrap()).expect("backend");
+
+    let meta = std::fs::metadata(&db_path).expect("metadata");
+    let mode = meta.permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "fresh SQLite DB must land at mode 0o600 (AI-C-SEC-2); got 0o{:o}",
+        mode
+    );
+}
+
+/// Test 16 (AC#17 #12, added in I1-F6 iter-1) — An existing wider-mode
+/// SQLite database is NOT chmod'd retroactively on subsequent
+/// `ConnectionPool::new` calls — operator umask + supervisor permission
+/// model is preserved per AC#12.
+///
+/// The test creates a fresh DB (mode 0o600), then mutates its mode to
+/// 0o644 externally, then re-opens via a new SqliteBackend, and asserts
+/// the mode remains 0o644 (the warn fires but the file is not modified).
+#[cfg(unix)]
+#[test]
+fn singleton_existing_wider_db_is_not_chmod_retroactively() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().expect("tempdir");
+    let db_path = dir.path().join("existing-wider.db");
+
+    // First open creates the file at 0o600.
+    {
+        let _b = SqliteBackend::new(db_path.to_str().unwrap()).expect("first backend");
+    }
+    // Mutate to 0o644 externally to simulate an operator's existing wider
+    // permissions (e.g. inherited from a 0o022 umask).
+    std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o644))
+        .expect("widen mode");
+    let pre_mode = std::fs::metadata(&db_path).expect("metadata").permissions().mode() & 0o777;
+    assert_eq!(pre_mode, 0o644, "test precondition: mode widened to 0o644");
+
+    // Re-open. The atomic-create probe will see AlreadyExists; no chmod
+    // should fire; the warn is emitted but the file mode is unchanged.
+    {
+        let _b2 = SqliteBackend::new(db_path.to_str().unwrap()).expect("second backend");
+    }
+
+    let post_mode = std::fs::metadata(&db_path).expect("metadata").permissions().mode() & 0o777;
+    assert_eq!(
+        post_mode, 0o644,
+        "AC#12: existing wider-mode DB must NOT be chmod'd retroactively; \
+         expected mode unchanged at 0o644, got 0o{:o}",
+        post_mode
     );
 }

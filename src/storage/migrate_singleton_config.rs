@@ -10,8 +10,14 @@
 //!
 //! Mirrors the C-6 [`crate::storage::migrate_config`] pattern: primary
 //! guard via meta done-flag, secondary back-fill guard for direct-SQLite-
-//! import databases, EXCLUSIVE TRANSACTION + per-section row-count
-//! verification, fall-back to TOML on mismatch.
+//! import databases. The four-section migration runs inside a SINGLE
+//! EXCLUSIVE TRANSACTION (via [`crate::storage::SqliteBackend::migrate_singleton_sections_atomic`])
+//! so a row-count mismatch ROLLs BACK the entire migration — partial
+//! state cannot survive into the database. Fall-back to TOML for the
+//! current boot on `Err`; retry idempotently on next boot.
+//!
+//! Iter-1 (I1-F1) closed the atomic-transaction gap that the
+//! per-section `write_singleton_section` approach left open.
 //!
 //! **Secrets out of scope.** `[chirpstack].api_token` and
 //! `[opcua].user_password` are NEVER written to SQLite — they remain in
@@ -63,8 +69,11 @@ pub fn migrate_singleton_toml_to_sqlite(
     backend: &SqliteBackend,
 ) -> Result<SingletonMigrationOutcome, OpcGwError> {
     // ── Guard 1: primary — done-flag set ─────────────────────────────────
+    // I1-F3 (iter-1): `?` propagation instead of `.unwrap_or(0)` so a
+    // pool-checkout timeout fails the migration call honestly. The C-6
+    // counterpart in `migrate_config.rs` uses the same pattern.
     if backend.is_d0_migration_done()? {
-        let existing = backend.count_singleton_config().unwrap_or(0);
+        let existing = backend.count_singleton_config()?;
         info!(
             event = "config_migration",
             stage = "singleton_already_migrated",
@@ -123,50 +132,45 @@ pub fn migrate_singleton_toml_to_sqlite(
         return Ok(SingletonMigrationOutcome::SkippedEmptyOrPlaceholder);
     }
 
-    // ── Run migration ─────────────────────────────────────────────────────
+    // ── Run migration (I1-F1 iter-1 fix: single EXCLUSIVE TRANSACTION) ──
+    // Serialize each section to (key, value) pairs (secrets skipped per
+    // AC#9), then commit ALL FOUR sections + the done-flag inside one
+    // EXCLUSIVE transaction via `migrate_singleton_sections_atomic`. A
+    // row-count mismatch or any insert error ROLLs BACK so the table
+    // reverts to its pre-call state; the gateway falls back to TOML for
+    // the current boot per AC#6 and retries idempotently on next boot.
     let start = Instant::now();
-    let mut total_rows = 0usize;
-    let sections = 4usize;
+    let sections_count = 4usize;
 
     let global_fields = serialize_section(&app_config.global, &[])?;
-    backend.write_singleton_section("global", &global_fields)?;
-    total_rows += global_fields.len();
-
     // `[chirpstack]` — skip `api_token` (secret stays in secrets.toml).
     let chirpstack_fields = serialize_section(&app_config.chirpstack, &["api_token"])?;
-    backend.write_singleton_section("chirpstack", &chirpstack_fields)?;
-    total_rows += chirpstack_fields.len();
-
     // `[opcua]` — skip `user_password` (secret stays in secrets.toml).
+    // I1-F12 (deferred per user acceptance): `user_name` is intentionally
+    // migrated — the OPC UA security model treats usernames as not-secret
+    // and the chmod 0o600 hardening provides the practical mitigation.
     let opcua_fields = serialize_section(&app_config.opcua, &["user_password"])?;
-    backend.write_singleton_section("opcua", &opcua_fields)?;
-    total_rows += opcua_fields.len();
-
     let web_fields = serialize_section(&app_config.web, &[])?;
-    backend.write_singleton_section("web", &web_fields)?;
-    total_rows += web_fields.len();
 
-    // Verify post-write row count matches what we wrote.
-    let actual = backend.count_singleton_config()?;
-    if actual != total_rows {
-        return Err(OpcGwError::Database(format!(
-            "singleton_row_count_mismatch: expected={} actual={}",
-            total_rows, actual
-        )));
-    }
+    let sections: &[(&str, &[(String, String)])] = &[
+        ("global", &global_fields),
+        ("chirpstack", &chirpstack_fields),
+        ("opcua", &opcua_fields),
+        ("web", &web_fields),
+    ];
 
-    backend.write_d0_migration_done()?;
+    let total_rows = backend.migrate_singleton_sections_atomic(sections)?;
 
     let duration_ms = start.elapsed().as_millis() as u64;
     info!(
         event = "config_migration",
         stage = "singleton_toml_to_sqlite",
-        sections = sections,
+        sections = sections_count,
         rows = total_rows,
         duration_ms = duration_ms,
     );
     Ok(SingletonMigrationOutcome::Migrated(SingletonMigrationReport {
-        sections,
+        sections: sections_count,
         rows: total_rows,
         duration_ms,
     }))
@@ -205,7 +209,7 @@ fn serialize_section<T: serde::Serialize>(
         }
         let v_str = serde_json::to_string(v).map_err(|e| {
             OpcGwError::Database(format!(
-                "serialize_section: serde_json::to_string for key={}: {}",
+                "serialize_section: serde_json::to_string for key={:?}: {}",
                 k, e
             ))
         })?;

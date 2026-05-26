@@ -12,7 +12,7 @@
 -- key-value shape (Option A) — `(section, key, value)` PRIMARY KEY. The
 -- value column is TEXT and holds either a scalar TOML lexeme
 -- ("polling_frequency"=>"10", "debug"=>"true") or a JSON-encoded list
--- ("allowed_origins"=>'["http://127.0.0.1:8088"]'). Rust-side typing is
+-- ("allowed_origins"=>'["http://127.0.0.1:8080"]'). Rust-side typing is
 -- enforced by `AppConfig::validate` post-load; SQLite is transport only.
 --
 -- The four-section CHECK pins the section namespace at the schema level so

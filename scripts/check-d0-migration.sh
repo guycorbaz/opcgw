@@ -86,6 +86,7 @@ fi
 
 if [[ "$TOTAL" -eq 0 && -z "$MIG_TS" ]]; then
     info "singleton_config is empty and no done-flag. The gateway has likely not started yet on a post-D-0 binary, or it started in placeholder-secrets mode (operator hasn't supplied [chirpstack].api_token or [opcua].user_password yet)."
+    pass "D-0 migration check complete (singleton tables empty — gateway not yet started on post-D-0 binary, or placeholder-secrets mode active)."
     exit 0
 fi
 

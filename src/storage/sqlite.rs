@@ -3300,6 +3300,143 @@ impl SqliteBackend {
         }
     }
 
+    /// D-0 iter-1 I1-F1: atomic boot-time migration of ALL singleton sections
+    /// in one EXCLUSIVE transaction. Closes the AC#4 ROLLBACK contract that
+    /// the per-section `write_singleton_section` approach left open.
+    ///
+    /// Behaviour: open a single connection, BEGIN EXCLUSIVE TRANSACTION,
+    /// DELETE all rows for the four sections (defensive — covers the case
+    /// where a partial prior run left some rows), INSERT all supplied
+    /// rows, verify the total row count matches the input, write the
+    /// `d0_migration_done` meta-key inside the same transaction so data
+    /// and flag are atomic, then COMMIT. On any failure: ROLLBACK so the
+    /// table reverts to its pre-call state (either empty for a fresh
+    /// migration, or whatever was there before for a re-attempt).
+    ///
+    /// Used by `migrate_singleton_toml_to_sqlite`. D-1's per-section PUT
+    /// continues to use the lighter `write_singleton_section` (one
+    /// section per IMMEDIATE txn) since D-1 writes to one section at a
+    /// time and does NOT touch the meta key.
+    pub fn migrate_singleton_sections_atomic(
+        &self,
+        sections: &[(&str, &[(String, String)])],
+    ) -> Result<usize, OpcGwError> {
+        let conn = self.pool.checkout(Duration::from_secs(5)).map_err(|e| {
+            warn!(error = %e, "Pool checkout timeout for migrate_singleton_sections_atomic");
+            e
+        })?;
+        conn.execute_batch("BEGIN EXCLUSIVE TRANSACTION").map_err(|e| {
+            OpcGwError::Database(format!(
+                "migrate_singleton_sections_atomic: begin: {}",
+                e
+            ))
+        })?;
+
+        let result: Result<usize, OpcGwError> = (|| {
+            let now = format_rfc3339(&Utc::now());
+
+            // Defensive DELETE for each named section so partial prior
+            // state cannot survive into this commit. The four sections
+            // covered by D-0 are explicitly listed; the schema-level
+            // CHECK constraint pins this list.
+            for (section, _) in sections {
+                conn.execute(
+                    "DELETE FROM singleton_config WHERE section = ?1",
+                    rusqlite::params![section],
+                )
+                .map_err(|e| {
+                    OpcGwError::Database(format!(
+                        "migrate_singleton_sections_atomic: delete section={}: {}",
+                        section, e
+                    ))
+                })?;
+            }
+
+            let mut stmt = conn
+                .prepare_cached(
+                    "INSERT INTO singleton_config (section, key, value, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                )
+                .map_err(|e| {
+                    OpcGwError::Database(format!(
+                        "migrate_singleton_sections_atomic: prepare: {}",
+                        e
+                    ))
+                })?;
+
+            let mut total_inserted = 0usize;
+            for (section, fields) in sections {
+                for (k, v) in *fields {
+                    stmt.execute(rusqlite::params![section, k, v, now])
+                        .map_err(|e| {
+                            OpcGwError::Database(format!(
+                                "migrate_singleton_sections_atomic: insert section={} key={:?}: {}",
+                                section, k, e
+                            ))
+                        })?;
+                    total_inserted += 1;
+                }
+            }
+            drop(stmt);
+
+            // Row-count verification inside the same transaction (so a
+            // mismatch triggers ROLLBACK, NOT a partial commit).
+            let actual: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM singleton_config",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| {
+                    OpcGwError::Database(format!(
+                        "migrate_singleton_sections_atomic: count: {}",
+                        e
+                    ))
+                })?;
+            if actual as usize != total_inserted {
+                return Err(OpcGwError::Database(format!(
+                    "singleton_row_count_mismatch: expected={} actual={}",
+                    total_inserted, actual
+                )));
+            }
+
+            // Write the done-flag inside the same EXCLUSIVE transaction so
+            // (data present) ↔ (flag set) is an atomic invariant. INSERT
+            // OR IGNORE preserves any pre-existing timestamp (this path
+            // is reachable only on the FIRST migration; secondary-guard
+            // back-fill uses a separate non-transactional helper).
+            conn.execute(
+                "INSERT OR IGNORE INTO meta (key, value) \
+                 VALUES ('d0_migration_done', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+                [],
+            )
+            .map_err(|e| {
+                OpcGwError::Database(format!(
+                    "migrate_singleton_sections_atomic: done-flag write: {}",
+                    e
+                ))
+            })?;
+
+            Ok(total_inserted)
+        })();
+
+        match result {
+            Ok(n) => {
+                conn.execute_batch("COMMIT").map_err(|e| {
+                    OpcGwError::Database(format!(
+                        "migrate_singleton_sections_atomic: commit: {}",
+                        e
+                    ))
+                })?;
+                Ok(n)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
     /// Insert a device and all its metrics in one EXCLUSIVE transaction.
     /// Used by `create_device` so the device row and metric rows are
     /// committed atomically or not at all.

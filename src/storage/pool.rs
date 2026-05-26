@@ -67,19 +67,59 @@ impl ConnectionPool {
 
         // Story D-0 AC#12 (AI-C-SEC-2 from Epic C security review):
         // Tighten the SQLite database file mode to 0o600 on fresh
-        // creation. The Connection::open call below either opens an
-        // existing file (we don't touch its mode — preserve operator's
-        // umask + supervisor permission model) or creates a new file
-        // (we chmod 0o600 immediately so config + metric values aren't
-        // world-readable in the default 0o022-umask deployment).
+        // creation. Iter-1 I1-F2: race-free claim via
+        // `OpenOptions::new().mode(0o600).create_new(true).open(path)` —
+        // either we win the creation (and the file is created atomically
+        // with mode 0o600, no chmod needed afterwards) or someone else
+        // already created the file (and we leave its mode untouched per
+        // AC#12). Closes the TOCTOU window between the prior
+        // `Path::exists()` check and `Connection::open`, and also closes
+        // the `set_permissions`-follows-symlinks attack surface.
         //
         // Existing wider-mode databases are flagged once per boot via
         // the `storage_init` warn event below, with the runbook
         // documenting the operator-action chmod recipe.
         //
-        // Unix-only — Windows uses ACLs; the chmod call has no equivalent.
-        // Documented as a gap in docs/security.md per AC#24.
-        let was_fresh_creation = !std::path::Path::new(path).exists();
+        // Unix-only — Windows uses ACLs; the atomic-mode creation has no
+        // equivalent. Documented as a gap in docs/security.md.
+        #[cfg(unix)]
+        let was_fresh_creation = {
+            use std::os::unix::fs::OpenOptionsExt;
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+            {
+                Ok(file) => {
+                    // We won the creation race; close the fd so
+                    // Connection::open below can re-open the file.
+                    drop(file);
+                    tracing::info!(
+                        event = "storage_init",
+                        path = %path,
+                        "SQLite DB file created with mode 0o600 (race-free claim)"
+                    );
+                    true
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+                Err(e) => {
+                    // Pre-existing-but-permission-denied or other I/O
+                    // error. Defer the failure to Connection::open below,
+                    // which will produce a more contextual error message.
+                    tracing::debug!(
+                        event = "storage_init",
+                        path = %path,
+                        error = %e,
+                        "Atomic-create probe failed; deferring to Connection::open"
+                    );
+                    false
+                }
+            }
+        };
+        #[cfg(not(unix))]
+        let was_fresh_creation = false;
 
         let mut connections = Vec::with_capacity(size);
         let mut available = Vec::with_capacity(size);
@@ -91,32 +131,6 @@ impl ConnectionPool {
                     i, e
                 ))
             })?;
-
-            // Apply chmod 0o600 on the first connection's fresh creation
-            // (subsequent loop iterations re-open the same file). Skip on
-            // non-Unix targets.
-            #[cfg(unix)]
-            if i == 0 && was_fresh_creation {
-                use std::os::unix::fs::PermissionsExt;
-                if let Err(e) = std::fs::set_permissions(
-                    path,
-                    std::fs::Permissions::from_mode(0o600),
-                ) {
-                    tracing::warn!(
-                        event = "storage_init",
-                        path = %path,
-                        error = %e,
-                        "Failed to set SQLite DB file mode to 0o600 on fresh creation; \
-                         configuration data may be world-readable per process umask"
-                    );
-                } else {
-                    tracing::info!(
-                        event = "storage_init",
-                        path = %path,
-                        "SQLite DB file mode set to 0o600 on fresh creation"
-                    );
-                }
-            }
 
             connections.push(conn);
             available.push(i);

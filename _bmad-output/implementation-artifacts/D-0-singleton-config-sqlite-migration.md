@@ -354,6 +354,17 @@ D-0 lands the `write_singleton_section` helper but does NOT expose it via any HT
 
 This mirrors the C-6 → C-2 sequencing (C-6's CRUD helpers were already there from Stories 9-4/9-5/9-6; C-2's pickers consumed them). For Epic D, the storage layer (D-0) precedes the UI layer (D-1) by one story.
 
+### Why `[opcua].user_name` is migrated to SQLite (not skipped like `user_password`)
+
+Iter-1 review finding I1-F12 (BH-F05) flagged that the skip-list for `[opcua]` contains only `"user_password"` — `user_name` (the OPC UA client authentication username) is migrated to the SQLite `singleton_config` table. User accepted the deferral with explicit documentation:
+
+- The OPC UA security model treats usernames as **not-secret**: they appear in audit logs, OPC UA browse-tree variable values (`opcua_session_count` exposes session usernames), and the `WWW-Authenticate: Basic realm="…"` header for web auth.
+- The OPC UA threat model assumes the server already knows the username list; an attacker brute-forcing OPC UA auth has to defeat the password, not the username.
+- The new AI-C-SEC-2 chmod 0o600 hardening on `data/opcgw.db` provides the practical mitigation against local-user read access on multi-user hosts.
+- Symmetry with `user_password` would require moving `user_name` to `config/secrets.toml` (wider scope) or to env-var-only (worse operator UX).
+
+Revisit if the operator threat model shifts — e.g. a multi-user shared host where the OPC UA gateway runs alongside untrusted local services. The chmod 0o600 + the existing security.md threat-model discussion cover the current model.
+
 ### Why `[command_delivery]` migrates with `[chirpstack]`
 
 `[command_delivery]` is a sub-section that lives inside `ChirpstackPollerConfig` as `pub command_delivery: CommandDeliveryConfig` (Story 3-3). It's deserialised as part of the same struct, not as a separate config section. D-0 migrates it as part of the `[chirpstack]` row — the field list in the chirpstack typed table (if Dev Agent picks Option B) includes the command_delivery sub-fields with a prefix (`command_delivery_<field>`) OR the migration writes a separate `command_delivery_config` table mirroring the per-section pattern. Dev Agent picks one shape; the choice does NOT change observable runtime behaviour (the in-memory `AppConfig` struct is unchanged).
@@ -515,3 +526,49 @@ The serde_json approach in `serialize_section` flattens the parent `ChirpstackPo
 - **D-0-FOLLOWUP-1 (MED)** — Typed `OpcGwError::RowCountMismatch { kind: ConfigKind }` refactor to close AI-C-1 substring-classifier anti-pattern (now extended by D-0's `"singleton_row_count_mismatch"` arm). Recommended for v2.x skill-codification epic.
 - **D-0-FOLLOWUP-2 (MED)** — Figment Provider rework so SQLite singleton snapshot overrides TOML between boots (proper AC#7 + AC#8 implementation). Land in D-2 alongside TOML mutation-surface decommission. Until then, hand-edits to `config.toml` still take effect on next boot.
 - **D-0-FOLLOWUP-3 (LOW)** — Extend Test 11 (`singleton_write_done_is_idempotent`) to assert the original timestamp is preserved across re-calls (not just that the flag stays set). `INSERT OR IGNORE` preserves the original; `INSERT OR REPLACE` would refresh. The current test pins the flag presence but not the timestamp invariant. Add to iter-1 reviewer Blind Hunter prompt.
+
+---
+
+### Review Findings — Iter-1 (2026-05-26)
+
+Sources: Blind Hunter (BH, 12 findings), Edge Case Hunter (ECH, 5 findings + 10 investigations), Acceptance Auditor (AA, 5 findings). **The 25th cumulative iter-N+1 doctrine validation** — three reviewers converged on 3 HIGH findings on the implementation commit. 22 raw findings → 11 patch, 4 defer, 3 dismiss.
+
+#### Patch
+
+- [x] [Review][Patch] **I1-F1 (HIGH) — No outer EXCLUSIVE TRANSACTION wrapping the 4-section migration; partial state not rolled back; Guard 2 misclassifies as `AlreadyMigrated`; module docstring claims behavior the code does not implement** [`src/storage/migrate_singleton_config.rs`] — Reviewers converged: BH-F01 + AA-F1 (HIGH; AC#4 violation), BH-F03 (HIGH; Guard 2 over-broad), BH-F08 (MED; no rollback), AA-F5 (LOW; stale docstring). Current code calls `write_singleton_section` four times — each with its own `IMMEDIATE TRANSACTION` that commits independently. If the 3rd section's write succeeds but the 4th fails (or the post-write `count_singleton_config` reports a mismatch), the first 3 sections are durably committed; no rollback unwinds them. Guard 2 on the NEXT boot sees `existing > 0`, back-fills the done-flag, and permanently stamps the DB as `AlreadyMigrated` with partial singleton state. AC#4 explicitly mandates `BEGIN EXCLUSIVE TRANSACTION`. Fix: add `SqliteBackend::migrate_singleton_sections_atomic(sections: &[(String, Vec<(String, String)>)]) -> Result<usize, OpcGwError>` that holds a single EXCLUSIVE transaction across all 4 section DELETEs + INSERTs + the post-write count verification + the `d0_migration_done` meta-key write. Atomic guarantee: data and flag both commit, or neither does. Module docstring updated to reflect "EXCLUSIVE TRANSACTION across all sections."
+
+- [x] [Review][Patch] **I1-F2 (HIGH) — TOCTOU race in `pool.rs` between `Path::exists()` and `Connection::open` + `set_permissions` follows symlinks** [`src/storage/pool.rs:82-144`] — BH-F02. `was_fresh_creation = !Path::new(path).exists()` is sampled BEFORE `Connection::open`. A concurrent process (or symlink-attack via operator misconfiguration) could create the file between the two calls. `std::fs::set_permissions` follows symlinks on Linux — chmod could land on the wrong file. Fix: atomically claim file creation via `std::fs::OpenOptions::new().mode(0o600).create_new(true).open(path)` — if it succeeds, we created the file with the right mode already (no chmod needed); if it fails with `AlreadyExists`, file pre-existed (no chmod). Closes the TOCTOU window and the symlink-follow attack surface in one step.
+
+- [x] [Review][Patch] **I1-F3 (MED) — Guard 1 `count_singleton_config().unwrap_or(0)` silently masks pool-checkout errors → logs `rows=0`** [`src/storage/migrate_singleton_config.rs:67`] — BH-F06 + ECH-F4 converged. Repeats the C-6 I2-F3 mistake (which patched the equivalent `count_applications().unwrap_or(0)` to `?` propagation). Fix: change to `?` propagation. The migration call returns `Err` on transient pool exhaustion (next boot retries idempotently); audit log no longer lies about row count.
+
+- [x] [Review][Patch] **I1-F4 (MED) — `check-d0-migration.sh` missing `pass` line on the empty+no-done-flag exit path** [`scripts/check-d0-migration.sh:87-89`] — AA-F3. Exact repeat of the C-6 iter-2 I2-F9 finding ("every exit path emits a pass-line so automated runners detect success"). Fix: add `pass "D-0 migration check complete (singleton tables empty — gateway not yet started on post-D-0 binary, or placeholder-secrets mode active)."` before `exit 0`.
+
+- [x] [Review][Patch] **I1-F5 (MED) — Test 11 (`singleton_write_done_is_idempotent`) is a fake regression guard** [`tests/sqlite_singleton_config_migration.rs:303-313`] — BH-F07. The test asserts `ts1 == ts2` where both are `bool`, not timestamps. The test passes regardless of whether `write_d0_migration_done` uses `INSERT OR IGNORE` or `INSERT OR REPLACE` (both leave the row present). Closes D-0-FOLLOWUP-3 from the impl commit. Fix: query the raw timestamp via a direct `rusqlite::Connection` against the temp DB BEFORE and AFTER the second `write_d0_migration_done` call; assert the timestamp strings are byte-identical (which `INSERT OR REPLACE` would break).
+
+- [x] [Review][Patch] **I1-F6 (MED) — Missing AC#17 enumerated tests** [`tests/sqlite_singleton_config_migration.rs`] — AA-F2. The file has 14 tests numerically but substitutes 5 of the spec's enumerated tests (tests 4 / 5 / 10 / 11 / 12). Partial patch: add tests 11 (fresh-creation chmod 0o600 verified) + 12 (existing-wider-mode warn fires) — the simpler-to-test pair. Defer tests 4 (pool exhaustion mock requires a mock-backend layer that doesn't exist), 5 (row-count mismatch becomes hard to test after I1-F1 outer-transaction refactor — the EXCLUSIVE txn prevents partial commits, so synthesising a mismatch requires injection), and 10 (perf-sensitive timing; would need `#[ignore = "perf"]`). Deferred tests captured in deferred-work.md.
+
+- [x] [Review][Patch] **I1-F7 (LOW) — Substring classifier ordering fragile + lacks comment** [`src/main.rs:674-680`] — BH-F04. The two arms `contains("singleton_row_count_mismatch")` and `contains("row_count_mismatch")` are correctly ordered (more-specific first) but the substring relationship makes the ordering load-bearing for correctness. Fix: add an inline comment explaining the ordering dependency + cross-reference D-0-FOLLOWUP-1 (typed-error-variant refactor).
+
+- [x] [Review][Patch] **I1-F8 (LOW) — `storage_init` warn for chmod-failure includes `error=` field not documented in `docs/logging.md`** [`docs/logging.md:200`] — ECH-F3. The `error=<str>` field on the `storage_init` warn-failure variant is undocumented. Fix: extend the `storage_init` row in `docs/logging.md` to list the `error=<str>` field.
+
+- [x] [Review][Patch] **I1-F9 (LOW) — Test 1 docstring claims `PRAGMA user_version == 10` assertion but body omits it** [`tests/sqlite_singleton_config_migration.rs:83-98`] — AA-F4. Docstring/body drift. Fix: open a raw `rusqlite::Connection` against the temp DB and assert `PRAGMA user_version == 10` at the end of `singleton_fresh_db_populated_toml_returns_migrated`.
+
+- [x] [Review][Patch] **I1-F10 (LOW) — SQL comment in v010 migration shows port 8088 but default is 8080** [`migrations/v010_singleton_config_tables.sql`] — BH-F09. Stale-doc cosmetic. Fix: change `8088` to `8080` in the SQL comment.
+
+- [x] [Review][Patch] **I1-F11 (LOW) — `serialize_section` error format uses `{}` for a serde-derived field name** [`src/storage/migrate_singleton_config.rs:201-205`] — BH-F11. No injection risk today (field names are Rust identifiers) but defensive `?`-Debug consistency. Fix: change `for key={}` → `for key={:?}`.
+
+#### Deferred
+
+- [x] [Review][Defer] **I1-F12 (MED-equivalent, user-accepted) — `[opcua].user_name` migrated to SQLite** [`src/storage/migrate_singleton_config.rs:138`] — BH-F05. The OPC UA security model treats usernames as not-secret (they appear in audit logs + browse trees). The new AI-C-SEC-2 chmod 0o600 hardening provides the practical mitigation. Deferred per explicit user acceptance with documentation: D-0 Dev Notes will add a paragraph explaining the design call (`user_name` is migrated; `user_password` stays in `secrets.toml`); revisit if the operator threat model shifts (e.g. multi-user shared host).
+
+- [x] [Review][Defer] **I1-F13 (LOW) — `missing_secret` uses `%`-Display on a comma-joined hardcoded literal** [`src/storage/migrate_singleton_config.rs:118`] — BH-F10. No injection risk (the value comes from two literal strings hardcoded in the function); consistency-only concern with the codebase's `?`-Debug defensive convention on structured-log fields. Deferred as cosmetic.
+
+- [x] [Review][Defer] **I1-F14 (LOW) — ECH-F5 race between 4 sequential writes and `count_singleton_config`** [`src/storage/migrate_singleton_config.rs:131-156`] — Dissolves automatically after I1-F1 (outer EXCLUSIVE transaction wraps the writes + count). Deferred as moot once I1-F1 patches land.
+
+- [x] [Review][Defer] **I1-F15 (LOW) — AC#17 tests 4 (pool exhaustion), 5 (row-count mismatch), 10 (perf) not implemented** — Partial deferral of AA-F2. Test 4 requires a mock-backend layer that doesn't exist; test 5 becomes structurally difficult after the I1-F1 outer-transaction refactor (EXCLUSIVE prevents partial commits, so mismatch is only triggerable via injection); test 10 is perf-sensitive timing. Tests 11 + 12 are patched per I1-F6. Captured for v2.x.
+
+#### Dismissed
+
+- [Dismiss] BH-F12 (LOW): Missing partial-migration-test — becomes moot after I1-F1 outer-transaction wrapping (partial state can no longer exist).
+- [Dismiss] ECH-F1 (LOW): Concurrent-start TOCTOU — running two opcgw processes against the same DB path is operator misconfiguration; outside the documented deployment model.
+- [Dismiss] ECH-F2 (LOW): "once-per-boot" warn is "once-per-`ConnectionPool::new()`" — only matters in test scenarios that create multiple pools per process; not a runtime concern.
