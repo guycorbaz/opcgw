@@ -23,6 +23,7 @@ const MIGRATION_V006: &str = include_str!("../../migrations/v006_gateway_status_
 const MIGRATION_V007: &str = include_str!("../../migrations/v007_typed_value_columns.sql");
 const MIGRATION_V008: &str = include_str!("../../migrations/v008_typed_value_constraints.sql");
 const MIGRATION_V009: &str = include_str!("../../migrations/v009_application_config_tables.sql");
+const MIGRATION_V010: &str = include_str!("../../migrations/v010_singleton_config_tables.sql");
 
 /// Run all pending migrations based on current schema version.
 ///
@@ -59,7 +60,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
 
     // Latest available schema version
     #[allow(dead_code)]
-    const LATEST_VERSION: u32 = 9;
+    const LATEST_VERSION: u32 = 10;
 
     // Apply migrations in order
     if current_version < 1 {
@@ -280,6 +281,28 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
         info!(version = 9, "Applied migration v009_application_config_tables");
     }
 
+    if current_version < 10 {
+        debug!("Applying migration v010_singleton_config_tables");
+
+        conn.execute_batch(MIGRATION_V010)
+            .map_err(|e| {
+                OpcGwError::Database(format!(
+                    "Failed to execute migration v010_singleton_config_tables: {}",
+                    e
+                ))
+            })?;
+
+        conn.pragma_update(None, "user_version", 10u32.to_string())
+            .map_err(|e| {
+                OpcGwError::Database(format!(
+                    "Failed to set schema version to 10: {}",
+                    e
+                ))
+            })?;
+
+        info!(version = 10, "Applied migration v010_singleton_config_tables");
+    }
+
     // Verify final version
     let final_version: u32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -324,7 +347,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read version");
-        assert_eq!(version, 9, "Schema version should be 9 (latest — C-6 application config tables)");
+        assert_eq!(version, 10, "Schema version should be 10 (latest — D-0 singleton config tables)");
 
         // Verify tables were created (excluding sqlite_sequence which is created automatically for AUTOINCREMENT)
         let table_count: i32 = conn
@@ -334,7 +357,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("Failed to count tables");
-        assert_eq!(table_count, 10, "Should have 10 tables (metric_values, metric_history, command_queue, gateway_status, retention_config, applications, devices, metrics, commands, meta)");
+        assert_eq!(table_count, 11, "Should have 11 tables (metric_values, metric_history, command_queue, gateway_status, retention_config, applications, devices, metrics, commands, meta, singleton_config)");
 
         // Cleanup
         let _ = fs::remove_file(&path);
@@ -353,7 +376,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read version");
-        assert_eq!(version, 9, "Version should still be 9 (latest)");
+        assert_eq!(version, 10, "Version should still be 10 (latest)");
 
         // Cleanup
         let _ = fs::remove_file(&path);
@@ -530,7 +553,7 @@ mod tests {
         let post_version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read post-migration version");
-        assert_eq!(post_version, 9, "Post-upgrade version must be 9 (v006 → v007 → v008 → v009 in one pass)");
+        assert_eq!(post_version, 10, "Post-upgrade version must be 10 (v006 → v007 → v008 → v009 → v010 in one pass)");
 
         // Row counts preserved
         let mv_count: i32 = conn
@@ -1307,7 +1330,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 9, "run_migrations must have advanced user_version to 9 (v008 + v009)");
+        assert_eq!(version, 10, "run_migrations must have advanced user_version to 10 (v008 + v009 + v010)");
 
         // Sanity: row counts preserved through the recreate
         let mv_count: i32 = conn
@@ -1441,8 +1464,8 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(
-            version, 9,
-            "run_migrations must advance v006 -> v009 in a single call (real \
+            version, 10,
+            "run_migrations must advance v006 -> v010 in a single call (real \
              operator upgrade path)"
         );
 
@@ -1581,7 +1604,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("read version");
-        assert_eq!(version, 9, "fresh DB must land at v009");
+        assert_eq!(version, 10, "fresh DB must land at v010 (D-0 singleton config tables)");
 
         for table in &["applications", "devices", "metrics", "commands"] {
             let exists: bool = conn
@@ -1611,7 +1634,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("read version");
-        assert_eq!(version, 9, "version must stay at 9 after second run");
+        assert_eq!(version, 10, "version must stay at 10 after second run");
 
         let _ = fs::remove_file(&path);
     }
@@ -1666,6 +1689,132 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM commands", [], |row| row.get(0))
             .unwrap();
         assert_eq!(cmd_count, 0, "commands must be cascade-deleted with their application");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    // ===== Story D-0: migration v010 singleton_config =====
+
+    /// D-0 AC#1: the v010 migration creates the `singleton_config` table.
+    #[test]
+    fn test_v010_creates_singleton_config_table() {
+        let (conn, path) = temp_db();
+        run_migrations(&conn).expect("migration");
+
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master \
+                 WHERE type='table' AND name='singleton_config'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("singleton_config existence check");
+        assert!(exists, "table singleton_config must exist after v010");
+
+        // Schema shape: section + key composite PK, value + updated_at TEXT.
+        let cols: Vec<(String, String, i32)> = conn
+            .prepare("SELECT name, type, \"notnull\" FROM pragma_table_info('singleton_config')")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let names: Vec<&str> = cols.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert!(names.contains(&"section"), "section column required");
+        assert!(names.contains(&"key"), "key column required");
+        assert!(names.contains(&"value"), "value column required");
+        assert!(names.contains(&"updated_at"), "updated_at column required");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// D-0 AC#3 (idempotent): running run_migrations on an already-v10 DB is a no-op.
+    #[test]
+    fn test_v010_idempotent() {
+        let (conn, path) = temp_db();
+        run_migrations(&conn).expect("first migration");
+        run_migrations(&conn).expect("second migration must be idempotent");
+
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("read version");
+        assert_eq!(version, 10, "version must stay at 10 after second run");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// D-0 AC#1: the section CHECK rejects rogue section names. D-1's UI cannot
+    /// accidentally create a fifth namespace without a schema migration.
+    #[test]
+    fn test_v010_section_check_constraint() {
+        let (conn, path) = temp_db();
+        run_migrations(&conn).expect("migration");
+
+        // Accept all four valid sections.
+        for section in &["global", "chirpstack", "opcua", "web"] {
+            conn.execute(
+                "INSERT INTO singleton_config (section, key, value, updated_at) \
+                 VALUES (?1, 'k', 'v', '2024-01-01T00:00:00Z')",
+                rusqlite::params![section],
+            )
+            .unwrap_or_else(|e| panic!("section {} must be accepted: {}", section, e));
+        }
+
+        // Reject anything else.
+        for bad in &["", "Global", "GLOBAL", "logging", "secrets"] {
+            let err = conn.execute(
+                "INSERT INTO singleton_config (section, key, value, updated_at) \
+                 VALUES (?1, 'k', 'v', '2024-01-01T00:00:00Z')",
+                rusqlite::params![bad],
+            );
+            assert!(
+                err.is_err(),
+                "section = {:?} must be rejected by the CHECK constraint",
+                bad
+            );
+            match err.unwrap_err() {
+                rusqlite::Error::SqliteFailure(ref e, _) => assert_eq!(
+                    e.extended_code,
+                    rusqlite::ffi::SQLITE_CONSTRAINT_CHECK,
+                    "section {:?}: expected SQLITE_CONSTRAINT_CHECK, got {}",
+                    bad,
+                    e.extended_code
+                ),
+                other => panic!("section {:?}: expected SqliteFailure, got {:?}", bad, other),
+            }
+        }
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// D-0 AC#1: composite PK `(section, key)` rejects duplicate keys within a
+    /// section but allows the same key under different sections.
+    #[test]
+    fn test_v010_composite_pk() {
+        let (conn, path) = temp_db();
+        run_migrations(&conn).expect("migration");
+
+        conn.execute(
+            "INSERT INTO singleton_config (section, key, value, updated_at) \
+             VALUES ('global', 'debug', 'true', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        // Same section + same key → reject.
+        let err = conn.execute(
+            "INSERT INTO singleton_config (section, key, value, updated_at) \
+             VALUES ('global', 'debug', 'false', '2024-01-01T00:00:00Z')",
+            [],
+        );
+        assert!(err.is_err(), "duplicate (section, key) must be rejected");
+
+        // Same key under a different section → allowed.
+        conn.execute(
+            "INSERT INTO singleton_config (section, key, value, updated_at) \
+             VALUES ('chirpstack', 'debug', 'true', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("same key under different section must be allowed");
 
         let _ = fs::remove_file(&path);
     }

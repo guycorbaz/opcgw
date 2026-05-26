@@ -2174,6 +2174,68 @@ application_name = "Arrosage"
         </note>
       </section>
 
+      <section id="sec-singleton-config-migration">
+        <title>Singleton Configuration Migration (post-Story D-0)</title>
+        <para>Story D-0 extends the C-6 SQLite migration to cover the four
+        singleton configuration sections — <literal>[global]</literal>,
+        <literal>[chirpstack]</literal>, <literal>[opcua]</literal>, and
+        <literal>[web]</literal> — so non-secret configuration converges
+        on a single canonical store. Schema migration v010 adds a
+        <literal>singleton_config(section, key, value, updated_at)</literal>
+        key-value table; a boot-time one-shot migration writes the
+        four sections' non-secret fields on first boot of a post-D-0
+        binary.</para>
+
+        <para>Secrets (<literal>[chirpstack].api_token</literal> and
+        <literal>[opcua].user_password</literal>) stay in
+        <filename>config/secrets.toml</filename> (chmod 0o600, established
+        by Story C-0). They are explicitly skipped by the D-0
+        migration. If either still carries the
+        <literal>REPLACE_ME_WITH_OPCGW_</literal> placeholder string,
+        the migration defers to the next boot — once the operator
+        supplies the secrets via env-var or
+        <filename>config/secrets.toml</filename>, the migration runs
+        normally.</para>
+
+        <note>
+          <title>SQLite File Permissions (AI-C-SEC-2)</title>
+          <para>D-0 makes <filename>data/opcgw.db</filename>
+          load-bearing for the full non-secret config surface. On
+          fresh creation, the database file mode is set to
+          <literal>0o600</literal> via an atomic chmod immediately
+          after <literal>Connection::open</literal>. Existing
+          databases are not chmod'd retroactively; if the file mode
+          is wider than <literal>0o600</literal>, opcgw emits a
+          once-per-boot warning at
+          <literal>event="storage_init"</literal>. Operators should
+          run <command>chmod 0600 data/opcgw.db</command> on existing
+          deployments — see
+          <filename>docs/d-0-migration-runbook.md</filename> for the
+          full recipe including Docker volume + systemd
+          <literal>UMask</literal> notes.</para>
+        </note>
+
+        <note>
+          <title>Verification Tool</title>
+          <para>After upgrading to a post-D-0 binary, verify the
+          migration with the bundled script:</para>
+          <screen>bash scripts/check-d0-migration.sh data/opcgw.db</screen>
+          <para>The script reports the schema version, the
+          <literal>d0_migration_done</literal> meta key, per-section
+          row counts, and the SQLite file mode. Exit code 0 means
+          the migration completed cleanly.</para>
+        </note>
+
+        <para>D-0 is the first of three stories in Epic D. D-1 (web
+        UI editor) and D-2 (TOML mutation-surface decommission) build
+        on D-0's storage layer. Until D-2 lands, hand-edits to
+        <filename>config.toml</filename> continue to take effect on
+        next boot — D-0 writes singleton config to SQLite but the
+        figment loader still reads TOML at boot for backward
+        compatibility. The read-path swap (SQLite override of TOML)
+        lands in D-2.</para>
+      </section>
+
       <section id="sec-config-env-overrides">
         <title>Environment Variable Overrides</title>
         <para>Every TOML key can be overridden via environment variables.

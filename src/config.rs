@@ -32,7 +32,7 @@ use figment::{
     Figment,
 };
 use tracing::{debug, trace, warn};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Global application configuration parameters.
@@ -40,7 +40,7 @@ use std::collections::HashMap;
 /// Contains application-wide settings that affect the overall behavior
 /// of the gateway service. These settings may be expanded in future versions.
 #[allow(dead_code)]
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Global {
     /// Enable detailed debug logging throughout the application.
     ///
@@ -89,7 +89,7 @@ pub struct Global {
 /// Contains all parameters required to establish connection with the ChirpStack
 /// LoRaWAN Network Server and configure the polling behavior for device metrics.
 #[allow(dead_code)]
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct ChirpstackPollerConfig {
     /// ChirpStack server address including protocol and port.
     ///
@@ -169,7 +169,7 @@ pub struct ChirpstackPollerConfig {
 /// Contains all settings required to configure and run the OPC UA server
 /// that exposes ChirpStack device data to OPC UA clients. This includes
 /// security settings, network configuration, and certificate management.
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct OpcUaConfig {
     /// Human-readable name for the OPC UA application.
     ///
@@ -388,7 +388,7 @@ pub struct OpcUaConfig {
 /// `None`; consumers fall back to the `WEB_DEFAULT_*` constants in
 /// `src/utils.rs` via `Option::unwrap_or`. Validation lives in
 /// `AppConfig::validate` and runs at startup.
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 pub struct WebConfig {
     /// Port the web server listens on. Range: `WEB_MIN_PORT` (1024) to
     /// `WEB_MAX_PORT` (65535). Default: `WEB_DEFAULT_PORT` (8080).

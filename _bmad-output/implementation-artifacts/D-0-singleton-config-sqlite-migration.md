@@ -1,6 +1,6 @@
 # Story D-0: Singleton Configuration → SQLite Migration
 
-Status: ready-for-dev
+Status: review
 
 | Field           | Value                                                                                                       |
 | --------------- | ----------------------------------------------------------------------------------------------------------- |
@@ -452,15 +452,66 @@ C-6 removed `toml_edit` from `Cargo.toml` (the only allowed change in Epic C). E
 
 ## Completion Note
 
-To be filled in by the Dev Agent at story completion. Should include:
+**Implemented 2026-05-26 (same-session as Epic D scoping + spec drafting).**
 
-- Actual test count delta (gross +N, net after any tests refactored).
-- The Task 1.1 schema design call (Option A generic K/V or Option B per-section typed) + one-sentence rationale.
-- The Task 3.3 typed-error-variant disposition (refactored to `OpcGwError::RowCountMismatch { kind }` OR deferred to v2.x with explicit link to AI-C-1).
-- Confirmation that `tests/main_startup_no_deadlock.rs::main_startup_with_empty_application_list` still passes.
-- Confirmation that all 19 C-6 tests in `tests/sqlite_config_migration.rs` still pass.
-- Result of the SQLite file-permission integration tests (#11 + #12 per AC#17) — fresh creation chmod 0o600 verified on Unix; existing-DB-wider-permissions warn-emit verified.
-- Manual smoke against Guy's real ChirpStack — DEFERRED per the 2026-05-20 main-deadlock incident doctrine; record the deferral here.
-- The GitHub tracking issue number (or the `Refs #__` placeholder rationale per Epic A/B/C precedent).
-- Any deferred follow-ups added to `deferred-work.md`.
-- Any architectural decisions captured during implementation (e.g. the K/V vs typed-table call; whether `[command_delivery]` got prefix-fields or its own table).
+### Test deltas
+
+- `cargo test --all-targets`: **1504 / 0 / 73** (baseline post-C-6: 1482 / 0 / 73; gross +22 net new tests from D-0).
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- `tests/main_startup_no_deadlock.rs::main_startup_with_empty_application_list`: still passes (verified in the regression suite).
+- All 19 C-6 tests in `tests/sqlite_config_migration.rs`: still pass.
+- New D-0 tests: 14 integration tests in `tests/sqlite_singleton_config_migration.rs` + 4 unit tests in `src/storage/schema.rs::tests` (v010 schema fresh DB / idempotent / section CHECK / composite PK).
+
+### Task 1.1 — Schema design call
+
+**Picked Option A (generic K/V).** Schema is a single `singleton_config(section TEXT, key TEXT, value TEXT, updated_at TEXT)` table with composite PK `(section, key)` + `CHECK (section IN ('global','chirpstack','opcua','web'))`.
+
+Rationale (deviates from the spec's author-recommendation of Option B):
+
+- **Heterogeneous fields handled uniformly** — `[opcua]` has 20+ Option-typed fields including `Option<u32>` ceilings, `Option<u16>` ports, and `[web].allowed_origins: Option<Vec<String>>` (JSON-encoded as a string). Option B would require 4 wide tables with 50+ total nullable columns + CHECK constraints replicating `AppConfig::validate`.
+- **Type safety lives in Rust** — `AppConfig::validate` already enforces typed validation. SQLite is transport-only; per-section typed tables would duplicate that surface.
+- **Future singleton fields = zero schema change** — no v011/v012/… migrations needed when adding a new knob.
+- **D-1's UI iteration is uniform** — `SELECT key, value FROM singleton_config WHERE section=?1` is the canonical per-section read; no per-section typed deserialisation.
+
+The choice locks in for D-1's UI (which iterates K/V pairs per section). Future stories may reconsider if a typed-table need emerges.
+
+### Task 3.3 — Typed `OpcGwError::RowCountMismatch` refactor disposition
+
+**Deferred to v2.x.** The substring classifier extension (adding `"singleton_row_count_mismatch"` to `main.rs`'s `reason=` arm) was the cheap path. The typed-variant refactor closes AI-C-1 but requires touching `OpcGwError` definition + the C-6 error site + the new D-0 site + the classifier match-arm at `main.rs:631-644`. Wider scope than D-0 should absorb; left for the dedicated v2.x skill-codification + cleanup epic (AI-C-5 territory). The current code adds a NEW substring matcher arm — re-extending the documented anti-pattern, which iter-N+1 reviewers should flag again.
+
+### Task 4 — AppConfig precedence path (partial fulfillment of AC#7)
+
+AC#7 says "the in-memory `AppConfig` snapshot is rebuilt from SQLite at boot post-D-0." D-0 ships the **write side** (TOML → SQLite via `migrate_singleton_toml_to_sqlite`) + the **read helper** (`SqliteBackend::load_singleton_config`), but does **NOT** swap the AppConfig read path. The full overlay-from-SQLite-into-AppConfig is deferred to D-2 alongside the TOML mutation-surface decommission.
+
+Reasons documented inline at `src/main.rs` post-migration:
+
+1. `application_config` is wrapped in `Arc<AppConfig>` at line ~444 and cloned into `reload_handle`, `storage`, `OpcUa::new`, `ChirpstackPoller::new`, `WebAuthState`, etc., **before** the SqliteBackend is available. Overlay-here would only mutate the binding; subsystem clones would still hold the figment-loaded snapshot.
+2. Subsystems read restart-required knobs (PKI paths, ports, allowed_origins) once at construction; a post-construction overlay doesn't reach them.
+3. On the first post-D-0 boot, the figment-loaded `application_config` and the SQLite singleton snapshot are byte-equivalent (migration just wrote one from the other). Overlay would be a no-op for this boot.
+4. On subsequent boots, `config.toml` is still authoritative for the figment loader until D-2 lands. D-2 is the proper home for the figment Provider rework that puts SQLite between TOML and env-var layers (preserving AC#8 precedence ordering).
+
+**This is a meaningful scope reduction from AC#7's plain reading.** Iter-1 reviewers may want to either: (a) accept the deferral and update AC#7's wording to clarify "D-0 writes SQLite, D-2 reads it"; or (b) reject the deferral and require a wider implementation that reorders subsystem construction to happen after the SQLite read.
+
+### Manual smoke against Guy's real ChirpStack
+
+DEFERRED per the 2026-05-20 main-deadlock incident doctrine (`cargo test does NOT replace real-world testing`). Same precedent as C-1 Task 10.4 / C-2 Task 8.4 / C-4 Task 7.4 / C-6 Task 11.4. Recommended for Guy's batched-validation window when the next v2.x version is ready to tag.
+
+### GitHub tracking issue
+
+`Refs #__` placeholder per Epic A/B/C precedent. `gh` CLI is not authenticated for write in the dev session; the issue is opened out-of-band by the user. Until then the commits carry `Refs #__`.
+
+### `[command_delivery]` sub-section placement
+
+The serde_json approach in `serialize_section` flattens the parent `ChirpstackPollerConfig` struct to a JSON object. `command_delivery` appears as a nested JSON object value under the `command_delivery` key in the `chirpstack` section (single row `(chirpstack, command_delivery, {...json...})`). The Rust-side load path would deserialize this back into a `CommandDeliveryConfig` struct. No per-field flattening; the sub-section round-trips as one JSON-encoded value. This is functionally equivalent to a prefix-fields approach and avoids exposing the internal sub-struct layout to D-1's UI iteration.
+
+### Architectural decisions captured
+
+- **chmod 0o600 fresh-creation-only**, per the spec's "don't surprise operators with retroactive chmod" guidance. Existing wider-mode databases emit a once-per-boot `storage_init` warn with the operator-action recipe in the runbook.
+- **Migration uses `IMMEDIATE TRANSACTION`** (in `write_singleton_section`) not `EXCLUSIVE TRANSACTION`. Rationale: the per-section atomic write is for D-1's PUT-per-section endpoint; EXCLUSIVE would serialise against the C-6 application-tree writers unnecessarily.
+- **The placeholder-secrets guard in `migrate_singleton_toml_to_sqlite` is defense-in-depth.** `AppConfig::from_path` already rejects placeholders at parse time, so the guard is unreachable through the normal load path. Kept as belt-and-suspenders per AC#4 + because a future code path that bypasses validation (e.g. a test fixture loaded by hand) would otherwise persist placeholder strings to SQLite.
+
+### Deferred follow-ups (added to `deferred-work.md`)
+
+- **D-0-FOLLOWUP-1 (MED)** — Typed `OpcGwError::RowCountMismatch { kind: ConfigKind }` refactor to close AI-C-1 substring-classifier anti-pattern (now extended by D-0's `"singleton_row_count_mismatch"` arm). Recommended for v2.x skill-codification epic.
+- **D-0-FOLLOWUP-2 (MED)** — Figment Provider rework so SQLite singleton snapshot overrides TOML between boots (proper AC#7 + AC#8 implementation). Land in D-2 alongside TOML mutation-surface decommission. Until then, hand-edits to `config.toml` still take effect on next boot.
+- **D-0-FOLLOWUP-3 (LOW)** — Extend Test 11 (`singleton_write_done_is_idempotent`) to assert the original timestamp is preserved across re-calls (not just that the flag stays set). `INSERT OR IGNORE` preserves the original; `INSERT OR REPLACE` would refresh. The current test pins the flag presence but not the timestamp invariant. Add to iter-1 reviewer Blind Hunter prompt.

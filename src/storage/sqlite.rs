@@ -3155,6 +3155,151 @@ impl SqliteBackend {
         Ok(count)
     }
 
+    // ===== Story D-0: singleton-config helpers =====
+
+    /// Returns `true` once the `d0_migration_done` meta key has been written
+    /// (either by the main `migrate_singleton_toml_to_sqlite` path or by
+    /// the secondary-guard back-fill on direct-SQLite-import databases).
+    /// Mirrors the C-6 [`Self::is_c6_migration_done`] pattern.
+    pub fn is_d0_migration_done(&self) -> Result<bool, OpcGwError> {
+        let conn = self.pool.checkout(Duration::from_secs(5)).map_err(|e| {
+            warn!(error = %e, "Pool checkout timeout for is_d0_migration_done");
+            e
+        })?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM meta WHERE key = 'd0_migration_done'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| OpcGwError::Database(format!("is_d0_migration_done: {}", e)))?;
+        Ok(count > 0)
+    }
+
+    /// Write the D-0 migration done-flag to the `meta` table. INSERT OR
+    /// IGNORE so re-invocations preserve the original timestamp (the
+    /// back-fill path runs idempotently on every subsequent boot until
+    /// the row exists). Mirrors C-6 [`Self::write_c6_migration_done`].
+    pub fn write_d0_migration_done(&self) -> Result<(), OpcGwError> {
+        let conn = self.pool.checkout(Duration::from_secs(5)).map_err(|e| {
+            warn!(error = %e, "Pool checkout timeout for write_d0_migration_done");
+            e
+        })?;
+        conn.execute(
+            "INSERT OR IGNORE INTO meta (key, value) \
+             VALUES ('d0_migration_done', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+            [],
+        )
+        .map_err(|e| OpcGwError::Database(format!("write_d0_migration_done: {}", e)))?;
+        Ok(())
+    }
+
+    /// Count rows in `singleton_config`. Used by the secondary already-
+    /// migrated guard in `migrate_singleton_toml_to_sqlite` (apps-present-
+    /// without-done-flag scenario for direct SQLite imports).
+    pub fn count_singleton_config(&self) -> Result<usize, OpcGwError> {
+        let conn = self.pool.checkout(Duration::from_secs(5)).map_err(|e| {
+            trace!(error = %e, "Pool checkout timeout for count_singleton_config");
+            e
+        })?;
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM singleton_config", [], |row| row.get(0))
+            .map_err(|e| OpcGwError::Database(format!("count_singleton_config: {}", e)))?;
+        Ok(count as usize)
+    }
+
+    /// Read all rows from `singleton_config` as `(section, key, value)` triples.
+    /// The Rust-side caller (`AppConfig::load_singleton_from_sqlite`) routes
+    /// each triple into the matching typed struct field via section + key
+    /// dispatch. Boot-time call; not on the hot path.
+    pub fn load_singleton_config(
+        &self,
+    ) -> Result<Vec<(String, String, String)>, OpcGwError> {
+        let conn = self.pool.checkout(Duration::from_secs(5)).map_err(|e| {
+            warn!(error = %e, "Pool checkout timeout for load_singleton_config");
+            e
+        })?;
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT section, key, value FROM singleton_config ORDER BY section, key",
+            )
+            .map_err(|e| OpcGwError::Database(format!("load_singleton_config prepare: {}", e)))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+            .map_err(|e| OpcGwError::Database(format!("load_singleton_config query: {}", e)))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| {
+                OpcGwError::Database(format!("load_singleton_config row: {}", e))
+            })?);
+        }
+        Ok(out)
+    }
+
+    /// Atomically replace all rows for a given section in `singleton_config`.
+    /// The caller supplies (key, value) pairs; existing rows for the section
+    /// are deleted first, then the new rows are inserted. Used by D-1's
+    /// `PUT /api/config/singleton/<section>` endpoint (D-0 ships the helper;
+    /// D-1 wires it to HTTP).
+    ///
+    /// Wrapped in `BEGIN IMMEDIATE TRANSACTION` so a partial write cannot
+    /// leave the section half-empty. The `section` argument is validated by
+    /// the schema-level CHECK constraint — invalid sections fall out of the
+    /// INSERT with a CHECK violation rolled back by the IMMEDIATE txn.
+    pub fn write_singleton_section(
+        &self,
+        section: &str,
+        fields: &[(String, String)],
+    ) -> Result<(), OpcGwError> {
+        let conn = self.pool.checkout(Duration::from_secs(5)).map_err(|e| {
+            warn!(error = %e, "Pool checkout timeout for write_singleton_section");
+            e
+        })?;
+        conn.execute_batch("BEGIN IMMEDIATE TRANSACTION").map_err(|e| {
+            OpcGwError::Database(format!("write_singleton_section: begin: {}", e))
+        })?;
+        let result: Result<(), OpcGwError> = (|| {
+            conn.execute(
+                "DELETE FROM singleton_config WHERE section = ?1",
+                rusqlite::params![section],
+            )
+            .map_err(|e| OpcGwError::Database(format!("write_singleton_section: delete: {}", e)))?;
+
+            let now = format_rfc3339(&Utc::now());
+            let mut stmt = conn
+                .prepare_cached(
+                    "INSERT INTO singleton_config (section, key, value, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                )
+                .map_err(|e| {
+                    OpcGwError::Database(format!("write_singleton_section: prepare: {}", e))
+                })?;
+            for (k, v) in fields {
+                stmt.execute(rusqlite::params![section, k, v, now])
+                    .map_err(|e| {
+                        OpcGwError::Database(format!(
+                            "write_singleton_section: insert section={} key={}: {}",
+                            section, k, e
+                        ))
+                    })?;
+            }
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                conn.execute_batch("COMMIT").map_err(|e| {
+                    OpcGwError::Database(format!("write_singleton_section: commit: {}", e))
+                })?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
     /// Insert a device and all its metrics in one EXCLUSIVE transaction.
     /// Used by `create_device` so the device row and metric rows are
     /// committed atomically or not at all.

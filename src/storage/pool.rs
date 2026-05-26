@@ -65,6 +65,22 @@ impl ConnectionPool {
         // Handle database corruption/repair before creating connections
         Self::detect_and_repair_database(path)?;
 
+        // Story D-0 AC#12 (AI-C-SEC-2 from Epic C security review):
+        // Tighten the SQLite database file mode to 0o600 on fresh
+        // creation. The Connection::open call below either opens an
+        // existing file (we don't touch its mode — preserve operator's
+        // umask + supervisor permission model) or creates a new file
+        // (we chmod 0o600 immediately so config + metric values aren't
+        // world-readable in the default 0o022-umask deployment).
+        //
+        // Existing wider-mode databases are flagged once per boot via
+        // the `storage_init` warn event below, with the runbook
+        // documenting the operator-action chmod recipe.
+        //
+        // Unix-only — Windows uses ACLs; the chmod call has no equivalent.
+        // Documented as a gap in docs/security.md per AC#24.
+        let was_fresh_creation = !std::path::Path::new(path).exists();
+
         let mut connections = Vec::with_capacity(size);
         let mut available = Vec::with_capacity(size);
 
@@ -76,8 +92,55 @@ impl ConnectionPool {
                 ))
             })?;
 
+            // Apply chmod 0o600 on the first connection's fresh creation
+            // (subsequent loop iterations re-open the same file). Skip on
+            // non-Unix targets.
+            #[cfg(unix)]
+            if i == 0 && was_fresh_creation {
+                use std::os::unix::fs::PermissionsExt;
+                if let Err(e) = std::fs::set_permissions(
+                    path,
+                    std::fs::Permissions::from_mode(0o600),
+                ) {
+                    tracing::warn!(
+                        event = "storage_init",
+                        path = %path,
+                        error = %e,
+                        "Failed to set SQLite DB file mode to 0o600 on fresh creation; \
+                         configuration data may be world-readable per process umask"
+                    );
+                } else {
+                    tracing::info!(
+                        event = "storage_init",
+                        path = %path,
+                        "SQLite DB file mode set to 0o600 on fresh creation"
+                    );
+                }
+            }
+
             connections.push(conn);
             available.push(i);
+        }
+
+        // Story D-0 AC#12: once-per-boot warn for existing databases
+        // whose mode is wider than 0o600. Operator-action recipe lives
+        // in docs/d-0-migration-runbook.md.
+        #[cfg(unix)]
+        if !was_fresh_creation {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(path) {
+                let mode = meta.permissions().mode() & 0o777;
+                if mode & 0o077 != 0 {
+                    tracing::warn!(
+                        event = "storage_init",
+                        path = %path,
+                        mode = format!("{:o}", mode),
+                        "SQLite DB file mode is wider than 0o600; configuration and \
+                         metric values may be readable by other local users. See \
+                         docs/d-0-migration-runbook.md for the chmod recipe."
+                    );
+                }
+            }
         }
 
         tracing::info!(

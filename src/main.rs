@@ -644,6 +644,85 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Story D-0 Task 3: one-shot singleton-config migration. Runs
+    // immediately after the C-6 `[[application]]` migration above. Mirrors
+    // C-6's shape (primary done-flag guard + secondary back-fill guard +
+    // placeholder-secrets guard + best-effort fall-back). Failure is
+    // non-fatal: the gateway continues with the TOML-driven singleton
+    // values for the current boot (transition safety net, D-0 AC#6).
+    match storage::migrate_singleton_config::migrate_singleton_toml_to_sqlite(
+        &application_config,
+        &sqlite_backend,
+    ) {
+        Ok(storage::migrate_singleton_config::SingletonMigrationOutcome::Migrated(report)) => {
+            info!(
+                sections = report.sections,
+                rows = report.rows,
+                duration_ms = report.duration_ms,
+                "Singleton config TOML→SQLite migration complete"
+            );
+        }
+        Ok(storage::migrate_singleton_config::SingletonMigrationOutcome::AlreadyMigrated) => {
+            // Normal path after the first-boot singleton migration.
+        }
+        Ok(
+            storage::migrate_singleton_config::SingletonMigrationOutcome::SkippedEmptyOrPlaceholder,
+        ) => {
+            // Operator hasn't supplied secrets yet — retry on next boot.
+        }
+        Err(e) => {
+            let reason = if e.to_string().contains("singleton_row_count_mismatch") {
+                "singleton_row_count_mismatch"
+            } else if e.to_string().contains("row_count_mismatch") {
+                "row_count_mismatch"
+            } else {
+                "insert_failed"
+            };
+            warn!(
+                event = "config_migration_failed",
+                reason = reason,
+                error = %e,
+                "Singleton config TOML→SQLite migration failed; \
+                 continuing with TOML-driven singleton config (transition safety net)"
+            );
+        }
+    }
+
+    // Story D-0 Task 4 (partial): AC#7 says the in-memory AppConfig
+    // snapshot is rebuilt from SQLite post-migration so subsystems read
+    // SQLite-authoritative values. In D-0 we land the migration WRITE
+    // side (TOML → SQLite) + the read helper `load_singleton_config`,
+    // but we deliberately do NOT swap the AppConfig read path yet:
+    //
+    //   - `application_config` is wrapped in `Arc<AppConfig>` at line
+    //     ~444 and cloned into `reload_handle` (~554), `storage` (~575),
+    //     `OpcUa::new` / `ChirpstackPoller::new` / `WebAuthState` /
+    //     etc. before we have a queryable `SqliteBackend`. Overlaying
+    //     here would only mutate this binding; the subsystem clones
+    //     would still hold the figment-loaded snapshot.
+    //   - The subsystems read restart-required knobs (PKI paths, ports,
+    //     allowed_origins) ONCE at construction; rebuilding the watch
+    //     channel after that doesn't reach them.
+    //   - On the first post-D-0 boot, the migration writes TOML → SQLite
+    //     atomically, so the figment-loaded `application_config` and
+    //     the SQLite singleton snapshot are byte-equivalent for this
+    //     boot — overlay would be a no-op anyway.
+    //   - On subsequent boots, `config.toml` is still authoritative
+    //     for the figment loader (D-2 is the story that flips this).
+    //     Until D-2 lands, hand-edits to `config.toml` continue to
+    //     take effect on next boot, which is the documented v2.x
+    //     transition contract.
+    //
+    // The proper read-path swap belongs in D-2 alongside the TOML
+    // mutation-surface decommission, where the figment Provider stack
+    // can be reworked to put SQLite between the TOML and env-var
+    // layers (preserving AC#8 precedence ordering). D-0 ships the
+    // schema, helpers, and migration; D-2 ships the read-from-SQLite
+    // architectural pivot.
+    //
+    // Captured as a follow-up in `deferred-work.md` § "Deferred from
+    // implementation of D-0".
+
     // Story C-6 F1: seed the watch channel from SQLite so subsystems
     // (OPC UA, poller, web) operate on the authoritative SQLite state,
     // not the TOML snapshot that was in place at handle construction time.

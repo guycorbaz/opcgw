@@ -2123,6 +2123,61 @@ exactly 4 lines.
 
 ---
 
+## SQLite database file permissions (Story D-0, AI-C-SEC-2)
+
+Story D-0 (singleton config → SQLite migration) makes `data/opcgw.db`
+load-bearing for the full non-secret configuration surface — not just
+metric values + the post-C-6 `[[application]]` tree. The Epic C security
+review (`AI-C-SEC-2`) flagged that opening the database via `rusqlite::Connection::open`
+inherits the process umask, which on a typical deployment (umask 0o022)
+produces a world-readable file (0o644). D-0 closes this gap.
+
+### On-disk behaviour (Unix-family targets)
+
+- **Fresh creation:** opcgw chmod's the file to `0o600` immediately
+  after `Connection::open` returns, before any data is written. Emits
+  `event="storage_init" path="<db>" "SQLite DB file mode set to 0o600 on fresh creation"`
+  at `info`.
+- **Existing database (pre-D-0 deployments):** opcgw does NOT chmod
+  retroactively — operator-defined umask + supervisor permission models
+  are preserved. If the existing file mode is wider than `0o600`,
+  opcgw emits a once-per-boot warn at `event="storage_init"` with
+  `mode=<oct>`; the gateway continues normally.
+- **Windows:** the chmod call is gated by `#[cfg(unix)]` and does not
+  fire on Windows targets. Windows deployments rely on ACLs; consult
+  the Windows Server documentation for restricting access to the
+  service account.
+
+### Operator action — apply chmod to existing deployments
+
+After upgrading to a post-D-0 binary, apply the tightening manually:
+
+```bash
+chmod 0600 data/opcgw.db
+```
+
+For Docker deployments, ensure the bind-mounted volume preserves the
+mode. For systemd deployments, set `UMask=0077` in the service unit
+so future opcgw-created files inherit the tight default. The D-0
+migration runbook (`docs/d-0-migration-runbook.md`) documents the
+full operator recipe including SELinux relabel notes.
+
+### Why D-0 doesn't chmod retroactively
+
+Three reasons:
+
+1. **Operator supervisor models vary.** A `0o644` file may be
+   intentional — e.g. a deployment where a monitoring user reads the
+   database via a tight group membership. Retroactively chmod'ing would
+   break that without warning.
+2. **The warn-once-per-boot event makes the gap operator-visible.**
+   Operators who want the tightening can run `chmod 0600` after
+   reading the warn line.
+3. **Fresh deployments get the tight mode automatically** — the
+   common case is self-healing.
+
+---
+
 ## References
 
 - Story 7-1 spec: `_bmad-output/implementation-artifacts/7-1-credential-management-via-environment-variables.md`

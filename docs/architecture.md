@@ -6,13 +6,13 @@ permalink: /architecture/
 
 # Architecture Documentation — opcgw
 
-> Last updated: 2026-05-25 (Story C-6: SQLite as authoritative configuration store)
+> Last updated: 2026-05-26 (Story D-0: singleton config TOML→SQLite migration — in-progress, see § "Configuration architecture" below for the in-transition state)
 
 ## Executive Summary
 
 opcgw is a Rust-based gateway that bridges ChirpStack 4 (LoRaWAN Network Server) with OPC UA industrial automation clients. It runs concurrent async tasks — a ChirpStack gRPC poller, an OPC UA server, and an embedded web UI — that communicate through shared in-memory state backed by a SQLite database.
 
-**Configuration architecture (post-Story C-6):** The `[[application]]` tree (applications, devices, metrics, commands) is stored authoritatively in SQLite. The singleton sections (`[global]`, `[chirpstack]`, `[opcua]`, `[web]`) remain in `config.toml` for v2.x. All CRUD operations go through the web UI → SQLite → in-memory snapshot path. The TOML file is read once at boot to seed the initial config; the `[[application]]` section is no longer written or watched at runtime.
+**Configuration architecture (post-Story C-6, in-transition through Epic D):** The `[[application]]` tree (applications, devices, metrics, commands) is stored authoritatively in SQLite per Story C-6. Story D-0 adds the singleton sections (`[global]`, `[chirpstack]`, `[opcua]`, `[web]`) to SQLite via a one-shot boot-time migration into a new `singleton_config(section, key, value)` table (schema v010). On the first post-D-0 boot the four non-secret sections are written to SQLite; secrets (`api_token`, `user_password`) stay in `config/secrets.toml` (chmod 0o600, established by Story C-0). Until Story D-2 lands, the figment loader continues to read `config.toml` on every boot for backward compatibility — the SQLite singleton snapshot is **written** in D-0 but the **read-path swap** (figment Provider reordering so SQLite overrides TOML between-boots) lands in D-2 alongside the TOML mutation-surface decommission. D-1 adds the web UI editor that writes through `SqliteBackend::write_singleton_section`. End-state (post-D-2): SQLite is canonical for non-secret config + applications + metric values; `config/secrets.toml` holds operator-supplied secrets; `config.toml` is bootstrap-seed-only and never mutated at runtime.
 
 ## System Architecture
 
