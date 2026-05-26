@@ -665,8 +665,12 @@ fn migration_already_migrated_does_not_overwrite_sqlite_data() {
     assert!(ids.contains(&"app-beta"), "app-beta present");
 }
 
-/// I2-F7: The done-flag is written to the `meta` table after a successful migration
-/// so subsequent boots hit the faster primary guard via `is_c6_migration_done()`.
+/// I2-F7: Verifies that `migrate_applications_config` (iter-1 code) writes the
+/// `c6_migration_done` flag to the `meta` table inside the EXCLUSIVE TRANSACTION
+/// on a fresh-DB migration, so subsequent boots hit the faster primary guard via
+/// `is_c6_migration_done()`. The iter-2 `write_c6_migration_done()` helper is NOT
+/// exercised here — the new helper is only called from the secondary already-migrated
+/// guard, which is covered by `migration_secondary_guard_backfills_meta_key` below.
 #[test]
 fn migration_meta_done_flag_is_written() {
     let (_dir, cfg, backend) = setup(TOML_TWO_APPS);

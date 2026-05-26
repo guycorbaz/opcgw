@@ -15,7 +15,7 @@ use crate::config::AppConfig;
 use crate::storage::SqliteBackend;
 use crate::utils::OpcGwError;
 use std::time::Instant;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Outcome of a `migrate_toml_to_sqlite` call.
 pub enum MigrationOutcome {
@@ -61,9 +61,18 @@ pub fn migrate_toml_to_sqlite(
     // Secondary check: non-empty applications table without the done-flag
     // (e.g. a direct SQLite import that bypassed migrate_applications_config).
     // Back-fill the meta key so future boots hit the faster primary guard.
+    // Back-fill is best-effort: data is already intact, so a transient pool
+    // failure here must not surface as `config_migration_failed` upstream.
     let existing = backend.count_applications()?;
     if existing > 0 {
-        backend.write_c6_migration_done()?;
+        if let Err(e) = backend.write_c6_migration_done() {
+            warn!(
+                event = "config_migration",
+                stage = "already_migrated_backfill_failed",
+                error = %e,
+                "Meta key back-fill failed; data intact, next boot will retry"
+            );
+        }
         info!(
             event = "config_migration",
             stage = "already_migrated",
