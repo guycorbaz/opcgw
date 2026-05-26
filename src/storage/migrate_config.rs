@@ -15,7 +15,7 @@ use crate::config::AppConfig;
 use crate::storage::SqliteBackend;
 use crate::utils::OpcGwError;
 use std::time::Instant;
-use tracing::{error, info};
+use tracing::info;
 
 /// Outcome of a `migrate_toml_to_sqlite` call.
 pub enum MigrationOutcome {
@@ -50,7 +50,7 @@ pub fn migrate_toml_to_sqlite(
     // applications via the web UI — row-count alone would false-trigger
     // re-migration in that scenario).
     if backend.is_c6_migration_done()? {
-        let existing = backend.count_applications().unwrap_or(0);
+        let existing = backend.count_applications()?;
         info!(
             event = "config_migration",
             stage = "already_migrated",
@@ -60,8 +60,10 @@ pub fn migrate_toml_to_sqlite(
     }
     // Secondary check: non-empty applications table without the done-flag
     // (e.g. a direct SQLite import that bypassed migrate_applications_config).
+    // Back-fill the meta key so future boots hit the faster primary guard.
     let existing = backend.count_applications()?;
     if existing > 0 {
+        backend.write_c6_migration_done()?;
         info!(
             event = "config_migration",
             stage = "already_migrated",
@@ -98,18 +100,6 @@ pub fn migrate_toml_to_sqlite(
                 duration_ms,
             }))
         }
-        Err(e) => {
-            let reason = if e.to_string().contains("row_count_mismatch") {
-                "row_count_mismatch"
-            } else {
-                "insert_failed"
-            };
-            error!(
-                event = "config_migration_failed",
-                reason = reason,
-                error = %e,
-            );
-            Err(e)
-        }
+        Err(e) => Err(e),
     }
 }

@@ -90,6 +90,7 @@ fi
 
 if [[ "$APP_COUNT" -eq 0 && -n "$MIG_TS" ]]; then
     info "Migration done-flag is set ($MIG_TS) but applications table is empty — operator has deleted all applications via the web UI (normal post-migration state)."
+    pass "C-6 migration: done-flag present, applications intentionally empty."
     exit 0
 fi
 

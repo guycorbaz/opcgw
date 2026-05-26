@@ -636,11 +636,10 @@ fn migration_duration_ms_is_populated() {
     }
 }
 
-/// F14 (iter-1 patch): AlreadyMigrated path returns correct data from
-/// load_all_applications_config so the boot-time watch-channel seeding
-/// in main.rs (F1 patch) receives the right application list.
+/// F14 (iter-1 patch): AlreadyMigrated path does not overwrite SQLite data with
+/// stale TOML; the second call to migrate_toml_to_sqlite is a pure no-op.
 #[test]
-fn migration_already_migrated_returns_sqlite_data_for_watch_seeding() {
+fn migration_already_migrated_does_not_overwrite_sqlite_data() {
     // First boot: migrate.
     let (_dir, cfg, backend) = setup(TOML_TWO_APPS);
     let outcome = migrate_toml_to_sqlite(&cfg, &backend).expect("first migrate");
@@ -664,4 +663,49 @@ fn migration_already_migrated_returns_sqlite_data_for_watch_seeding() {
     let ids: Vec<&str> = apps.iter().map(|a| a.application_id.as_str()).collect();
     assert!(ids.contains(&"app-alpha"), "app-alpha present");
     assert!(ids.contains(&"app-beta"), "app-beta present");
+}
+
+/// I2-F7: The done-flag is written to the `meta` table after a successful migration
+/// so subsequent boots hit the faster primary guard via `is_c6_migration_done()`.
+#[test]
+fn migration_meta_done_flag_is_written() {
+    let (_dir, cfg, backend) = setup(TOML_TWO_APPS);
+    assert!(!backend.is_c6_migration_done().expect("pre-check"), "no flag before migration");
+    migrate_toml_to_sqlite(&cfg, &backend).expect("migrate");
+    assert!(backend.is_c6_migration_done().expect("post-check"), "flag must be set after migration");
+}
+
+/// I2-F4: Secondary already-migrated guard — apps present in SQLite but no
+/// done-flag (e.g. direct SQLite import that bypassed migrate_applications_config).
+/// Must return AlreadyMigrated AND back-fill the meta key so future boots use
+/// the faster primary guard.
+#[test]
+fn migration_secondary_guard_backfills_meta_key() {
+    use opcgw::config::ChirpStackApplications;
+    let (_dir, cfg, backend) = setup(TOML_TWO_APPS);
+
+    // Seed the DB directly (bypassing migrate_toml_to_sqlite) — no done-flag written.
+    let app = ChirpStackApplications {
+        application_id: "direct-import-app".to_string(),
+        application_name: "Direct Import".to_string(),
+        device_list: vec![],
+    };
+    backend.insert_application(&app).expect("direct insert");
+
+    // Precondition: done-flag is absent, but apps table is non-empty.
+    assert!(!backend.is_c6_migration_done().expect("pre-check"), "no flag before secondary guard");
+    assert!(backend.count_applications().expect("count") > 0, "app must be present");
+
+    // migrate_toml_to_sqlite must take the secondary guard path.
+    let outcome = migrate_toml_to_sqlite(&cfg, &backend).expect("migrate");
+    assert!(
+        matches!(outcome, MigrationOutcome::AlreadyMigrated),
+        "secondary guard must return AlreadyMigrated"
+    );
+
+    // Done-flag must now be back-filled.
+    assert!(
+        backend.is_c6_migration_done().expect("post-check"),
+        "secondary guard must back-fill the meta done-flag"
+    );
 }

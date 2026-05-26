@@ -802,3 +802,8 @@ iter-2 of bmad-code-review C-1 caught **2 HIGH + 2 MED + several LOW** in iter-1
 - F13 (LOW): FK pragma must be enabled per-connection — `src/storage/sqlite.rs`. `PRAGMA foreign_keys = ON` is set on each connection via `connection_hook`. Pre-existing pattern across codebase; risk that a raw connection bypasses the hook. Not a C-6-specific regression.
 - F15 (LOW): `duration_ms` includes pool-checkout time — `src/storage/migrate_config.rs:66`. Timer starts before `migrate_applications_config()` which internally does a pool checkout (up to 5 s timeout). Cosmetic accuracy issue; pool checkout is typically sub-millisecond.
 - F17 (LOW): Unstructured `info!` startup log block in `main.rs` — pre-existing style inconsistency; not a C-6 regression.
+
+## Deferred from: code review iter-2 of C-6-toml-to-sqlite-config-migration (2026-05-26)
+
+- I2-F10 (LOW): Identical `stage="already_migrated"` for two distinct paths — primary (done-flag present) and secondary (apps > 0, no flag) both emit `stage="already_migrated"` with no distinction. Operators cannot tell which path fired. Deferred: I2-F6 fix (secondary guard back-fills meta key) will over time eliminate the secondary path for all DBs; distinguishing the stages adds noise before that transition completes.
+- I2-F11 (LOW): Two pool round-trips per AlreadyMigrated boot — `is_c6_migration_done()` + `count_applications()` could be one query returning `Option<String>` (the timestamp). Minor optimisation; pool checkout is sub-millisecond on warm boot; deferred.

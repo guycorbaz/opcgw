@@ -629,8 +629,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // C-0 empty-bootstrap: no applications in TOML to migrate.
         }
         Err(e) => {
+            let reason = if e.to_string().contains("row_count_mismatch") {
+                "row_count_mismatch"
+            } else {
+                "insert_failed"
+            };
             warn!(
                 event = "config_migration_failed",
+                reason = reason,
                 error = %e,
                 "TOML→SQLite config migration failed; \
                  continuing with TOML-driven config (transition safety net)"

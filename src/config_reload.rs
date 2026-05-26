@@ -72,20 +72,13 @@ impl ConfigReloadHandle {
         let mut candidate = (*live).clone();
         let app_count = new_apps.len();
         candidate.application_list = new_apps;
-        if self.tx.send(Arc::new(candidate)).is_err() {
-            warn!(
-                event = "config_reload_warn",
-                reason = "no_subscribers",
-                "Watch channel send failed — all subscribers have dropped"
-            );
-        } else {
-            info!(
-                event = "config_reload",
-                trigger = "crud_write",
-                application_count = app_count,
-                "Application config snapshot rebuilt from SQLite"
-            );
-        }
+        self.tx.send_replace(Arc::new(candidate));
+        info!(
+            event = "config_reload",
+            trigger = "crud_write",
+            application_count = app_count,
+            "Application config snapshot rebuilt from SQLite"
+        );
     }
 }
 

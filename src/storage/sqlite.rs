@@ -3111,7 +3111,7 @@ impl SqliteBackend {
     /// applications via the web UI cannot re-trigger migration on restart.
     pub fn is_c6_migration_done(&self) -> Result<bool, OpcGwError> {
         let conn = self.pool.checkout(Duration::from_secs(5)).map_err(|e| {
-            trace!(error = %e, "Pool checkout timeout for is_c6_migration_done");
+            warn!(error = %e, "Pool checkout timeout for is_c6_migration_done");
             e
         })?;
         let count: i64 = conn
@@ -3122,6 +3122,24 @@ impl SqliteBackend {
             )
             .map_err(|e| OpcGwError::Database(format!("is_c6_migration_done: {}", e)))?;
         Ok(count > 0)
+    }
+
+    /// Write the C-6 migration done-flag to the `meta` table so the primary
+    /// idempotency guard in `migrate_toml_to_sqlite` fires on subsequent boots.
+    /// Called by the secondary already-migrated guard to back-fill the flag for
+    /// databases populated via a direct SQLite import that bypassed the normal
+    /// migration path.
+    pub fn write_c6_migration_done(&self) -> Result<(), OpcGwError> {
+        let conn = self.pool.checkout(Duration::from_secs(5)).map_err(|e| {
+            warn!(error = %e, "Pool checkout timeout for write_c6_migration_done");
+            e
+        })?;
+        conn.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES ('c6_migration_done', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+            [],
+        )
+        .map_err(|e| OpcGwError::Database(format!("write_c6_migration_done: {}", e)))?;
+        Ok(())
     }
 
     pub fn count_applications(&self) -> Result<usize, OpcGwError> {
