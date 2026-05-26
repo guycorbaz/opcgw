@@ -70,7 +70,8 @@ pub fn migrate_toml_to_sqlite(
                 event = "config_migration",
                 stage = "already_migrated_backfill_failed",
                 error = %e,
-                "Meta key back-fill failed; data intact, next boot will retry"
+                "Meta key back-fill failed; data intact, retry attempted on \
+                 subsequent boots if backend is healthy"
             );
         }
         info!(

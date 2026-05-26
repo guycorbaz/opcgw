@@ -61,6 +61,14 @@ event="config_migration" stage="skipped_empty_source"
 ```
 or simply nothing (already-migrated DB is silently a no-op at schema version 9+).
 
+A secondary already-migrated guard back-fill failure (apps present but done-flag write fails — e.g. a direct SQLite import on a pool-exhausted boot) produces:
+
+```
+event="config_migration" stage="already_migrated_backfill_failed" error="..."
+```
+
+Non-fatal — the applications table is intact and the gateway boots normally. The secondary guard re-fires on every subsequent boot until the done-flag is successfully written, so a transient pool-exhaustion clears itself; a persistent failure (e.g. disk full) warns on every boot but does not block service.
+
 A failed migration produces:
 
 ```

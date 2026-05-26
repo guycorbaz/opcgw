@@ -507,3 +507,23 @@ Sources: Blind Hunter (BH), Edge Case Hunter (ECH), Acceptance Auditor (AA — *
 - [Dismiss] BH-F06 (LOW): Test rename breaks `git bisect` by old name — cosmetic; `git log --follow` and content-based bisection both work.
 - [Dismiss] BH-F07 (LOW): `pass` function may not be defined in `check-c6-migration.sh` — ECH Investigation-8 verified `pass()` IS defined in the script.
 - [Dismiss] BH-F08 (LOW): `warn!` import not visible in diff — BH self-flagged as unverifiable from diff alone; `cargo test` + `cargo clippy` pass, confirming the import is present.
+
+---
+
+### Review Findings — Iter-4 (2026-05-26)
+
+Sources: Blind Hunter (BH), Edge Case Hunter (ECH), Acceptance Auditor (AA). Scope: iter-3 commit `e59fed2` (106 lines, 2 files). 5 raw findings → 2 patch (doc-only), 1 defer, 1 dismiss. AA verified I3-F2 code logic is correct. **The two patches are doc-string/doc-file only; iter-5 NOT mandatory.**
+
+#### Patch
+
+- [x] [Review][Patch] **I4-F1 (MED) — `warn!` message "next boot will retry" overstates the retry guarantee** [`src/storage/migrate_config.rs:78`] — Message says "Meta key back-fill failed; data intact, next boot will retry". The retry claim is mechanically correct only if `count_applications()` succeeds on next boot — but that call still uses `?` (line 73, unchanged from iter-3). A persistent pool-exhaustion that fails both `count_applications` AND `write_c6_migration_done` would surface as `config_migration_failed` upstream on every boot, defeating the "retry on next boot" guarantee. Fix: weaken the message to "Meta key back-fill failed; data intact, retry attempted on subsequent boots if backend is healthy" — or note explicitly that retry is contingent on `count_applications` succeeding. [Sources: BH-F01]
+
+- [x] [Review][Patch] **I4-F2 (LOW) — `stage="already_migrated_backfill_failed"` is undocumented (AC#24 violation)** [`docs/logging.md:~199`, `docs/c-6-migration-runbook.md:~60-74`] — AC#24 requires `docs/logging.md` to document all `config_migration` event variants. The taxonomy lists `stage="toml_to_sqlite"`, `stage="already_migrated"`, `stage="skipped_empty_source"` (all `info`). The iter-3 patch introduced `stage="already_migrated_backfill_failed"` at `warn!` level, which is absent from both `logging.md` and `c-6-migration-runbook.md`. Operators consulting the docs cannot triage this event. Fix: add the new stage variant to `docs/logging.md` (note: severity `warn`, includes `error=<str>` field, fires when back-fill side-task fails but data is intact) and add a one-liner to `c-6-migration-runbook.md` documenting that this is a non-fatal warn-only event with auto-retry. [Sources: ECH-F01, AA-F01]
+
+#### Deferred
+
+- [x] [Review][Defer] **I4-F3 (LOW) — Dual-emit `info(stage="already_migrated")` after `warn(stage="already_migrated_backfill_failed")`** [`src/storage/migrate_config.rs:81-85`] — Reviewer-flagged but on inspection the two events answer different questions (the `info` records the outcome of the migration call; the `warn` records the side-task failure). Not contradictory. Reorganising the emission to fire mutually-exclusive stages would conflate concerns and break the documented `stage="already_migrated"` taxonomy entry. Deferred as design intent.
+
+#### Dismissed
+
+- [Dismiss] BH-F03 (LOW): Docstring claim "inside the EXCLUSIVE TRANSACTION" over-specific — ECH Investigation-4 verified the docstring is accurate (`migrate_applications_config` at `sqlite.rs:3316` does open `BEGIN EXCLUSIVE TRANSACTION` and the meta key write at `sqlite.rs:3463-3467` is inside that transaction). No misleading claim; dismissed.
