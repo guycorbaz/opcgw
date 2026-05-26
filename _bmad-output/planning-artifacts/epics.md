@@ -1273,3 +1273,86 @@ So that all writes (web UI, future automation APIs, eventual ChirpStack-driven a
 **Vision capture reference:** see memory `project_epic_c_auto_discovery_vision.md` (Guy 2026-05-20, scope finalised 2026-05-21) for the load-bearing name-translation rationale and the three design decisions resolved at scope time (duplicate scope = same-level only; metric inventory discovery = scrape recent uplinks; wire type default = observation-driven).
 
 **Deferred CR:** `CR-EPIC-C-MQTT` in `../implementation-artifacts/deferred-work.md` — the originally-proposed Story C-5 (MQTT-based real-time path) was removed from Epic C on 2026-05-21 ("not willing to implement MQTT, at least now") to keep this epic finishable. Re-promote to a story in a future epic only on explicit operator request.
+
+---
+
+## Epic D: Singleton Configuration → SQLite
+
+**Numbering offset:** literal name `Epic D` in `sprint-status.yaml`, continuing the lettered post-numeric-epic convention (A/B/C/D). Stories use sprint-status keys `D-0`, `D-1`, `D-2`. 3-story epic — deliberately narrower than Epic C to keep the scope tight and finishable.
+
+**Why it exists:** Story C-6 (2026-05-26) moved the `[[application]]` tree (applications/devices/metrics/commands) from `config.toml` into SQLite as the canonical store. The remaining `config.toml` sections — `[global]`, `[chirpstack]`, `[opcua]`, `[web]` — are *singleton* config (one row per section, not a collection) and stayed in TOML for v2.x per the C-6 spec's explicit deferral. Epic D lands the natural follow-up: migrate the singleton sections to SQLite so `config.toml` becomes a pure bootstrap-seed file with no runtime mutation surface. Secrets (`[chirpstack].api_token`, `[opcua].user_password`) stay in `config/secrets.toml` per the Story C-0 pattern — chmod 0600 via atomic-rename keeps secrets out of the world-readable SQLite database (cf. AI-C-SEC-2 from the Epic C security review). The end state: opcgw has exactly **three** persistence surfaces — SQLite (configuration + metric values), `secrets.toml` (operator-supplied secrets, chmod 0600), and `config.toml` (bootstrap seed only, never mutated at runtime). Guy's articulated end-state from 2026-05-20 — *"In the final version, all configuration should be in database"* — is fully realised by Epic D combined with what C-6 already shipped.
+
+**FRs covered:** none from the original PRD (Epic D is a post-PRD addition driven by the 2026-05-26 Epic C retrospective's "natural C-6 follow-up" recommendation). Implicit functional contract per story: D-0 = bulk one-shot migration of `[global]`/`[chirpstack]`/`[opcua]`/`[web]` non-secret fields into SQLite, mirroring C-6's pattern; D-1 = web UI page for editing singleton config with restart-required-knob awareness; D-2 = decommission TOML mutation surface, making `config.toml` bootstrap-seed-only.
+
+**Sequencing:** D-0 is the prerequisite for D-1 + D-2. D-1 and D-2 can run in parallel after D-0 (D-1 is additive — new UI page + new POST handlers; D-2 is subtractive — delete remaining TOML write paths). D-2 should land **last** in the epic, symmetric with C-6's "must-land-last" constraint in Epic C, because it removes the TOML safety net that D-0's migration falls back to on row-count mismatch.
+
+**Carry-forward from Epic C retro:** Epic D is the natural home for partial resolution of these v2.x action items: **AI-C-SEC-2** (SQLite database file permissions — D-0's migration adds singleton config to `data/opcgw.db`, making the file-permission tightening load-bearing). It is NOT the home for **AI-C-SEC-1** (`prune_old_metrics` SQL format-string — Epic A/storage territory), **AI-C-SEC-3** (`setup_get` filename log — Story C-0 territory, simple one-line fix), or the cumulative skill-codification debt (AI-A-1/2/3 + AI-B-1/2/3 + AI-C-1/2 — needs a dedicated skill-codification epic, not bolted onto a data-migration epic).
+
+### Story D.0: Singleton Config → SQLite Migration
+
+As an **opcgw operator running a post-D-0 binary**,
+I want the gateway's `[global]`, `[chirpstack]`, `[opcua]`, and `[web]` non-secret singleton config to migrate from `config.toml` into SQLite on first boot,
+So that all configuration writes converge on a single canonical store and `config.toml` no longer needs runtime mutation.
+
+**Scope summary (full Acceptance Criteria to be drafted when `bmad-create-story D-0` is invoked):**
+
+- Schema migration **v010** (incrementing from C-6's v009) adds a `singleton_config` table — design call between (a) generic key-value `(section TEXT, key TEXT, value TEXT)` with composite PK and (b) per-section typed tables (`global_config`, `chirpstack_config`, `opcua_config`, `web_config`) is **deferred to Dev Notes during D-0 implementation**. The C-6 precedent for `[[application]]` was per-entity typed tables; the singleton sections may benefit from a single typed-by-section table since each section has its own fixed schema.
+- Boot-time one-shot migration mirrors C-6's pattern: detect empty SQLite singleton tables + non-empty TOML singleton sections → open `BEGIN EXCLUSIVE TRANSACTION`, insert all rows, verify count per section, commit + write `d0_migration_done` meta done-flag. Fall back to TOML-driven boot on row-count mismatch or insert failure (transition safety net).
+- Secondary already-migrated guard with meta-key back-fill (C-6 iter-2/iter-3 doctrine carry-over).
+- Post-migration: ALL reads of singleton config come from SQLite (rebuilt into the in-memory `AppConfig` snapshot at boot); TOML is read once at boot to seed the migration on the first post-D-0 startup and never again afterwards.
+- **Secrets stay in `config/secrets.toml`** — `[chirpstack].api_token`, `[opcua].user_password` are explicitly out of D-0's scope. The figment provider stack (TOML + secrets.toml + env-var) keeps the secrets.toml layer; only the TOML layer changes from "authoritative for singletons" to "bootstrap seed only."
+- Restart-required knobs (`[opcua].host_port`, `[opcua].host_ip_address`, `[web].port`, `[chirpstack].server_address`, `[web].allowed_origins` from issue #113, all PKI paths) are **read once at boot from SQLite** and continue to require a process restart to take effect. D-0 does NOT introduce live hot-reload for these knobs — that surface stays restart-required for v2.x.
+- Hot-reloadable knobs (e.g. `[chirpstack].poll_frequency`, `[global]` log-level if applicable) continue to hot-reload via the existing `notify_crud_write` path Story C-6 wired up — they just read from SQLite now instead of from TOML watcher events.
+- New `docs/d-0-migration-runbook.md` + `scripts/check-d0-migration.sh` operator tools (mirrors C-6 deliverables).
+- DocBook user manual Configuration chapter updated to reflect the two-surface model: SQLite for runtime config, `config.toml` for bootstrap-seed only, `config/secrets.toml` for operator-supplied secrets.
+- Integration tests cover: (a) fresh-DB boot with populated TOML — migration runs, SQLite singleton tables populate, in-memory snapshot matches TOML byte-for-byte; (b) re-boot with already-migrated SQLite — migration no-ops via primary guard; (c) secondary guard fires with apps present but no flag (mirrors C-6 I2-F4 test); (d) restart-required knob change via D-1 UI surfaces operator warning + supervisor restart.
+- AC#24 doc-sync gate (Epic C retro carry-forward): `docs/logging.md` is updated to document the new `config_migration` stage values (`stage="singleton_toml_to_sqlite"`, `stage="singleton_already_migrated"`, `stage="singleton_already_migrated_backfill_failed"`) in the same commit as the code.
+
+### Story D.1: Singleton Config Editor in the Web UI
+
+As an **opcgw operator running a post-D-1 binary**,
+I want to edit `[global]`, `[chirpstack]`, `[opcua]`, and `[web]` config knobs through the web UI,
+So that I can adjust gateway behaviour without SSH-ing in to edit TOML files.
+
+**Scope summary:**
+
+- New `static/singleton-config.html` page covering all 4 sections (one collapsible section per `[X]` group). Mirrors C-2's CRUD UI pattern (basic Auth + CSRF gate).
+- New `GET /api/config/singleton` endpoint returns the current snapshot (basic-auth required; CSRF-exempt because GET).
+- New `PUT /api/config/singleton/<section>` endpoint replaces one section's values (basic-auth + CSRF-gated; validates the section's value shape via the existing `AppConfig::validate` per-section helpers).
+- **Restart-required knob handling:** the UI explicitly labels which fields are restart-required (PKI paths, ports, allowed_origins) and presents a confirmation modal explaining "this change requires a gateway restart to take effect." Submit triggers a graceful `CancellationToken` restart via the same mechanism C-0's wizard uses, so the supervisor (Docker / systemd) restarts and the new SQLite values are read.
+- Hot-reloadable knobs (e.g. `[chirpstack].poll_frequency`, log levels) take effect immediately via the existing `notify_crud_write` → in-memory snapshot rebuild path (no restart required; UI surfaces this distinction clearly).
+- Secrets (`api_token`, `user_password`) are NOT editable from this UI — they remain operator-supplied via `secrets.toml` or env-var overrides. The UI shows masked placeholders + a note "secrets are managed via `config/secrets.toml`."
+- New audit events: `singleton_config_updated` (info), `singleton_config_rejected` (warn with `reason="validation"|"csrf"|"reload_failed"`), `singleton_config_restart_required` (info).
+- Nav strip extended on all 7 sites (`index/applications/devices-config/devices/metrics/commands/inventory-drift/singleton-config`).
+- Integration tests cover: GET returns current snapshot; PUT validates and persists; restart-required PUT triggers shutdown_token cancellation; hot-reloadable PUT triggers notify_crud_write; auth + CSRF carry-forward intact.
+
+### Story D.2: Decommission TOML Mutation Surface (must-land-last)
+
+As an **opcgw operator running a post-D-2 binary**,
+I want `config.toml` to be exclusively a bootstrap-seed file that opcgw never mutates at runtime,
+So that the operator contract is unambiguous: edit SQLite via the web UI (or `secrets.toml` for secrets); `config.toml` is read once at first boot and is otherwise inert.
+
+**Scope summary:**
+
+- Delete any remaining figment write paths, TOML mutation code, or `toml_edit` usage (`toml_edit` was already removed in C-6 per spec; D-2 is the final sweep).
+- `config.toml` becomes a **read-once-at-bootstrap** file: the figment provider stack still loads it on every boot for backward compatibility (operators with existing `config.toml` files don't need to migrate by hand), but once the SQLite singleton tables are populated, the TOML values are ignored at runtime in favour of the SQLite snapshot.
+- Update `architecture.md` to reflect the final two-surface model (SQLite authoritative; `secrets.toml` for secrets; `config.toml` bootstrap-seed-only).
+- DocBook user manual Configuration chapter is rewritten — NOT just patched — to describe the new operator-facing contract end-to-end. Operators who learned opcgw pre-D-2 need a clear migration narrative.
+- Audit log: emit `event="config_toml_unused_warning"` at `warn` level on every boot where `config.toml` is present AND the SQLite singleton tables are already populated, with a one-time-per-boot guard. The warning includes a recommended-action field ("config.toml is no longer mutated; verify it matches SQLite or delete it to remove operator confusion").
+- D-2 deliberately does NOT delete operators' existing `config.toml` files. Removal is left to operator action (documented in the runbook).
+- Integration tests cover: (a) operator with pre-D-2 `config.toml` + populated SQLite boots cleanly with the warn event firing once; (b) operator deletes `config.toml` post-migration → boot succeeds (SQLite is authoritative); (c) operator edits `config.toml` post-D-2 has no effect on runtime (proves the TOML is inert).
+
+### Epic D — Story Acceptance Criteria
+
+**Given** opcgw is freshly deployed with the existing `config.toml` + `config/secrets.toml` + `data/opcgw.db` files from a pre-Epic-D version,
+**When** the operator deploys the post-D-2 binary,
+**Then** the gateway migrates singleton config from TOML to SQLite on first boot (D-0), provides a web UI for editing it (D-1), and explicitly disclaims any TOML mutation at runtime (D-2). The operator's `config.toml` file may be deleted after the migration is verified; the gateway operates from SQLite + `secrets.toml` alone.
+**And** the AI-C-SEC-2 follow-up (SQLite file permissions chmod 0600) is incorporated into D-0's deliverables so the now-load-bearing `data/opcgw.db` is not world-readable.
+
+**Vision capture reference:** Epic C retrospective recommendation, 2026-05-26 — "natural C-6 follow-up: migrate the singleton config sections to SQLite + add web UI for editing them." Memory `session_2026_05_26_epic_C_retro_done.md` carries the option-1 recommendation context.
+
+**Deferred / out-of-scope:**
+
+- Secrets-in-SQLite (encrypted-at-rest) — operator threat model has not shifted to justify the key-management surface; secrets stay in `secrets.toml`.
+- Live hot-reload for restart-required knobs (PKI paths, ports, `allowed_origins`) — issue #113 territory; D-1 surfaces restart-required UX clearly but does NOT change the underlying restart-required semantics.
+- `CR-EPIC-C-MQTT` (MQTT real-time path) — still deferred per Epic C scope decision; re-promote only on explicit operator request.
