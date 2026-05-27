@@ -1,3 +1,14 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) [2024] Guy Corbaz
+//
+// Story C-6 (commit 1c09911) extracted the SqliteBackend test suite
+// out of `sqlite.rs` into this sibling file via `#[path = "sqlite_tests.rs"]
+// mod tests;` (see `src/storage/sqlite.rs:3821`). The extraction
+// preserved the original indentation from the inner `mod tests { ... }`
+// block, which is why the test fns below start at column 4 instead of
+// column 0 — still valid Rust, since this file is included as the body
+// of the `tests` module declared in sqlite.rs.
+
     use super::*;
     use crate::storage::{StorageBackend, BatchMetricWrite};
     use std::time::SystemTime;
