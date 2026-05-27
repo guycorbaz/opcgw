@@ -1,6 +1,6 @@
 # Story D-0: Singleton Configuration → SQLite Migration
 
-Status: review
+Status: done
 
 | Field           | Value                                                                                                       |
 | --------------- | ----------------------------------------------------------------------------------------------------------- |
