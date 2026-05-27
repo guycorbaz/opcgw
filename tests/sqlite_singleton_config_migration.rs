@@ -532,10 +532,16 @@ fn singleton_existing_wider_db_is_not_chmod_retroactively() {
          no storage_init in captured logs:\n{}",
         logs
     );
+    // I3-F3 (iter-3): tighten the mode-field assertion to require the
+    // structured-log context. Bare `contains("644")` could be satisfied
+    // by unrelated content (e.g. a temp-dir path containing the digit
+    // sequence `644`); the field-prefix anchor pins the assertion to
+    // the storage_init warn's `mode=` field specifically.
     assert!(
-        logs.contains("644"),
-        "AC#12 part 2: storage_init warn must carry the file mode (644) so \
-         operators can identify the affected file; mode missing from logs:\n{}",
+        logs.contains("mode=\"644\"") || logs.contains("mode=644"),
+        "AC#12 part 2: storage_init warn must carry mode=\"644\" so operators \
+         can identify the file's actual permissions; expected `mode=\"644\"` or \
+         `mode=644` in captured logs:\n{}",
         logs
     );
 }

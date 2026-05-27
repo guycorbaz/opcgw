@@ -3418,8 +3418,14 @@ impl SqliteBackend {
                         ))
                     })?;
                 if actual as usize != fields.len() {
+                    // I3-F4 (iter-3): quote the section name so downstream
+                    // string parsers can unambiguously extract the section
+                    // even in the (theoretical) case where a section name
+                    // contains whitespace. Section names are a fixed enum
+                    // today (global / chirpstack / opcua / web) so this is
+                    // defensive against future schema extensions.
                     return Err(OpcGwError::Database(format!(
-                        "singleton_row_count_mismatch: expected={} actual={} section={}",
+                        "singleton_row_count_mismatch: expected={} actual={} section={:?}",
                         fields.len(),
                         actual,
                         section

@@ -608,3 +608,34 @@ Sources: Blind Hunter (BH, 10 findings), Edge Case Hunter (ECH, 1 finding focuse
 - [Dismiss] BH-F08 (LOW): "the wider-mode warn block may have been deleted in the iter-1 diff" — ECH investigation 7 verified the warn block at `src/storage/pool.rs:140-159` is intact; not regression-affected.
 - [Dismiss] BH-F10 (LOW): `drop(stmt)` is load-bearing for the borrow checker (releases shared borrow on `conn` so `query_row` can proceed); not a bug, compile-time enforced.
 - [Dismiss] ECH-others: ECH was sharply focused on a single high-signal finding (COMMIT poisoning); no other findings worth dismissing.
+
+---
+
+### Review Findings — Iter-3 (2026-05-27)
+
+Sources: Blind Hunter (BH, 8 findings), Edge Case Hunter (ECH, 3 findings + 10 investigations), Acceptance Auditor (AA, 2 findings). **27th cumulative iter-N+1 doctrine validation** — iter-3 caught 2 converged doc-sync gaps from iter-2's I2-F1 + I2-F9 patches. 13 raw findings → 4 patch (all doc-only or test tightening), 6 defer, 3 dismiss. **No new code introduced by iter-3 patches — iter-4 NOT mandatory.**
+
+#### Patch
+
+- [x] [Review][Patch] **I3-F1 (MED) — `docs/logging.md` still describes `storage_init` probe-failure as `debug` but I2-F9 raised it to `warn`** [`docs/logging.md:200`] — AA-F01 + ECH-F1 converged. I2-F9's commit message explicitly stated "debug → warn" for operator visibility but the matching doc update was missed. Operators reading the doc to configure log-level filters would expect DEBUG and miss the WARN events (or vice versa, configure WARN capture and miss what they expected to be DEBUG-suppressed). Fix: extended the `storage_init` event row to document the now-two `warn` variants (wider-mode existing DB + atomic-create probe failure) explicitly.
+
+- [x] [Review][Patch] **I3-F2 (LOW) — `docs/logging.md` doesn't document the `section=<name>` field added to `singleton_row_count_mismatch` by I2-F1** [`docs/logging.md:201`] — AA-F02 + ECH-F2 converged. The iter-2 per-section count refactor produces error messages with `section=<name>` for diagnostic precision, but the doc still describes it as "same shape" as C-6's two-field error. Operators following the runbook wouldn't know which section caused the mismatch. Fix: extended the `config_migration_failed` row to document the `error=<str>` field's diagnostic format and explicitly mention the `section=<name>` field.
+
+- [x] [Review][Patch] **I3-F3 (MED) — Test 16 `logs.contains("644")` assertion too broad — could false-positive on unrelated strings (temp-dir paths, port numbers, etc.)** [`tests/sqlite_singleton_config_migration.rs:540-547`] — BH-F04. Tightened to require the structured field context: `logs.contains("mode=\"644\"") || logs.contains("mode=644")` — pins the assertion to the storage_init warn's `mode=` field specifically.
+
+- [x] [Review][Patch] **I3-F4 (LOW) — Section name in `singleton_row_count_mismatch` error format not quoted; theoretically vulnerable to whitespace in a future section name** [`src/storage/sqlite.rs:3398-3405`] — BH-F05. Section names are a fixed enum today (global/chirpstack/opcua/web) so this is purely defensive. Fix: changed `section={}` to `section={:?}` — Rust's Debug format quotes strings with `"..."` so downstream parsers can unambiguously extract the section even if a future section name contains whitespace or special characters.
+
+#### Deferred
+
+- [x] [Review][Defer] **I3-F5 (LOW) — Empty-slice precondition error routes to `reason="insert_failed"` (BH/ECH-F3)** — Defensive guard not reachable in current code (`migrate_singleton_toml_to_sqlite` always constructs a 4-entry sections slice). If a future caller misuses the helper, the error would be misclassified. Deferred as unreachable; revisit if a typed-error refactor lands (D-0-FOLLOWUP-1).
+
+- [x] [Review][Defer] **I3-F6 (LOW) — `init_test_subscriber`'s `set_global_default` Err silently ignored (BH-F07)** — If another test or library installs a global tracing subscriber first, Test 16's `captured_logs()` reads from an unwritten buffer; assertions fail loudly (detectable, not silent). The failure message is sufficient for CI debugging. Deferred as low-impact + visible-on-failure.
+
+- [x] [Review][Defer] **I3-F7 (LOW) — Test 11 clock read happens AFTER first write; boundary sleep computed from a later moment (BH-F08)** — Cosmetic timing — the test still correctly guarantees the second write lands in a different SQLite second. May extend test duration on slow CI but doesn't break correctness. Deferred as cosmetic.
+
+#### Dismissed
+
+- [Dismiss] BH-F01 (HIGH→dismiss): "count_stmt drop/ROLLBACK ordering missing in Err arm" — ECH Investigation 2 + 9 verified the closure-Err path correctly drops `count_stmt` via Rust RAII at `?` propagation; the outer `match result { Err(e) => { let _ = conn.execute_batch("ROLLBACK"); Err(e) } }` covers the Err path (pre-existing from impl commit). BH misread the diff.
+- [Dismiss] BH-F02 (HIGH→dismiss): "`sleep_micros` u32 arithmetic overflow concerns" — BH self-downgraded after analysis (verified no overflow possible; `subsec_micros()` bounded to [0, 999_999]).
+- [Dismiss] BH-F03 (HIGH→dismiss): Test 16 captured-logs cross-test contamination — ECH Investigation 5 verified each test file is a separate test binary (separate processes); no cross-file contamination. Within-file concurrent contamination addressed by I3-F3's tighter `mode="644"` assertion.
+- [Dismiss] BH-F06 (MED→dismiss): "shared-cache mode could defeat fresh-Connection-per-read" — ECH Investigation 6 verified `PRAGMA journal_mode = WAL` is set on pool connections; fresh `rusqlite::Connection::open` on a WAL-mode DB sees the latest committed snapshot at the start of each read transaction. Test 11's fix is correct.
