@@ -175,6 +175,7 @@ impl Drop for StorageOpLog {
 /// let backend = SqliteBackend::with_pool(Arc::clone(&pool))?;
 /// // Use backend for reads/writes
 /// ```
+#[derive(Clone)]
 pub struct SqliteBackend {
     pool: Arc<ConnectionPool>,
     validator: Option<Arc<CommandValidator>>,

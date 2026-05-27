@@ -74,6 +74,40 @@ In first-run mode:
 
 `config/secrets.toml` is gitignored (added 2026-05-21) and must never be committed.
 
+## Singleton config editor (Story D-1 + D-2)
+
+Story D-1 (2026-05-27) introduced a web-UI editor for the four non-secret singleton sections (`[global]` / `[chirpstack]` / `[opcua]` / `[web]`) at `/singleton-config.html`, with the corresponding API surface at `GET /api/config/singleton` and `PUT /api/config/singleton/<section>`. Story D-2 (2026-05-27) closed the loop by replacing D-1's `Arc::make_mut` overlay with a structural figment Provider (`SqliteSingletonProvider`).
+
+### Editor surface contracts
+
+- **`GET /api/config/singleton`** is basic-auth-required + CSRF-exempt + returns the current AppConfig snapshot for the four sections. Secret fields (`[chirpstack].api_token`, `[opcua].user_password`) are NEVER returned — the response injects a static `<secret-managed-via-secrets.toml>` placeholder for each known secret per the `SECRET_FIELDS_BY_SECTION` constant in `src/storage/migrate_singleton_config.rs`. Operators cannot read real secret values through the editor.
+
+- **`PUT /api/config/singleton/<section>`** is basic-auth-required + CSRF-required + replaces all non-secret fields for the named section in a single transaction. Requests carrying secret field keys are rejected with HTTP 400 + `singleton_config_rejected reason="secret_field_not_editable"` (closed-enum taxonomy; storage faults use the separate `singleton_config_storage_error` event so the `_rejected` taxonomy stays scoped to client errors per the iter-1 I1-F3 finding).
+
+### Audit-event privacy contract
+
+The `singleton_config_updated` event records `section` + `field_count` + `auth_user` only — **never** the per-field VALUES. This is an explicit operator-data-protection contract: an operator updating a `[chirpstack].server_address` to a sensitive internal hostname must not have that hostname leak into the audit trail. The audit event surfaces the WHO + WHAT-SECTION + HOW-MANY-FIELDS, not the data itself.
+
+### Secret-store boundary
+
+Per the Epic D scoping decision (2026-05-26), secrets stay in `config/secrets.toml`. They are NOT migrated to SQLite even though the non-secret singleton fields are. Rationale:
+
+- `secrets.toml` is already chmod 0o600 via atomic-rename (Story C-0); moving secrets to SQLite would expose them to a wider attack surface (the SQLite file is read by many code paths; the file-permission boundary is the same but the in-database boundary is weaker).
+- The D-0 migration explicitly excludes the `SECRET_FIELDS_BY_SECTION` keys from being written to `singleton_config` — verify via `bash scripts/check-d0-migration.sh data/opcgw.db` that `chirpstack.api_token` and `opcua.user_password` rows are absent.
+- The D-1 editor surfaces those fields as read-only placeholders so an operator cannot accidentally write a secret via the UI.
+
+### Post-D-2 figment Provider security implications
+
+The `SqliteSingletonProvider` reads the singleton snapshot from SQLite on EVERY call to `AppConfig::from_path_with_sqlite`. Failure modes:
+
+- **Pool checkout failure or SQL execution error** — the Provider emits `config_provider_failed` (warn) and returns an empty figment Map, causing figment to fall through to the TOML layer. The gateway boots cleanly against the bootstrap-loaded `config.toml` values. This is the safety-net path for SQLite corruption or file-permission accidents.
+- **Malformed value JSON in a row** — the Provider skips that single row with a `config_provider_failed` warn carrying `section` + `key` + `error` fields, and continues processing the remaining rows. A corrupted singleton row does NOT brick the gateway.
+- **CHECK constraint violation** (unknown section name) — the schema CHECK constraint on `singleton_config.section` rejects writes to unknown sections, so this case is theoretically unreachable. The Provider does NOT crash if it occurs.
+
+### Restart-required vs. hot-reloadable knobs
+
+Most singleton fields are restart-required (the `Arc<AppConfig>` snapshot is captured once at boot and threaded through subsystems). The D-1 PUT handler invokes `state.shutdown_token.cancel()` after a successful write to trigger graceful supervisor restart. Genuinely hot-reloadable knobs (e.g. `[chirpstack].polling_frequency`) continue to flow through `ConfigReloadHandle::notify_crud_write` for the `[[application]]` tree but the singleton-side hot-reload story is deferred to issue #113's live-borrow refactor.
+
 ### Threat model for first-run mode
 
 - **Local network deployment assumption.** The wizard is intended to be reached on a trusted operator network (LAN, VPN, or jump-host). Deploying opcgw on a public-internet-facing interface during first-run is a security regression — set `OPCGW_OPCUA__USER_PASSWORD` via env-var BEFORE the first start to skip the wizard entirely.

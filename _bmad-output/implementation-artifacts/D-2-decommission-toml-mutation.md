@@ -1,13 +1,13 @@
 # Story D-2: Decommission TOML Mutation Surface (must-land-last)
 
-Status: ready-for-dev
+Status: review
 
 | Field           | Value                                                                                                       |
 | --------------- | ----------------------------------------------------------------------------------------------------------- |
 | Story key       | `D-2-decommission-toml-mutation`                                                                            |
 | Epic            | D — Singleton Configuration → SQLite                                                                        |
 | FRs             | none (Epic D is post-PRD)                                                                                   |
-| Status          | ready-for-dev                                                                                               |
+| Status          | review                                                                                                      |
 | Created         | 2026-05-27                                                                                                  |
 | Source epic     | `_bmad-output/planning-artifacts/epics.md § Epic D § Story D.2`                                             |
 | Depends on      | D-0 (SQLite singleton store + boot-time migration) and D-1 (web editor + boot-time AppConfig overlay + `seed_post_overlay`). Strictly: D-2 is the LAST story in Epic D and MUST land after D-0 + D-1 since it removes the TOML safety net that both of them fall back to. |
@@ -354,18 +354,189 @@ D-2 adds ≥ 10 integration tests in `tests/d2_figment_provider.rs` + ~5 unit te
 
 ---
 
-## Completion Note
+## Completion Note (2026-05-27)
 
-To be filled in by the Dev Agent at story completion. Should include:
+D-2 implementation complete. Status flipped `ready-for-dev → review`.
+Single-session implementation by Opus 4.7 (parent assistant); ready for
+`bmad-code-review D-2` on a different LLM per the 29× iter-N+1 doctrine
+streak.
 
-- Actual test count delta (gross +N, net after any tests refactored).
-- The Task 1.1 module location pick (`src/storage/sqlite_singleton_provider.rs` vs `src/config_provider.rs`).
-- The Task 2.3 disposition of `overlay_singletons_from_sqlite_rows` (retained for PUT handler, or deleted).
-- The Task 2.2 disposition of `seed_post_overlay` (retained for forward-compat, or deleted).
-- The Task 5.4 disposition of the D-1 audit events (`config_overlay` + `config_overlay_failed` removal from logging.md if the overlay code is deleted).
-- Confirmation that all 16 D-0 + 12 D-1 + 19 C-6 + deadlock-guard tests still pass.
-- Confirmation that the figment Provider stack delivers the AC#8 precedence ordering (env > SQLite > TOML > default) via the integration tests.
-- Manual smoke against Guy's real ChirpStack — DEFERRED per the 2026-05-20 main-deadlock incident doctrine; record the deferral.
-- The GitHub tracking issue number (or `Refs #__` placeholder rationale).
-- Any deferred follow-ups added to `deferred-work.md`.
-- Any architectural decisions captured during implementation (e.g. figment Provider error-handling strategy, secret-field invariants in the Provider).
+### Headline facts
+
+- **Test count**: `cargo test` reports **1542 passed / 0 failed / 73 ignored**.
+  Spec target was ≥ 1531/0/≥73 — cleared with +11 buffer. Net new D-2 tests:
+  15 in `tests/d2_figment_provider.rs` + 3 unit tests in the Provider module.
+- **Clippy**: `cargo clippy --all-targets -- -D warnings` clean.
+- **All D-0 (16) + D-1 (15 incl. unit tests) + C-6 (19) + deadlock-guard (1)
+  tests still pass** — verified by running the full `cargo test`.
+- **Figment precedence ordering verified**: 4 dedicated tests
+  (`t03_precedence_env_beats_sqlite`, `t04_precedence_sqlite_beats_toml`,
+  `t05_precedence_toml_beats_default`, `t06_precedence_default_fallback_for_missing_field`)
+  cover all four pairwise transitions of the `env > SQLite > TOML > default`
+  ordering. AC#8 (originally D-0's spec, deferred through D-1) is now
+  structurally satisfied — no post-hoc overlay required.
+- **Manual smoke against Guy's real ChirpStack**: DEFERRED per the
+  2026-05-20 main-deadlock incident doctrine (`session_pause_2026_05_20`
+  memory entry). Recorded explicitly.
+- **GitHub tracking issue**: `Refs #__` placeholder per Epic A/B/C/D
+  precedent. Guy opens out-of-band; commit message body carries the
+  placeholder.
+
+### Task 1.1 module location pick
+
+`src/storage/sqlite_singleton_provider.rs` (recommended option in spec).
+Lives alongside `migrate_singleton_config.rs` since the Provider reads via
+`SqliteBackend::load_singleton_config()`. Re-exported via
+`pub use sqlite_singleton_provider::SqliteSingletonProvider` in
+`src/storage/mod.rs`.
+
+### Task 2.3 disposition of `overlay_singletons_from_sqlite_rows`
+
+**Retained** as a unit-tested utility. The D-1 PUT handler in
+`src/web/singleton_config.rs` continues to use it for candidate-AppConfig
+validation before persisting to SQLite. The author considered reworking
+the PUT handler to construct the candidate via figment + the new
+Provider, but the resulting shape was no cleaner than the existing
+helper (the PUT handler would need to construct a temporary in-memory
+SqliteBackend mock to drive figment, which is more LOC than the current
+in-place merge). Kept the helper.
+
+### Task 2.2 disposition of `seed_post_overlay`
+
+**Retained** for forward-compat. The method itself is ~30 LOC including
+the `try_lock` + warn fallback. `main.rs` still calls
+`reload_handle.seed_post_overlay(application_config.clone())` after the
+D-2 reload to re-seed the watch channel with the post-Provider snapshot
+(replaces D-1's seed-after-overlay shape). If a future story removes
+this call site, the method can be deleted then — but for now it's
+load-bearing.
+
+### Task 5.4 disposition of the D-1 audit events
+
+`config_overlay` + `config_overlay_failed` are now dead code (the overlay
+block was removed from `main.rs` and replaced with the D-2 reload).
+`docs/logging.md` was updated to document the events as historical
+(retained in prose for the grep-invariant test
+`d1_audit_event_names_documented_in_logging_md` which still references
+them, plus to give future operators a paper trail of the D-1→D-2
+transition). Updated to reflect:
+
+- D-1's six event names remain documented (the test invariant is
+  preserved).
+- D-2 adds four NEW events: `config_reload_with_sqlite` (info,
+  once-per-boot, fires when D-2 reload produces a populated snapshot),
+  `config_reload_with_sqlite_failed` (warn), `config_provider_failed`
+  (warn, per-section/per-key on JSON-parse failures), and
+  `config_toml_unused_warning` (warn, once-per-boot when both surfaces
+  populated).
+
+### Audit results — TOML mutation surface (AC#8/#9/#10)
+
+Three greps required per the spec:
+
+1. **`grep -rn toml_edit src/ tests/`** — D-2 commit removed
+   `src/web/config_writer.rs` (551 LOC, orphan from Story 9-4 era; C-6
+   commit `1c09911` removed it from git but left on disk via partial
+   `git rm`). Remaining hits are in test files: pure comments referring
+   to historical behaviour (no compilation dependency). `toml_edit`
+   dependency removed from `Cargo.toml`.
+2. **`grep -rn 'figment::write|figment::save'`** — 0 hits (figment is
+   read-only by design; no custom write-back code ever existed).
+3. **`grep -rn 'std::fs::write.*config\.toml'`** — only matches are in
+   test fixtures writing config.toml for test setup. No production
+   code writes to operator-owned `config.toml`. (`secrets.toml` is
+   written via the Story C-0 `write_secrets_toml` helper as designed.)
+
+### `toml_edit` removal details
+
+The sole remaining production consumer was the secrets.toml
+pre-validator at `src/config.rs:1060`:
+
+```rust
+match body.parse::<toml_edit::DocumentMut>() { ... }
+```
+
+D-2 swapped this to use figment's own TOML parser via
+`figment::Provider::data(&Toml::string(&body))`. Figment owns a
+TOML parser internally (via the `toml` crate at version 0.8.x,
+transitively); calling `Provider::data()` triggers a parse and returns
+the result, which is exactly what the pre-validator needs.
+
+Verified via `cargo tree` post-removal: `toml_edit` is no longer in
+the dependency closure of any binary or library target. The `toml`
+crate remains a transitive dep via figment's `toml` feature — no new
+direct deps were added.
+
+### Pre-existing flake fix (defensive, in opc_ua.rs)
+
+The two unit tests `secrets_not_logged_from_appconfig_from_path` and
+`secrets_not_logged_when_full_config_debug_formatted` in
+`src/opc_ua.rs` had a pre-existing race condition with tests in
+`src/config.rs` that set `OPCGW_OPCUA__USER_PASSWORD` to empty via
+`temp_env::with_var`. The race was intermittent (passed 4/5 runs on
+main) but reproducible under `cargo test --all-targets`. D-2 wrapped
+both tests with explicit `temp_env::with_var("OPCGW_OPCUA__USER_PASSWORD",
+None::<&str>, ...)` to scope env-var isolation, eliminating the
+flake. Production code unchanged.
+
+### `SqliteBackend` Clone derive
+
+Added `#[derive(Clone)]` to `SqliteBackend` (both fields are `Arc<…>`
+so Clone is essentially free). `main.rs` clones the backend into the
+`Arc::new(...)` passed to `AppConfig::from_path_with_sqlite`. Allows
+the existing `&sqlite_backend` callers to continue working unchanged
+while the D-2 reload owns its own `Arc<SqliteBackend>` for the
+Provider.
+
+### Architectural decisions captured
+
+1. **Two-pass config load.** `AppConfig::from_path` (bootstrap, no
+   SQLite) loads first to discover storage paths; then the SQLite
+   backend is opened + D-0 migration runs; THEN `AppConfig::from_path_with_sqlite`
+   re-loads the full config with the Provider in the stack. The
+   chicken-and-egg (need config to open DB, need DB to build full
+   config) is resolved by accepting that bootstrap field changes
+   (e.g. `database_path`) still require a config.toml edit + restart.
+   For SQLite-stored knobs, the D-2 reload handles them.
+
+2. **Provider error-handling: non-fatal.** Pool checkout failure, SQL
+   execution error, JSON parse error all emit `config_provider_failed`
+   warn + return an empty Map (or skip the row). Figment falls through
+   to the TOML layer. Gateway never bricks on SQLite corruption.
+
+3. **Closed-enum event-name taxonomy preserved.** The new D-2 events
+   slot cleanly into the existing pattern: `*_failed` for non-fatal
+   warnings, `*_warning` for operator-attention-needed conditions,
+   plain info for routine state changes. No new event-name patterns
+   introduced.
+
+### Deferred follow-ups added to `deferred-work.md`
+
+None new. D-2 closed all four D-1-FOLLOWUP-1 through D-1-FOLLOWUP-4
+items (figment Provider rework, security.md subsection, architecture.md
+rewrite, DocBook user manual). D-1-FOLLOWUP-5 is partially closed
+(`config_toml_unused_warning` now has an event-table row; the other
+six D-1 events remain at section-summary level — Guy can decide
+whether to spend a sweep on discrete event rows in a v2.x doc-sync
+epic, OR leave the section-summary documentation as the canonical
+form).
+
+### Next BMad action
+
+`bmad-code-review D-2` on a different LLM (per the 29× iter-N+1
+doctrine streak). D-2's surface is moderately wide:
+
+- 1 brand-new module (Provider, ~165 LOC + 3 unit tests)
+- 1 brand-new public API method (`AppConfig::from_path_with_sqlite`)
+- Boot-sequence reorder in main.rs (overlay block REMOVED, reload +
+  warn-event added)
+- 1 dependency removal (Cargo.toml)
+- 1 orphan-file deletion (config_writer.rs, 551 LOC)
+- 15 integration tests
+- 3 documentation rewrites + 2 doc-edits + 1 runbook section + 1
+  Cargo.toml comment
+
+Review eligibility: D-2 introduces brand-new flow-control (the
+figment Provider stack reorder + the once-per-boot warn predicate);
+iter-N+1 mandate is IN FORCE. Review on a different LLM is expected
+to extend the doctrine streak to 30+.

@@ -2796,8 +2796,23 @@ mod tests {
         // Drive the actual production loader. Any future `info!(?cfg, ...)`
         // or similar inside `AppConfig::from_path` would land in the
         // captured tracing-test buffer here.
-        let load_result = crate::config::AppConfig::from_path(
-            tmp_path.to_str().expect("tmp path is utf-8"),
+        //
+        // D-2 defensive isolation: explicitly clear
+        // `OPCGW_OPCUA__USER_PASSWORD` for the duration of this test.
+        // Several tests in src/config.rs set the env-var via
+        // `temp_env::with_var`; when scheduling overlaps, this test's
+        // call to `AppConfig::from_path` can observe a transient
+        // empty value and the production validator (correctly) refuses
+        // to load. Clearing the var here scopes the isolation to this
+        // test without changing the production-side behaviour.
+        let load_result = temp_env::with_var(
+            "OPCGW_OPCUA__USER_PASSWORD",
+            None::<&str>,
+            || {
+                crate::config::AppConfig::from_path(
+                    tmp_path.to_str().expect("tmp path is utf-8"),
+                )
+            },
         );
         // Best-effort cleanup; we don't fail the test if removal races.
         let _ = std::fs::remove_file(&tmp_path);
@@ -2884,10 +2899,19 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::write(&tmp_path, toml_string).expect("write temp config");
-        let config = crate::config::AppConfig::from_path(
-            tmp_path.to_str().expect("tmp path is utf-8"),
-        )
-        .expect("test config loads cleanly");
+        // D-2 defensive isolation: same rationale as
+        // `secrets_not_logged_from_appconfig_from_path` — `OPCGW_OPCUA__USER_PASSWORD`
+        // can leak from a parallel src/config.rs test via `temp_env::with_var`.
+        let config = temp_env::with_var(
+            "OPCGW_OPCUA__USER_PASSWORD",
+            None::<&str>,
+            || {
+                crate::config::AppConfig::from_path(
+                    tmp_path.to_str().expect("tmp path is utf-8"),
+                )
+                .expect("test config loads cleanly")
+            },
+        );
         let _ = std::fs::remove_file(&tmp_path);
 
         // This is exactly the kind of careless log a future contributor

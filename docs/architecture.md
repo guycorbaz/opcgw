@@ -6,13 +6,31 @@ permalink: /architecture/
 
 # Architecture Documentation — opcgw
 
-> Last updated: 2026-05-26 (Story D-0: singleton config TOML→SQLite migration — in-progress, see § "Configuration architecture" below for the in-transition state)
+> Last updated: 2026-05-27 (Story D-2: figment Provider rework + TOML mutation-surface decommission — Epic D 3/3 done)
 
 ## Executive Summary
 
 opcgw is a Rust-based gateway that bridges ChirpStack 4 (LoRaWAN Network Server) with OPC UA industrial automation clients. It runs concurrent async tasks — a ChirpStack gRPC poller, an OPC UA server, and an embedded web UI — that communicate through shared in-memory state backed by a SQLite database.
 
-**Configuration architecture (post-Story C-6, in-transition through Epic D):** The `[[application]]` tree (applications, devices, metrics, commands) is stored authoritatively in SQLite per Story C-6. Story D-0 adds the singleton sections (`[global]`, `[chirpstack]`, `[opcua]`, `[web]`) to SQLite via a one-shot boot-time migration into a new `singleton_config(section, key, value)` table (schema v010). On the first post-D-0 boot the four non-secret sections are written to SQLite; secrets (`api_token`, `user_password`) stay in `config/secrets.toml` (chmod 0o600, established by Story C-0). Until Story D-2 lands, the figment loader continues to read `config.toml` on every boot for backward compatibility — the SQLite singleton snapshot is **written** in D-0 but the **read-path swap** (figment Provider reordering so SQLite overrides TOML between-boots) lands in D-2 alongside the TOML mutation-surface decommission. D-1 adds the web UI editor that writes through `SqliteBackend::write_singleton_section`. End-state (post-D-2): SQLite is canonical for non-secret config + applications + metric values; `config/secrets.toml` holds operator-supplied secrets; `config.toml` is bootstrap-seed-only and never mutated at runtime.
+**Configuration architecture (post-Story D-2 — final three-surface model):** opcgw has exactly three persistence surfaces for configuration:
+
+1. **SQLite** (`data/opcgw.db`, chmod 0o600) — **authoritative** for all non-secret runtime configuration. Holds the `[[application]]` tree (Story C-6) AND the four singleton sections `[global]`, `[chirpstack]`, `[opcua]`, `[web]` (Story D-0, `singleton_config` K/V table at schema v010). The web UI singleton editor (Story D-1) writes through `SqliteBackend::write_singleton_section`; the application CRUD endpoints write through the `applications` / `devices` / `metrics` / `commands` tables.
+2. **`config/secrets.toml`** (chmod 0o600 via atomic-rename, established by Story C-0) — operator-supplied secrets: `[chirpstack].api_token` + `[opcua].user_password`. Read at boot via figment's secrets.toml provider; opcgw never mutates this file at runtime.
+3. **`config.toml`** — **bootstrap-seed-only**. Read at boot via figment's primary TOML provider; values OVERRIDDEN by SQLite for any key the singleton snapshot has set (Story D-2's `SqliteSingletonProvider`). Operators MAY delete `config.toml` post-migration; opcgw boots cleanly from SQLite + `secrets.toml` alone.
+
+**Figment Provider stack (final precedence ordering, top = highest priority):**
+
+1. `Env::prefixed("OPCGW_").split("__")` — env-var overrides
+2. `SqliteSingletonProvider` (Story D-2) — non-secret runtime config from SQLite
+3. `Toml::string(secrets.toml)` — secret fields only
+4. `Toml::file(config.toml)` — bootstrap seed (lowest, default-overridable)
+5. `#[serde(default = "...")]` — struct defaults
+
+This delivers proper `env > SQLite > TOML > default` precedence as a structural figment guarantee. The post-D-1 Arc::make_mut overlay is gone — figment produces the correct AppConfig directly on every load.
+
+**Operator-facing impact of the three-surface model:** Hand-edits to `config.toml` for keys covered by `singleton_config` are silently shadowed by the SQLite values. To surface that confusion, opcgw emits `config_toml_unused_warning` once-per-boot when `config.toml` is present alongside a populated `singleton_config` table. The runbook at `docs/d-0-migration-runbook.md` documents the explicit operator workflow for verifying-and-optionally-deleting `config.toml` post-migration.
+
+**toml_edit dependency:** intentionally absent from the dependency tree. Story 9-4's `src/web/config_writer.rs` (the only `toml_edit` consumer in production code) was decommissioned by Story C-6 + the residual import path in `src/config.rs`'s secrets.toml pre-validator was rewritten to use figment's own TOML parser by Story D-2. The dep tree contains `toml 0.8.x` transitively via figment's `toml` feature only.
 
 ## System Architecture
 
@@ -242,7 +260,7 @@ POST /api/applications/:id/devices
 ## Known Architectural Considerations
 
 1. **Incomplete OPC UA feature set:** The OPC UA server currently supports basic Browse/Read/Write/History. Alarms and conditions, complex type support, and monitored items tuning are not yet implemented.
-2. **Configuration architecture is intentionally layered:** Singleton sections (`[chirpstack]`, `[opcua]`, etc.) remain in TOML and require a process restart to update. A future story may move these into SQLite + an admin settings UI.
+2. **Configuration architecture (post-D-2):** All non-secret runtime configuration is authoritative in SQLite. The four singleton sections (`[global]` / `[chirpstack]` / `[opcua]` / `[web]`) live in the `singleton_config` K/V table and are read at boot via the `SqliteSingletonProvider` figment Provider. `config.toml` is a bootstrap seed only — figment continues to load it but SQLite values override on every key the singleton snapshot has set. Most singleton knobs are restart-required (the `Arc<AppConfig>` snapshot is captured at boot); see issue #113 for the live-borrow refactor that would enable true hot-reload of PKI paths / ports / allowed_origins.
 3. **SQLite is single-process:** The current connection pool assumes a single opcgw process per SQLite file. Multi-process deployments (active-active HA) require an alternative backend.
 4. **Linear config lookups:** `get_device_name()`, `get_metric_type()` etc. do O(n) scans over the in-memory snapshot — acceptable for < 1000 devices but not designed for large-scale deployments.
 5. **Single metric type support:** Only ChirpStack "Gauge" metric type is supported; Counter, Absolute, Unknown are not handled.

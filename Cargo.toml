@@ -57,10 +57,14 @@ uuid = { version = "1.10.0", features = ["v4", "serde"] }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["fs", "set-header"] }
 base64 = "0.22"
-toml_edit = "0.25.11"
-# Story 9-4: `ConfigWriter` uses `NamedTempFile::persist` for atomic
-# `tempfile + rename` writes of `config/config.toml`. Already a
-# dev-dep below; promoted here for the production code path.
+# Story D-2 (2026-05-27): removed `toml_edit = "0.25.11"`. Story C-6 (2026-05-26)
+# decommissioned the SIGHUP + TOML round-trip mutation path (Story 9-4's
+# `src/web/config_writer.rs` was orphaned but left on disk by C-6 + the
+# `toml_edit::DocumentMut` parse-validation in `AppConfig::from_path` was the
+# sole remaining import). D-2 deleted the orphan module and swapped the
+# secrets.toml pre-validation step to `figment::Provider::data(&Toml::string(..))`
+# (figment already owns a TOML parser via the `toml` crate, exposed through the
+# `Toml::string()` provider). Net dep tree: one less crate; no new direct deps.
 tempfile = "3"
 
 [dev-dependencies]

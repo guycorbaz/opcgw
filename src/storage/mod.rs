@@ -65,10 +65,12 @@ pub mod schema;
 pub mod pool;
 pub mod migrate_config;
 pub mod migrate_singleton_config;
+pub mod sqlite_singleton_provider;
 
 pub use types::{ChirpstackStatus, Command, CommandFilter, CommandStatus, DeviceCommand, MetricType, MetricValue, MAX_LORA_PAYLOAD_SIZE};
 pub use sqlite::SqliteBackend;
 pub use pool::ConnectionPool;
+pub use sqlite_singleton_provider::SqliteSingletonProvider;
 
 use crate::config::{OpcMetricTypeConfig, AppConfig};
 use crate::utils::*;

@@ -697,62 +697,77 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Story D-1 Task 1 (closes D-0-FOLLOWUP-2 partial): overlay
-    // singleton-config rows from SQLite onto the in-memory AppConfig
-    // BEFORE any subsystem construction. Without this overlay, D-1's
-    // singleton-editor UI writes would land in SQLite but next-boot
-    // figment reads from TOML would ignore them; the editor would
-    // ship in a broken state.
+    // Story D-2 Task 2 (replaces D-1's `Arc::make_mut` overlay block):
+    // reload AppConfig with the SqliteSingletonProvider injected into
+    // the figment stack between secrets.toml and env-var. Delivers the
+    // proper `env > SQLite > TOML > default` precedence ordering as a
+    // structural guarantee (closes D-1-FOLLOWUP-1).
     //
-    // Precedence inversion vs D-0 spec AC#8: post-D-1, SQLite values
-    // override env-var-set values at boot (proper `env > SQLite > TOML
-    // > default` ordering still deferred to D-2's figment Provider
-    // rework). Documented as `D-1-FOLLOWUP-1`.
-    //
-    // On overlay failure (invalid JSON in SQLite, struct shape
-    // mismatch): emit `config_overlay_failed` at warn! + continue with
-    // the figment-loaded values (transition safety net mirroring
-    // D-0 AC#6).
-    match sqlite_backend.load_singleton_config() {
-        Ok(rows) if !rows.is_empty() => {
-            let app = Arc::make_mut(&mut application_config);
-            match app.overlay_singletons_from_sqlite_rows(&rows) {
-                Ok(()) => {
-                    info!(
-                        event = "config_overlay",
-                        rows = rows.len(),
-                        "Applied singleton config snapshot from SQLite over figment-loaded AppConfig"
-                    );
-                    // D-1 iter-1 I1-F2: reseed the watch channel with
-                    // the post-overlay snapshot so the next
-                    // `notify_crud_write` propagates SQLite-overlaid
-                    // singleton fields to all subscribers — not the
-                    // pre-overlay figment values seeded at line ~554.
-                    reload_handle.seed_post_overlay(application_config.clone());
-                }
-                Err(e) => {
-                    warn!(
-                        event = "config_overlay_failed",
-                        error = %e,
-                        "Failed to overlay singleton config from SQLite; \
-                         continuing with figment-loaded snapshot"
-                    );
-                }
+    // On reload failure: log the error and keep the bootstrap-loaded
+    // figment snapshot. Same safety-net semantic as the D-1 overlay
+    // (D-0 AC#6 transition contract).
+    match AppConfig::from_path_with_sqlite(
+        &config_path,
+        std::sync::Arc::new(sqlite_backend.clone()),
+    ) {
+        Ok(reloaded) => {
+            let row_count = sqlite_backend
+                .count_singleton_config()
+                .unwrap_or(0);
+            if row_count > 0 {
+                info!(
+                    event = "config_reload_with_sqlite",
+                    rows = row_count,
+                    "Re-loaded AppConfig with SqliteSingletonProvider in the figment stack"
+                );
             }
-        }
-        Ok(_) => {
-            // SQLite singleton tables empty — first boot before D-0
-            // migration landed, or placeholder-secrets-skipped path.
-            // Use the figment-loaded values for this boot.
+            // Swap the in-memory snapshot. Arc::make_mut clones if
+            // there are outstanding refs, but at this point only
+            // reload_handle holds one — reseed it below.
+            *std::sync::Arc::make_mut(&mut application_config) = reloaded;
+            // Re-seed the watch channel with the post-D-2 snapshot
+            // so the next `notify_crud_write` propagates SQLite-merged
+            // singleton fields to all subscribers — not the
+            // bootstrap-load figment values seeded earlier.
+            reload_handle.seed_post_overlay(application_config.clone());
         }
         Err(e) => {
             warn!(
-                event = "config_overlay_failed",
+                event = "config_reload_with_sqlite_failed",
                 error = %e,
-                "Failed to load singleton config from SQLite for overlay; \
-                 continuing with figment-loaded snapshot"
+                "Failed to re-load AppConfig with SqliteSingletonProvider; \
+                 continuing with bootstrap-loaded snapshot"
             );
         }
+    }
+
+    // Story D-2 Task 3: emit `config_toml_unused_warning` once on
+    // boots where `config.toml` is present on disk AND the SQLite
+    // `singleton_config` table already has rows. Surfaces the silent-
+    // shadow case where an operator hand-edits `config.toml`
+    // expecting the change to take effect — post-D-2 the SQLite
+    // values win, so the hand-edit is silently shadowed. Static
+    // `recommended_action` field guides the operator to the
+    // check-d0-migration runbook + optional config.toml deletion.
+    // opcgw NEVER deletes operator-owned files; this is an
+    // information event, not an autoremediation.
+    let config_toml_exists = std::path::Path::new(&config_path).exists();
+    let singleton_row_count = sqlite_backend
+        .count_singleton_config()
+        .unwrap_or(0);
+    if config_toml_exists && singleton_row_count > 0 {
+        warn!(
+            event = "config_toml_unused_warning",
+            config_path = ?config_path,
+            singleton_row_count = singleton_row_count,
+            recommended_action = "config.toml is no longer mutated by opcgw at runtime; \
+                                  verify it matches SQLite via \
+                                  `bash scripts/check-d0-migration.sh data/opcgw.db` \
+                                  or delete it to avoid operator confusion",
+            "config.toml is present alongside a populated SQLite singleton_config table. \
+             Hand-edits to config.toml will be silently shadowed by SQLite values via \
+             the SqliteSingletonProvider in the figment stack."
+        );
     }
 
     // Story C-6 F1: seed the watch channel from SQLite so subsystems

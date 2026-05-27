@@ -142,6 +142,78 @@ Exit code 0 = pass; non-zero = something to investigate.
 
 ---
 
+## Post-D-2 operator workflow
+
+Story D-2 (2026-05-27) decommissioned the TOML mutation surface and
+replaced D-1's boot-time `Arc::make_mut` overlay with a structural
+figment Provider (`SqliteSingletonProvider`) that slots between the
+TOML and env-var layers of the figment stack. Concrete behaviour
+changes for operators:
+
+1. **`config.toml` is now bootstrap-seed-only.** Hand-edits to keys
+   covered by the `singleton_config` table (i.e. anything under
+   `[global]` / `[chirpstack]` / `[opcua]` / `[web]` except the two
+   secret fields `api_token` + `user_password`) are silently shadowed
+   by the SQLite snapshot. To change a runtime knob, use the web UI
+   editor at `/singleton-config.html` (D-1) or write directly to
+   SQLite via `SqliteBackend::write_singleton_section`. Any
+   `OPCGW_*` env-var still takes the highest precedence per the
+   `env > SQLite > TOML > default` ordering.
+
+2. **opcgw emits `config_toml_unused_warning` at warn level**
+   once-per-boot when `config.toml` is present alongside a populated
+   `singleton_config` table. The event includes a static
+   `recommended_action` field guiding you to this section of the
+   runbook. Sample log line:
+
+   ```
+   WARN config_toml_unused_warning config_path="config/config.toml" \
+        singleton_row_count=27 recommended_action="config.toml is no \
+        longer mutated by opcgw at runtime; verify it matches SQLite \
+        via `bash scripts/check-d0-migration.sh data/opcgw.db` or \
+        delete it to avoid operator confusion"
+   ```
+
+3. **Recommended workflow after the D-0 migration completes
+   successfully:**
+
+   ```bash
+   # 1. Verify the SQLite snapshot is populated and matches your
+   #    intended configuration.
+   bash scripts/check-d0-migration.sh data/opcgw.db
+
+   # 2. Optionally: archive your current config.toml as a reference
+   #    for the operator notebook, then remove it from the runtime
+   #    deployment.
+   cp config/config.toml config/config.toml.bootstrap-archived
+   rm config/config.toml
+
+   # 3. Restart opcgw. The `config_toml_unused_warning` event will
+   #    no longer fire because `config.toml` is absent on disk.
+   systemctl restart opcgw
+   ```
+
+   opcgw boots cleanly from SQLite + `secrets.toml` alone — no
+   `config.toml` is required at runtime post-migration. The
+   `secrets.toml` file remains required (operator-supplied secrets
+   are NOT migrated to SQLite).
+
+4. **opcgw NEVER deletes operator-owned files.** The `config.toml`
+   removal is always an operator action — the gateway emits the
+   warn event but never touches the file itself.
+
+5. **Reverting to a TOML-driven deployment.** If you need to roll
+   back from the SQLite-canonical state (e.g. for emergency operator
+   intervention without web UI access), restore your archived
+   `config.toml` and delete `data/opcgw.db` (after backing it up).
+   On the next boot, opcgw will detect the missing
+   `d0_migration_done` flag and re-run the bootstrap migration from
+   the restored `config.toml`. Schema migrations are forward-only —
+   downgrading the opcgw binary across major versions is not
+   supported.
+
+---
+
 ## File permissions (AI-C-SEC-2)
 
 Story D-0 lands the SQLite file-permission tightening flagged by the

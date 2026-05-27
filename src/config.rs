@@ -1024,7 +1024,40 @@ impl AppConfig {
     /// explicitly. Used by `main.rs` so the CLI `-c FILE` flag (or the
     /// `CONFIG_PATH` env var) drives both the bootstrap-phase TOML peek
     /// and the full configuration load from a single resolved path.
+    ///
+    /// **Story D-2 (2026-05-27):** the bootstrap path — no SQLite
+    /// Provider in the figment stack. `main.rs` calls this first to
+    /// learn the storage paths it needs to open the SQLite database,
+    /// then calls [`Self::from_path_with_sqlite`] after the D-0
+    /// migration to reload the config with the full figment stack
+    /// including the SQLite Provider.
     pub fn from_path(config_path: &str) -> Result<Self, OpcGwError> {
+        Self::from_path_inner(config_path, None)
+    }
+
+    /// Story D-2: load configuration with the
+    /// [`crate::storage::SqliteSingletonProvider`] injected into the
+    /// figment stack between the secrets.toml layer and the env-var
+    /// layer. Delivers the proper `env > SQLite > TOML > default`
+    /// precedence ordering as a structural figment guarantee instead
+    /// of D-1's post-figment overlay.
+    ///
+    /// Call this AFTER the SQLite backend has been initialised and
+    /// the D-0 boot-time migration has run. On fresh deployments
+    /// where `singleton_config` is still empty, the Provider returns
+    /// an empty map and the final config matches the result of
+    /// [`Self::from_path`] (TOML + secrets.toml + env-var only).
+    pub fn from_path_with_sqlite(
+        config_path: &str,
+        backend: std::sync::Arc<crate::storage::SqliteBackend>,
+    ) -> Result<Self, OpcGwError> {
+        Self::from_path_inner(config_path, Some(backend))
+    }
+
+    fn from_path_inner(
+        config_path: &str,
+        sqlite_backend: Option<std::sync::Arc<crate::storage::SqliteBackend>>,
+    ) -> Result<Self, OpcGwError> {
         trace!(config_path = %config_path, "Loading configuration");
 
         // Epic C C-0 (2026-05-21): derive the sibling secrets.toml path
@@ -1057,7 +1090,7 @@ impl AppConfig {
         // is also simpler.
         let secrets_body: Option<String> = match std::fs::metadata(&secrets_path) {
             Ok(_) => match std::fs::read_to_string(&secrets_path) {
-                Ok(body) => match body.parse::<toml_edit::DocumentMut>() {
+                Ok(body) => match figment::Provider::data(&Toml::string(&body)) {
                     Ok(_) => Some(body),
                     Err(e) => {
                         warn!(
@@ -1095,13 +1128,23 @@ impl AppConfig {
         //      silently. Iter-1 H4 fix: only merged if the pre-validate
         //      step above accepted the file. Iter-2 P15 fix: merged via
         //      Toml::string(body) reusing the validated-once buffer.
-        //   3. OPCGW_* env-vars (highest priority; existing convention).
+        //   3. SqliteSingletonProvider (Story D-2). Reads non-secret
+        //      runtime config from the `singleton_config` SQLite table
+        //      written by D-0's boot-time migration + D-1's web editor.
+        //      Only present when the caller passed a backend handle —
+        //      bootstrap loads via [`Self::from_path`] (no Provider)
+        //      because the DB path itself comes from the bootstrap
+        //      config.
+        //   4. OPCGW_* env-vars (highest priority; existing convention).
         // `split("__")` enables nested-key overrides like
         // `OPCGW_LOGGING__DIR` → `logging.dir` (matches the convention
         // referenced in this module's doc comment).
         let mut figment = Figment::new().merge(Toml::file(config_path));
         if let Some(body) = secrets_body.as_deref() {
             figment = figment.merge(Toml::string(body));
+        }
+        if let Some(backend) = sqlite_backend {
+            figment = figment.merge(crate::storage::SqliteSingletonProvider::new(backend));
         }
         let config: AppConfig = figment
             .merge(Env::prefixed("OPCGW_").split("__").global())
