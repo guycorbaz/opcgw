@@ -57,6 +57,38 @@ impl ConfigReloadHandle {
         self.tx.subscribe()
     }
 
+    /// D-1 iter-1 I1-F2: replace the entire `Arc<AppConfig>` in the
+    /// watch channel with the post-overlay snapshot, called once at
+    /// boot AFTER the D-1 SQLite singleton overlay has been applied to
+    /// `application_config` in main.rs.
+    ///
+    /// Without this seed call, `notify_crud_write` would later read the
+    /// PRE-overlay snapshot from `self.tx.borrow()`, mutate only the
+    /// `application_list` field, and broadcast a candidate where all
+    /// singleton fields revert to their figment-loaded (TOML/env-var)
+    /// values — silently undoing every D-1 UI edit on the next
+    /// application CRUD. ECH-F2 finding.
+    ///
+    /// Serialised by `reload_lock` so a concurrent `notify_crud_write`
+    /// cannot interleave (boot-time invariant: this only runs before
+    /// any CRUD path, but the lock is cheap and future-proofs against
+    /// a re-seed-after-boot scenario).
+    pub fn seed_post_overlay(&self, post_overlay: Arc<AppConfig>) {
+        // Boot-time call; no async runtime needed for the lock
+        // acquisition. We use the synchronous `try_lock` path; if
+        // contended (impossible at boot, but defensive), fall through
+        // to send_replace anyway — the worst case is a benign concurrent
+        // overwrite which the CRUD path's lock-then-build-then-send
+        // sequence already tolerates.
+        let _maybe_guard = self.reload_lock.try_lock();
+        self.tx.send_replace(post_overlay);
+        info!(
+            event = "config_reload",
+            trigger = "post_overlay_seed",
+            "Watch channel re-seeded with post-D-1-overlay AppConfig"
+        );
+    }
+
     /// Push a new application list from a SQLite write into the watch
     /// channel without re-reading the TOML file. Used by CRUD handlers
     /// after each successful SQLite mutation (Story C-6): the handler

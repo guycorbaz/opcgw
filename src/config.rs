@@ -2301,7 +2301,18 @@ impl AppConfig {
         &mut self,
         rows: &[(String, String, String)],
     ) -> Result<(), OpcGwError> {
-        use serde_json::{json, Map, Value};
+        use serde_json::{Map, Value};
+
+        // I1-F1 (iter-1): all-or-nothing semantics. Deserialise each
+        // section's merged JSON into a local Option<T> FIRST; only
+        // assign back to `self` once every section we touched has
+        // successfully deserialised. Closes the partial-mutation gap
+        // where a mid-loop `?` could leave `self` in an inconsistent
+        // A-from-SQLite / B-from-TOML hybrid (ECH-F1 finding).
+        //
+        // I1-F12 (iter-1): iterate sections in a fixed order
+        // (`KNOWN_SECTIONS`) so error messages and emit ordering are
+        // deterministic across HashMap rehashing variance.
 
         // Group rows by section.
         let mut by_section: std::collections::HashMap<String, Map<String, Value>> =
@@ -2320,21 +2331,30 @@ impl AppConfig {
                 .insert(key.clone(), parsed);
         }
 
-        // For each known section, merge SQLite values on top of the
-        // figment-loaded JSON representation, then deserialize.
-        for (section_name, sqlite_map) in by_section {
-            match section_name.as_str() {
+        // Stage candidate replacements WITHOUT mutating `self`.
+        let mut new_global: Option<Global> = None;
+        let mut new_chirpstack: Option<ChirpstackPollerConfig> = None;
+        let mut new_opcua: Option<OpcUaConfig> = None;
+        let mut new_web: Option<WebConfig> = None;
+
+        const KNOWN_SECTIONS: &[&str] = &["global", "chirpstack", "opcua", "web"];
+        for section_name in KNOWN_SECTIONS {
+            let sqlite_map = match by_section.remove(*section_name) {
+                Some(m) => m,
+                None => continue,
+            };
+            match *section_name {
                 "global" => {
                     let mut merged = serde_json::to_value(&self.global)
                         .map_err(|e| OpcGwError::Configuration(format!(
                             "overlay_singletons_from_sqlite_rows: \
                              failed to re-serialise global: {}", e)))?;
                     merge_object(&mut merged, sqlite_map);
-                    self.global = serde_json::from_value(merged).map_err(|e| {
+                    new_global = Some(serde_json::from_value(merged).map_err(|e| {
                         OpcGwError::Configuration(format!(
                             "overlay_singletons_from_sqlite_rows: \
                              failed to deserialise merged global: {}", e))
-                    })?;
+                    })?);
                 }
                 "chirpstack" => {
                     let mut merged = serde_json::to_value(&self.chirpstack)
@@ -2342,11 +2362,11 @@ impl AppConfig {
                             "overlay_singletons_from_sqlite_rows: \
                              failed to re-serialise chirpstack: {}", e)))?;
                     merge_object(&mut merged, sqlite_map);
-                    self.chirpstack = serde_json::from_value(merged).map_err(|e| {
+                    new_chirpstack = Some(serde_json::from_value(merged).map_err(|e| {
                         OpcGwError::Configuration(format!(
                             "overlay_singletons_from_sqlite_rows: \
                              failed to deserialise merged chirpstack: {}", e))
-                    })?;
+                    })?);
                 }
                 "opcua" => {
                     let mut merged = serde_json::to_value(&self.opcua)
@@ -2354,11 +2374,11 @@ impl AppConfig {
                             "overlay_singletons_from_sqlite_rows: \
                              failed to re-serialise opcua: {}", e)))?;
                     merge_object(&mut merged, sqlite_map);
-                    self.opcua = serde_json::from_value(merged).map_err(|e| {
+                    new_opcua = Some(serde_json::from_value(merged).map_err(|e| {
                         OpcGwError::Configuration(format!(
                             "overlay_singletons_from_sqlite_rows: \
                              failed to deserialise merged opcua: {}", e))
-                    })?;
+                    })?);
                 }
                 "web" => {
                     let mut merged = serde_json::to_value(&self.web)
@@ -2366,23 +2386,31 @@ impl AppConfig {
                             "overlay_singletons_from_sqlite_rows: \
                              failed to re-serialise web: {}", e)))?;
                     merge_object(&mut merged, sqlite_map);
-                    self.web = serde_json::from_value(merged).map_err(|e| {
+                    new_web = Some(serde_json::from_value(merged).map_err(|e| {
                         OpcGwError::Configuration(format!(
                             "overlay_singletons_from_sqlite_rows: \
                              failed to deserialise merged web: {}", e))
-                    })?;
+                    })?);
                 }
-                other => {
-                    // Unknown section in SQLite — schema CHECK constraint
-                    // makes this unreachable, but log defensively.
-                    tracing::warn!(
-                        section = %other,
-                        "overlay_singletons_from_sqlite_rows: unknown section in SQLite"
-                    );
-                    let _ = json!({}); // silence unused-import warning on `json` in release builds
-                }
+                _ => unreachable!("KNOWN_SECTIONS pinned above"),
             }
         }
+
+        // Any remaining `by_section` keys are unknown sections —
+        // schema CHECK constraint makes this unreachable, but log
+        // defensively (does NOT poison the all-or-nothing apply below).
+        for unknown in by_section.keys() {
+            tracing::warn!(
+                section = ?unknown,
+                "overlay_singletons_from_sqlite_rows: unknown section in SQLite"
+            );
+        }
+
+        // ALL sections deserialised successfully — now apply atomically.
+        if let Some(g) = new_global { self.global = g; }
+        if let Some(c) = new_chirpstack { self.chirpstack = c; }
+        if let Some(o) = new_opcua { self.opcua = o; }
+        if let Some(w) = new_web { self.web = w; }
 
         Ok(())
     }

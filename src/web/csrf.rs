@@ -401,13 +401,17 @@ pub async fn csrf_middleware(
             // Story D-1 AC#13: literal match arm for singleton-config
             // PUT rejections so `git grep -hoE 'event = "singleton_config_[a-z_]+"' src/`
             // returns the closed taxonomy (updated/rejected/restart_required).
+            //
+            // I1-F5 (iter-1): `?`-Debug on operator-controlled `path` +
+            // `origin` to close the log-injection sink (C-1 finding
+            // class re-introduced if left as `%`-Display).
             "singleton_config" => warn!(
                 event = "singleton_config_rejected",
                 reason = "csrf",
-                path = %path,
+                path = ?path,
                 method = %method,
                 source_ip = %addr.ip(),
-                origin = origin_str,
+                origin = ?origin_str,
                 "CSRF rejected: missing or cross-origin Origin"
             ),
             _ => warn!(
@@ -479,10 +483,11 @@ pub async fn csrf_middleware(
                 "CSRF rejected: Content-Type is not application/json"
             ),
             // Story D-1: same pattern for the singleton-config editor.
+            // I1-F5: `?`-Debug on operator-controlled `path`.
             "singleton_config" => warn!(
                 event = "singleton_config_rejected",
                 reason = "csrf",
-                path = %path,
+                path = ?path,
                 method = %method,
                 source_ip = %addr.ip(),
                 "CSRF rejected: Content-Type is not application/json"

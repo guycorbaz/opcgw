@@ -73,6 +73,10 @@ struct Fixture {
     cancel: CancellationToken,
     server_handle: tokio::task::JoinHandle<()>,
     shutdown_token: CancellationToken,
+    // I1-F4 (iter-1): expose the backend so tests can read-back SQLite
+    // state to verify writes actually persisted (closes the fake-
+    // regression-guard finding-class on Test 4).
+    sqlite_config: Arc<SqliteBackend>,
     _temp_dir: TempDir,
 }
 
@@ -243,6 +247,7 @@ async fn spawn_fixture() -> Fixture {
         cancel,
         server_handle,
         shutdown_token,
+        sqlite_config: app_state.sqlite_config.clone(),
         _temp_dir: dir,
     }
 }
@@ -312,7 +317,11 @@ async fn d1_get_is_csrf_exempt() {
     fx.shutdown().await;
 }
 
-/// Test 4 — PUT /global with a valid payload returns 202 + triggers shutdown.
+/// Test 4 — PUT /global with a valid payload returns 202, triggers
+/// shutdown, and **actually persists to SQLite** (I1-F4 iter-1: prior
+/// version was a fake regression guard that only checked HTTP status +
+/// shutdown + log strings; a broken `write_singleton_section` that
+/// returned `Ok(())` without writing would have passed).
 #[tokio::test]
 #[serial(captured_logs)]
 async fn d1_put_global_success_triggers_restart() {
@@ -337,11 +346,40 @@ async fn d1_put_global_success_triggers_restart() {
     let resp: Value = r.json().await.expect("json");
     assert_eq!(resp["status"], "restart_pending");
 
-    // Wait briefly for shutdown_token to flip.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(
-        fx.shutdown_token.is_cancelled(),
-        "PUT must trigger shutdown_token.cancel()"
+    // I1-F9 (iter-1): polling loop instead of fixed 50ms sleep. The
+    // PUT handler calls `state.shutdown_token.cancel()` synchronously
+    // before returning the response, so the token should already be
+    // cancelled when the HTTP response arrives — but a slow CI runner
+    // may not observe the bit-flip immediately. 1s timeout is well
+    // beyond the synchronous-cancel expectation.
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while !fx.shutdown_token.is_cancelled() {
+        if std::time::Instant::now() >= deadline {
+            panic!("shutdown_token not cancelled within 1s of PUT response");
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // I1-F4 (iter-1): SQLite round-trip — read the singleton_config
+    // rows back via the backend exposed on the fixture, assert the
+    // PUT'd values are durably present. A broken `write_singleton_section`
+    // returning `Ok(())` without committing would now fail loudly.
+    let rows = fx.sqlite_config.load_singleton_config().expect("load rows");
+    let global_pairs: std::collections::HashMap<String, String> = rows
+        .iter()
+        .filter(|(s, _, _)| s == "global")
+        .map(|(_, k, v)| (k.clone(), v.clone()))
+        .collect();
+    assert_eq!(
+        global_pairs.get("debug").map(|s| s.as_str()),
+        Some("false"),
+        "PUT must persist debug=false; got rows={:?}",
+        global_pairs
+    );
+    assert_eq!(
+        global_pairs.get("prune_interval_minutes").map(|s| s.as_str()),
+        Some("30"),
+        "PUT must persist prune_interval_minutes=30"
     );
 
     // Audit events present in captured logs.

@@ -114,22 +114,36 @@
   }
 
   // Read the form values back out into a JSON object suitable for PUT.
+  // Returns { ok: false, error: string } on bad input (e.g. NaN /
+  // Infinity for numeric fields) — I1-F7 (iter-1): without this guard,
+  // parseInt("") / parseFloat("Infinity") silently become NaN, then
+  // JSON.stringify maps NaN → null, and the server overlay sees a
+  // null where a u16 / u32 was expected — opaque error message
+  // surfaces instead of "field X must be a finite number".
   function collectSection(section, sectionEl) {
     const out = {};
     const fields = sectionEl.querySelectorAll('.field');
-    fields.forEach(f => {
-      if (f.dataset.secret === 'true') return; // skip secrets
+    for (const f of fields) {
+      if (f.dataset.secret === 'true') continue; // skip secrets
       const key = f.dataset.key;
       const ctrl = f.querySelector('input, textarea, select');
-      if (!ctrl) return;
+      if (!ctrl) continue;
       const t = ctrl.dataset.type;
       const raw = ctrl.value;
       if (t === 'bool') {
         out[key] = raw === 'true';
       } else if (t === 'int') {
-        out[key] = parseInt(raw, 10);
+        const n = parseInt(raw, 10);
+        if (Number.isNaN(n) || !Number.isFinite(n)) {
+          return { ok: false, error: `field "${key}" must be a finite integer (got: ${JSON.stringify(raw)})` };
+        }
+        out[key] = n;
       } else if (t === 'float') {
-        out[key] = parseFloat(raw);
+        const n = parseFloat(raw);
+        if (Number.isNaN(n) || !Number.isFinite(n)) {
+          return { ok: false, error: `field "${key}" must be a finite number (got: ${JSON.stringify(raw)})` };
+        }
+        out[key] = n;
       } else if (t === 'array') {
         out[key] = raw.split('\n').map(s => s.trim()).filter(s => s.length > 0);
       } else if (t === 'string-or-null') {
@@ -137,8 +151,8 @@
       } else {
         out[key] = raw;
       }
-    });
-    return out;
+    }
+    return { ok: true, body: out };
   }
 
   let pendingSave = null;
@@ -161,12 +175,16 @@
     const errEl = document.getElementById(`err-${section}`);
     errEl.textContent = '';
 
-    const body = collectSection(section, sectionEl);
+    const collected = collectSection(section, sectionEl);
+    if (!collected.ok) {
+      errEl.textContent = collected.error;
+      return;
+    }
     try {
       const r = await fetch(`/api/config/singleton/${encodeURIComponent(section)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify(collected.body),
         credentials: 'include',
       });
       if (r.status === 202) {

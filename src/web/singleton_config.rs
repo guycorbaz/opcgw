@@ -56,8 +56,8 @@ pub async fn get_singleton_config(
         Err(e) => {
             warn!(
                 event = "config_get_singleton_failed",
-                auth_user = %auth_user,
-                error = %e,
+                auth_user = ?auth_user,
+                error = ?e,
                 "GET /api/config/singleton: failed to load singleton_config"
             );
             return internal_error("Failed to load singleton config");
@@ -75,10 +75,10 @@ pub async fn get_singleton_config(
             Err(e) => {
                 warn!(
                     event = "config_get_singleton_failed",
-                    auth_user = %auth_user,
-                    section = %section,
+                    auth_user = ?auth_user,
+                    section = ?section,
                     key = %key,
-                    error = %e,
+                    error = ?e,
                     "GET /api/config/singleton: malformed JSON in SQLite row"
                 );
                 return internal_error("Malformed JSON in stored config");
@@ -105,7 +105,7 @@ pub async fn get_singleton_config(
 
     info!(
         event = "config_get_singleton",
-        auth_user = %auth_user,
+        auth_user = ?auth_user,
         section_count = KNOWN_SECTIONS.len(),
         "GET /api/config/singleton: snapshot served"
     );
@@ -139,8 +139,8 @@ pub async fn put_singleton_section(
         warn!(
             event = "singleton_config_rejected",
             reason = "invalid_section",
-            section = %section,
-            auth_user = %auth_user,
+            section = ?section,
+            auth_user = ?auth_user,
             "PUT /api/config/singleton/{}: section not in allowlist",
             section
         );
@@ -159,8 +159,8 @@ pub async fn put_singleton_section(
             warn!(
                 event = "singleton_config_rejected",
                 reason = "validation",
-                section = %section,
-                auth_user = %auth_user,
+                section = ?section,
+                auth_user = ?auth_user,
                 "PUT /api/config/singleton/{}: request body is not a JSON object",
                 section
             );
@@ -180,9 +180,9 @@ pub async fn put_singleton_section(
             warn!(
                 event = "singleton_config_rejected",
                 reason = "secret_field_not_editable",
-                section = %section,
-                field = %k,
-                auth_user = %auth_user,
+                section = ?section,
+                field = ?k,
+                auth_user = ?auth_user,
                 "PUT /api/config/singleton/{}: payload contains secret field {:?}",
                 section,
                 k
@@ -211,10 +211,10 @@ pub async fn put_singleton_section(
                 warn!(
                     event = "singleton_config_rejected",
                     reason = "validation",
-                    section = %section,
-                    field = %k,
-                    auth_user = %auth_user,
-                    error = %e,
+                    section = ?section,
+                    field = ?k,
+                    auth_user = ?auth_user,
+                    error = ?e,
                     "PUT /api/config/singleton/{}: failed to re-serialise field",
                     section
                 );
@@ -233,9 +233,9 @@ pub async fn put_singleton_section(
         warn!(
             event = "singleton_config_rejected",
             reason = "validation",
-            section = %section,
-            auth_user = %auth_user,
-            error = %e,
+            section = ?section,
+            auth_user = ?auth_user,
+            error = ?e,
             "PUT /api/config/singleton/{}: candidate overlay failed",
             section
         );
@@ -252,17 +252,25 @@ pub async fn put_singleton_section(
         warn!(
             event = "singleton_config_rejected",
             reason = "validation",
-            section = %section,
-            auth_user = %auth_user,
-            error = %e,
+            section = ?section,
+            auth_user = ?auth_user,
+            error = ?e,
             "PUT /api/config/singleton/{}: AppConfig::validate rejected candidate",
             section
         );
+        // I1-F6 (iter-1): don't expose internal OpcGwError Display in
+        // the HTTP body — its variants can carry file paths, struct
+        // field names, or implementation detail. Log the full error
+        // structurally (already done above via `error = ?e`); return
+        // a static, operator-facing hint.
         return validation_error(
             StatusCode::BAD_REQUEST,
             "validation",
             None,
-            Some(&format!("validation error: {}", e)),
+            Some(
+                "config validation failed; check field values are within \
+                 allowed ranges. The full error is in the audit log.",
+            ),
         );
     }
 
@@ -277,12 +285,18 @@ pub async fn put_singleton_section(
         .sqlite_config
         .write_singleton_section(&section, &fields)
     {
+        // I1-F3 (iter-1): DO NOT emit `singleton_config_rejected` here
+        // — that audit event is reserved for client-error cases
+        // (validation / secret_field_not_editable / invalid_section /
+        // csrf). A SQLite write failure is a server fault; HTTP 500
+        // is the canonical signal. Emit a distinct event so audit
+        // pipelines tracking client errors don't conflate them with
+        // storage faults.
         warn!(
-            event = "singleton_config_rejected",
-            reason = "validation",
-            section = %section,
-            auth_user = %auth_user,
-            error = %e,
+            event = "singleton_config_storage_error",
+            section = ?section,
+            auth_user = ?auth_user,
+            error = ?e,
             "PUT /api/config/singleton/{}: SQLite write failed",
             section
         );
@@ -292,16 +306,16 @@ pub async fn put_singleton_section(
     // Success path: audit + restart trigger.
     info!(
         event = "singleton_config_updated",
-        section = %section,
+        section = ?section,
         field_count = fields.len(),
-        auth_user = %auth_user,
+        auth_user = ?auth_user,
         "PUT /api/config/singleton/{}: section persisted to SQLite",
         section
     );
     info!(
         event = "singleton_config_restart_required",
-        section = %section,
-        auth_user = %auth_user,
+        section = ?section,
+        auth_user = ?auth_user,
         "PUT /api/config/singleton/{}: triggering graceful supervisor restart",
         section
     );

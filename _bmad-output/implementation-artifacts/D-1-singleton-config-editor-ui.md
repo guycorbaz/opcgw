@@ -481,3 +481,43 @@ Modified files:
 - `_bmad-output/implementation-artifacts/D-1-singleton-config-editor-ui.md` — Status review
 - `_bmad-output/implementation-artifacts/sprint-status.yaml` — D-1 ready-for-dev → review
 - `_bmad-output/implementation-artifacts/deferred-work.md` — D-1-FOLLOWUP-1
+
+---
+
+### Review Findings — Iter-1 (2026-05-27)
+
+Sources: Blind Hunter (BH, 12 findings), Edge Case Hunter (ECH, 4 findings + 12 investigations), Acceptance Auditor (AA, 6 findings). **28th cumulative iter-N+1 doctrine validation.** 16 raw findings (with significant cross-layer convergence) → 12 patch (1 HIGH + 7 MED + 4 LOW) / 5 defer (all LOW) / 0 dismiss.
+
+#### Patch
+
+- [x] [Review][Patch] **I1-F1 (HIGH) — `overlay_singletons_from_sqlite_rows` partial-mutation on error** [`src/config.rs`] — ECH-F1 escalation: non-deterministic HashMap iteration + early-`?`-return on any section's deserialization failure leaves `self` in an inconsistent A-from-SQLite/B-from-TOML hybrid state, contradicting the "fall back to figment" safety net. Fix: stage candidate replacements (`Option<T>` per section) in fixed `KNOWN_SECTIONS` order; only assign back to `self` once every touched section has successfully deserialised. Also closes I1-F11 (removed `json!` dummy + unused import) and I1-F12 (deterministic iteration via `KNOWN_SECTIONS` slice).
+
+- [x] [Review][Patch] **I1-F2 (MED) — `notify_crud_write` watch channel seeded pre-overlay; CRUD propagates pre-overlay singleton fields** [`src/config_reload.rs`, `src/main.rs`] — ECH-F2 escalation. `ConfigReloadHandle` was seeded with the figment-loaded Arc at line ~554; the D-1 boot-time overlay applied to a different `Arc<AppConfig>` via `Arc::make_mut`, but the watch channel still held the pre-overlay Arc. The first `notify_crud_write` (any application CRUD) would broadcast a candidate with singleton fields reverted to TOML/env-var values — silently undoing every D-1 UI edit. Fix: new `ConfigReloadHandle::seed_post_overlay(post_overlay: Arc<AppConfig>)` method; main.rs calls it immediately after the successful overlay so subscribers start from the post-overlay snapshot.
+
+- [x] [Review][Patch] **I1-F3 (MED) — SQLite write-failure misclassified as `reason="validation"` + HTTP 500 contradiction** [`src/web/singleton_config.rs`] — BH-F02 + AA-F3 converged. The write-failure arm emitted `singleton_config_rejected reason="validation"` but returned HTTP 500 — log claimed bad input, response signalled server fault. Fix: drop the `singleton_config_rejected` emit on this path (storage faults aren't client errors); emit `singleton_config_storage_error` warn instead so audit pipelines tracking `_rejected` stay scoped to client errors.
+
+- [x] [Review][Patch] **I1-F4 (MED) — Test 4 fake regression guard: doesn't verify SQLite write persisted** [`tests/web_singleton_config.rs`] — BH-F03 + AA-F2 converged. Old test asserted HTTP 202 + shutdown_token + log strings but never read SQLite to confirm the PUT'd values were durably written. A broken `write_singleton_section` returning `Ok(())` without committing would have passed. Fix: expose `sqlite_config: Arc<SqliteBackend>` on `Fixture`; Test 4 now calls `load_singleton_config()` post-PUT and asserts `debug=false` + `prune_interval_minutes=30` are present.
+
+- [x] [Review][Patch] **I1-F5 (MED) — `section = %section` + `path = %path` Display log-injection sink** [`src/web/singleton_config.rs`, `src/web/csrf.rs`] — BH-F05. C-1 finding-class re-introduced. `section` is operator-controlled (URL path segment); `path` is operator-controlled (full request URI). Display interpolation embeds newlines / structured-log delimiters verbatim. Fix: changed `%`-Display to `?`-Debug for all operator-controlled fields (24 occurrences across singleton_config.rs + csrf.rs).
+
+- [x] [Review][Patch] **I1-F6 (MED) — `validation error: {}` exposes internal OpcGwError Display in HTTP response body** [`src/web/singleton_config.rs`] — BH-F06. `OpcGwError` variants can carry file paths, struct field names, implementation detail. Sending the Display string verbatim in the HTTP body via the `hint` field reaches the browser + browser cache + JS runtime. Fix: replaced with a static hint ("config validation failed; check field values are within allowed ranges. The full error is in the audit log."); the structured `error = ?e` warn already captures full diagnostic context.
+
+- [x] [Review][Patch] **I1-F7 (MED) — JS `collectSection` submits NaN/Infinity silently as `null`** [`static/singleton-config.js`] — BH-F07. `parseInt("")` → NaN → JSON.stringify → `null` → server overlay tries to deserialise `null` into a typed field. Fix: rewrote `collectSection` to return `{ok, body|error}` discriminated result; `Number.isNaN` + `Number.isFinite` guards reject bad numeric input with a per-field error message before submit; `performSave` honours the new return shape.
+
+- [x] [Review][Patch] **I1-F8 (MED, design exclusion documented) — `setup.html` nav strip not extended (AC#7 said 9 sites; impl did 8)** [`deferred-work.md`] — AA-F1. C-0 wizard intentionally has no nav strip per `setup.html` line 11 ("No global navigation — operator must complete this step before the rest of the UI is reachable"). Linking from the pre-first-run wizard to singleton-config (which the operator can't reach until the wizard completes) would be confusing. Fix: per user-accepted design exclusion, added a deferred-work entry documenting the rationale; AC#7's 9-site enumeration is reduced to 8 sites for D-1.
+
+- [x] [Review][Patch] **I1-F9 (LOW) — Test 4 fixed 50ms sleep flake on slow CI** [`tests/web_singleton_config.rs`] — BH-F09 + ECH-Inv10 converged. Fix: replaced with polling loop (5ms poll, 1s deadline) so the test does not depend on a specific scheduler latency.
+
+- [x] [Review][Patch] **I1-F10 (LOW) — `reload_failed` reason in spec/docs but never emitted** [`docs/logging.md`] — BH-F01 + AA-F4 converged. Closed-enum taxonomy member without an emit site. Fix: removed `reload_failed` from the `singleton_config_rejected` closed-enum documentation; added cross-reference to the new `singleton_config_storage_error` event for storage faults.
+
+- [x] [Review][Patch] **I1-F11 + I1-F12 (LOW) — `json!({})` code smell + HashMap iteration non-deterministic in overlay** — Both closed inline by the I1-F1 refactor (removed `json!` import, replaced HashMap iteration with fixed `KNOWN_SECTIONS` order).
+
+- [x] [Review][Patch] **Orphan `tests/config_hot_reload.rs` deleted** — Story 9-7-era test file with 19 tests, deleted by C-6's impl commit `1c09911` per its stated deliverables list but reappeared locally as an untracked file (likely stash recovery / git checkout glitch). Referenced removed APIs (`ConfigReloadHandle::reload()`, 2-arg `new()`, `ReloadOutcome` import). Re-evaluation triggered by I1-F2's `seed_post_overlay` API addition surfaced the broken file. User-confirmed deletion (not D-1 regression; unrelated technical debt that surfaced through D-1's API extension).
+
+#### Deferred
+
+- [x] [Review][Defer] **I1-F8 follow-up (LOW)** — `setup.html` nav strip intentional exclusion (see Patch I1-F8 above).
+- [x] [Review][Defer] **GET orphan rows silent (BH-F08, LOW)** — defensive only; schema CHECK makes this currently unreachable.
+- [x] [Review][Defer] **JS Origin design assumption (BH-F10, LOW)** — consistent with C-2 / C-4 precedent; CLI operators using curl must supply Origin explicitly.
+- [x] [Review][Defer] **Test 11 error-path coverage (BH-F12, LOW)** — overlay unit test exercises only success path; v2.x improvement.
+- [x] [Review][Defer] **Secret-field whitespace bypass (ECH-F3, LOW)** — `"api_token "` / `"API_TOKEN"` bypass exact-match; real secret not exposed (serde ignores during overlay), but bogus key persists. Defer: tighten to normalize-then-compare if re-raised.

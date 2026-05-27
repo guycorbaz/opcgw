@@ -723,6 +723,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         rows = rows.len(),
                         "Applied singleton config snapshot from SQLite over figment-loaded AppConfig"
                     );
+                    // D-1 iter-1 I1-F2: reseed the watch channel with
+                    // the post-overlay snapshot so the next
+                    // `notify_crud_write` propagates SQLite-overlaid
+                    // singleton fields to all subscribers — not the
+                    // pre-overlay figment values seeded at line ~554.
+                    reload_handle.seed_post_overlay(application_config.clone());
                 }
                 Err(e) => {
                     warn!(
