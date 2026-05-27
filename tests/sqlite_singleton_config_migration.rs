@@ -16,6 +16,37 @@ use opcgw::storage::migrate_singleton_config::{
 };
 use opcgw::storage::SqliteBackend;
 
+// ── Tracing-capture helpers (I2-F4 iter-2) ────────────────────────────────────
+//
+// Mirrors the pattern from tests/sqlite_config_migration.rs so Test 16 can
+// assert the `storage_init` warn event fires on existing wider-mode DBs.
+
+fn init_test_subscriber() {
+    use tracing_subscriber::{fmt as tracing_fmt, layer::SubscriberExt, Layer};
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INIT.get_or_init(|| {
+        let buf: &'static std::sync::Mutex<Vec<u8>> = tracing_test::internal::global_buf();
+        let mock = tracing_test::internal::MockWriter::new(buf);
+        let fmt_layer = tracing_fmt::layer()
+            .with_writer(mock)
+            .with_level(true)
+            .with_ansi(false)
+            .with_filter(tracing_subscriber::filter::LevelFilter::TRACE);
+        let subscriber = tracing_subscriber::Registry::default().with(fmt_layer);
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    });
+}
+
+fn captured_logs() -> String {
+    let buf = tracing_test::internal::global_buf().lock().unwrap();
+    String::from_utf8_lossy(&buf).to_string()
+}
+
+fn clear_captured_logs() {
+    let mut buf = tracing_test::internal::global_buf().lock().unwrap();
+    buf.clear();
+}
+
 // ── TOML fixtures ─────────────────────────────────────────────────────────────
 
 /// Singleton sections with realistic non-placeholder secrets. D-0 migration
@@ -292,45 +323,67 @@ fn singleton_is_done_false_on_fresh_db() {
 
 /// Test 11 — `write_d0_migration_done` is idempotent under `INSERT OR
 /// IGNORE` semantics: the original timestamp is preserved across repeat
-/// calls. I1-F5 (iter-1) closes D-0-FOLLOWUP-3 — the previous version of
-/// this test asserted `bool == bool` (always true) and would have passed
-/// even under `INSERT OR REPLACE`. The new body reads the raw timestamp
-/// string and asserts byte-equality across re-calls.
+/// calls.
+///
+/// I1-F5 (iter-1) rewrote the prior bool == bool fake guard. I2-F2 +
+/// I2-F5 (iter-2) fix two new issues iter-1 introduced:
+///   - **I2-F2**: a long-lived raw `rusqlite::Connection` may hold a
+///     WAL snapshot from the first query and miss the second write,
+///     making the byte-equality assertion vacuous. Fix: open a fresh
+///     raw Connection for EACH read so each gets a new snapshot.
+///   - **I2-F5**: `thread::sleep(1100ms)` does not guarantee crossing a
+///     SQLite-`strftime` second boundary if both writes fall in the
+///     same wall-clock second. Fix: deterministic sleep to the start of
+///     the NEXT wall-clock second + 100ms slack, so the two writes
+///     are guaranteed to observe different `strftime('now')` values
+///     under a hypothetical `INSERT OR REPLACE` implementation.
 #[test]
 fn singleton_write_done_preserves_timestamp_across_calls() {
     let (dir, _cfg, backend) = setup(TOML_FULL);
     backend.write_d0_migration_done().expect("first write");
     let db_path = dir.path().join("test.db");
 
-    // Read the raw timestamp via direct connection (bypassing the
-    // boolean `is_d0_migration_done` helper) so we can assert preservation
-    // at the byte level.
-    let raw = rusqlite::Connection::open(&db_path).expect("raw open");
-    let ts_after_first: String = raw
-        .query_row(
+    // I2-F2: fresh raw connection for the first read (each open
+    // starts a new read transaction; no stale WAL snapshot risk).
+    let ts_after_first: String = {
+        let raw = rusqlite::Connection::open(&db_path).expect("raw open 1");
+        raw.query_row(
             "SELECT value FROM meta WHERE key = 'd0_migration_done'",
             [],
             |row| row.get(0),
         )
-        .expect("read first timestamp");
+        .expect("read first timestamp")
+    };
     assert!(
         !ts_after_first.is_empty(),
         "first write must set a non-empty timestamp"
     );
 
-    // SQLite `strftime` resolution is one second; sleep slightly more
-    // than that so a hypothetical INSERT OR REPLACE would produce a
-    // different timestamp value (defeating the byte-equality check).
-    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    // I2-F5: deterministic sleep across a second boundary so a
+    // hypothetical INSERT OR REPLACE would observe a different
+    // strftime('now') value. We compute the duration until the next
+    // wall-clock second + 100ms slack; the second write is then
+    // guaranteed to fall in a different SQLite second from the first.
+    let micros_into_sec = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .subsec_micros();
+    let sleep_micros = (1_000_000 - micros_into_sec) + 100_000;
+    std::thread::sleep(std::time::Duration::from_micros(sleep_micros as u64));
 
     backend.write_d0_migration_done().expect("second write");
-    let ts_after_second: String = raw
-        .query_row(
+
+    // I2-F2: fresh raw connection for the second read (mirrors the
+    // first; defeats WAL-snapshot caching of the prior read txn).
+    let ts_after_second: String = {
+        let raw = rusqlite::Connection::open(&db_path).expect("raw open 2");
+        raw.query_row(
             "SELECT value FROM meta WHERE key = 'd0_migration_done'",
             [],
             |row| row.get(0),
         )
-        .expect("read second timestamp");
+        .expect("read second timestamp")
+    };
     assert_eq!(
         ts_after_first, ts_after_second,
         "INSERT OR IGNORE must preserve the original timestamp across re-calls; \
@@ -424,18 +477,18 @@ fn singleton_fresh_db_has_chmod_0o600() {
     );
 }
 
-/// Test 16 (AC#17 #12, added in I1-F6 iter-1) — An existing wider-mode
-/// SQLite database is NOT chmod'd retroactively on subsequent
-/// `ConnectionPool::new` calls — operator umask + supervisor permission
-/// model is preserved per AC#12.
-///
-/// The test creates a fresh DB (mode 0o600), then mutates its mode to
-/// 0o644 externally, then re-opens via a new SqliteBackend, and asserts
-/// the mode remains 0o644 (the warn fires but the file is not modified).
+/// Test 16 (AC#17 #12, added in I1-F6 iter-1; I2-F4 iter-2 adds the
+/// warn-emission assertion) — An existing wider-mode SQLite database is
+/// NOT chmod'd retroactively on subsequent `ConnectionPool::new` calls
+/// AND the `storage_init` warn fires so operators know the mode is
+/// wider than 0o600. Two-part AC#12 contract; iter-1 covered only the
+/// no-retroactive-chmod half.
 #[cfg(unix)]
 #[test]
 fn singleton_existing_wider_db_is_not_chmod_retroactively() {
     use std::os::unix::fs::PermissionsExt;
+
+    init_test_subscriber();
 
     let dir = TempDir::new().expect("tempdir");
     let db_path = dir.path().join("existing-wider.db");
@@ -451,8 +504,12 @@ fn singleton_existing_wider_db_is_not_chmod_retroactively() {
     let pre_mode = std::fs::metadata(&db_path).expect("metadata").permissions().mode() & 0o777;
     assert_eq!(pre_mode, 0o644, "test precondition: mode widened to 0o644");
 
-    // Re-open. The atomic-create probe will see AlreadyExists; no chmod
-    // should fire; the warn is emitted but the file mode is unchanged.
+    // I2-F4: clear the captured-logs buffer immediately before the second
+    // backend creation so we only capture events from this call.
+    clear_captured_logs();
+
+    // Re-open. The atomic-create probe sees AlreadyExists; no chmod
+    // fires; the warn block at the end of ConnectionPool::new emits.
     {
         let _b2 = SqliteBackend::new(db_path.to_str().unwrap()).expect("second backend");
     }
@@ -460,8 +517,25 @@ fn singleton_existing_wider_db_is_not_chmod_retroactively() {
     let post_mode = std::fs::metadata(&db_path).expect("metadata").permissions().mode() & 0o777;
     assert_eq!(
         post_mode, 0o644,
-        "AC#12: existing wider-mode DB must NOT be chmod'd retroactively; \
+        "AC#12 part 1: existing wider-mode DB must NOT be chmod'd retroactively; \
          expected mode unchanged at 0o644, got 0o{:o}",
         post_mode
+    );
+
+    // I2-F4: AC#12 part 2 — verify the storage_init warn fires with the
+    // mode field set. The captured log buffer will contain a line like
+    // `WARN ... event="storage_init" path="..." mode="644" ...`.
+    let logs = captured_logs();
+    assert!(
+        logs.contains("storage_init"),
+        "AC#12 part 2: storage_init event must fire on existing wider-mode DB; \
+         no storage_init in captured logs:\n{}",
+        logs
+    );
+    assert!(
+        logs.contains("644"),
+        "AC#12 part 2: storage_init warn must carry the file mode (644) so \
+         operators can identify the affected file; mode missing from logs:\n{}",
+        logs
     );
 }

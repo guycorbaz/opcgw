@@ -3321,6 +3321,18 @@ impl SqliteBackend {
         &self,
         sections: &[(&str, &[(String, String)])],
     ) -> Result<usize, OpcGwError> {
+        // I2-F1 (iter-2): empty-slice precondition guard. An empty
+        // `sections` slice would silently succeed (no INSERTs, count
+        // matches 0 if the table was empty), write the done-flag, and
+        // permanently stamp the DB as migrated with zero rows.
+        if sections.is_empty() {
+            return Err(OpcGwError::Database(
+                "migrate_singleton_sections_atomic called with empty sections slice; \
+                 refusing to write done-flag for a no-op migration"
+                    .into(),
+            ));
+        }
+
         let conn = self.pool.checkout(Duration::from_secs(5)).map_err(|e| {
             warn!(error = %e, "Pool checkout timeout for migrate_singleton_sections_atomic");
             e
@@ -3379,26 +3391,42 @@ impl SqliteBackend {
             }
             drop(stmt);
 
-            // Row-count verification inside the same transaction (so a
-            // mismatch triggers ROLLBACK, NOT a partial commit).
-            let actual: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM singleton_config",
-                    [],
-                    |row| row.get(0),
+            // I2-F1 (iter-2): per-section row-count verification scoped
+            // to the sections we operated on. Previous code used an
+            // unbounded `SELECT COUNT(*) FROM singleton_config` which
+            // would conflate orphaned rows (e.g. a future Section #5
+            // direct-SQLite-hack) with the migration's own writes. The
+            // per-section count is bounded to the input sections and
+            // surfaces the offending section name in the error message.
+            let mut count_stmt = conn
+                .prepare_cached(
+                    "SELECT COUNT(*) FROM singleton_config WHERE section = ?1",
                 )
                 .map_err(|e| {
                     OpcGwError::Database(format!(
-                        "migrate_singleton_sections_atomic: count: {}",
+                        "migrate_singleton_sections_atomic: count prepare: {}",
                         e
                     ))
                 })?;
-            if actual as usize != total_inserted {
-                return Err(OpcGwError::Database(format!(
-                    "singleton_row_count_mismatch: expected={} actual={}",
-                    total_inserted, actual
-                )));
+            for (section, fields) in sections {
+                let actual: i64 = count_stmt
+                    .query_row(rusqlite::params![section], |row| row.get(0))
+                    .map_err(|e| {
+                        OpcGwError::Database(format!(
+                            "migrate_singleton_sections_atomic: count section={}: {}",
+                            section, e
+                        ))
+                    })?;
+                if actual as usize != fields.len() {
+                    return Err(OpcGwError::Database(format!(
+                        "singleton_row_count_mismatch: expected={} actual={} section={}",
+                        fields.len(),
+                        actual,
+                        section
+                    )));
+                }
             }
+            drop(count_stmt);
 
             // Write the done-flag inside the same EXCLUSIVE transaction so
             // (data present) ↔ (flag set) is an atomic invariant. INSERT
@@ -3422,7 +3450,14 @@ impl SqliteBackend {
 
         match result {
             Ok(n) => {
+                // I2-F3 (iter-2): if COMMIT itself fails (disk full,
+                // I/O error mid-commit), the pool connection has a
+                // pending uncommitted EXCLUSIVE transaction. Without
+                // explicit ROLLBACK, the next BEGIN on this connection
+                // fails with "cannot start a transaction within a
+                // transaction". Pre-existing precedent at sqlite.rs:1387.
                 conn.execute_batch("COMMIT").map_err(|e| {
+                    let _ = conn.execute_batch("ROLLBACK");
                     OpcGwError::Database(format!(
                         "migrate_singleton_sections_atomic: commit: {}",
                         e

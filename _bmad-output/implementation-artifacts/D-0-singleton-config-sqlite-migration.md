@@ -518,7 +518,7 @@ The serde_json approach in `serialize_section` flattens the parent `ChirpstackPo
 ### Architectural decisions captured
 
 - **chmod 0o600 fresh-creation-only**, per the spec's "don't surprise operators with retroactive chmod" guidance. Existing wider-mode databases emit a once-per-boot `storage_init` warn with the operator-action recipe in the runbook.
-- **Migration uses `IMMEDIATE TRANSACTION`** (in `write_singleton_section`) not `EXCLUSIVE TRANSACTION`. Rationale: the per-section atomic write is for D-1's PUT-per-section endpoint; EXCLUSIVE would serialise against the C-6 application-tree writers unnecessarily.
+- **Two transaction surfaces, two isolation levels** (updated 2026-05-27 per iter-1 I1-F1 + iter-2 I2-F6 corrections): The boot-time **migration path** uses `BEGIN EXCLUSIVE TRANSACTION` via the new `SqliteBackend::migrate_singleton_sections_atomic` helper — all 4 section DELETEs + INSERTs + post-write row-count verify + done-flag write are atomic; a row-count mismatch or any insert error ROLLs BACK so the table reverts to its pre-call state (AC#4 contract). The **D-1 per-section write helper** `write_singleton_section` continues to use `BEGIN IMMEDIATE TRANSACTION` since it writes a single section atomically (delete-then-insert) and does NOT touch the meta key; IMMEDIATE avoids serialising against C-6 application-tree writers unnecessarily during runtime CRUD.
 - **The placeholder-secrets guard in `migrate_singleton_toml_to_sqlite` is defense-in-depth.** `AppConfig::from_path` already rejects placeholders at parse time, so the guard is unreachable through the normal load path. Kept as belt-and-suspenders per AC#4 + because a future code path that bypasses validation (e.g. a test fixture loaded by hand) would otherwise persist placeholder strings to SQLite.
 
 ### Deferred follow-ups (added to `deferred-work.md`)
@@ -572,3 +572,39 @@ Sources: Blind Hunter (BH, 12 findings), Edge Case Hunter (ECH, 5 findings + 10 
 - [Dismiss] BH-F12 (LOW): Missing partial-migration-test — becomes moot after I1-F1 outer-transaction wrapping (partial state can no longer exist).
 - [Dismiss] ECH-F1 (LOW): Concurrent-start TOCTOU — running two opcgw processes against the same DB path is operator misconfiguration; outside the documented deployment model.
 - [Dismiss] ECH-F2 (LOW): "once-per-boot" warn is "once-per-`ConnectionPool::new()`" — only matters in test scenarios that create multiple pools per process; not a runtime concern.
+
+---
+
+### Review Findings — Iter-2 (2026-05-27)
+
+Sources: Blind Hunter (BH, 10 findings), Edge Case Hunter (ECH, 1 finding focused on pool-poisoning), Acceptance Auditor (AA, 3 findings). **26th cumulative iter-N+1 doctrine validation** — iter-2 caught 2 real HIGH findings in iter-1's own brand-new EXCLUSIVE-transaction logic. 14 raw findings → 9 patch, 2 defer, 3 dismiss.
+
+#### Patch
+
+- [x] [Review][Patch] **I2-F1 (HIGH) — `migrate_singleton_sections_atomic` row-count check uses unbounded `SELECT COUNT(*)` + no empty-slice guard** [`src/storage/sqlite.rs:3384-3401`] — BH-F01 + BH-F06 converged. The post-write count query had no WHERE clause; if any orphaned rows existed pre-call (future Section #5 direct-SQLite-hack) or if a partial caller passed only some sections, the count would include unrelated rows and mismatch spuriously. Also: an empty `sections` slice would silently write the done-flag for a no-op migration, permanently stamping the DB as migrated with zero rows. Fix: (a) added `if sections.is_empty() { return Err(...) }` precondition guard; (b) replaced the global COUNT with per-section `SELECT COUNT(*) FROM singleton_config WHERE section = ?1` loop — bounded to the input sections, error message now includes `section=<name>` for diagnostic precision.
+
+- [x] [Review][Patch] **I2-F2 + I2-F5 (HIGH + MED) — Test 11 raw-conn WAL snapshot fake guard + 1.1s sleep insufficient under load** [`tests/sqlite_singleton_config_migration.rs`] — BH-F02 + BH-F04 converged. The iter-1 rewrite used a long-lived `rusqlite::Connection` whose WAL snapshot may not refresh between reads (defeating the byte-equality assertion). Plus the 1.1s sleep is wall-clock-bound — if both writes fall in the same second, `strftime('now')` returns the same value and the test passes under `INSERT OR REPLACE`. Fix: (a) open a fresh raw Connection for EACH read so each gets a new snapshot; (b) compute the duration to the next wall-clock second + 100ms slack so the two writes are guaranteed to observe different `strftime('now')` values.
+
+- [x] [Review][Patch] **I2-F3 (MED) — COMMIT failure in `migrate_singleton_sections_atomic` doesn't ROLLBACK; pool connection poisoned** [`src/storage/sqlite.rs:3423-3431`] — ECH-F01. If `conn.execute_batch("COMMIT")` fails (disk full, I/O error mid-commit), the connection has a pending uncommitted EXCLUSIVE transaction. The next `BEGIN` on this pooled connection fails with "cannot start a transaction within a transaction" — pool capacity degraded by 1 slot until process restart. Pre-existing precedent at `src/storage/sqlite.rs:1387-1398` shows the correct pattern (ROLLBACK on COMMIT failure). Fix: `let _ = conn.execute_batch("ROLLBACK");` immediately inside the COMMIT-failure `.map_err` closure.
+
+- [x] [Review][Patch] **I2-F4 (MED) — Test 16 doesn't assert warn fires; regression deleting the warn block would still pass** [`tests/sqlite_singleton_config_migration.rs`] — BH-F05. AC#12 has two parts (don't chmod retroactively + emit `storage_init` warn); iter-1's Test 16 covered only part 1. Fix: import the tracing-test capture helpers (`init_test_subscriber` / `captured_logs` / `clear_captured_logs`) from the C-6 test suite pattern; clear the buffer before the second backend creation; assert `storage_init` event + `mode="644"` field both appear in the captured logs.
+
+- [x] [Review][Patch] **I2-F6 (MED) — Completion Note bullet says "Migration uses IMMEDIATE TRANSACTION" — factually inverted after I1-F1** [`_bmad-output/implementation-artifacts/D-0-singleton-config-sqlite-migration.md`] — AA-F02. After the iter-1 EXCLUSIVE-transaction refactor, the migration path uses EXCLUSIVE; the IMMEDIATE-only bullet was not updated. Fix: rewrite the bullet to clearly distinguish the two transaction surfaces — migration (EXCLUSIVE via `migrate_singleton_sections_atomic`) vs D-1 per-section write helper (IMMEDIATE via `write_singleton_section`).
+
+- [x] [Review][Patch] **I2-F7 (LOW) — AC#17 tests 7, 8, 9 absent and not tracked in `deferred-work.md`** — AA-F01. Tests 7 (AppConfig read from SQLite), 8 (env-var override on top of SQLite), 9 (secrets.toml still wins) map directly to the AC#7 deferral but `deferred-work.md` I1-F15 only names tests 4/5/10. Fix: add explicit deferred-work entry linking AC#17 tests 7/8/9 to D-0-FOLLOWUP-2 (figment Provider rework for AC#7+AC#8 lands in D-2).
+
+- [x] [Review][Patch] **I2-F8 (LOW) — Spec AC#4 error format includes `section=X` field; impl now produces it after I2-F1 per-section counts** [`spec AC#4`, `src/storage/sqlite.rs:3397-3403`] — AA-F03. Spec wording was ahead of the impl in the original D-0 spec; iter-2 I2-F1 added `section=X` to the error message as a side effect of the per-section count refactor. Iter-2 closes the gap by ensuring the spec and impl agree.
+
+- [x] [Review][Patch] **I2-F9 (MED) — Atomic-create probe failure logs at `debug!` only; silent degraded-security path** [`src/storage/pool.rs:104-116`] — BH-F03. When the probe fails with `PermissionDenied` or other unexpected error (other than `AlreadyExists`), the chmod 0o600 guarantee is NOT delivered but the failure is logged only at `debug` — invisible at default log levels. Operators investigating "why does the DB file have unexpected permissions" need this signal. Fix: change `tracing::debug!` to `tracing::warn!` + extend the message to mention the missed guarantee.
+
+#### Deferred
+
+- [x] [Review][Defer] **I2-F10 (MED) — `BEGIN EXCLUSIVE TRANSACTION` fails with `SQLITE_BUSY` on concurrent connections** [`src/storage/sqlite.rs`] — BH-F07. SQLite EXCLUSIVE prevents other connections from acquiring any lock, including SHARED for reads. With a pool of N > 1 connections, if another task holds an open connection, BEGIN EXCLUSIVE fails immediately (not retryable). Documented behavior of SQLite + pool interaction; the migration retries idempotently on next boot per the AC#5 safety net. Deferred as a documented design-level limitation; mentioned in the new method docstring.
+
+- [x] [Review][Defer] **I2-F11 (LOW) — Test 15 may fail on filesystems with forced mode bits (tmpfs no-permission, root-CI)** [`tests/sqlite_singleton_config_migration.rs`] — BH-F09. Test reliability concern on certain CI configurations; the gateway code is correct. Deferred as test-environment-dependent; if CI surfaces a real failure, add `#[ignore = "filesystem-dependent"]` or a CI-specific override.
+
+#### Dismissed
+
+- [Dismiss] BH-F08 (LOW): "the wider-mode warn block may have been deleted in the iter-1 diff" — ECH investigation 7 verified the warn block at `src/storage/pool.rs:140-159` is intact; not regression-affected.
+- [Dismiss] BH-F10 (LOW): `drop(stmt)` is load-bearing for the borrow checker (releases shared borrow on `conn` so `query_row` can proceed); not a bug, compile-time enforced.
+- [Dismiss] ECH-others: ECH was sharply focused on a single high-signal finding (COMMIT poisoning); no other findings worth dismissing.

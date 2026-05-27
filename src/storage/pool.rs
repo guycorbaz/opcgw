@@ -105,14 +105,21 @@ impl ConnectionPool {
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
                 Err(e) => {
-                    // Pre-existing-but-permission-denied or other I/O
-                    // error. Defer the failure to Connection::open below,
-                    // which will produce a more contextual error message.
-                    tracing::debug!(
+                    // I2-F9 (iter-2): operator-visible warn. Previous
+                    // `debug!` level made degraded-security paths
+                    // (probe failure → no chmod guarantee → Connection::open
+                    // proceeds via a path that may leave wider-mode
+                    // permissions) invisible at default log levels.
+                    // Operators investigating "why does the DB file
+                    // have unexpected permissions" need this signal.
+                    tracing::warn!(
                         event = "storage_init",
                         path = %path,
                         error = %e,
-                        "Atomic-create probe failed; deferring to Connection::open"
+                        "Atomic-create probe failed with unexpected error; \
+                         deferring to Connection::open. The chmod 0o600 \
+                         guarantee was NOT applied to the file — verify \
+                         file mode manually if security-sensitive."
                     );
                     false
                 }
