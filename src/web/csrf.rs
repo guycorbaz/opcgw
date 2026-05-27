@@ -205,6 +205,16 @@ pub(crate) fn csrf_event_resource_for_path(path: &str) -> &'static str {
     if path == "/api/audit/drift-action" || path == "/api/audit/drift-action/" {
         return "drift_audit";
     }
+    // Story D-1: singleton-config editor surface gets its own resource
+    // bucket so a CSRF rejection on PUT /api/config/singleton/<section>
+    // emits `event="singleton_config_rejected" reason="csrf"` and never
+    // collides with the application_crud_rejected grep contract.
+    if path == "/api/config/singleton"
+        || path == "/api/config/singleton/"
+        || path.starts_with("/api/config/singleton/")
+    {
+        return "singleton_config";
+    }
     // Match the bare LIST/CREATE surface FIRST so POST /api/applications
     // (no application_id) emits `event="application_crud_rejected"` on
     // CSRF rejection — preserving Story 9-4's grep contract at the
@@ -388,6 +398,18 @@ pub async fn csrf_middleware(
                 origin = origin_str,
                 "CSRF rejected: missing or cross-origin Origin"
             ),
+            // Story D-1 AC#13: literal match arm for singleton-config
+            // PUT rejections so `git grep -hoE 'event = "singleton_config_[a-z_]+"' src/`
+            // returns the closed taxonomy (updated/rejected/restart_required).
+            "singleton_config" => warn!(
+                event = "singleton_config_rejected",
+                reason = "csrf",
+                path = %path,
+                method = %method,
+                source_ip = %addr.ip(),
+                origin = origin_str,
+                "CSRF rejected: missing or cross-origin Origin"
+            ),
             _ => warn!(
                 event = "crud_rejected",
                 reason = "csrf",
@@ -450,6 +472,15 @@ pub async fn csrf_middleware(
             // Story C-4: same pattern for the drift-action endpoint.
             "drift_audit" => warn!(
                 event = "drift_audit_rejected",
+                reason = "csrf",
+                path = %path,
+                method = %method,
+                source_ip = %addr.ip(),
+                "CSRF rejected: Content-Type is not application/json"
+            ),
+            // Story D-1: same pattern for the singleton-config editor.
+            "singleton_config" => warn!(
+                event = "singleton_config_rejected",
                 reason = "csrf",
                 path = %path,
                 method = %method,

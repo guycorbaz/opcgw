@@ -441,7 +441,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Phase 2: now that tracing is up, load the full config from the same
     // path the bootstrap peek used. Any failure here reaches the file
     // appenders via `error!` (review patch D1).
-    let application_config = match AppConfig::from_path(&config_path) {
+    let mut application_config = match AppConfig::from_path(&config_path) {
         Ok(config) => Arc::new(config),
         Err(e) => {
             error!(error = %e, "Failed to load configuration");
@@ -697,40 +697,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Story D-0 Task 4 (partial): AC#7 says the in-memory AppConfig
-    // snapshot is rebuilt from SQLite post-migration so subsystems read
-    // SQLite-authoritative values. In D-0 we land the migration WRITE
-    // side (TOML → SQLite) + the read helper `load_singleton_config`,
-    // but we deliberately do NOT swap the AppConfig read path yet:
+    // Story D-1 Task 1 (closes D-0-FOLLOWUP-2 partial): overlay
+    // singleton-config rows from SQLite onto the in-memory AppConfig
+    // BEFORE any subsystem construction. Without this overlay, D-1's
+    // singleton-editor UI writes would land in SQLite but next-boot
+    // figment reads from TOML would ignore them; the editor would
+    // ship in a broken state.
     //
-    //   - `application_config` is wrapped in `Arc<AppConfig>` at line
-    //     ~444 and cloned into `reload_handle` (~554), `storage` (~575),
-    //     `OpcUa::new` / `ChirpstackPoller::new` / `WebAuthState` /
-    //     etc. before we have a queryable `SqliteBackend`. Overlaying
-    //     here would only mutate this binding; the subsystem clones
-    //     would still hold the figment-loaded snapshot.
-    //   - The subsystems read restart-required knobs (PKI paths, ports,
-    //     allowed_origins) ONCE at construction; rebuilding the watch
-    //     channel after that doesn't reach them.
-    //   - On the first post-D-0 boot, the migration writes TOML → SQLite
-    //     atomically, so the figment-loaded `application_config` and
-    //     the SQLite singleton snapshot are byte-equivalent for this
-    //     boot — overlay would be a no-op anyway.
-    //   - On subsequent boots, `config.toml` is still authoritative
-    //     for the figment loader (D-2 is the story that flips this).
-    //     Until D-2 lands, hand-edits to `config.toml` continue to
-    //     take effect on next boot, which is the documented v2.x
-    //     transition contract.
+    // Precedence inversion vs D-0 spec AC#8: post-D-1, SQLite values
+    // override env-var-set values at boot (proper `env > SQLite > TOML
+    // > default` ordering still deferred to D-2's figment Provider
+    // rework). Documented as `D-1-FOLLOWUP-1`.
     //
-    // The proper read-path swap belongs in D-2 alongside the TOML
-    // mutation-surface decommission, where the figment Provider stack
-    // can be reworked to put SQLite between the TOML and env-var
-    // layers (preserving AC#8 precedence ordering). D-0 ships the
-    // schema, helpers, and migration; D-2 ships the read-from-SQLite
-    // architectural pivot.
-    //
-    // Captured as a follow-up in `deferred-work.md` § "Deferred from
-    // implementation of D-0".
+    // On overlay failure (invalid JSON in SQLite, struct shape
+    // mismatch): emit `config_overlay_failed` at warn! + continue with
+    // the figment-loaded values (transition safety net mirroring
+    // D-0 AC#6).
+    match sqlite_backend.load_singleton_config() {
+        Ok(rows) if !rows.is_empty() => {
+            let app = Arc::make_mut(&mut application_config);
+            match app.overlay_singletons_from_sqlite_rows(&rows) {
+                Ok(()) => {
+                    info!(
+                        event = "config_overlay",
+                        rows = rows.len(),
+                        "Applied singleton config snapshot from SQLite over figment-loaded AppConfig"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        event = "config_overlay_failed",
+                        error = %e,
+                        "Failed to overlay singleton config from SQLite; \
+                         continuing with figment-loaded snapshot"
+                    );
+                }
+            }
+        }
+        Ok(_) => {
+            // SQLite singleton tables empty — first boot before D-0
+            // migration landed, or placeholder-secrets-skipped path.
+            // Use the figment-loaded values for this boot.
+        }
+        Err(e) => {
+            warn!(
+                event = "config_overlay_failed",
+                error = %e,
+                "Failed to load singleton config from SQLite for overlay; \
+                 continuing with figment-loaded snapshot"
+            );
+        }
+    }
 
     // Story C-6 F1: seed the watch channel from SQLite so subsystems
     // (OPC UA, poller, web) operate on the authoritative SQLite state,

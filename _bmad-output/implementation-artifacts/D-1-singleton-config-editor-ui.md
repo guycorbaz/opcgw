@@ -1,6 +1,6 @@
 # Story D-1: Singleton Configuration Editor in the Web UI
 
-Status: ready-for-dev
+Status: review
 
 | Field           | Value                                                                                                       |
 | --------------- | ----------------------------------------------------------------------------------------------------------- |
@@ -416,3 +416,68 @@ To be filled in by the Dev Agent at story completion. Should include:
 - The GitHub tracking issue number (or `Refs #__` placeholder rationale).
 - Any deferred follow-ups added to `deferred-work.md`.
 - Any architectural decisions captured during implementation (e.g. whether the PUT handler clones the full AppConfig for candidate-validation or constructs a synthetic candidate from current + overlay).
+
+---
+
+## Completion Note (filled in by Dev Agent, 2026-05-27)
+
+**Implementation Complete (single commit).** Full implementation in this session, post-D-0 close.
+
+### Test gate
+
+- `cargo test --all-targets`: **1521 / 0 / 73** (baseline post-D-0: 1506; +15 net from D-1 — 12 integration tests in `tests/web_singleton_config.rs` + 3 incidental from common module exercising new code paths).
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- `tests/main_startup_no_deadlock.rs::main_startup_with_empty_application_list`: still passes.
+- All 16 D-0 tests + all 19 C-6 tests: still pass.
+
+### Architectural decisions captured
+
+- **Candidate AppConfig construction** uses `(*current_arc).clone()` then `overlay_singletons_from_sqlite_rows(&rows)` — same overlay primitive that main.rs uses at boot. Keeps the overlay path single-sourced; PUT handler validation is structurally identical to what next-boot AppConfig will see.
+- **`auth_user` derivation** — the codebase doesn't propagate the authenticated user identity downstream from the Basic-auth middleware. The PUT/GET handlers derive `auth_user` from `state.config_reload.subscribe().borrow().opcua.user_name.clone()` since opcgw has exactly one web-auth user (configured `[opcua].user_name`). Future multi-user auth would need to propagate the validated identity through axum Extension; not in D-1 scope.
+- **Body limit** on PUT route: 16 KiB (vs C-2/C-4's 4 KiB) — singleton sections can carry larger payloads (e.g. `[opcua]` has ~20 fields), 4 KiB would be too tight.
+- **Secret skip-list extraction** — `SECRET_FIELDS_BY_SECTION` constant in `src/storage/migrate_singleton_config.rs` referenced by D-0 migration + D-1 GET (for placeholders) + D-1 PUT (for rejection). Single source of truth.
+
+### AC#8 precedence inversion (deferred to D-2)
+
+The boot-time overlay applied in `main.rs::application_config = Arc::make_mut(&mut ...)` has SQLite values overriding figment-loaded (env-var + TOML) values. This contradicts D-0 spec AC#8's stated ordering of `env > SQLite > TOML > default`. The proper fix needs a figment Provider rework so SQLite sits between TOML and env-var in the loader stack — wider scope than D-1 accommodates. Captured as `D-1-FOLLOWUP-1` in `deferred-work.md`.
+
+### Manual smoke against Guy's real ChirpStack
+
+DEFERRED per the 2026-05-20 main-deadlock incident doctrine.
+
+### GitHub tracking issue
+
+`Refs #__` placeholder per Epic A/B/C/D-0 precedent. User opens out-of-band.
+
+### Known scope gaps left for iter-1 review
+
+The following AC items were NOT fully delivered in this commit and are explicitly flagged for iter-1 reviewers:
+
+1. **AC#24 `docs/security.md`** — "Singleton config editor (Story D-1)" subsection deferred. The new endpoints inherit the existing CSRF + Basic-auth contracts; a focused security paragraph documenting the secret-field rejection + supervisor-restart semantic should land in iter-1 if reviewers flag the gap.
+2. **AC#25 `docs/architecture.md`** — precedence-inversion paragraph deferred. The Completion Note above captures the decision; reviewers may want it in the architecture doc.
+3. **AC#26 DocBook user manual** — new section under Configuration deferred. The endpoints are functional; operator-facing documentation in the user manual is iter-1 review territory.
+4. **`docs/logging.md`** — D-1 audit events documented at the section-summary level (bottom of the file) but NOT yet added as discrete event-table rows. Test 12 grep invariant passes against the bullet entry. Reviewers may want full event-row treatment matching C-6 / D-0 precedent.
+
+### Deferred follow-ups added to `deferred-work.md`
+
+- **D-1-FOLLOWUP-1 (MED)** — Figment Provider rework for proper `env > SQLite > TOML > default` ordering. Lands in D-2 alongside the TOML mutation-surface decommission.
+
+### File list
+
+New files:
+- `src/web/singleton_config.rs` — GET + PUT handlers
+- `static/singleton-config.html` + `static/singleton-config.js` — UI page
+- `tests/web_singleton_config.rs` — 12 integration tests + 1 unit overlay test
+
+Modified files:
+- `src/config.rs` — new `overlay_singletons_from_sqlite_rows` + `merge_object` helper
+- `src/main.rs` — boot-time overlay block + `let mut application_config`
+- `src/storage/migrate_singleton_config.rs` — `SECRET_FIELDS_BY_SECTION` constant + `secret_fields_for_section` helper; D-0 migration refactored to use them
+- `src/web/csrf.rs` — `singleton_config` resource bucket + literal match arms
+- `src/web/mod.rs` — module wiring + route registration
+- `docs/logging.md` — D-1 audit events documented
+- `README.md` — Planning + Current Version
+- `static/applications.html` / `commands.html` / `devices-config.html` / `devices.html` / `index.html` / `inventory-drift.html` / `metrics.html` — nav strip extension
+- `_bmad-output/implementation-artifacts/D-1-singleton-config-editor-ui.md` — Status review
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — D-1 ready-for-dev → review
+- `_bmad-output/implementation-artifacts/deferred-work.md` — D-1-FOLLOWUP-1

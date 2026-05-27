@@ -36,6 +36,7 @@ pub mod auth;
 pub mod csrf;
 /// Story C-4: `/api/inventory/drift` handler + 4-class diff computation.
 pub mod drift;
+pub mod singleton_config;
 /// Story C-1: `/api/inventory/*` handlers.
 pub mod inventory;
 pub mod setup;
@@ -564,6 +565,25 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
             "/api/audit/drift-action",
             axum::routing::post(api::audit_drift_action)
                 .layer(axum::extract::DefaultBodyLimit::max(4096)),
+        )
+        // Story D-1 (AC#8, #9): singleton-config editor. GET returns
+        // the SQLite-canonical snapshot with secret placeholders;
+        // PUT-per-section replaces editable fields, validates the
+        // candidate AppConfig, commits to SQLite, then triggers a
+        // graceful supervisor restart via `shutdown_token.cancel()`.
+        //
+        // 16 KiB body limit on PUT — the four sections combined are
+        // ~2-4 KiB of JSON typically; 16 KiB leaves headroom for
+        // future field additions while bounding the DoS amplifier
+        // blast radius from axum's 2 MiB default.
+        .route(
+            "/api/config/singleton",
+            get(singleton_config::get_singleton_config),
+        )
+        .route(
+            "/api/config/singleton/{section}",
+            axum::routing::put(singleton_config::put_singleton_section)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
         )
         // Epic C C-0 (2026-05-21): wizard routes. Reachable BEFORE
         // auth+CSRF when `AppState.is_first_run = true` (the basic-auth

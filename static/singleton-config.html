@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<!--
+  SPDX-License-Identifier: MIT OR Apache-2.0
+  Copyright (c) [2024] Guy Corbaz
+
+  Story D-1: Singleton configuration editor.
+
+  Edits the four singleton config sections ([global] / [chirpstack] /
+  [opcua] / [web]) via GET + PUT /api/config/singleton. Secrets stay
+  in config/secrets.toml; the UI shows them as read-only placeholders.
+  Every section save triggers a graceful supervisor restart via the
+  endpoint's `state.shutdown_token.cancel()` mechanism — the operator
+  sees a "restart pending" message and waits for the supervisor to
+  bring opcgw back up.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>opcgw — Singleton Configuration</title>
+  <link rel="stylesheet" href="/dashboard.css">
+  <style>
+    .section { border: 1px solid var(--border, #ccc); border-radius: 4px; margin: 1em 0; padding: 0.5em 1em; }
+    .section summary { font-weight: bold; cursor: pointer; padding: 0.25em 0; }
+    .field { display: grid; grid-template-columns: minmax(220px, 1fr) 2fr; gap: 0.5em; margin: 0.5em 0; align-items: center; }
+    .field label { font-family: monospace; font-size: 0.95em; }
+    .field input, .field textarea, .field select { width: 100%; padding: 0.3em; box-sizing: border-box; font-family: monospace; }
+    .field-secret { color: #666; font-style: italic; }
+    .field-badge { display: inline-block; padding: 0.1em 0.5em; border-radius: 3px; background: #e0e0e0; font-size: 0.8em; margin-left: 0.5em; }
+    .actions { margin: 1em 0; }
+    .actions button { padding: 0.5em 1em; cursor: pointer; }
+    .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: none; align-items: center; justify-content: center; z-index: 1000; }
+    .modal-overlay.visible { display: flex; }
+    .modal { background: var(--bg, white); padding: 1.5em 2em; border-radius: 8px; max-width: 500px; }
+    .modal h2 { margin-top: 0; }
+    .modal .modal-actions { display: flex; gap: 0.5em; justify-content: flex-end; margin-top: 1em; }
+    .restart-notice { background: #fff3cd; border: 1px solid #ffc107; padding: 1em; border-radius: 4px; margin: 1em 0; display: none; }
+    .restart-notice.visible { display: block; }
+    .error { color: #c00; margin-top: 0.5em; }
+  </style>
+</head>
+<body>
+  <nav><a href="/index.html">Dashboard</a> | <a href="/applications.html">Applications</a> | <a href="/devices-config.html">Devices configuration</a> | <a href="/metrics.html">Live Metrics</a> | <a href="/commands.html">Commands</a> | <a href="/inventory-drift.html">Inventory drift</a> | <strong>Singleton config</strong></nav>
+
+  <main>
+    <h1>Singleton Configuration</h1>
+    <p>
+      Edit the gateway's <code>[global]</code> / <code>[chirpstack]</code> /
+      <code>[opcua]</code> / <code>[web]</code> configuration sections.
+      <strong>Every save triggers a graceful supervisor restart</strong> —
+      the gateway will shut down cleanly and the supervisor
+      (Docker / systemd) will bring it back up. Secrets
+      (<code>api_token</code>, <code>user_password</code>) are read-only
+      here; rotate them via <code>config/secrets.toml</code> or
+      environment variables.
+    </p>
+
+    <div id="restart-notice" class="restart-notice">
+      <strong>Restart pending.</strong> The gateway is shutting down to
+      apply your changes. Wait for the supervisor (Docker / systemd) to
+      bring opcgw back up, then reload this page.
+    </div>
+
+    <div id="sections"></div>
+  </main>
+
+  <div id="confirm-modal" class="modal-overlay">
+    <div class="modal">
+      <h2>Confirm restart</h2>
+      <p>
+        Saving <code id="confirm-section">section</code> will restart
+        the opcgw gateway. The supervisor will bring it back up
+        automatically. Any active OPC UA sessions will be disconnected.
+      </p>
+      <p>Continue?</p>
+      <div class="modal-actions">
+        <button id="confirm-cancel">Cancel</button>
+        <button id="confirm-ok">Save and restart</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/singleton-config.js"></script>
+</body>
+</html>

@@ -58,6 +58,36 @@ pub struct SingletonMigrationReport {
 
 const PLACEHOLDER_MARKER: &str = "REPLACE_ME_WITH_OPCGW_";
 
+/// D-1 Task 4 (iter-0): secret-field skip-list for singleton sections.
+///
+/// Single source of truth referenced by:
+/// - D-0 [`migrate_singleton_toml_to_sqlite`]: skip secret fields when
+///   writing TOML → SQLite (secrets stay in `config/secrets.toml`).
+/// - D-1 `GET /api/config/singleton`: inject placeholder strings for
+///   secret fields so the UI can render a read-only field.
+/// - D-1 `PUT /api/config/singleton/<section>`: reject payloads
+///   containing secret field names with HTTP 400 +
+///   `reason="secret_field_not_editable"`.
+///
+/// `[opcua].user_name` is intentionally NOT a secret (per D-0 iter-1
+/// I1-F12 user-accepted defer): the OPC UA security model treats
+/// usernames as not-secret and the chmod 0o600 SQLite hardening
+/// provides the practical mitigation.
+pub const SECRET_FIELDS_BY_SECTION: &[(&str, &[&str])] = &[
+    ("chirpstack", &["api_token"]),
+    ("opcua", &["user_password"]),
+];
+
+/// Returns the secret fields for a section, or an empty slice if none.
+pub fn secret_fields_for_section(section: &str) -> &'static [&'static str] {
+    for (s, fields) in SECRET_FIELDS_BY_SECTION {
+        if *s == section {
+            return fields;
+        }
+    }
+    &[]
+}
+
 /// Detect whether a singleton-config migration is needed and, if so, run it.
 ///
 /// Returns `Ok(SingletonMigrationOutcome)` in all non-fatal cases. Callers
@@ -142,15 +172,17 @@ pub fn migrate_singleton_toml_to_sqlite(
     let start = Instant::now();
     let sections_count = 4usize;
 
-    let global_fields = serialize_section(&app_config.global, &[])?;
-    // `[chirpstack]` — skip `api_token` (secret stays in secrets.toml).
-    let chirpstack_fields = serialize_section(&app_config.chirpstack, &["api_token"])?;
-    // `[opcua]` — skip `user_password` (secret stays in secrets.toml).
-    // I1-F12 (deferred per user acceptance): `user_name` is intentionally
-    // migrated — the OPC UA security model treats usernames as not-secret
-    // and the chmod 0o600 hardening provides the practical mitigation.
-    let opcua_fields = serialize_section(&app_config.opcua, &["user_password"])?;
-    let web_fields = serialize_section(&app_config.web, &[])?;
+    // D-1 Task 4 refactor: skip-lists from the shared `SECRET_FIELDS_BY_SECTION`
+    // constant; D-0's previous inline `&["api_token"]` / `&["user_password"]`
+    // literals are now single-sourced.
+    let global_fields = serialize_section(&app_config.global, secret_fields_for_section("global"))?;
+    let chirpstack_fields = serialize_section(&app_config.chirpstack, secret_fields_for_section("chirpstack"))?;
+    // I1-F12 (deferred per user acceptance): `[opcua].user_name` is
+    // intentionally migrated — the OPC UA security model treats usernames
+    // as not-secret and the chmod 0o600 hardening provides the practical
+    // mitigation.
+    let opcua_fields = serialize_section(&app_config.opcua, secret_fields_for_section("opcua"))?;
+    let web_fields = serialize_section(&app_config.web, secret_fields_for_section("web"))?;
 
     let sections: &[(&str, &[(String, String)])] = &[
         ("global", &global_fields),

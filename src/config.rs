@@ -2270,6 +2270,134 @@ impl AppConfig {
         }
         None
     }
+
+    /// D-1 Task 1 (AC#1): overlay singleton-config rows from SQLite onto
+    /// the current AppConfig snapshot.
+    ///
+    /// Takes the output of [`crate::storage::SqliteBackend::load_singleton_config`]
+    /// — a `Vec<(section, key, value-as-json-string)>` — and updates
+    /// `self.global` / `self.chirpstack` / `self.opcua` / `self.web`
+    /// from the SQLite values. Inverse of D-0's `serialize_section`:
+    /// each section's existing struct is first re-serialised to JSON
+    /// (preserves figment-loaded values for fields absent from SQLite),
+    /// then the SQLite key/value pairs are merged on top, then the
+    /// merged JSON is deserialised back into the typed struct.
+    ///
+    /// Fields skipped by D-0's migration (secrets — `api_token`,
+    /// `user_password`) are NEVER present in the SQLite rows, so this
+    /// helper does NOT touch them; the figment-loaded values from
+    /// `secrets.toml` + env-var continue to flow through unchanged.
+    ///
+    /// On error (invalid JSON in a SQLite value, deserialization failure
+    /// because of a struct shape mismatch), returns `Err` so the caller
+    /// can decide whether to fall back to the figment-loaded snapshot.
+    ///
+    /// **Precedence inversion vs D-0 spec AC#8**: post-D-1, SQLite values
+    /// OVERRIDE env-var-set values at boot (the proper
+    /// `env > SQLite > TOML > default` ordering needs the figment
+    /// Provider rework that D-2 owns). Documented as `D-1-FOLLOWUP-1`
+    /// in `deferred-work.md`.
+    pub fn overlay_singletons_from_sqlite_rows(
+        &mut self,
+        rows: &[(String, String, String)],
+    ) -> Result<(), OpcGwError> {
+        use serde_json::{json, Map, Value};
+
+        // Group rows by section.
+        let mut by_section: std::collections::HashMap<String, Map<String, Value>> =
+            std::collections::HashMap::new();
+        for (section, key, value_json) in rows {
+            let parsed: Value = serde_json::from_str(value_json).map_err(|e| {
+                OpcGwError::Configuration(format!(
+                    "overlay_singletons_from_sqlite_rows: \
+                     failed to parse value for section={:?} key={:?}: {}",
+                    section, key, e
+                ))
+            })?;
+            by_section
+                .entry(section.clone())
+                .or_default()
+                .insert(key.clone(), parsed);
+        }
+
+        // For each known section, merge SQLite values on top of the
+        // figment-loaded JSON representation, then deserialize.
+        for (section_name, sqlite_map) in by_section {
+            match section_name.as_str() {
+                "global" => {
+                    let mut merged = serde_json::to_value(&self.global)
+                        .map_err(|e| OpcGwError::Configuration(format!(
+                            "overlay_singletons_from_sqlite_rows: \
+                             failed to re-serialise global: {}", e)))?;
+                    merge_object(&mut merged, sqlite_map);
+                    self.global = serde_json::from_value(merged).map_err(|e| {
+                        OpcGwError::Configuration(format!(
+                            "overlay_singletons_from_sqlite_rows: \
+                             failed to deserialise merged global: {}", e))
+                    })?;
+                }
+                "chirpstack" => {
+                    let mut merged = serde_json::to_value(&self.chirpstack)
+                        .map_err(|e| OpcGwError::Configuration(format!(
+                            "overlay_singletons_from_sqlite_rows: \
+                             failed to re-serialise chirpstack: {}", e)))?;
+                    merge_object(&mut merged, sqlite_map);
+                    self.chirpstack = serde_json::from_value(merged).map_err(|e| {
+                        OpcGwError::Configuration(format!(
+                            "overlay_singletons_from_sqlite_rows: \
+                             failed to deserialise merged chirpstack: {}", e))
+                    })?;
+                }
+                "opcua" => {
+                    let mut merged = serde_json::to_value(&self.opcua)
+                        .map_err(|e| OpcGwError::Configuration(format!(
+                            "overlay_singletons_from_sqlite_rows: \
+                             failed to re-serialise opcua: {}", e)))?;
+                    merge_object(&mut merged, sqlite_map);
+                    self.opcua = serde_json::from_value(merged).map_err(|e| {
+                        OpcGwError::Configuration(format!(
+                            "overlay_singletons_from_sqlite_rows: \
+                             failed to deserialise merged opcua: {}", e))
+                    })?;
+                }
+                "web" => {
+                    let mut merged = serde_json::to_value(&self.web)
+                        .map_err(|e| OpcGwError::Configuration(format!(
+                            "overlay_singletons_from_sqlite_rows: \
+                             failed to re-serialise web: {}", e)))?;
+                    merge_object(&mut merged, sqlite_map);
+                    self.web = serde_json::from_value(merged).map_err(|e| {
+                        OpcGwError::Configuration(format!(
+                            "overlay_singletons_from_sqlite_rows: \
+                             failed to deserialise merged web: {}", e))
+                    })?;
+                }
+                other => {
+                    // Unknown section in SQLite — schema CHECK constraint
+                    // makes this unreachable, but log defensively.
+                    tracing::warn!(
+                        section = %other,
+                        "overlay_singletons_from_sqlite_rows: unknown section in SQLite"
+                    );
+                    let _ = json!({}); // silence unused-import warning on `json` in release builds
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Helper for [`AppConfig::overlay_singletons_from_sqlite_rows`]: merge
+/// `sqlite_map` into `target` (which must be a JSON object). For each
+/// key in `sqlite_map`, the SQLite value replaces the corresponding
+/// target value (SQLite wins per the post-D-1 precedence convention).
+fn merge_object(target: &mut serde_json::Value, sqlite_map: serde_json::Map<String, serde_json::Value>) {
+    if let serde_json::Value::Object(target_map) = target {
+        for (k, v) in sqlite_map {
+            target_map.insert(k, v);
+        }
+    }
 }
 
 /// Configuration module test suite.
