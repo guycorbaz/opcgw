@@ -572,6 +572,11 @@ fn d1_audit_event_names_documented_in_logging_md() {
         "singleton_config_updated",
         "singleton_config_rejected",
         "singleton_config_restart_required",
+        // I2-F3 (iter-2): I1-F3 introduced `singleton_config_storage_error`
+        // as the storage-fault event (split from `singleton_config_rejected`
+        // which now stays scoped to client errors). Add to the grep
+        // invariant so a future doc-deletion regression is caught.
+        "singleton_config_storage_error",
     ] {
         assert!(
             doc.contains(ev),

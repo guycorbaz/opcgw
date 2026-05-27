@@ -843,7 +843,7 @@ iter-2 of bmad-code-review C-1 caught **2 HIGH + 2 MED + several LOW** in iter-1
 - **D-1-FOLLOWUP-2 (LOW)** — `docs/security.md` "Singleton config editor (Story D-1)" subsection deferred per AC#24. Reviewers may want a focused security paragraph documenting the secret-field rejection + supervisor-restart semantic. Add in iter-1 if flagged.
 - **D-1-FOLLOWUP-3 (LOW)** — `docs/architecture.md` precedence-inversion paragraph deferred per AC#25. The Completion Note in D-1 spec captures the decision; architecture doc update is iter-1 territory.
 - **D-1-FOLLOWUP-4 (LOW)** — DocBook user manual section under Configuration deferred per AC#26. The endpoints are functional; operator-facing manual documentation is iter-1 territory.
-- **D-1-FOLLOWUP-5 (LOW)** — `docs/logging.md` discrete event-table rows for the 6 new D-1 events. The new events are documented at the section-summary level (bullet entry); Test 12's grep invariant passes. Reviewers may want full event-row treatment matching C-6 / D-0 precedent.
+- **D-1-FOLLOWUP-5 (LOW)** — `docs/logging.md` discrete event-table rows for the **7** new D-1 events (`config_overlay`, `config_overlay_failed`, `config_get_singleton`, `singleton_config_updated`, `singleton_config_rejected`, `singleton_config_restart_required`, plus `singleton_config_storage_error` added by iter-1 I1-F3). The new events are documented at the section-summary level (bullet entry); Test 12's grep invariant passes for all 7. Reviewers may want full event-row treatment matching C-6 / D-0 precedent.
 
 ## Deferred from: code review iter-1 of D-1-singleton-config-editor-ui (2026-05-27)
 

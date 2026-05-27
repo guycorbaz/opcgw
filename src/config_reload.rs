@@ -80,7 +80,26 @@ impl ConfigReloadHandle {
         // to send_replace anyway — the worst case is a benign concurrent
         // overwrite which the CRUD path's lock-then-build-then-send
         // sequence already tolerates.
-        let _maybe_guard = self.reload_lock.try_lock();
+        //
+        // I2-F7 (iter-2): emit a `warn!` on the Err branch so an
+        // unexpected boot-time race is operator-visible. The binding
+        // name (`_held_guard`) starts with `_` to silence the
+        // unused-binding lint while keeping the named-binding scope
+        // semantic (`let _x = ...` lives until end of scope; only
+        // `let _ = ...` drops immediately).
+        let _held_guard = match self.reload_lock.try_lock() {
+            Ok(g) => Some(g),
+            Err(_) => {
+                tracing::warn!(
+                    event = "config_reload",
+                    trigger = "post_overlay_seed_lock_contended",
+                    "seed_post_overlay raced an in-flight notify_crud_write; \
+                     proceeding with send_replace anyway (boot-time invariant \
+                     says this is impossible — investigate if seen)"
+                );
+                None
+            }
+        };
         self.tx.send_replace(post_overlay);
         info!(
             event = "config_reload",

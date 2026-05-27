@@ -78,6 +78,13 @@ pub const SECRET_FIELDS_BY_SECTION: &[(&str, &[&str])] = &[
     ("opcua", &["user_password"]),
 ];
 
+/// D-1 iter-2 I2-F6: single source of truth for the four singleton
+/// sections D-0 / D-1 / D-2 operate on. Schema migration v010's CHECK
+/// constraint pins the same list at the SQLite layer. Referenced by:
+/// - `AppConfig::overlay_singletons_from_sqlite_rows` (config.rs)
+/// - `get_singleton_config` + `put_singleton_section` (src/web/singleton_config.rs)
+pub const KNOWN_SECTIONS: &[&str] = &["global", "chirpstack", "opcua", "web"];
+
 /// Returns the secret fields for a section, or an empty slice if none.
 pub fn secret_fields_for_section(section: &str) -> &'static [&'static str] {
     for (s, fields) in SECRET_FIELDS_BY_SECTION {

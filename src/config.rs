@@ -2337,8 +2337,11 @@ impl AppConfig {
         let mut new_opcua: Option<OpcUaConfig> = None;
         let mut new_web: Option<WebConfig> = None;
 
-        const KNOWN_SECTIONS: &[&str] = &["global", "chirpstack", "opcua", "web"];
-        for section_name in KNOWN_SECTIONS {
+        // I2-F6 (iter-2): use the shared constant from
+        // `crate::storage::migrate_singleton_config::KNOWN_SECTIONS`
+        // so adding a 5th section in a future story only updates one
+        // location (plus the schema CHECK constraint in v010).
+        for section_name in crate::storage::migrate_singleton_config::KNOWN_SECTIONS {
             let sqlite_map = match by_section.remove(*section_name) {
                 Some(m) => m,
                 None => continue,

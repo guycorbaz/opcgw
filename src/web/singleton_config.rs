@@ -27,11 +27,12 @@ use axum::{
 use serde_json::{json, Map, Value};
 use tracing::{info, warn};
 
-use crate::storage::migrate_singleton_config::secret_fields_for_section;
+use crate::storage::migrate_singleton_config::{
+    secret_fields_for_section, KNOWN_SECTIONS,
+};
 use crate::web::AppState;
 
 const SECRET_PLACEHOLDER: &str = "<set via config/secrets.toml>";
-const KNOWN_SECTIONS: &[&str] = &["global", "chirpstack", "opcua", "web"];
 
 /// GET `/api/config/singleton` — returns the four-section snapshot from
 /// SQLite with secret placeholders injected. Basic-auth-gated (via the
@@ -77,7 +78,7 @@ pub async fn get_singleton_config(
                     event = "config_get_singleton_failed",
                     auth_user = ?auth_user,
                     section = ?section,
-                    key = %key,
+                    key = ?key,
                     error = ?e,
                     "GET /api/config/singleton: malformed JSON in SQLite row"
                 );

@@ -80,7 +80,7 @@ The trade-off: poll_frequency / debug-flag / inventory_cache_ttl_seconds and sim
 
 6. **Per-section save (no global "save all").** Each section is saved independently via a separate PUT. The operator cannot batch a multi-section edit; this matches the per-section PUT endpoint contract and reduces ambiguity about which section caused a validation failure.
 
-7. **Nav strip extended on all 9 sites.** `static/index.html`, `static/applications.html`, `static/devices-config.html`, `static/devices.html`, `static/metrics.html`, `static/commands.html`, `static/inventory-drift.html`, `static/setup.html`, and the new `static/singleton-config.html` all carry a nav strip that includes the new `Singleton Configuration` entry. Same pattern as Story C-4's nav-strip-on-6-sites extension.
+7. **Nav strip extended on 8 sites.** `static/index.html`, `static/applications.html`, `static/devices-config.html`, `static/devices.html`, `static/metrics.html`, `static/commands.html`, `static/inventory-drift.html`, and the new `static/singleton-config.html` all carry a nav strip that includes the new `Singleton Configuration` entry. **`static/setup.html` is intentionally excluded** per the C-0 first-run-wizard design (line 11: "No global navigation — operator must complete this step before the rest of the UI is reachable"); the wizard runs BEFORE the gateway is fully configured. Same pattern as Story C-4's nav-strip-on-6-sites extension. (Iter-1 I1-F8 reduced the AC#7 enumeration from 9 to 8 sites; the exclusion is documented in `deferred-work.md`.)
 
 ### HTTP endpoints
 
@@ -126,7 +126,7 @@ The trade-off: poll_frequency / debug-flag / inventory_cache_ttl_seconds and sim
 13. **Three new audit events** documented in `docs/logging.md` (same commit as the code per the AC#24 doc-sync gate from Epic C retro):
     - `event="config_get_singleton"` (info) — fields `auth_user=<str>`, `section_count=<N>` (always 4 in D-1 scope).
     - `event="singleton_config_updated"` (info) — fields `section=<str>`, `field_count=<N>`, `auth_user=<str>`. Per-field VALUES are NOT logged (defensive: operator-supplied data is potential PII / secrets-adjacent; field counts are sufficient for audit reconstruction).
-    - `event="singleton_config_rejected"` (warn) — fields `section=<str>`, `reason=<closed-enum: validation | secret_field_not_editable | invalid_section | csrf | reload_failed>`, `auth_user=<str>`. The `reason` is a closed enum — new reasons require a `docs/logging.md` update.
+    - `event="singleton_config_rejected"` (warn) — fields `section=<str>`, `reason=<closed-enum: validation | secret_field_not_editable | invalid_section | csrf>`, `auth_user=<str>`. The `reason` is a closed enum — new reasons require a `docs/logging.md` update. (Storage-fault writes use the separate `singleton_config_storage_error` event per iter-1 I2-F1; the `_rejected` taxonomy is scoped to client errors only.)
     - `event="singleton_config_restart_required"` (info) — fields `section=<str>`, `auth_user=<str>`. Fires immediately before `shutdown_token.cancel()` so the audit log records intent even if the process is killed mid-restart.
     - The two new `config_overlay` / `config_overlay_failed` events from AC#2 also land in `docs/logging.md` in the same commit.
 
@@ -521,3 +521,31 @@ Sources: Blind Hunter (BH, 12 findings), Edge Case Hunter (ECH, 4 findings + 12 
 - [x] [Review][Defer] **JS Origin design assumption (BH-F10, LOW)** — consistent with C-2 / C-4 precedent; CLI operators using curl must supply Origin explicitly.
 - [x] [Review][Defer] **Test 11 error-path coverage (BH-F12, LOW)** — overlay unit test exercises only success path; v2.x improvement.
 - [x] [Review][Defer] **Secret-field whitespace bypass (ECH-F3, LOW)** — `"api_token "` / `"API_TOKEN"` bypass exact-match; real secret not exposed (serde ignores during overlay), but bogus key persists. Defer: tighten to normalize-then-compare if re-raised.
+
+---
+
+### Review Findings — Iter-2 (2026-05-27)
+
+Sources: Blind Hunter (BH, 8 findings), Edge Case Hunter (ECH, 1 finding + 10 investigations), Acceptance Auditor (AA, 3 findings). **29th cumulative iter-N+1 doctrine validation.** 12 raw findings → 7 patch (all LOW) / 0 defer / 3 dismiss. **No HIGH or MED correctness bugs**; iter-2 caught spec/test/doc gaps + 1 missed sed occurrence + 1 minor refactor opportunity. **Iter-3 NOT mandatory** — all 7 patches are doc/test/sed/refactor fixes with no new flow-control.
+
+#### Patch
+
+- [x] [Review][Patch] **I2-F1 (LOW) — Spec AC#13 still listed `reload_failed`** [`_bmad-output/implementation-artifacts/D-1-singleton-config-editor-ui.md` AC#13] — AA-F01. Iter-1 I1-F10 removed `reload_failed` from `docs/logging.md` but the spec body itself was not updated. Fix: AC#13 closed-enum list now reads `{validation | secret_field_not_editable | invalid_section | csrf}` + cross-references `singleton_config_storage_error` for storage faults.
+
+- [x] [Review][Patch] **I2-F2 (LOW) — Spec AC#7 still claimed 9 sites including `setup.html`** [spec AC#7] — AA-F02. Iter-1 I1-F8 accepted the design exclusion in `deferred-work.md` but the AC#7 text itself was not updated. Fix: AC#7 now says "8 sites" + names the excluded `setup.html` + cites the C-0 first-run-wizard design rationale.
+
+- [x] [Review][Patch] **I2-F3 (LOW) — `singleton_config_storage_error` (I1-F3) not in Test 12 grep invariant** [`tests/web_singleton_config.rs`] — BH-F04 + ECH-F-01 + AA-F03 converged. Iter-1 added a new audit event but Test 12's closed-enum guard wasn't extended. A future `docs/logging.md` regression deleting the event would slip past Test 12. Fix: added `"singleton_config_storage_error"` to the grep invariant list with a comment explaining the iter-1 lineage.
+
+- [x] [Review][Patch] **I2-F4 (LOW) — `key = %key` left as Display on GET malformed-JSON warn** [`src/web/singleton_config.rs:80`] — BH-F05 + ECH-F-01 same finding. I1-F5's sed swap missed this single occurrence (other operator-controlled fields on the same warn — `auth_user`, `section`, `error` — were all flipped to `?`-Debug). Log-injection-class re-exposed for the malformed-row diagnostic path. Fix: `key = ?key` so the operator-supplied key is Debug-formatted.
+
+- [x] [Review][Patch] **I2-F5 (LOW) — `D-1-FOLLOWUP-5` said "6 new D-1 events" after I1-F3 added the 7th** [`deferred-work.md`] — BH-F07. Doc-drift. Fix: updated to "7 new D-1 events" + enumerated all 7 explicitly.
+
+- [x] [Review][Patch] **I2-F6 (LOW) — `KNOWN_SECTIONS` defined twice (config.rs function-local + singleton_config.rs module-level)** [`src/storage/migrate_singleton_config.rs`, `src/config.rs`, `src/web/singleton_config.rs`] — BH-F08. Maintenance hazard: adding a 5th section in a future story would require updating two locations. Fix: single source of truth as `pub const KNOWN_SECTIONS: &[&str]` in `migrate_singleton_config.rs` (alongside `SECRET_FIELDS_BY_SECTION`); both consumers now import it.
+
+- [x] [Review][Patch] **I2-F7 (LOW) — `seed_post_overlay`'s `try_lock` Err silently discarded** [`src/config_reload.rs::seed_post_overlay`] — BH-F03. Boot-time invariant says contention is impossible, but the silent-discard makes an unexpected race operator-invisible. Fix: `match` on `try_lock()` result; emit a `warn!` with `event="config_reload" trigger="post_overlay_seed_lock_contended"` on Err so the unexpected case surfaces. Comment also corrects the Rust-binding-name-semantics subtlety (`let _name = ...` is a normal named binding that lives until end of scope; only `let _ = ...` drops immediately) to forestall future BH-F01-style false-positive reviews.
+
+#### Dismissed
+
+- [Dismiss] BH-F01 (HIGH-claimed): `let _maybe_guard = self.reload_lock.try_lock();` claim of immediate-drop. **False alarm.** Rust drops bindings named `_x` only when the pattern IS the underscore character itself (`let _ = ...`); named bindings starting with `_` (like `_maybe_guard`) are regular bindings that live until end-of-scope. The lock IS held for the function body; clippy's `let_underscore_lock` lint specifically targets `let _ = ...` (the bare-underscore form), not `let _named = ...`.
+- [Dismiss] BH-F02 (HIGH-claimed): Test 4's `Some("false")` assertion shape. ECH Investigation 4 verified `serde_json::to_string(&Value::Bool(false))` produces the 5-char string `"false"`; the assertion is correct. BH self-acknowledged the analysis was speculative.
+- [Dismiss] BH-F06 (MED-claimed): `pendingSave` bookkeeping leak in JS performSave. Walking the actual code: `closeModal()` at the top of `performSave` already calls `pendingSave = null` BEFORE `collectSection` is invoked. The early-return on `!collected.ok` therefore preserves the cleared state. No bookkeeping leak.
