@@ -1,6 +1,6 @@
 # Story D-1: Singleton Configuration Editor in the Web UI
 
-Status: review
+Status: done
 
 | Field           | Value                                                                                                       |
 | --------------- | ----------------------------------------------------------------------------------------------------------- |
