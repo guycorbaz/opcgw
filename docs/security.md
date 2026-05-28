@@ -1347,37 +1347,38 @@ not-yet-polled metric appears with `value: null` + `timestamp: null`
 
 ---
 
-## Configuration hot-reload
+## Configuration reload
 
-Story 9-7 adds operator-driven configuration hot-reload via SIGHUP.
-Sending `SIGHUP` to the gateway PID re-reads `config/config.toml`
-through the same figment chain used at startup (TOML +
-`OPCGW_*` env-var overlay), validates the candidate, classifies
-which knobs changed, atomically swaps the live `Arc<AppConfig>`
-into a `tokio::sync::watch` channel, and notifies the in-process
-subscribers (poller, web `AppState`, OPC UA listener stub for
-Story 9-8) to pick up the new values at their next safe checkpoint.
+> **Superseded (v2.1.0):** the original Story 9-7 SIGHUP reload — which
+> re-read `config/config.toml` on `kill -HUP` — was **removed in C-6**
+> (along with `reload()`, `classify_diff`, and the `config_reload_*`
+> audit events). Configuration now lives in SQLite and is edited from the
+> web UI. There is **no** SIGHUP handler, **no** `config.toml` re-read, and
+> **no** `POST /api/config/reload` endpoint; editing `config.toml` on disk
+> has no effect on a running gateway.
 
-### SIGHUP trigger surface
+Configuration changes are applied as follows:
 
-```sh
-# Send SIGHUP to the running gateway. The PID is whatever the init
-# system (systemd / Docker / supervisor) tracks for the opcgw
-# process. systemd users: wire `ExecReload=` to this kill recipe.
-kill -HUP "$(pgrep opcgw)"
-```
-
-There is **no** `POST /api/config/reload` endpoint in v1 — SIGHUP-only
-minimises CSRF / auth-surface area until Stories 9-4 / 9-5 / 9-6
-land web-based CRUD endpoints (which will trigger reloads
-programmatically by calling the same routine). There is also **no**
-filesystem watch (`notify` crate) — editor-save races and
-dependency-surface expansion ruled it out.
+- **Applications / devices / metrics / commands.** The web CRUD handlers
+  write to SQLite and then call `ConfigReloadHandle::notify_crud_write`,
+  which pushes the new `Arc<AppConfig>` through a `tokio::sync::watch`
+  channel. `run_opcua_config_listener` (`src/config_reload.rs`) reacts and
+  applies the topology delta to the live OPC UA address space via
+  `apply_diff_to_address_space` — no restart required.
+- **Singleton sections** (`[global]` / `[chirpstack]` / `[opcua]` /
+  `[web]`). Edited through the D-1 web editor, which persists to SQLite.
+  Most singleton fields are captured into subsystems at boot, so the D-1
+  PUT handler triggers a **graceful supervisor restart**
+  (`shutdown_token.cancel()`) to apply them; the editor flags which knobs
+  require this.
 
 ### Knob taxonomy
 
-The reload routine classifies every knob into one of three buckets
-(see `src/config_reload.rs::classify_diff` for the canonical list):
+Knobs still fall into three buckets by how a change takes effect. (The
+`classify_diff` routine that enforced this for SIGHUP reloads was removed
+in C-6; the classification below remains the operator-facing contract for
+which fields apply live versus require a restart, now surfaced by the D-1
+web editor.)
 
 **Hot-reload-safe** — applied without restart. Changes here are
 picked up by subscribers at their next safe checkpoint:
@@ -1393,10 +1394,9 @@ picked up by subscribers at their next safe checkpoint:
   affects only the web dashboard's "Good → Uncertain" boundary
   in v1; OPC UA reads continue using the startup value)
 
-**Restart-required** — reloads that mutate any of these are
-**rejected** with `event="config_reload_failed" reason="restart_required"`
-and a `changed_knob` field naming the offending field. Operators
-restart the gateway after applying the change:
+**Restart-required** — changes to any of these only take effect after a
+gateway restart. The D-1 web editor flags these knobs and applies them via
+a graceful supervisor restart (`shutdown_token.cancel()`):
 
 - `chirpstack.server_address`, `chirpstack.api_token`, `chirpstack.tenant_id`
   — gRPC channel + interceptor are bound at startup
@@ -1436,42 +1436,24 @@ limitations.
 
 ### Audit events
 
-Three new structured events are emitted by the SIGHUP listener:
+The Story 9-7 `config_reload_attempted` / `_succeeded` / `_failed`
+events were removed with the SIGHUP path. Configuration-change auditing
+is now covered by:
 
-- `event="config_reload_attempted"` (info) — every SIGHUP. Carries
-  `trigger="sighup"`. The next line is either `succeeded` or
-  `failed`.
-- `event="config_reload_succeeded"` (info) — validate + classify +
-  swap completed. Carries `trigger`, `changed_section_count`,
-  `includes_topology_change`, `duration_ms`. `changed_section_count
-  = 0` means the candidate equalled the live config (no swap).
-- `event="config_reload_failed"` (warn / audit) — reload was
-  rejected. Carries `trigger`, `reason ∈ {validation, io,
-  restart_required}`, `changed_knob` (only for
-  `reason="restart_required"`), and a sanitised `error` field.
-  Per NFR7, the `error` field never includes secrets — the
-  `ReloadError::Display` impl is curated to surface only the
-  validation diagnostic, file path, or knob name.
+- `event="address_space_mutation_succeeded"` / `="address_space_mutation_failed"`
+  — emitted when an applications/devices/metrics change is applied to the
+  live OPC UA address space (see § Dynamic OPC UA address-space mutation
+  below).
+- the per-resource CRUD events (`application_*`, `device_*`, `command_*`)
+  emitted by the web handlers on each create / update / delete.
 
-The classifier rejects on the **first** restart-required violation
-it finds (so the operator gets a single actionable line rather
-than a wall of "this also changed" noise). Iterate by fixing each
-flagged knob and re-issuing SIGHUP until the reload succeeds.
+Per NFR7, audit `error` fields never include secrets.
 
-### Limitations (v1 scope)
+### Limitations
 
-- **OPC UA address-space mutation is now functional** as of Story
-  9-8 (Story 9-7's "stubbed" note was the v1 limitation that is now
-  closed). See § Dynamic OPC UA address-space mutation (Story 9-8)
-  below.
-- **Credential rotation requires restart in v1** (see
-  "Restart-required" above).
-- **`[opcua].stale_threshold_seconds` hot-reload affects only the
-  web dashboard** in v1. The OPC UA path's per-variable
-  read-callback closures capture the threshold at startup AND at
-  Story-9-8-runtime-add time — but a reload that does NOT add or
-  remove metrics leaves existing closures unchanged (issue #113
-  carry-forward).
+- **Singleton-knob live reload is deferred** (issue [#113](https://github.com/guycorbaz/opcgw/issues/113)): most `[chirpstack]` / `[opcua]` / `[web]` fields are captured at boot, so the D-1 editor applies them via a graceful restart rather than in place.
+- **Credential rotation requires a restart** (see "Restart-required" above).
+- **OPC UA address-space mutation is functional** for applications/devices/metrics — see § Dynamic OPC UA address-space mutation below.
 
 ## Dynamic OPC UA address-space mutation (Story 9-8)
 
@@ -1621,7 +1603,7 @@ advances under the following rules:
 The asymmetric advancement is a deliberate iter-2 design
 (superseded iter-1 P2's simpler "advance only on Applied/NoChange"
 which created the replay loop on Phase 2/3/4 partial failures).
-Operators retry SIGHUP / CRUD to recover from Phase 1 failures;
+Operators retry the CRUD operation to recover from Phase 1 failures;
 Phase 2/3 partial-failure recovery is **manual reconciliation**
 based on the failed-event's per-axis counts + sanitised error
 field. If recovery is impossible, restart the gateway.
@@ -1673,10 +1655,10 @@ callback FR.
 - **Address-space mutation does not affect storage payload
   semantics** (issue #108 is orthogonal — production blocker for
   Epic 9 retro).
-- **No HTTP trigger.** SIGHUP-only; web-driven reload arrives with
-  Stories 9-4 / 9-5 / 9-6.
-- **No filesystem watch.** Editor-save races + `notify`-crate
-  dependency-surface expansion ruled it out.
+- **Triggered by web CRUD, not SIGHUP.** Address-space mutation runs when
+  a web CRUD write notifies the config-reload watch channel; the SIGHUP
+  trigger and the rejected `notify`-crate filesystem watch were both
+  removed in C-6.
 
 ---
 
@@ -1774,85 +1756,20 @@ parse as `scheme://host[:port]` with no path/query/fragment.
 state is captured at router-build time; the live-borrow refactor
 is tracked in GH #113).
 
-### TOML round-trip via `toml_edit`
+### Configuration persistence
 
-CRUD writes go through `src/web/config_writer.rs::ConfigWriter`
-which uses `toml_edit::DocumentMut` to preserve operator-edited
-comments, key order, and whitespace on round-trip. The figment
-chain (`src/config.rs`) remains the read side; `toml_edit` is the
-write side.
+> **Superseded (v2.1.0):** CRUD writes and singleton-config edits are
+> persisted to **SQLite**, not to `config.toml`. The Story 9-4 / 9-7
+> `toml_edit` write path (`src/web/config_writer.rs::ConfigWriter`), its
+> atomic-TOML-rename + in-memory rollback discipline, the `ConfigWriter`
+> poisoning path, and the SIGHUP-vs-CRUD snapshot race were all **removed
+> in C-6 / D-2** along with the on-disk TOML mutation surface.
 
-Writes are **atomic** via `tempfile::NamedTempFile::new_in(parent)`
-+ `persist(target)` (POSIX-atomic rename on the same filesystem).
-
-### Lock acquire-order invariant
-
-CRUD handlers MUST hold `ConfigWriter::lock()` across the entire
-`write + reload + (rollback)` sequence so concurrent CRUD requests
-cannot lose updates. Story 9-7's reload mutex is independent and
-acquired **after** the write_lock — no deadlock risk.
-
-#### SIGHUP-vs-CRUD-snapshot race (operator action — Story 9-4 review iter-1 D4-P)
-
-`ConfigWriter::lock()` only serialises CRUD-vs-CRUD requests. A
-SIGHUP-triggered reload runs on the SIGHUP listener task (Story 9-7)
-and does NOT contend on `ConfigWriter::write_lock`. Sequence at
-risk:
-
-1. CRUD handler acquires `lock()`.
-2. **Operator sends SIGHUP** → reload reads disk + swaps watch
-   channel.
-3. CRUD handler reads `original_bytes` for rollback snapshot —
-   captures **post-SIGHUP** bytes.
-4. CRUD handler writes its delta.
-5. CRUD handler calls `reload()` again; if it fails, rollback
-   restores step-3 bytes (NOT pre-SIGHUP).
-
-Pre-SIGHUP TOML state is lost on rollback in this window. **Operator
-mitigation:** do not SIGHUP while a CRUD request is in flight; the
-window is small (sub-millisecond on a healthy gateway) but
-operationally distinguishable. A future hardening story will gate
-SIGHUP on the `ConfigWriter::lock()` mutex; tracked alongside
-issue #113.
-
-### Rollback discipline on reload failure
-
-When `ConfigReloadHandle::reload()` returns `Err(_)` after a
-successful TOML write, the handler rolls back the on-disk TOML to
-the pre-write bytes (held in memory) via `ConfigWriter::rollback`.
-The HTTP response maps:
-
-- `ReloadError::Validation(_)` → **422 Unprocessable Entity** (with
-  the validation message).
-- `ReloadError::Io(_)` / `RestartRequired` → **500 Internal Server
-  Error** (operator log carries the detailed error).
-
-If the rollback **itself** fails, the gateway logs an
-`event="application_crud_rejected" reason="rollback_failed"` warn
-event and **poisons the `ConfigWriter`** (Story 9-4 review iter-1
-D3-P). All subsequent CRUD requests short-circuit with HTTP 503 +
-`event="application_crud_rejected" reason="poisoned"` warn until the
-gateway is restarted; operators MUST manually restore the TOML from
-a backup before restart, otherwise the next startup will fail
-validation. The poisoning is process-local, so a fresh `cargo run`
-or container restart clears it.
-
-Story 9-4 review iter-1 P4: the atomic-write also `fsync`s the
-tempfile data BEFORE persist + `fsync`s the parent directory AFTER
-persist, so a power loss during the write cannot leave the file
-zero-length or the rename lost. POSIX-atomic rename + fsync(file) +
-fsync(parent_dir) covers the durability gap that `tempfile::persist`
-alone leaves.
-
-Story 9-4 review iter-1 D1-P: when the post-write `reload()`
-returns `RestartRequired { knob }`, the handler checks whether the
-offending knob is in the just-written CRUD delta. If NOT (i.e., the
-operator made an unrelated manual edit to the TOML between gateway
-start and the CRUD POST), the handler returns 409 + `reason=
-"ambient_drift"` and DOES NOT roll back — the operator's manual
-edit is preserved. If the offending knob IS in our delta (defence-
-in-depth; should not happen for application_list mutations), the
-standard 500 + rollback path applies.
+SQLite provides write atomicity and durability for configuration changes.
+Reads go through the figment chain (`SqliteSingletonProvider` +
+`config.toml` bootstrap seed, see § Restart-required vs. hot-reloadable
+knobs); there is no longer a TOML round-trip, an in-memory rollback
+snapshot, or a `ConfigWriter` lock to reason about.
 
 ### Audit events
 
@@ -1862,10 +1779,10 @@ Four new event names land with Story 9-4:
 - `event="application_updated"` (info) — PUT succeeded.
 - `event="application_deleted"` (info) — DELETE succeeded.
 - `event="application_crud_rejected"` (warn / audit) — request
-  rejected at one of: handler-level validation, CSRF check,
-  conflict (delete pre-conditions), reload failure, or rollback
-  failure. Carries `reason ∈ {validation, csrf, conflict,
-  reload_failed, io, immutable_field, rollback_failed}`.
+  rejected at handler-level validation, a conflict (delete pre-conditions),
+  an immutable-field violation, or a SQLite write error. Carries a
+  `reason` field (e.g. `validation`, `conflict`, `immutable_field`,
+  `database_error`).
 
 The grep contract `git grep -hoE 'event = "application_[a-z_]+"' src/`
 must return exactly 4 lines.
@@ -1938,9 +1855,8 @@ those fields.
   stronger CSRF is needed, the canonical upgrade is a
   double-submit pattern signed with the existing per-process
   `hmac_key` (Story 9-1 / 7-2 reuse).
-- **Do NOT switch the write side to `toml::to_string`.** It loses
-  comments + key order on round-trip.
-- **Do NOT bypass the `ConfigWriter::lock()` discipline.**
+- **Do NOT write configuration back to `config.toml`.** Configuration is
+  persisted to SQLite; the on-disk TOML write path was removed in C-6 / D-2.
 - **Do NOT use the same `metric_name` (or `chirpstack_metric_name`)
   twice within one device's `read_metric_list`.** The post-#99
   NodeId construction (`format!("{}/{}", device_id, metric_name)`)
@@ -1950,13 +1866,10 @@ those fields.
   duplicates at config-load + post-write reload time. The CRUD
   layer also rejects duplicate `metric_name` / `chirpstack_metric
   _name` shapes pre-write where it can.
-- **Do NOT serialise a `ChirpstackDevice` back via `toml::Value`
-  on PUT.** It silently strips the `[[application.device.command]]`
-  sub-table since `UpdateDeviceRequest` doesn't carry commands.
-  Story 9-5's PUT mutation operates on `toml_edit::DocumentMut` at
-  the table level — replacing only `device_name` and the
-  `read_metric` sub-array — so the command sub-table is preserved
-  byte-for-byte.
+- **Do NOT drop the device's command sub-table on PUT.** An
+  `UpdateDeviceRequest` carries only `device_name` + `read_metric`; the
+  update must preserve the device's existing commands in SQLite rather than
+  replacing the whole device record.
 
 ### Device + metric mapping CRUD (Story 9-5)
 
@@ -2142,11 +2055,10 @@ exactly 4 lines.
 - **Do NOT** add cross-device `command_id` uniqueness — the
   per-device folder NodeId namespaces the command, so cross-
   device same-`command_id` is a valid scenario the tests pin.
-- **Do NOT** serialise `DeviceCommandCfg` back to TOML via
-  `toml::Value` — the TOML mutation MUST be done at the table
-  level via `toml_edit::DocumentMut` so that sibling
-  `[[application.device.read_metric]]` sub-tables are preserved
-  byte-for-byte (load-bearing regression guard for Story 9-5).
+- **Do NOT** drop sibling data when persisting a command change —
+  updates target only the command record in SQLite and must preserve the
+  device's `read_metric` mappings (the `toml_edit` round-trip this once
+  guarded against was removed in C-6 / D-2).
 - **Do NOT** add `Serialize` to `DeviceCommandCfg` — use a
   parallel `CommandResponse` struct in `src/web/api.rs` (Story
   9-5's `MetricMappingResponse` pattern).
