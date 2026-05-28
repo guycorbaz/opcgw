@@ -586,3 +586,27 @@ to extend the doctrine streak to 30+.
 ### iter-2 mandate
 
 iter-1 introduced brand-new code: the `maybe_emit_config_toml_unused_warning` public helper (new flow-control + AtomicBool guard), the Provider read-time secret filter + else-branch diagnostic, the `reload_succeeded` gating, and four rewritten tests. Per the iter-N+1 doctrine, **iter-2 is MANDATORY** to review iter-1's new code for regressions.
+
+---
+
+## Senior Developer Review (AI) — iter-2 (2026-05-28)
+
+**Reviewers:** Blind Hunter + Edge Case Hunter, on Sonnet (different LLM from the Opus 4.7 implementer). 31st cumulative iter-N+1 doctrine validation. Reviewed iter-1's patch round (commit `3d3642e`, 873 lines) for regressions in the brand-new code iter-1 introduced.
+
+**Outcome:** Changes Requested → all findings patched. 6 raw findings (2 MED real + 1 MED converged-pair + LOW converged-pair); 3 patch groups applied.
+
+### Patched findings
+
+- **[MED, converged ECH2-1 + BH2-2 + BH2-3] — count/reload/warn interaction.** iter-1 queried `count_singleton_config` BEFORE the reload and gated the warn on a separate `reload_succeeded` bool. Three problems: (ECH2-1) a transient pre-reload pool-checkout error forced the count to 0 and wrongly SUPPRESSED the warn when SQLite was actually healthy; (BH2-2) figment returns `Ok` even when the Provider errored→empty-map→fell-back-to-TOML, so the warn could fire claiming "config.toml shadowed" when TOML was live; (BH2-3) the `config_provider_failed` message said "after the D-2 reload" but the count ran BEFORE it. **Fix:** moved the count query AND the warn emit INSIDE the reload `Ok` arm. The count now runs in the same post-reload healthy-pool window (fixes ECH2-1), the "after the D-2 reload" wording is accurate (BH2-3), and the warn fires only when the reload succeeded (preserves iter-1 ECH-F6). Removed the now-redundant `reload_succeeded` bool. BH2-2's residual (Provider-errored-but-figment-Ok) is accepted: the warn describes the durable post-D-2 contract, and the concurrent `config_provider_failed` event flags the transient fault — a one-boot TOML fallback doesn't change the operator guidance.
+
+- **[MED] BH2-1 — Provider read-time secret filter had no test.** The iter-1 defense-in-depth secret filter (skip `SECRET_FIELDS_BY_SECTION` keys) had zero coverage — deleting the block wouldn't fail the suite (a latent fake-regression-guard gap). **Fix:** added `t16_provider_filters_secret_field_at_read_time` — injects `chirpstack.api_token` directly via the raw `write_singleton_section` helper (bypassing the PUT handler's rejection, simulating a tampered DB), then asserts the secret value + key are absent from the Provider's figment map AND the `config_provider_failed` warn fired.
+
+- **[LOW, converged BH2-4 + ECH2-2] — t07b asserted only the return-value contract.** The once-per-boot guard test proved `second == false` but not that the second call emitted zero log events. **Fix:** added a `logs_assert` closure counting `config_toml_unused_warning` occurrences == 1 across the two calls — audit-trail-level proof of the once-per-boot semantic.
+
+### Test gate (post iter-2)
+
+`cargo test`: **1544 passed / 0 failed / 73 ignored** (iter-1 was 1543; +1 net for t16). `cargo clippy --all-targets -- -D warnings`: clean. xmllint clean. D-1 doc-sync grep-invariant green.
+
+### iter-3 assessment
+
+iter-2's production change was a **control-flow restructure** in main.rs (relocating the count + warn into the reload `Ok` arm) — no new helper, parser, classifier, or predicate; the logic is identical, only the location changed to fix the ordering bug. The other two patches are test-only (t16 new test + t07b `logs_assert`). Per the iter-N+1 doctrine the borderline question is whether a flow-control *relocation* (vs. net-new flow-control) triggers a mandatory iter-3. Deferred to the user per the strict-doctrine pattern.

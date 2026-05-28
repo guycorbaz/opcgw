@@ -336,6 +336,13 @@ fn t07_unused_warning_fires_when_both_present() {
 
 /// Test 7b — once-per-boot guard: a SECOND call with the same
 /// already-emitted guard does NOT re-emit (D-2 AC#5 / Task 3.3).
+///
+/// D-2 review iter-2 (BH2-4 / ECH2-2 converged): the original t07b
+/// asserted only the return-value contract. It now ALSO asserts at the
+/// audit-trail level via `logs_assert` that the
+/// `config_toml_unused_warning` event appears EXACTLY ONCE across the
+/// two calls — so a future refactor that emitted-then-guarded (instead
+/// of guarded-then-emitted) would be caught.
 #[traced_test]
 #[test]
 fn t07b_unused_warning_fires_only_once_per_guard() {
@@ -349,6 +356,23 @@ fn t07b_unused_warning_fires_only_once_per_guard() {
     let second = AppConfig::maybe_emit_config_toml_unused_warning(&config_path, row_count, &guard);
     assert!(first, "first call must emit");
     assert!(!second, "second call with the same guard must NOT re-emit (once-per-boot)");
+
+    // Audit-trail-level proof: the event must appear exactly once even
+    // though the helper was called twice.
+    logs_assert(|lines: &[&str]| {
+        let count = lines
+            .iter()
+            .filter(|l| l.contains("config_toml_unused_warning"))
+            .count();
+        if count == 1 {
+            Ok(())
+        } else {
+            Err(format!(
+                "expected config_toml_unused_warning to appear exactly once, got {}",
+                count
+            ))
+        }
+    });
 }
 
 /// Test 8 — `config_toml_unused_warning` event does NOT fire when
@@ -629,4 +653,59 @@ fn t14_count_singleton_config_matches_post_migration() {
 fn t15_provider_is_send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<SqliteSingletonProvider>();
+}
+
+/// Test 16 — Provider read-time secret filter (D-2 review iter-1
+/// defense-in-depth; tested in iter-2 per BH2-1).
+///
+/// The migration + D-1 PUT handler skip secret fields at WRITE time,
+/// but the Provider sits ABOVE secrets.toml in the figment stack, so a
+/// secret row that landed in `singleton_config` via direct SQL / a
+/// tampered backup restore / a future write-path bug would shadow the
+/// real secret. The Provider must therefore ALSO filter secret keys at
+/// READ time. This test injects `chirpstack.api_token` directly via the
+/// raw `write_singleton_section` helper (bypassing the PUT handler's
+/// rejection), then asserts (a) the secret does NOT appear in the
+/// Provider's figment map and (b) the `config_provider_failed` warn
+/// fired. Deleting the filter block would fail this test.
+#[traced_test]
+#[test]
+fn t16_provider_filters_secret_field_at_read_time() {
+    use figment::Provider as _;
+    let (_dir, _config_path, backend) = fresh_env();
+
+    // Simulate a tampered DB: a secret row written directly to
+    // singleton_config (the raw helper does NOT enforce the secret
+    // skip-list — only the migration + PUT handler do).
+    backend
+        .write_singleton_section(
+            "chirpstack",
+            &[(
+                "api_token".to_string(),
+                serde_json::to_string(&serde_json::json!("LEAKED-FROM-SQLITE"))
+                    .expect("serialize"),
+            )],
+        )
+        .expect("write secret row");
+
+    let provider = SqliteSingletonProvider::new(Arc::new(backend));
+    let data = provider.data().expect("data ok");
+
+    // The secret must NOT appear anywhere in the Provider output.
+    let rendered = format!("{:?}", data);
+    assert!(
+        !rendered.contains("LEAKED-FROM-SQLITE"),
+        "secret value must be filtered out of the Provider map; got {:?}",
+        rendered
+    );
+    assert!(
+        !rendered.contains("api_token"),
+        "secret key must be filtered out of the Provider map; got {:?}",
+        rendered
+    );
+    // The filter emits a config_provider_failed warn on the skipped row.
+    assert!(
+        logs_contain("config_provider_failed"),
+        "filtering a secret row must emit a config_provider_failed warn"
+    );
 }

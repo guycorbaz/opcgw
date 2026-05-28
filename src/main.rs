@@ -717,42 +717,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // figment snapshot. Same safety-net semantic as the D-1 overlay
     // (D-0 AC#6 transition contract).
     //
-    // D-2 review iter-1 (ECH-F6): `reload_succeeded` tracks whether the
-    // SQLite snapshot is actually the live config. Only when it is do we
-    // emit `config_toml_unused_warning` below — otherwise the bootstrap
-    // TOML is in effect and the "your config.toml edits are shadowed"
-    // message would be factually wrong.
-    let mut reload_succeeded = false;
-    // D-2 review iter-1 (BH-F4 / ECH-F3): query the row count ONCE, with
-    // explicit error logging instead of a silent `.unwrap_or(0)` that
-    // could mask the same pool/DB fault that would have made the reload
-    // return an empty Provider map. Reused for both the info log and the
-    // unused-warning predicate below.
-    let singleton_row_count = match sqlite_backend.count_singleton_config() {
-        Ok(n) => n,
-        Err(e) => {
-            warn!(
-                event = "config_provider_failed",
-                error = %e,
-                "Failed to count singleton_config rows after the D-2 reload; \
-                 treating as zero for the config_toml_unused_warning predicate"
-            );
-            0
-        }
-    };
+    //
+    // D-2 review iter-2 (ECH2-1 + BH2-2 + BH2-3 converged): the
+    // row-count query AND the `config_toml_unused_warning` emit both
+    // live INSIDE the reload Ok arm. This pins three properties:
+    //   1. The count runs only after a successful reload, in the same
+    //      healthy connection-pool window — a transient pre-reload
+    //      checkout timeout can no longer force the count to 0 and
+    //      wrongly suppress the warning when SQLite is actually the
+    //      live config (ECH2-1).
+    //   2. The `config_reload_with_sqlite` info log + the unused-warning
+    //      both reflect the post-reload state, so the
+    //      "after the D-2 reload" wording is accurate (BH2-3).
+    //   3. The warning fires only when the SQLite snapshot is the live
+    //      config (reload succeeded), so the "config.toml edits are
+    //      shadowed" guidance is correct (ECH-F6 from iter-1, preserved).
     match AppConfig::from_path_with_sqlite(
         &config_path,
         std::sync::Arc::new(sqlite_backend.clone()),
     ) {
         Ok(reloaded) => {
-            reload_succeeded = true;
-            if singleton_row_count > 0 {
-                info!(
-                    event = "config_reload_with_sqlite",
-                    rows = singleton_row_count,
-                    "Re-loaded AppConfig with SqliteSingletonProvider in the figment stack"
-                );
-            }
             // Swap the in-memory snapshot. Arc::make_mut clones if
             // there are outstanding refs, but at this point only
             // reload_handle holds one — reseed it below.
@@ -762,6 +746,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // singleton fields to all subscribers — not the
             // bootstrap-load figment values seeded earlier.
             reload_handle.seed_post_overlay(application_config.clone());
+
+            // Query the row count ONCE, post-reload, with explicit
+            // error logging instead of a silent `.unwrap_or(0)` that
+            // could mask a pool/DB fault. On Err, skip the info log +
+            // the warning (degraded but safe — the fault is logged).
+            match sqlite_backend.count_singleton_config() {
+                Ok(singleton_row_count) => {
+                    if singleton_row_count > 0 {
+                        info!(
+                            event = "config_reload_with_sqlite",
+                            rows = singleton_row_count,
+                            "Re-loaded AppConfig with SqliteSingletonProvider in the figment stack"
+                        );
+                    }
+                    // Emit `config_toml_unused_warning` once-per-boot
+                    // when config.toml is present AND singleton_config
+                    // has rows. The emit + once-per-boot guard live in
+                    // `AppConfig::maybe_emit_config_toml_unused_warning`
+                    // so the event path is unit-testable (iter-1
+                    // BH-F1 / ECH-F2 / AA-F3 converged fake-guard
+                    // finding). opcgw NEVER deletes operator-owned
+                    // files; this is an information event only.
+                    AppConfig::maybe_emit_config_toml_unused_warning(
+                        &config_path,
+                        singleton_row_count,
+                        &CONFIG_TOML_UNUSED_WARNING_EMITTED,
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        event = "config_provider_failed",
+                        error = %e,
+                        "Failed to count singleton_config rows after the D-2 reload; \
+                         skipping the config_toml_unused_warning for this boot"
+                    );
+                }
+            }
         }
         Err(e) => {
             warn!(
@@ -771,23 +792,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                  continuing with bootstrap-loaded snapshot"
             );
         }
-    }
-
-    // Story D-2 Task 3: emit `config_toml_unused_warning` once on boots
-    // where `config.toml` is present on disk AND the SQLite
-    // `singleton_config` table has rows AND the D-2 reload actually
-    // succeeded (so the SQLite snapshot is the live config). The
-    // emit + once-per-boot guard live in
-    // `AppConfig::maybe_emit_config_toml_unused_warning` so the event
-    // path is unit-testable (D-2 review iter-1, BH-F1 / ECH-F2 / AA-F3
-    // converged fake-regression-guard finding). opcgw NEVER deletes
-    // operator-owned files; this is an information event only.
-    if reload_succeeded {
-        AppConfig::maybe_emit_config_toml_unused_warning(
-            &config_path,
-            singleton_row_count,
-            &CONFIG_TOML_UNUSED_WARNING_EMITTED,
-        );
     }
 
     // Story C-6 F1: seed the watch channel from SQLite so subsystems
