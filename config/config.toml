@@ -1,21 +1,34 @@
 # ============================================================================
-# opcgw — minimal default configuration template
+# opcgw — bootstrap configuration seed
 #
-# This file ships with placeholder credentials only. The gateway refuses to
-# start with the placeholder values still in place, so you MUST inject real
-# secrets via environment variables before first run.
+# As of v2.1.0, opcgw is configured from the web UI and stores all
+# configuration in SQLite (the gateway database under ./data). This file is an
+# OPTIONAL bootstrap seed: it is read ONCE on first start to populate an empty
+# database, then never read or written again. To change configuration after the
+# first boot, use the web UI — editing this file has no effect on a running
+# gateway.
 #
-# Required environment variables (see docs/security.md for the full recipe):
-#   OPCGW_CHIRPSTACK__API_TOKEN   — overrides [chirpstack].api_token
-#   OPCGW_OPCUA__USER_PASSWORD    — overrides [opcua].user_password
+# Configuration precedence: environment variable > SQLite > this file > default.
 #
-# Quick start:
-#   1. Copy `.env.example` to `.env` and fill in real secret values.
-#   2. Optionally tailor the `[[application]]` block(s) below to your
-#      ChirpStack deployment, or copy `config/config.example.toml` for a
-#      multi-application real-world reference.
-#   3. Run the gateway (locally with `cargo run`, or via `docker compose up`
-#      which auto-loads `.env`).
+# Secrets are NOT stored here. The gateway refuses to start while the
+# placeholder credential values below are still in place; inject the real
+# secrets via environment variables (or via the web setup wizard, which writes
+# them to config/secrets.toml with file mode 0600):
+#   OPCGW_CHIRPSTACK__API_TOKEN   — ChirpStack API token
+#   OPCGW_OPCUA__USER_PASSWORD    — OPC UA user password
+#
+# Quick start (web-first):
+#   1. Copy `.env.example` to `.env` and set the two secret values.
+#   2. Run the gateway (`cargo run`, or `docker compose up` which auto-loads
+#      `.env`). The web UI is enabled by default on port 8080.
+#   3. Open http://localhost:8080 — on first run the gateway serves a setup
+#      wizard. Enter your ChirpStack connection and OPC UA settings, then use
+#      the application/device pickers to map metrics from your ChirpStack
+#      inventory. No hand-editing of this file is required.
+#
+# The [[application]] block below is an optional illustrative seed; see
+# `config/config.example.toml` for a multi-application reference. You can
+# instead leave it out entirely and add everything through the web UI pickers.
 #
 # See docs/security.md for the env-var convention, Docker / Kubernetes
 # recipes, and anti-patterns to avoid.
@@ -146,14 +159,16 @@ stale_threshold_seconds = 120
 # Override via env var: OPCGW_OPCUA__<UPPERCASE_KEY>
 
 
-# Embedded Axum web server (Story 9-1). Off by default — uncomment and
-# set `enabled = true` to enable, or override via env var
-# `OPCGW_WEB__ENABLED=true`. The server binds an HTTP port and serves
-# placeholder static files behind HTTP Basic auth (credentials shared
-# with `[opcua]` — `user_name` / `user_password`).
+# Embedded Axum web server. Enabled by default (see the active [web] section
+# below) because the web UI is the primary configuration surface as of v2.1.0:
+# the setup wizard, ChirpStack inventory pickers, drift view, and singleton-
+# config editor all live here. Set `enabled = false` (or
+# `OPCGW_WEB__ENABLED=false`) to disable it. The server serves the
+# configuration UI behind HTTP Basic auth (credentials shared with `[opcua]` —
+# `user_name` / `user_password`).
 #
-# Story 9-1 ships HTTP-only; deploy a reverse proxy (nginx, Caddy,
-# Traefik) for TLS termination if your environment requires it.
+# HTTP-only; deploy a reverse proxy (nginx, Caddy, Traefik) for TLS
+# termination if your environment requires it (GH #104).
 # See docs/security.md "Web UI authentication" for the full recipe.
 #
 # port — listening port. Default 8080. Range 1024–65535 (privileged
@@ -178,17 +193,21 @@ stale_threshold_seconds = 120
 #auth_realm = "opcgw"
 #allowed_origins = ["http://gateway.local:8080"]
 
-# Active [web] section. enabled / bind_address / port are still controllable
-# via env vars (OPCGW_WEB__ENABLED, OPCGW_WEB__BIND_ADDRESS, OPCGW_WEB__PORT)
-# which take precedence over the values here. `allowed_origins` is set
-# explicitly because the default ("http://<bind_address>:<port>") only matches
-# one of the two URLs operators commonly browse to; without both entries the
-# CSRF middleware rejects POST/PUT/DELETE when the browser uses localhost
-# while bind_address is 127.0.0.1 (or vice versa).
+# Active [web] section. As of v2.1.0 the web UI is the primary way to configure
+# the gateway, so it is enabled by default here on port 8080. enabled /
+# bind_address / port are also controllable via env vars (OPCGW_WEB__ENABLED,
+# OPCGW_WEB__BIND_ADDRESS, OPCGW_WEB__PORT) which take precedence over the values
+# here. `allowed_origins` is set explicitly because the default
+# ("http://<bind_address>:<port>") only matches one of the two URLs operators
+# commonly browse to; without both entries the CSRF middleware rejects
+# POST/PUT/DELETE when the browser uses localhost while bind_address is 127.0.0.1
+# (or vice versa). Both entries use port 8080 to match the listening port.
 [web]
+enabled = true
+port = 8080
 allowed_origins = [
-    "http://127.0.0.1:8088",
-    "http://localhost:8088",
+    "http://127.0.0.1:8080",
+    "http://localhost:8080",
 ]
 
 

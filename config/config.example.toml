@@ -2,15 +2,22 @@
 # Reference example configuration with multiple applications
 # (Arrosage, Bâtiments, Cultures, Meteo).
 #
+# As of v2.1.0 this file is an OPTIONAL bootstrap seed: like `config/config.toml`
+# it is read ONCE on first start to populate an empty SQLite database, then
+# never read or written again. After first boot, configure the gateway from the
+# web UI (the application/device pickers can build your inventory directly from
+# ChirpStack). This example simply pre-seeds a multi-application topology.
+#
 # Do NOT use as-is in production. To use:
 #   1. Copy to `config/config.toml`:
 #        cp config/config.example.toml config/config.toml
-#   2. Replace the `api_token` and `user_password` values with the
+#   2. Leave the `api_token` and `user_password` values as the
 #      `REPLACE_ME_WITH_*` placeholders that the gateway recognises and
 #      refuses to start with.
 #   3. Inject the real secrets via environment variables — see
 #      `docs/security.md` for the full recipe.
-#   4. Tailor the `[[application]]` list to your deployment.
+#   4. Tailor the `[[application]]` list to your deployment (or leave it minimal
+#      and add applications/devices through the web UI pickers after first boot).
 #
 # This example preserves the multi-application real-world shape that an
 # operator's production configuration is likely to take. The shipped
@@ -181,28 +188,26 @@ stale_threshold_seconds = 120
 # Override via env var: OPCGW_OPCUA__MAX_HISTORY_DATA_RESULTS_PER_NODE
 
 
-# Embedded Axum web server (Story 9-1). Off by default — set
-# `enabled = true` (or `OPCGW_WEB__ENABLED=true`) to expose the gateway's
-# HTTP UI. Credentials are shared with `[opcua]` (single source of truth
-# for both auth surfaces). HTTP-only — deploy a reverse proxy if your
-# environment requires TLS.
+# Embedded Axum web server. As of v2.1.0 the web UI is the primary way to
+# configure the gateway (setup wizard, ChirpStack inventory pickers, drift
+# view, singleton-config editor), so it is enabled here on port 8080. Set
+# `enabled = false` (or `OPCGW_WEB__ENABLED=false`) to disable it. Credentials
+# are shared with `[opcua]` (single source of truth for both auth surfaces).
+# HTTP-only — deploy a reverse proxy if your environment requires TLS (GH #104).
 #
 # port — listening port. Default 8080. Range 1024-65535.
 # bind_address — IP to bind. Default "0.0.0.0". Use "127.0.0.1" if a
 #   reverse proxy on the same host fronts the gateway.
 # auth_realm — Basic-auth realm string. Default "opcgw". Max 64 chars,
 #   ASCII-only, no `"`, no `\`, no leading/trailing whitespace.
-# enabled — master switch. Default false.
+# enabled — master switch. Binary default false; both this example and the
+#   shipped `config/config.toml` opt in to `true`.
 #
-# WARNING: this example overrides the default `enabled = false` to
-# `enabled = true` for illustration. The shipped `config/config.toml`
-# (the canonical starting point for new deployments) ships the entire
-# `[web]` block commented-out so the safe default applies. If you
-# copy this example as your starting point, REVIEW the `[web]` block
-# before deploying — verify your reverse-proxy / firewall posture
-# matches your threat model. See
-# `docs/security.md § Web UI authentication § Required reading
-# before enabling`.
+# NOTE: the binary's built-in default is `enabled = false` (safe by default);
+# the shipped config opts in so a fresh deployment lands on the setup wizard.
+# REVIEW the `[web]` block before deploying — verify your reverse-proxy /
+# firewall posture matches your threat model. See
+# `docs/security.md § Web UI authentication`.
 [web]
 enabled = true
 port = 8080

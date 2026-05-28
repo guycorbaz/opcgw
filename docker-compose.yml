@@ -8,24 +8,24 @@
 #   sudo chmod 700 ./pki/private
 #   sudo chmod 600 ./pki/private/*    # NFR9 — OPC UA private-key permissions
 #
-# Pull the published v2.0 image instead of building locally by either:
+# Pull the published v2.1 image instead of building locally by either:
 #   * `docker compose pull` (uses the `image:` declared below), or
-#   * `docker pull docker.io/gcorbaz/opcgw:2.0 && docker tag docker.io/gcorbaz/opcgw:2.0 opcgw`
+#   * `docker pull docker.io/gcorbaz/opcgw:2.1 && docker tag docker.io/gcorbaz/opcgw:2.1 opcgw`
 # For local-dev builds against the working tree, run `docker build -t opcgw .`
 # first and Compose will pick up the local tag.
 
 services:
   opcgw:
     container_name: opcgw
-    image: docker.io/gcorbaz/opcgw:2.0
+    image: docker.io/gcorbaz/opcgw:2.1
     restart: always
     ports:
       - "4855:4855"
-      # Uncomment to expose the Web UI on the host. Required if you set
-      # OPCGW_WEB__ENABLED=true; the gateway binds the Web UI on container
-      # port 8080 (Dockerfile EXPOSE 8080). The "Quick-start with Web UI"
-      # recipe in docs/dockerhub-description.md depends on this mapping.
-      # - "8080:8080"
+      # Web UI (setup wizard + configuration). Enabled by default in v2.1.0
+      # (OPCGW_WEB__ENABLED below). The gateway binds the Web UI on container
+      # port 8080 (Dockerfile EXPOSE 8080); this maps it to host port 8080.
+      # Browse http://localhost:8080 to reach the first-run setup wizard.
+      - "8080:8080"
     # Secret credentials are injected via env vars (Story 7-1, AC#6).
     # Compose reads `.env` from this directory and substitutes the values
     # below into the container's environment. The `:?` form fails compose
@@ -35,6 +35,10 @@ services:
     environment:
       - OPCGW_CHIRPSTACK__API_TOKEN=${OPCGW_CHIRPSTACK__API_TOKEN:?missing - copy .env.example to .env and set this variable, see docs/security.md}
       - OPCGW_OPCUA__USER_PASSWORD=${OPCGW_OPCUA__USER_PASSWORD:?missing - copy .env.example to .env and set this variable, see docs/security.md}
+      # Web UI is the primary configuration surface in v2.1.0 (first-run setup
+      # wizard, ChirpStack inventory pickers, drift view, singleton-config
+      # editor). Set to false to disable the web server.
+      - OPCGW_WEB__ENABLED=true
     volumes:
       - ./log:/usr/local/bin/log
       - ./config:/usr/local/bin/config
