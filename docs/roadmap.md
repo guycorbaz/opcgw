@@ -1,16 +1,17 @@
 ---
 layout: default
 title: Development Roadmap
+subtitle: Shipped milestones and what's planned next
 permalink: /roadmap/
 ---
 
 ## opcgw Development Roadmap
 
-**Strategic Goal:** Deliver production-ready v2.0 with feature parity to v1.0 plus new capabilities (data persistence, real-time subscriptions, historical access, web UI, configuration hot-reload).
+**Strategic Goal:** A production-ready gateway bridging ChirpStack to OPC UA — with persistence, real-time subscriptions, historical access, security hardening, and a web-first auto-discovery configuration experience. Delivered through v2.1.0.
 
-> **Principle:** Quality over Speed. v2.0 must be genuinely better than v1.0 — not just different.
+> **Principle:** Quality over Speed. Every epic ships behind an adversarial multi-layer code-review loop.
 
-> **Production-deployment blocker:** GitHub issue [#108](https://github.com/guycorbaz/opcgw/issues/108) — the `MetricType` enum is payload-less, so every row in `metric_values` stores the literal data-type string (`"Float"`, `"Int"`, …) instead of the actual measurement. opcgw has never persisted real metric values. Affects four shipped epics (2, 5, 8, 9-3); SCADA clients see literal type-name strings via OPC UA, dashboards show `"Float"` instead of `23.5`, HistoryRead returns type-strings. The fix is **Epic A — Storage Payload Migration**, an Epic-1-scale storage-trait refactor. Until #108 lands, opcgw is suitable for device-presence monitoring only ("is the sensor reporting?") — not for actual measurement collection.
+> **Note:** the payload-less metric-storage issue ([#108](https://github.com/guycorbaz/opcgw/issues/108)) that previously blocked production use — where `metric_values` stored the data-type string instead of the measurement — was resolved by **Epic A (Storage Payload Migration)**. opcgw now persists and serves real measurement values end-to-end (OPC UA Read / HistoryRead and the web dashboard).
 
 ---
 
@@ -20,14 +21,14 @@ permalink: /roadmap/
 Phase A (Crash-free + persistence + commands + scalability + visibility + diagnostics + security)
   Epic 1 ✅ → Epic 2 ✅ → Epic 3 ✅ → Epic 4 ✅ → Epic 5 ✅ → Epic 6 ✅ → Epic 7 ✅
 
-Phase B (Real-time subscriptions + historical + web UI + hot-reload + dynamic mutation)
+Phase B (Real-time subscriptions + historical data + web UI)
   Epic 8 ✅ → Epic 9 ✅
 
-Next (Production-deployment blocker)
-  Epic A — Storage Payload Migration ⏳ (issue #108)
+Phase C (v2.0 GA + storage payload migration + auto-discovery + SQLite config)
+  Epic A ✅ → Epic B ✅ → Epic C ✅ → Epic D ✅
 ```
 
-All 9 in-plan epics are complete. **Epic A is the immediate next epic** per the Epic 9 retrospective action item AI6 and is the gating work before production deployment.
+All planned epics are complete and shipped (**v2.1.0** prepared, pending publish). The next direction is a v2.x internal-quality / cleanup epic; see the canonical [sprint-status](https://github.com/guycorbaz/opcgw/blob/main/_bmad-output/implementation-artifacts/sprint-status.yaml) for details.
 
 ---
 
@@ -106,13 +107,32 @@ All 9 in-plan epics are complete. **Epic A is the immediate next epic** per the 
 
 - Axum 0.8 embedded web server gated by HTTP Basic auth (FR50 / NFR11)
 - Gateway status dashboard with live ChirpStack health, error counts, application/device counts (FR38)
-- Live metric values page with per-row staleness badges (FR37) — *currently shows the #108 data-type-string bug until Epic A lands*
+- Live metric values page with per-row staleness badges (FR37) — returns real typed values since Epic A
 - CRUD for applications, devices + metric mappings, and commands via the web UI (FR34 / FR35 / FR36 / FR40)
 - CSRF defence (Origin/Referer same-origin + JSON-only Content-Type)
-- TOML round-trip persistence via `toml_edit` with atomic tempfile + rename and lock-held-across-reload
-- Configuration hot-reload triggered by SIGHUP, validate-then-swap discipline, knob taxonomy (hot-reload-safe / restart-required / address-space-mutating) — FR39 / FR40
+- Configuration persistence (as shipped in Epic 9: SIGHUP-triggered `toml_edit` write-back + hot-reload). **Superseded in Phase C** — Epics C/D moved configuration into SQLite and removed the SIGHUP/`toml_edit` path; see Phase C below.
 - Dynamic OPC UA address-space mutation under live subscriptions (FR24) with the 4-phase mutation envelope from the 9-0 spike (Q2 `BadNodeIdUnknown` transition → delete → add → DisplayName rename)
 - Three new audit-event families: `config_reload_*`, `address_space_mutation_*`, plus per-resource CRUD events (`application_*`, `device_*`, `command_*`)
+
+---
+
+## Phase C — GA, Payload Migration, Auto-Discovery & SQLite Config ✅
+
+### Epic A: Storage Payload Migration ✅
+
+Resolved issue [#108](https://github.com/guycorbaz/opcgw/issues/108). `MetricType` became payload-bearing end-to-end (storage trait, SQLite schema, poller, OPC UA Read + HistoryRead, web dashboard). opcgw now persists and serves real measurement values, not type-name strings.
+
+### Epic B: v2.0 GA Release Packaging ✅
+
+Dual-registry multi-arch container publishing (Docker Hub `gcorbaz/opcgw` + GHCR `guycorbaz/opcgw`, amd64 + arm64), Dockerfile hardening (non-root user, `ubuntu:24.04` base), the Docker Hub Overview page, and the DocBook user manual brought current.
+
+### Epic C: Auto-Discovery & Web-First Configuration ✅
+
+First-run web setup wizard; ChirpStack inventory query layer + pickers (select applications/devices/metrics by name); duplicate-prevention validator; inventory drift view; and the TOML→SQLite migration that moved applications/devices/metrics/commands into the database.
+
+### Epic D: Singleton Configuration → SQLite ✅
+
+Moved the `[global]` / `[chirpstack]` / `[opcua]` / `[web]` singleton sections into SQLite with a web editor and decommissioned the TOML mutation surface. `config.toml` is now a one-time bootstrap seed; configuration precedence is `env > SQLite > config.toml > default`.
 
 ---
 
@@ -125,21 +145,16 @@ Story 8-4 was originally scoped inside Epic 8 but **was not implemented**. It wa
 - **What's missing:** the gateway does NOT propagate `Bad` / `Warning` OPC UA status codes when a metric crosses a configured `low_alarm` / `high_alarm` threshold. SCADA clients see `Good` status for every metric read regardless of threshold proximity.
 - **What still works:** Story 5-2's stale-data status codes (`Uncertain` after 1× poll interval, `Bad` after 3× poll interval) function unchanged. Story 8-2's `DataChangeFilter`-driven subscriptions deliver these status transitions correctly.
 - **Operator workaround:** define alarm thresholds in the SCADA application (FUXA / Ignition) rather than in opcgw. This is the operationally sound choice anyway — alarm-condition state belongs in the SCADA client which has full context of acknowledged / suppressed / shelved state.
-- **Functional block:** revival is gated by issue [#108](https://github.com/guycorbaz/opcgw/issues/108). Threshold alarms need real metric values to alarm on; until Epic A ships, an alarm story has nothing meaningful to compare against.
+- **Now unblocked:** Epic A shipped real metric values, so threshold alarms would have meaningful data to compare against. The story remains deferred (the SCADA-side workaround is operationally sound); if revived it lands under a new story name.
 - **Future revival:** if surfaced, the work lands under a **new story name** in a future Phase B epic (NOT `8-4`); the original spec was scoped for the wrong epic phase and should be redrafted with the Stories 8-2 / 8-3 lessons baked in (specifically: the `DataChangeFilter` `trigger: StatusValue` path is the correct integration point).
 
 Canonical narrative: `_bmad-output/implementation-artifacts/deferred-work.md` and `_bmad-output/implementation-artifacts/epic-8-retro-2026-05-01.md` § Known Failures + the 2026-05-14 descope addendum.
 
 ---
 
-## Next: Epic A — Storage Payload Migration ⏳
+## Next
 
-**Status:** not yet opened. Identified as the immediate next epic per Epic 9 retrospective action item AI6 (2026-05-14).
-
-- **Why it matters:** Issue [#108](https://github.com/guycorbaz/opcgw/issues/108) is the production-deployment blocker. The `MetricType` enum is payload-less, so the `metric_values.value` column stores the data-type string instead of the measurement. Every shipped feature that reads metric values back (dashboard, OPC UA Read, OPC UA HistoryRead) returns type-strings, not real data.
-- **Shape:** Epic-1-scale storage-trait refactor. `MetricType` carries the value payload; the storage layer round-trips it; readers no longer fall back to the type-name string.
-- **Affects:** Epics 2, 5, 8, and Story 9-3 (surface-correct but data-incorrect until #108 lands).
-- **Gate for:** production deployment of v2.0, and any future revival of Story 8-4's threshold-alarm functionality.
+All planned epics are complete. The current direction (per the Epic D retrospective) is a **v2.x internal-quality / cleanup epic** — codifying recurring code-review lessons and paying down internal tech debt — rather than new user-facing features. A live operator end-to-end smoke test against a real ChirpStack server is the remaining gate before the v2.1.0 tag and Docker publish.
 
 ---
 

@@ -1,8 +1,16 @@
 ---
 layout: default
 title: Quick Start Guide
+subtitle: Install opcgw and reach the web setup wizard in minutes
 permalink: /quickstart/
 ---
+
+> **opcgw is configured from the web UI (v2.1.0).** You provide a bootstrap
+> `config.toml` (or the matching `OPCGW_*` environment variables) for the first
+> boot; opcgw reads it once into its SQLite database and from then on you manage
+> everything — ChirpStack connection, OPC UA settings, and device/metric
+> mappings — from the browser. Editing `config.toml` after the first boot has no
+> effect.
 
 ## Installation
 
@@ -33,13 +41,19 @@ cargo build --release
 # Build image
 docker build -t opcgw:latest .
 
-# Or use pre-built (when available)
-docker pull ghcr.io/guycorbaz/opcgw:2.0.0
+# Or use the published image (Docker Hub primary, GHCR mirror)
+docker pull docker.io/gcorbaz/opcgw:2.1
 ```
 
 ---
 
 ## Configuration
+
+The TOML below is the **bootstrap seed** for the first boot only. opcgw reads it
+once to populate its SQLite database, then ignores it — afterwards you edit
+configuration in the web UI. You can keep the seed minimal (a valid
+`[chirpstack]` + `[opcua]` section is enough) and add applications/devices via
+the web UI's ChirpStack inventory pickers after first boot.
 
 ### 1. Create Configuration File
 
@@ -258,20 +272,24 @@ In ChirpStack UI:
 
 ## Environment Variables
 
-Override config values via environment variables:
+Override config values via environment variables. This is the recommended way
+to inject secrets (the ChirpStack API token and OPC UA password):
 
 ```bash
-export OPCGW_CHIRPSTACK_SERVER_ADDRESS="http://prod-chirpstack:8080"
-export OPCGW_CHIRPSTACK_API_TOKEN="secret-token"
-export OPCGW_OPCUA_HOST_PORT="4860"
+export OPCGW_CHIRPSTACK__SERVER_ADDRESS="http://prod-chirpstack:8080"
+export OPCGW_CHIRPSTACK__API_TOKEN="secret-token"
+export OPCGW_OPCUA__HOST_PORT="4860"
 
 cargo run --release
 ```
 
-**Naming Convention**: `OPCGW_<SECTION>_<FIELD>`
-- Replace dots with underscores
+**Naming Convention**: `OPCGW_<SECTION>__<FIELD>` — note the **double underscore**
+(`__`) between the section and the field.
+- Section and field are joined by `__` (two underscores); nested keys use `__` too
 - Uppercase all letters
-- Example: `opcua.host_port` → `OPCGW_OPCUA_HOST_PORT`
+- Examples: `opcua.host_port` → `OPCGW_OPCUA__HOST_PORT`; `chirpstack.api_token` → `OPCGW_CHIRPSTACK__API_TOKEN`; `web.enabled` → `OPCGW_WEB__ENABLED`
+
+Environment variables take precedence over SQLite and `config.toml`.
 
 ---
 
@@ -279,26 +297,30 @@ cargo run --release
 
 ### docker-compose.yml
 
-```yaml
-version: '3.8'
+The repository ships a canonical [`docker-compose.yml`](https://github.com/guycorbaz/opcgw/blob/main/docker-compose.yml); the essentials:
 
+```yaml
 services:
   opcgw:
-    image: opcgw:latest
+    image: docker.io/gcorbaz/opcgw:2.1
     container_name: opcgw
     restart: always
     ports:
-      - "4855:4855"  # OPC UA
+      - "4855:4855"   # OPC UA
+      - "8080:8080"   # Web UI (setup wizard + configuration)
     volumes:
       - ./config:/usr/local/bin/config
       - ./pki:/usr/local/bin/pki
       - ./log:/usr/local/bin/log
+      - ./data:/usr/local/bin/data   # SQLite DB — REQUIRED so metrics + config persist
     environment:
-      OPCGW_CHIRPSTACK_SERVER_ADDRESS: "http://chirpstack:8080"
-      OPCGW_CHIRPSTACK_API_TOKEN: "${CHIRPSTACK_TOKEN}"
-    depends_on:
-      - chirpstack  # Optional, if running locally
+      # Secrets injected from .env (double underscore between section and field):
+      OPCGW_CHIRPSTACK__API_TOKEN: "${OPCGW_CHIRPSTACK__API_TOKEN}"
+      OPCGW_OPCUA__USER_PASSWORD: "${OPCGW_OPCUA__USER_PASSWORD}"
+      OPCGW_WEB__ENABLED: "true"
 ```
+
+Bind-mounted directories must be owned by UID 10001 before first start (`sudo chown -R 10001:10001 ./config ./pki ./log ./data`). Without the `./data` mount the SQLite database lives in the ephemeral container layer and is lost on `docker compose down`.
 
 ### Run
 

@@ -33,7 +33,21 @@
     </nav>
 
     <main>
+        {% if page.permalink %}
+        <header class="page-hero">
+            <div class="container">
+                <h1>{{ page.title }}</h1>
+                {% if page.subtitle %}<p class="page-hero-subtitle">{{ page.subtitle }}</p>{% endif %}
+            </div>
+        </header>
+        <section class="content-section page-content">
+            <div class="container">
+                {{ content }}
+            </div>
+        </section>
+        {% else %}
         {{ content }}
+        {% endif %}
     </main>
 
     <footer>

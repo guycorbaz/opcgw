@@ -1,12 +1,13 @@
 ---
 layout: default
 title: Configuration Reference
+subtitle: Configure the gateway from the web UI, seeded once from config.toml
 permalink: /configuration/
 ---
 
 ## Configuration File Format
 
-opcgw uses TOML configuration files. The main config file is typically `config/config.toml`.
+As of v2.1.0, opcgw stores its configuration in **SQLite** and is managed from the **web UI**. The TOML file (`config/config.toml`) is a **bootstrap seed**: it is read once on first start to populate the database, then ignored at runtime. The sections below document the TOML schema used for that seed (and for `OPCGW_*` environment overrides); the same fields are editable in the web UI's singleton-configuration editor after first boot, and applications/devices/metrics are managed through the ChirpStack inventory pickers.
 
 ### Secrets
 
@@ -149,7 +150,7 @@ host_port = 4855
 
 # Authentication
 user_name = "operator"
-user_password = "strong_password_123"  # or use env var: OPCGW_OPCUA_USER_PASSWORD
+user_password = "strong_password_123"  # or use env var: OPCGW_OPCUA__USER_PASSWORD
 
 # Security (production)
 create_sample_keypair = false   # Use proper certs, not sample
@@ -179,9 +180,38 @@ create_sample_keypair = true   # OK for testing
 
 ---
 
+## [web] Section
+
+Configuration for the embedded web UI (setup wizard, status dashboard, live metrics, ChirpStack inventory pickers, drift view, and singleton-configuration editor). The web UI is the primary way to configure opcgw and is **enabled by default in the shipped `config.toml`** (the binary's built-in default is `enabled = false`).
+
+### Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `enabled` | bool | ✗ | `false` (binary) / `true` (shipped config) | Master switch for the web server |
+| `port` | u16 | ✗ | 8080 | Listening port (range 1024–65535) |
+| `bind_address` | string | ✗ | 0.0.0.0 | IP address to bind to |
+| `auth_realm` | string | ✗ | opcgw | HTTP Basic auth realm (max 64 chars) |
+| `allowed_origins` | array | ✗ | `["http://<bind_address>:<port>"]` | CSRF allow-list for state-changing requests (each entry `scheme://host[:port]`) |
+
+Authentication reuses the `[opcua].user_name` / `[opcua].user_password` credentials — there is no separate web admin account. The server is HTTP-only; put a reverse proxy in front of it for TLS.
+
+### Example
+
+```toml
+[web]
+enabled = true
+port = 8080
+bind_address = "0.0.0.0"
+auth_realm = "opcgw"
+allowed_origins = ["http://127.0.0.1:8080", "http://localhost:8080"]
+```
+
+---
+
 ## [[application]] Section
 
-Define ChirpStack applications to expose in OPC UA.
+Define ChirpStack applications to expose in OPC UA. These are a bootstrap seed only — after first boot, manage applications/devices/metrics through the web UI's ChirpStack inventory pickers.
 
 ### Top-Level Parameters
 
@@ -387,19 +417,22 @@ metric_type = "Bool"
 
 ## Environment Variable Overrides
 
-Override any config value via environment variables. Format: `OPCGW_<SECTION>_<FIELD>`
+Override any config value via environment variables. Format: `OPCGW_<SECTION>__<FIELD>` — note the **double underscore** (`__`) between the section and the field name.
 
 ### Examples
 
 ```bash
 # Override ChirpStack server
-export OPCGW_CHIRPSTACK_SERVER_ADDRESS="http://prod-chirpstack:8080"
+export OPCGW_CHIRPSTACK__SERVER_ADDRESS="http://prod-chirpstack:8080"
 
 # Override OPC UA port
-export OPCGW_OPCUA_HOST_PORT="4860"
+export OPCGW_OPCUA__HOST_PORT="4860"
 
 # Override polling frequency
-export OPCGW_CHIRPSTACK_POLLING_FREQUENCY="30"
+export OPCGW_CHIRPSTACK__POLLING_FREQUENCY="30"
+
+# Enable the web UI
+export OPCGW_WEB__ENABLED="true"
 
 # Run with overrides
 cargo run --release
@@ -408,8 +441,9 @@ cargo run --release
 ### Precedence
 
 1. Environment variables (highest priority)
-2. config.toml values
-3. Built-in defaults (lowest priority)
+2. SQLite — the live configuration store
+3. `config.toml` — the bootstrap seed (first boot only)
+4. Built-in defaults (lowest priority)
 
 ---
 
@@ -466,8 +500,8 @@ kill <PID>
 
 1. **Credentials**: Never hardcode in config files. Use environment variables for production.
    ```bash
-   export OPCGW_CHIRPSTACK_API_TOKEN="your-token"
-   export OPCGW_OPCUA_USER_PASSWORD="your-password"
+   export OPCGW_CHIRPSTACK__API_TOKEN="your-token"
+   export OPCGW_OPCUA__USER_PASSWORD="your-password"
    ```
 
 2. **Polling Interval**: Start with 10-30 seconds, adjust based on:

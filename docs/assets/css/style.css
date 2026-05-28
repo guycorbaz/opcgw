@@ -224,3 +224,58 @@ footer a { color: var(--accent-green); }
     margin-right: 0.5rem;
     margin-bottom: 0.5rem;
 }
+
+/* Page hero + content styling for interior (permalink) pages so they share
+   the home page's visual language: a gradient header banner above a styled
+   markdown body. Resolves GH #72 (missing header / inconsistent design). */
+.page-hero {
+    background: linear-gradient(135deg, var(--dark-bg) 0%, #1e3a5f 50%, var(--secondary-blue) 100%);
+    color: white;
+    padding: 64px 0 56px;
+}
+.page-hero h1 {
+    font-size: 2.6rem;
+    font-weight: 800;
+    margin: 0;
+    background: linear-gradient(135deg, #34d399 0%, #38bdf8 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+.page-hero-subtitle { font-size: 1.15rem; color: #cbd5e1; margin: 1rem 0 0; }
+
+.page-content { padding-top: 3rem; }
+.page-content h2 { font-size: 2rem; font-weight: 800; color: var(--dark-bg); margin: 2.5rem 0 1rem; }
+.page-content h3 { font-size: 1.4rem; font-weight: 700; color: var(--dark-bg); margin: 2rem 0 0.75rem; }
+.page-content p, .page-content li { font-size: 1.05rem; line-height: 1.8; color: #475569; }
+.page-content ul, .page-content ol { margin-bottom: 1.25rem; }
+.page-content table { width: 100%; border-collapse: collapse; margin: 1.5rem 0; }
+.page-content th, .page-content td { border: 1px solid #e2e8f0; padding: 0.6rem 0.9rem; text-align: left; }
+.page-content th { background: var(--light-bg); font-weight: 700; color: var(--dark-bg); }
+.page-content pre {
+    background: var(--dark-bg);
+    color: #e2e8f0;
+    padding: 1.25rem 1.5rem;
+    border-radius: 8px;
+    overflow-x: auto;
+    margin: 1.5rem 0;
+    border-left: 4px solid var(--primary-green);
+}
+.page-content :not(pre) > code {
+    background: #eef2f7;
+    color: #0f172a;
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.92em;
+}
+.page-content pre code { background: none; color: inherit; padding: 0; }
+.page-content blockquote {
+    border-left: 4px solid var(--primary-green);
+    background: var(--light-bg);
+    padding: 0.75rem 1.25rem;
+    margin: 1.5rem 0;
+    color: #475569;
+}
+@media (max-width: 768px) {
+    .page-hero { padding: 48px 0 40px; }
+    .page-hero h1 { font-size: 1.9rem; }
+}

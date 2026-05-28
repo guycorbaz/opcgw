@@ -1,6 +1,7 @@
 ---
 layout: default
 title: Features & Use Cases
+subtitle: What opcgw does and where it fits in your stack
 permalink: /features/
 ---
 
@@ -19,13 +20,20 @@ permalink: /features/
 - **Dynamic Address Space**: Automatically build OPC UA variable tree from device configuration
 - **Multiple Data Types**: Support for Float, Int, Bool, and String metric types
 - **Hierarchical Organization**: Applications → Devices → Metrics structure
+- **Real-Time Subscriptions**: Push value changes to clients via OPC UA subscriptions / monitored items
+- **Historical Data Access**: Serve time-series history to SCADA clients via OPC UA HistoryRead
+- **Stale-Data Detection**: Good / Uncertain / Bad status codes from a configurable staleness threshold
+- **Connection Limiting & Auth**: Session caps, security endpoints, and authenticated access
 
-### 🔐 Enterprise-Grade Configuration
+### 🔐 Web-First Configuration & Auto-Discovery
 
-- **TOML Configuration**: Human-readable configuration format with schema validation
-- **Environment Overrides**: OPCGW_ prefixed environment variables override config file settings
-- **Validation on Startup**: Clear, actionable error messages for configuration issues
-- **No Hardcoded Credentials**: All secrets via config or environment variables
+- **Browser-Based Setup**: First-run web wizard — no hand-editing after the initial bootstrap seed
+- **ChirpStack Auto-Discovery**: Pick applications, devices, and metrics from your live ChirpStack inventory by name instead of pasting UUIDs / DevEUIs
+- **SQLite-Backed Config**: All configuration stored in SQLite; `config.toml` is a one-time bootstrap seed
+- **Drift Detection**: Diff your configured inventory against ChirpStack and reconcile from the UI
+- **Duplicate Prevention**: Validation blocks duplicate names / OPC UA node collisions before they persist
+- **Environment Overrides**: `OPCGW_*` environment variables override stored config (double-underscore between section and field)
+- **No Hardcoded Credentials**: Secrets via environment variables or a `0600` `secrets.toml`
 
 ### 📊 Comprehensive Logging
 
@@ -147,12 +155,14 @@ permalink: /features/
 
 ---
 
-## Roadmap (Planned)
+## Roadmap
 
-- **v2.1**: SQLite persistence for historical data
-- **v2.2**: Command queue for write-back to ChirpStack devices
-- **v2.3**: Real-time OPC UA subscriptions
-- **v3.0**: Web UI for configuration and monitoring
-- **v3.1**: Hot-reload configuration without restart
+Most of the original roadmap has already shipped. Highlights now in the released gateway:
 
-See the [GitHub Projects](https://github.com/guycorbaz/opcgw/projects) for detailed tracking.
+- ✅ **SQLite persistence** for metric values, history, and the command queue (Epic 2)
+- ✅ **Command queue** write-back to ChirpStack devices (Epic 3)
+- ✅ **Real-time OPC UA subscriptions** and **historical data access** (Epic 8)
+- ✅ **Web UI** for configuration and monitoring (Epic 9)
+- ✅ **Auto-discovery and web-first configuration**, SQLite-backed config (Epics C + D)
+
+See the [Development Roadmap](roadmap.html) for the current plan and what comes next.

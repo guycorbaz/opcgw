@@ -1,6 +1,7 @@
 ---
 layout: default
 title: Use Cases & Success Stories
+subtitle: Where opcgw delivers value in the field
 permalink: /usecases/
 ---
 

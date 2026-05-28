@@ -14,7 +14,7 @@ title: opcgw - ChirpStack to OPC UA Gateway
                     <a href="https://github.com/guycorbaz/opcgw" target="_blank" class="btn btn-secondary-blue">View on GitHub</a>
                 </div>
                 <div style="margin-top: 3rem;">
-                    <span class="badge-custom">✨ v2.0.0 - Production Ready</span>
+                    <span class="badge-custom">✨ v2.1.0 - Web-First Configuration</span>
                     <span class="badge-custom">🦀 Written in Rust</span>
                     <span class="badge-custom">📡 OPC UA 1.04</span>
                 </div>
@@ -33,20 +33,20 @@ title: opcgw - ChirpStack to OPC UA Gateway
         <div class="row">
             <div class="col-md-3">
                 <div class="stat-card">
-                    <div class="stat-number">2.0</div>
+                    <div class="stat-number">2.1</div>
                     <div class="stat-label">Version</div>
                 </div>
             </div>
             <div class="col-md-3">
                 <div class="stat-card">
-                    <div class="stat-number">5</div>
-                    <div class="stat-label">Completed Stories</div>
+                    <div class="stat-number">13</div>
+                    <div class="stat-label">Epics Delivered</div>
                 </div>
             </div>
             <div class="col-md-3">
                 <div class="stat-card">
-                    <div class="stat-number">100%</div>
-                    <div class="stat-label">Test Coverage</div>
+                    <div class="stat-number">1500+</div>
+                    <div class="stat-label">Tests Passing</div>
                 </div>
             </div>
             <div class="col-md-3">
@@ -80,8 +80,8 @@ title: opcgw - ChirpStack to OPC UA Gateway
             <div class="col-lg-6 mb-4">
                 <div class="feature-card">
                     <div class="feature-icon"><i class="fas fa-cog"></i></div>
-                    <h3 class="feature-title">Easy Configuration</h3>
-                    <p class="feature-text">Simple TOML configuration with environment variable overrides and startup validation</p>
+                    <h3 class="feature-title">Web-Based Configuration</h3>
+                    <p class="feature-text">Configure everything from the browser — first-run setup wizard, ChirpStack inventory pickers, and a live config editor backed by SQLite</p>
                 </div>
             </div>
             <div class="col-lg-6 mb-4">
@@ -118,12 +118,13 @@ title: opcgw - ChirpStack to OPC UA Gateway
 <pre style="margin: 0; color: inherit;">git clone https://github.com/guycorbaz/opcgw.git
 cd opcgw
 cp config/config.example.toml config/config.toml
-# Edit config/config.toml with your ChirpStack details
-cargo run --release -- -c config/config.toml</pre>
+# Add your ChirpStack server + token to config/config.toml (bootstrap seed)
+cargo run --release -- -c config/config.toml
+# Then open http://localhost:8080 to finish configuring in the web UI</pre>
                 </div>
                 <p class="text-center" style="color: #64748b; margin-top: 2rem;">Or use Docker:</p>
                 <div class="code-block">
-<pre style="margin: 0; color: inherit;">docker-compose up</pre>
+<pre style="margin: 0; color: inherit;">docker compose up</pre>
                 </div>
                 <div class="text-center mt-4">
                     <a href="{{ site.baseurl }}/quickstart/" class="btn btn-primary-green">Read Full Guide →</a>
