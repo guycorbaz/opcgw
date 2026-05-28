@@ -9,9 +9,11 @@
 // asserts the produced AppConfig matches the expected precedence
 // ordering (env > SQLite > TOML > default).
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use tempfile::TempDir;
+use tracing_test::traced_test;
 
 use opcgw::config::AppConfig;
 use opcgw::storage::migrate_singleton_config::{
@@ -297,97 +299,173 @@ allowed_origins = ["http://127.0.0.1:8080"]
     );
 }
 
-/// Test 7 — `config_toml_unused_warning` event fires (as a warn-level
-/// log) when `config.toml` is present AND `singleton_config` is
-/// non-empty. This test verifies the condition predicate matches the
-/// boot-time logic in main.rs (without spawning the full binary).
+/// Test 7 — `config_toml_unused_warning` event ACTUALLY FIRES when
+/// `config.toml` is present AND `singleton_config` is non-empty.
+///
+/// D-2 review iter-1 (BH-F1 / ECH-F2 / AA-F3 converged): this test
+/// previously asserted only the boolean predicate and never exercised
+/// the warn-emit path — a fake regression guard. It now drives
+/// `AppConfig::maybe_emit_config_toml_unused_warning` (the exact
+/// helper main.rs calls) with a fresh once-per-boot guard and asserts
+/// BOTH the return value AND that the `config_toml_unused_warning`
+/// event landed in the captured log via `#[traced_test]`.
+#[traced_test]
 #[test]
 fn t07_unused_warning_fires_when_both_present() {
     let (_dir, config_path, backend) = fresh_env();
     let cfg = load_bootstrap_config(&config_path);
     migrate_singleton_toml_to_sqlite(&cfg, &backend).expect("migrate");
-    let exists = std::path::Path::new(&config_path).exists();
     let row_count = backend.count_singleton_config().expect("count");
-    assert!(exists, "config.toml should exist");
-    assert!(
-        row_count > 0,
-        "SQLite singleton_config should be populated after migration; got {}",
-        row_count
+    assert!(row_count > 0, "singleton_config must be populated; got {}", row_count);
+
+    let guard = AtomicBool::new(false);
+    let emitted = AppConfig::maybe_emit_config_toml_unused_warning(
+        &config_path,
+        row_count,
+        &guard,
     );
-    // The predicate (exists && row_count > 0) is the same one
-    // main.rs uses to fire the warn. If both halves are true the
-    // event must fire.
-    assert!(exists && row_count > 0);
+    assert!(
+        emitted,
+        "helper must report it emitted the warning when config.toml present + singleton non-empty"
+    );
+    assert!(
+        logs_contain("config_toml_unused_warning"),
+        "the config_toml_unused_warning event must appear in the captured log"
+    );
+}
+
+/// Test 7b — once-per-boot guard: a SECOND call with the same
+/// already-emitted guard does NOT re-emit (D-2 AC#5 / Task 3.3).
+#[traced_test]
+#[test]
+fn t07b_unused_warning_fires_only_once_per_guard() {
+    let (_dir, config_path, backend) = fresh_env();
+    let cfg = load_bootstrap_config(&config_path);
+    migrate_singleton_toml_to_sqlite(&cfg, &backend).expect("migrate");
+    let row_count = backend.count_singleton_config().expect("count");
+
+    let guard = AtomicBool::new(false);
+    let first = AppConfig::maybe_emit_config_toml_unused_warning(&config_path, row_count, &guard);
+    let second = AppConfig::maybe_emit_config_toml_unused_warning(&config_path, row_count, &guard);
+    assert!(first, "first call must emit");
+    assert!(!second, "second call with the same guard must NOT re-emit (once-per-boot)");
 }
 
 /// Test 8 — `config_toml_unused_warning` event does NOT fire when
-/// `config.toml` is absent.
+/// `config.toml` is absent. Drives the real helper and asserts both
+/// the `false` return AND the absence of the event in the log.
+#[traced_test]
 #[test]
 fn t08_unused_warning_skipped_when_config_toml_absent() {
     let dir = TempDir::new().expect("tempdir");
     let config_path = dir.path().join("does-not-exist.toml");
-    let db_path = dir.path().join("opcgw.db");
-    let _backend = SqliteBackend::new(db_path.to_str().unwrap()).expect("backend");
-    let exists = std::path::Path::new(&config_path).exists();
-    assert!(!exists, "config.toml MUST be absent for this scenario");
-    // The predicate short-circuits on the existence check.
+    let config_path_str = config_path.to_string_lossy().into_owned();
+    assert!(
+        !std::path::Path::new(&config_path_str).exists(),
+        "config.toml MUST be absent for this scenario"
+    );
+
+    let guard = AtomicBool::new(false);
+    // Non-zero row count to prove the existence-check (not the row
+    // count) is what suppresses the warning here.
+    let emitted =
+        AppConfig::maybe_emit_config_toml_unused_warning(&config_path_str, 27, &guard);
+    assert!(!emitted, "warning must NOT fire when config.toml is absent");
+    assert!(
+        !logs_contain("config_toml_unused_warning"),
+        "no config_toml_unused_warning event should appear when config.toml is absent"
+    );
 }
 
 /// Test 9 — `config_toml_unused_warning` event does NOT fire when
-/// SQLite singleton tables are empty (fresh deployment).
+/// SQLite singleton tables are empty (fresh deployment). Drives the
+/// real helper with row_count = 0.
+#[traced_test]
 #[test]
 fn t09_unused_warning_skipped_when_singleton_empty() {
     let (_dir, config_path, backend) = fresh_env();
-    let exists = std::path::Path::new(&config_path).exists();
     let row_count = backend.count_singleton_config().expect("count");
-    assert!(exists, "config.toml should exist");
-    assert_eq!(
-        row_count, 0,
-        "SQLite singleton_config should be empty pre-migration; got {}",
-        row_count
+    assert_eq!(row_count, 0, "singleton_config should be empty pre-migration");
+
+    let guard = AtomicBool::new(false);
+    let emitted =
+        AppConfig::maybe_emit_config_toml_unused_warning(&config_path, row_count, &guard);
+    assert!(!emitted, "warning must NOT fire when singleton_config is empty");
+    assert!(
+        !logs_contain("config_toml_unused_warning"),
+        "no config_toml_unused_warning event should appear when singleton_config is empty"
     );
-    // The predicate is FALSE here because row_count == 0, so no warn fires.
-    assert!(!(exists && row_count > 0));
 }
 
 /// Test 10 — Boot-cycle test: fresh boot loads `config.toml`,
 /// D-0 migration runs, D-2 provider's first invocation returns the
 /// migrated values; SECOND boot of same DB returns the same values
 /// from SQLite without re-running migration.
+///
+/// D-2 review iter-1 (BH-F2): the SQLite value is deliberately set to
+/// DIFFER from the TOML value (TOML polling_frequency=10, SQLite=20)
+/// so the assertion proves the Provider actually contributed — a
+/// short-circuited Provider returning an empty map would fall through
+/// to TOML (10) and fail the assertion. Wrapped in `temp_env` to clear
+/// the env-var that t03 sets, so a parallel run can't mask the result.
 #[test]
 fn t10_boot_cycle_idempotent() {
-    let (_dir, config_path, backend) = fresh_env();
-    let cfg = load_bootstrap_config(&config_path);
+    temp_env::with_var(
+        "OPCGW_CHIRPSTACK__POLLING_FREQUENCY",
+        None::<&str>,
+        || {
+            let (_dir, config_path, backend) = fresh_env();
+            let cfg = load_bootstrap_config(&config_path);
 
-    // First boot: run migration.
-    let outcome1 = migrate_singleton_toml_to_sqlite(&cfg, &backend).expect("migrate 1");
-    assert!(matches!(outcome1, SingletonMigrationOutcome::Migrated(_)));
+            // First boot: run migration.
+            let outcome1 = migrate_singleton_toml_to_sqlite(&cfg, &backend).expect("migrate 1");
+            assert!(matches!(outcome1, SingletonMigrationOutcome::Migrated(_)));
 
-    // First load via Provider.
-    let loaded1 = AppConfig::from_path_with_sqlite(
-        &config_path,
-        Arc::new(backend.clone()),
-    )
-    .expect("load 1");
+            // Set the SQLite value to DIFFER from TOML (10 → 20) so the
+            // assertion below actually proves the Provider contributed.
+            backend
+                .write_singleton_section(
+                    "chirpstack",
+                    &[(
+                        "polling_frequency".to_string(),
+                        serde_json::to_string(&serde_json::json!(20)).expect("serialize"),
+                    )],
+                )
+                .expect("write");
 
-    // Second boot: same DB, migration should detect already-done.
-    let outcome2 = migrate_singleton_toml_to_sqlite(&cfg, &backend).expect("migrate 2");
-    assert!(
-        matches!(outcome2, SingletonMigrationOutcome::AlreadyMigrated),
-        "second migration must detect already-done"
+            // First load via Provider.
+            let loaded1 = AppConfig::from_path_with_sqlite(
+                &config_path,
+                Arc::new(backend.clone()),
+            )
+            .expect("load 1");
+            assert_eq!(
+                loaded1.chirpstack.polling_frequency, 20,
+                "first boot must read the SQLite value (20), not the TOML value (10)"
+            );
+
+            // Second boot: same DB, migration should detect already-done.
+            let outcome2 = migrate_singleton_toml_to_sqlite(&cfg, &backend).expect("migrate 2");
+            assert!(
+                matches!(outcome2, SingletonMigrationOutcome::AlreadyMigrated),
+                "second migration must detect already-done"
+            );
+
+            // Second load via Provider — same SQLite value.
+            let loaded2 = AppConfig::from_path_with_sqlite(
+                &config_path,
+                Arc::new(backend),
+            )
+            .expect("load 2");
+            assert_eq!(
+                loaded2.chirpstack.polling_frequency, 20,
+                "second boot must read the same SQLite value (20)"
+            );
+            assert_eq!(
+                loaded1.chirpstack.server_address, loaded2.chirpstack.server_address
+            );
+        },
     );
-
-    // Second load via Provider — same values.
-    let loaded2 = AppConfig::from_path_with_sqlite(
-        &config_path,
-        Arc::new(backend),
-    )
-    .expect("load 2");
-    assert_eq!(
-        loaded1.chirpstack.polling_frequency, loaded2.chirpstack.polling_frequency,
-        "polling_frequency should be stable across boots"
-    );
-    assert_eq!(loaded1.chirpstack.server_address, loaded2.chirpstack.server_address);
 }
 
 /// Test 11 — D-1 PUT round-trip: write a new `polling_frequency=15`

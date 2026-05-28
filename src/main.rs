@@ -296,6 +296,16 @@ struct Args {
 /// - The logger cannot be initialized
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Story D-2 (AC#5 / Task 3.3): process-global once-per-boot guard
+    // for the `config_toml_unused_warning` event. `main` runs once per
+    // process so this is moot in production, but the guard makes the
+    // once-per-boot contract explicit and survives any future code path
+    // that re-enters the boot-time reload more than once in the same
+    // process. Function-local `static` keeps it scoped to `main` (the
+    // only caller) without leaking a module-level item.
+    static CONFIG_TOML_UNUSED_WARNING_EMITTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
     // Parse arguments
     let args = Args::parse();
 
@@ -706,18 +716,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // On reload failure: log the error and keep the bootstrap-loaded
     // figment snapshot. Same safety-net semantic as the D-1 overlay
     // (D-0 AC#6 transition contract).
+    //
+    // D-2 review iter-1 (ECH-F6): `reload_succeeded` tracks whether the
+    // SQLite snapshot is actually the live config. Only when it is do we
+    // emit `config_toml_unused_warning` below — otherwise the bootstrap
+    // TOML is in effect and the "your config.toml edits are shadowed"
+    // message would be factually wrong.
+    let mut reload_succeeded = false;
+    // D-2 review iter-1 (BH-F4 / ECH-F3): query the row count ONCE, with
+    // explicit error logging instead of a silent `.unwrap_or(0)` that
+    // could mask the same pool/DB fault that would have made the reload
+    // return an empty Provider map. Reused for both the info log and the
+    // unused-warning predicate below.
+    let singleton_row_count = match sqlite_backend.count_singleton_config() {
+        Ok(n) => n,
+        Err(e) => {
+            warn!(
+                event = "config_provider_failed",
+                error = %e,
+                "Failed to count singleton_config rows after the D-2 reload; \
+                 treating as zero for the config_toml_unused_warning predicate"
+            );
+            0
+        }
+    };
     match AppConfig::from_path_with_sqlite(
         &config_path,
         std::sync::Arc::new(sqlite_backend.clone()),
     ) {
         Ok(reloaded) => {
-            let row_count = sqlite_backend
-                .count_singleton_config()
-                .unwrap_or(0);
-            if row_count > 0 {
+            reload_succeeded = true;
+            if singleton_row_count > 0 {
                 info!(
                     event = "config_reload_with_sqlite",
-                    rows = row_count,
+                    rows = singleton_row_count,
                     "Re-loaded AppConfig with SqliteSingletonProvider in the figment stack"
                 );
             }
@@ -741,32 +773,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Story D-2 Task 3: emit `config_toml_unused_warning` once on
-    // boots where `config.toml` is present on disk AND the SQLite
-    // `singleton_config` table already has rows. Surfaces the silent-
-    // shadow case where an operator hand-edits `config.toml`
-    // expecting the change to take effect — post-D-2 the SQLite
-    // values win, so the hand-edit is silently shadowed. Static
-    // `recommended_action` field guides the operator to the
-    // check-d0-migration runbook + optional config.toml deletion.
-    // opcgw NEVER deletes operator-owned files; this is an
-    // information event, not an autoremediation.
-    let config_toml_exists = std::path::Path::new(&config_path).exists();
-    let singleton_row_count = sqlite_backend
-        .count_singleton_config()
-        .unwrap_or(0);
-    if config_toml_exists && singleton_row_count > 0 {
-        warn!(
-            event = "config_toml_unused_warning",
-            config_path = ?config_path,
-            singleton_row_count = singleton_row_count,
-            recommended_action = "config.toml is no longer mutated by opcgw at runtime; \
-                                  verify it matches SQLite via \
-                                  `bash scripts/check-d0-migration.sh data/opcgw.db` \
-                                  or delete it to avoid operator confusion",
-            "config.toml is present alongside a populated SQLite singleton_config table. \
-             Hand-edits to config.toml will be silently shadowed by SQLite values via \
-             the SqliteSingletonProvider in the figment stack."
+    // Story D-2 Task 3: emit `config_toml_unused_warning` once on boots
+    // where `config.toml` is present on disk AND the SQLite
+    // `singleton_config` table has rows AND the D-2 reload actually
+    // succeeded (so the SQLite snapshot is the live config). The
+    // emit + once-per-boot guard live in
+    // `AppConfig::maybe_emit_config_toml_unused_warning` so the event
+    // path is unit-testable (D-2 review iter-1, BH-F1 / ECH-F2 / AA-F3
+    // converged fake-regression-guard finding). opcgw NEVER deletes
+    // operator-owned files; this is an information event only.
+    if reload_succeeded {
+        AppConfig::maybe_emit_config_toml_unused_warning(
+            &config_path,
+            singleton_row_count,
+            &CONFIG_TOML_UNUSED_WARNING_EMITTED,
         );
     }
 

@@ -1162,6 +1162,63 @@ impl AppConfig {
         Ok(config)
     }
 
+    /// Story D-2: emit the `config_toml_unused_warning` event when
+    /// `config.toml` is present on disk AND the SQLite
+    /// `singleton_config` table has rows. Surfaces the silent-shadow
+    /// case where an operator hand-edits `config.toml` expecting the
+    /// change to take effect — post-D-2 the SQLite values win via the
+    /// [`crate::storage::SqliteSingletonProvider`].
+    ///
+    /// Returns `true` if the warning was emitted this call, `false`
+    /// otherwise (predicate not met, or already emitted this boot).
+    ///
+    /// The `already_emitted` guard delivers the once-per-boot semantic
+    /// (D-2 spec AC#5 / Task 3.3): `main.rs` passes a process-global
+    /// `static AtomicBool` so the event fires at most once even if the
+    /// boot-time config-reload path is ever invoked more than once in
+    /// the same process. Tests pass a fresh `AtomicBool` per call so
+    /// the emit path is exercised deterministically.
+    ///
+    /// The caller is responsible for only invoking this when the
+    /// SQLite snapshot is actually in effect — i.e. AFTER a successful
+    /// `from_path_with_sqlite` reload (D-2 review iter-1, ECH-F6). When
+    /// the reload failed and the bootstrap TOML is the live config, the
+    /// "your config.toml edits are shadowed" message would be factually
+    /// wrong, so `main.rs` skips this call on the reload-failure path.
+    pub fn maybe_emit_config_toml_unused_warning(
+        config_path: &str,
+        singleton_row_count: usize,
+        already_emitted: &std::sync::atomic::AtomicBool,
+    ) -> bool {
+        use std::sync::atomic::Ordering;
+
+        let config_toml_exists = std::path::Path::new(config_path).exists();
+        if !(config_toml_exists && singleton_row_count > 0) {
+            return false;
+        }
+
+        // Once-per-boot guard. `swap` returns the PREVIOUS value: if it
+        // was already `true`, another call beat us to it — do not
+        // re-emit.
+        if already_emitted.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+
+        warn!(
+            event = "config_toml_unused_warning",
+            config_path = ?config_path,
+            singleton_row_count = singleton_row_count,
+            recommended_action = "config.toml is no longer mutated by opcgw at runtime; \
+                                  verify it matches SQLite via \
+                                  `bash scripts/check-d0-migration.sh data/opcgw.db` \
+                                  or delete it to avoid operator confusion",
+            "config.toml is present alongside a populated SQLite singleton_config table. \
+             Hand-edits to config.toml will be silently shadowed by SQLite values via \
+             the SqliteSingletonProvider in the figment stack."
+        );
+        true
+    }
+
     /// Epic C C-0 (2026-05-21): detect the first-run state.
     ///
     /// Returns `true` if the gateway has NOT yet been configured with an

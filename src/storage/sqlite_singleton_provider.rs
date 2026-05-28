@@ -108,6 +108,30 @@ impl Provider for SqliteSingletonProvider {
         // typed value to the right AppConfig field.
         let mut root: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         for (section, key, value_json) in rows {
+            // Defense-in-depth (D-2 review iter-1, BH-F5 / ECH-F4
+            // converged): secret fields (`api_token`, `user_password`)
+            // must NEVER originate from SQLite — they flow through
+            // `config/secrets.toml` only. The D-0 migration and the
+            // D-1 PUT handler both skip secrets at WRITE time via
+            // `SECRET_FIELDS_BY_SECTION`, but the Provider sits ABOVE
+            // the secrets.toml layer in the figment stack, so a secret
+            // row that somehow landed in `singleton_config` (direct
+            // SQL, a tampered backup restore, a future write-path bug)
+            // would shadow the real secret. Filter at the read path
+            // too — never let a SQLite-sourced secret reach figment.
+            if crate::storage::migrate_singleton_config::secret_fields_for_section(&section)
+                .contains(&key.as_str())
+            {
+                warn!(
+                    event = "config_provider_failed",
+                    section = ?section,
+                    key = ?key,
+                    "Secret field found in singleton_config — skipping row. \
+                     Secrets must come from config/secrets.toml, never SQLite."
+                );
+                continue;
+            }
+
             let parsed: serde_json::Value = match serde_json::from_str(&value_json) {
                 Ok(v) => v,
                 Err(e) => {
@@ -123,10 +147,24 @@ impl Provider for SqliteSingletonProvider {
             };
 
             let entry = root
-                .entry(section)
+                .entry(section.clone())
                 .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
             if let serde_json::Value::Object(section_map) = entry {
                 section_map.insert(key, parsed);
+            } else {
+                // Unreachable in practice: `or_insert_with` always
+                // creates an Object on first insert and we never
+                // replace it with a non-Object. Logged defensively so
+                // a future refactor that breaks the invariant surfaces
+                // a diagnostic instead of silently dropping the row
+                // (ECH-F1 iter-1).
+                warn!(
+                    event = "config_provider_failed",
+                    section = ?section,
+                    key = ?key,
+                    "singleton_config section entry was not a JSON object — \
+                     dropping row (invariant violation)"
+                );
             }
         }
 
@@ -225,7 +263,8 @@ mod tests {
     }
 
     // Note: the malformed-value-json skip path is exercised by the
-    // integration test in `tests/d2_figment_provider.rs` (Test 8),
-    // which can inject directly into SQLite via a public helper.
-    // Keeping the unit test surface narrow to public APIs only.
+    // integration test `t13_provider_skips_malformed_value_json_row`
+    // in `tests/d2_figment_provider.rs`, which injects a broken value
+    // via the public `write_singleton_section` helper. Keeping the unit
+    // test surface narrow to public APIs only.
 }

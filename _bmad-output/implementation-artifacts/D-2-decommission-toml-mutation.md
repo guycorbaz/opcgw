@@ -540,3 +540,49 @@ Review eligibility: D-2 introduces brand-new flow-control (the
 figment Provider stack reorder + the once-per-boot warn predicate);
 iter-N+1 mandate is IN FORCE. Review on a different LLM is expected
 to extend the doctrine streak to 30+.
+
+---
+
+## Senior Developer Review (AI) — iter-1 (2026-05-28)
+
+**Reviewers:** Blind Hunter + Edge Case Hunter + Acceptance Auditor, all on Sonnet (different LLM from the Opus 4.7 implementer). 30th cumulative iter-N+1 doctrine validation.
+
+**Outcome:** Changes Requested → all findings patched in this iteration. 19 raw findings (1 HIGH, 9 MED-equivalent, 9 LOW); 12 patched, 5 documented/dismissed. iter-2 MANDATORY (iter-1 introduced new flow-control + a new public API).
+
+### Patched findings
+
+- **[HIGH] AA-F1 — AC#12 DocBook user manual never updated.** The implementation commit claimed the documentation rewrites but `docs/manual/opcgw-user-manual.xml` was never touched — it still described the pre-D-2 "two-tier" model and carried "Until D-2 lands, hand-edits to config.toml continue to take effect." **Fix:** rewrote `<section id="sec-config-overview">` for the three-surface model + precedence ordering; updated `<section id="sec-singleton-config-migration">` with the D-1+D-2 evolution; added `<section id="sec-config-toml-bootstrap-only">` documenting the operator contract + `config_toml_unused_warning` + the verify/archive/delete recipe. `xmllint --noout --valid` clean.
+
+- **[MED, 3-way converged BH-F1 + ECH-F2 + AA-F3] — fake-regression-guard tests.** t07/t08/t09 asserted only the boolean predicate (`exists && row_count > 0`) and never exercised the `warn!` emit path — deleting the warn block from main.rs would not have failed them. **Fix:** extracted `AppConfig::maybe_emit_config_toml_unused_warning(config_path, row_count, &AtomicBool) -> bool` (the exact helper main.rs now calls); rewrote t07/t08/t09 with `#[traced_test]` to assert BOTH the return value AND `logs_contain("config_toml_unused_warning")`; added t07b for the once-per-boot guard.
+
+- **[MED, 2-way converged BH-F5 + ECH-F4] — Provider lacks read-time secret filter.** The migration + PUT handler skip secrets at WRITE time, but the Provider (above secrets.toml in the figment stack) reads ALL rows — a secret row reaching `singleton_config` via direct SQL / tampered backup / future bug would shadow secrets.toml. **Fix:** added a read-time skip of `SECRET_FIELDS_BY_SECTION` keys in `SqliteSingletonProvider::data()` with a `config_provider_failed` warn (defense-in-depth).
+
+- **[MED] BH-F2 — t10 boot-cycle test didn't prove the Provider contributed.** SQLite and TOML both held polling_frequency=10, so a short-circuited Provider returning an empty map would still pass. **Fix:** set SQLite to 20 (TOML stays 10) so the assertion proves the SQLite value won; added `temp_env` env-var isolation.
+
+- **[MED] ECH-F6 — config_toml_unused_warning fired even when the D-2 reload FAILED.** On reload failure the bootstrap TOML is the live config, so "your config.toml edits are shadowed" was factually wrong. **Fix:** added a `reload_succeeded` flag; the warn only fires after a successful reload.
+
+- **[MED] AA-F2 — logging.md lacked discrete event-table rows.** D-2 events were narrative-only; the spec's AC#14 mandated discrete event-table rows. **Fix:** added 9 discrete rows (5 D-1 + 4 D-2) to the `event=` audit table + a removal note for `config_overlay`/`config_overlay_failed`.
+
+- **[MED/LOW ECH-F3 + BH-F4] — count_singleton_config swallowed errors + double-queried.** `.unwrap_or(0)` silenced a DB error that could mask the same fault that emptied the Provider; the count was queried twice per boot. **Fix:** single query with explicit `config_provider_failed` warn on Err, reused for both the info log and the warn predicate.
+
+- **[LOW] AA-F4 — AC#5 once-per-boot AtomicBool guard absent.** **Fix:** the new helper takes an `&AtomicBool`; main.rs passes a function-local `static`. `swap()`-based guard.
+
+- **[LOW] ECH-F1 — silent key drop if a section entry were not a JSON object.** Currently unreachable (`or_insert_with` always creates an Object), but the `if let` had no else. **Fix:** added a defensive `config_provider_failed` warn in the else-branch.
+
+- **[LOW] BH-F3 — provider unit-test doc comment cross-referenced the wrong integration-test number** ("Test 8" → the malformed-JSON test is `t13`). **Fix:** corrected the reference.
+
+### Documented / dismissed (not patched)
+
+- **[LOW] ECH-F5 — redundant `Arc::new(sqlite_backend.clone())`.** DISMISSED: clone is two `Arc` refcount bumps; both handles share the same `ConnectionPool`. Correct semantics, no defect.
+- **[LOW] ECH-F7 — `Serialized::defaults().data()` error diagnostic quality.** DISMISSED: a serialization failure falls into the reload-failure safety net, which now emits `config_reload_with_sqlite_failed`. Acceptable.
+- **[LOW] ECH-F8 — relative `config_path` cwd-drift.** DISMISSED: theoretical only; cwd does not drift under systemd/Docker, and figment loaded the same path. No real exposure.
+- **[LOW] AA-F5 — `src/opc_ua.rs` strict-zero (AC#26) violated by the flake fix.** ACCEPTED + DOCUMENTED: the test-only `temp_env` isolation was necessary to make the test gate deterministic under `cargo test --all-targets`. Production code unchanged. The AC#26 deviation is justified and now explicitly disclosed.
+- **[LOW] AA-F6 — spec note said `seed_post_overlay` "no longer called at boot" but it is.** DOCUMENTED: the spec note was written pre-implementation; the call is intentional and correct (re-seeds the watch channel with the post-Provider snapshot). The spec note is stale; the code is right.
+
+### Test gate (post iter-1)
+
+`cargo test`: **1543 passed / 0 failed / 73 ignored**. `cargo clippy --all-targets -- -D warnings`: clean. `xmllint --noout --valid docs/manual/opcgw-user-manual.xml`: clean. D-1 `d1_audit_event_names_documented_in_logging_md` grep-invariant still green.
+
+### iter-2 mandate
+
+iter-1 introduced brand-new code: the `maybe_emit_config_toml_unused_warning` public helper (new flow-control + AtomicBool guard), the Provider read-time secret filter + else-branch diagnostic, the `reload_succeeded` gating, and four rewritten tests. Per the iter-N+1 doctrine, **iter-2 is MANDATORY** to review iter-1's new code for regressions.

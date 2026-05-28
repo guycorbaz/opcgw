@@ -1017,37 +1017,89 @@ curl -sS -u "$OPCGW_OPCUA__USER_NAME:$OPCGW_OPCUA__USER_PASSWORD" \
     <title>Configuration</title>
 
       <section id="sec-config-overview">
-        <title>Configuration Overview (post-Story C-6)</title>
+        <title>Configuration Overview (post-Story D-2)</title>
 
-        <para>opcgw uses a <emphasis>two-tier configuration model</emphasis>
-        as of Story C-6:</para>
+        <para>opcgw uses a <emphasis>three-surface configuration
+        model</emphasis> as of Story D-2. SQLite is the authoritative
+        store for all non-secret runtime configuration; secrets live in
+        a separate file; and <filename>config/config.toml</filename> is
+        a bootstrap seed only.</para>
 
         <variablelist>
           <varlistentry>
-            <term>Tier 1 — TOML file (singleton settings, read at boot)</term>
+            <term>Surface 1 — SQLite database (authoritative runtime config)</term>
             <listitem>
-              <para><filename>config/config.toml</filename> holds the
-              infrastructure sections <literal>[global]</literal>,
-              <literal>[chirpstack]</literal>, <literal>[opcua]</literal>,
-              <literal>[web]</literal>, <literal>[logging]</literal>, and
-              <literal>[command_delivery]</literal>. These are read once
-              at startup. Changing them requires restarting opcgw.
-              Environment variable overrides (<literal>OPCGW_</literal>
-              prefix) remain in effect for all TOML keys.</para>
+              <para>The SQLite database (<filename>data/opcgw.db</filename>,
+              file mode <literal>0o600</literal>) holds
+              <emphasis>all non-secret runtime configuration</emphasis>:
+              the <literal>[[application]]</literal> tree (applications,
+              devices, metric mappings, commands — migrated in Story C-6)
+              <emphasis>and</emphasis> the four singleton sections
+              <literal>[global]</literal>, <literal>[chirpstack]</literal>,
+              <literal>[opcua]</literal>, <literal>[web]</literal>
+              (migrated in Story D-0, stored in the
+              <literal>singleton_config</literal> key/value table). Edit
+              the application tree via the web-UI CRUD pages and the
+              singleton sections via the singleton-config editor at
+              <filename>/singleton-config.html</filename> (Story D-1).
+              opcgw reads these values on every boot through a figment
+              Provider (Story D-2).</para>
             </listitem>
           </varlistentry>
           <varlistentry>
-            <term>Tier 2 — SQLite database (application tree, web-UI-driven)</term>
+            <term>Surface 2 — secrets.toml (operator-supplied secrets)</term>
             <listitem>
-              <para>The <literal>[[application]]</literal> tree
-              (applications, devices, metric mappings, commands) is stored
-              in the SQLite database and managed exclusively via the
-              embedded web UI. The web UI writes to SQLite; opcgw rebuilds
-              the in-memory snapshot immediately and the OPC UA address
-              space is updated without a restart.</para>
+              <para><filename>config/secrets.toml</filename> (file mode
+              <literal>0o600</literal>) holds the two secret fields
+              <literal>[chirpstack].api_token</literal> and
+              <literal>[opcua].user_password</literal>. It is written by
+              the first-run wizard (Story C-0) and is never mutated by
+              opcgw at runtime. Secrets are deliberately
+              <emphasis>not</emphasis> migrated to SQLite. The
+              singleton-config editor displays masked placeholders for
+              these fields and rejects any attempt to write them.</para>
+            </listitem>
+          </varlistentry>
+          <varlistentry>
+            <term>Surface 3 — config.toml (bootstrap seed only)</term>
+            <listitem>
+              <para><filename>config/config.toml</filename> is read at
+              boot to seed a fresh deployment before the first migration
+              runs. Once the SQLite singleton tables are populated, the
+              values in <filename>config.toml</filename> are
+              <emphasis>overridden</emphasis> by the SQLite snapshot for
+              every key the snapshot has set. You may delete
+              <filename>config.toml</filename> after the migration — opcgw
+              boots cleanly from SQLite + <filename>secrets.toml</filename>
+              alone. See <xref linkend="sec-config-toml-bootstrap-only"/>
+              for the operator contract.</para>
             </listitem>
           </varlistentry>
         </variablelist>
+
+        <para>The configuration precedence ordering (highest priority
+        first) is:</para>
+        <orderedlist>
+          <listitem>
+            <para>Environment variables (<literal>OPCGW_</literal>
+            prefix) — always win.</para>
+          </listitem>
+          <listitem>
+            <para>SQLite <literal>singleton_config</literal> — the
+            web-UI-editable runtime config.</para>
+          </listitem>
+          <listitem>
+            <para><filename>secrets.toml</filename> — secret fields
+            only.</para>
+          </listitem>
+          <listitem>
+            <para><filename>config.toml</filename> — bootstrap seed
+            (lowest priority above hard-coded defaults).</para>
+          </listitem>
+          <listitem>
+            <para>Built-in defaults.</para>
+          </listitem>
+        </orderedlist>
 
         <note>
           <title>TOML [[application]] section — bootstrap seed only</title>
@@ -2226,14 +2278,90 @@ application_name = "Arrosage"
           the migration completed cleanly.</para>
         </note>
 
-        <para>D-0 is the first of three stories in Epic D. D-1 (web
-        UI editor) and D-2 (TOML mutation-surface decommission) build
-        on D-0's storage layer. Until D-2 lands, hand-edits to
-        <filename>config.toml</filename> continue to take effect on
-        next boot — D-0 writes singleton config to SQLite but the
-        figment loader still reads TOML at boot for backward
-        compatibility. The read-path swap (SQLite override of TOML)
-        lands in D-2.</para>
+        <para>D-0 is the first of three stories in Epic D. D-1 added
+        the web-UI singleton editor at
+        <filename>/singleton-config.html</filename>; D-2 completed the
+        epic by replacing D-1's boot-time overlay with a figment
+        Provider that reads the <literal>singleton_config</literal>
+        table on every boot and slots into the figment stack between
+        the <filename>secrets.toml</filename> and environment-variable
+        layers. As of D-2, the SQLite snapshot
+        <emphasis>overrides</emphasis> <filename>config.toml</filename>
+        for every singleton key it has set, delivering the
+        <literal>env &gt; SQLite &gt; TOML &gt; default</literal>
+        precedence ordering. See
+        <xref linkend="sec-config-toml-bootstrap-only"/> for the
+        post-D-2 <filename>config.toml</filename> operator
+        contract.</para>
+      </section>
+
+      <section id="sec-config-toml-bootstrap-only">
+        <title>config.toml is Bootstrap-Seed-Only (post-Story D-2)</title>
+
+        <para>As of Story D-2, <filename>config/config.toml</filename>
+        is a <emphasis>bootstrap seed</emphasis>: opcgw reads it at boot
+        to populate a fresh deployment before the first SQLite migration
+        runs, but once the <literal>singleton_config</literal> table is
+        populated, the SQLite values override <filename>config.toml</filename>
+        for every key the snapshot has set. The figment
+        <literal>SqliteSingletonProvider</literal> sits above the TOML
+        layer in the precedence stack, so a hand-edit to a
+        SQLite-backed key in <filename>config.toml</filename> has
+        <emphasis>no effect at runtime</emphasis>.</para>
+
+        <note>
+          <title>The config_toml_unused_warning event</title>
+          <para>To surface this behaviour, opcgw emits a
+          <literal>warn</literal>-level event once per boot when
+          <filename>config.toml</filename> is present on disk
+          <emphasis>and</emphasis> the SQLite
+          <literal>singleton_config</literal> table has rows:</para>
+          <screen>WARN config_toml_unused_warning config_path="config/config.toml" \
+     singleton_row_count=27 recommended_action="config.toml is no longer \
+     mutated by opcgw at runtime; verify it matches SQLite via \
+     `bash scripts/check-d0-migration.sh data/opcgw.db` or delete it to \
+     avoid operator confusion"</screen>
+          <para>The warning is informational — it does not block
+          startup. opcgw <emphasis>never</emphasis> deletes
+          operator-owned files; removing
+          <filename>config.toml</filename> is always an operator
+          action.</para>
+        </note>
+
+        <para>Recommended operator workflow after the singleton
+        migration completes:</para>
+        <orderedlist>
+          <listitem>
+            <para>Verify the SQLite snapshot matches your intended
+            configuration:</para>
+            <screen>bash scripts/check-d0-migration.sh data/opcgw.db</screen>
+          </listitem>
+          <listitem>
+            <para>Optionally archive <filename>config.toml</filename> as
+            an operator reference, then remove it from the runtime
+            deployment:</para>
+            <screen>cp config/config.toml config/config.toml.bootstrap-archived
+rm config/config.toml</screen>
+          </listitem>
+          <listitem>
+            <para>Restart opcgw. With
+            <filename>config.toml</filename> absent, the
+            <literal>config_toml_unused_warning</literal> event no
+            longer fires; opcgw boots from SQLite +
+            <filename>secrets.toml</filename> alone.</para>
+          </listitem>
+        </orderedlist>
+
+        <para>The <filename>secrets.toml</filename> file remains
+        required after this workflow — operator-supplied secrets are
+        not migrated to SQLite. To change a runtime knob post-D-2, use
+        the singleton-config editor at
+        <filename>/singleton-config.html</filename> or an
+        <literal>OPCGW_</literal> environment-variable override, not a
+        <filename>config.toml</filename> hand-edit. The full operator
+        recipe (including rollback to a TOML-driven deployment) is in
+        <filename>docs/d-0-migration-runbook.md</filename> under
+        "Post-D-2 operator workflow".</para>
       </section>
 
       <section id="sec-config-env-overrides">
