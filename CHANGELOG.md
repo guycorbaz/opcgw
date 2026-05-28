@@ -5,6 +5,84 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] — 2026-05-28 — web-first configuration & auto-discovery
+
+> **Status:** prepared but **not yet tagged or published**. Docker images and the
+> Docker Hub Overview sync trigger on the `v2.1.0` git tag, which is held pending
+> an operator end-to-end smoke test against a live ChirpStack server.
+
+v2.1.0 changes how opcgw is configured. Through v2.0 you hand-edited
+`config/config.toml` and restarted the gateway. From v2.1.0 the gateway is
+configured **from the browser**: on first run it serves a setup wizard, and all
+configuration is stored in **SQLite**. `config.toml` is demoted to an *optional
+bootstrap seed* — read once on first start to populate the database, then never
+read or mutated again. This is the combined delivery of **Epic C** (auto-discovery
+and web-first configuration) and **Epic D** (singleton configuration → SQLite).
+
+Existing v2.0 deployments keep working: an existing `config.toml` is migrated
+into SQLite automatically on first boot of v2.1.0, so no manual conversion is
+required.
+
+### Added
+
+- **First-run web setup wizard** (Epic C / C-0). A gateway started with an empty
+  or placeholder `config.toml` boots into a first-run mode and serves a setup
+  wizard on the web port. The operator enters the ChirpStack connection + API
+  token and OPC UA endpoint settings in the browser; secrets are written to
+  `config/secrets.toml` (created `chmod 0600`) or supplied via environment
+  variables. Until configured, the OPC UA server rejects all sessions and the
+  web surface exposes only the wizard (a fixed allowlist of setup endpoints).
+  Completing the wizard triggers a graceful in-process restart.
+- **ChirpStack inventory auto-discovery** (Epic C / C-1, C-2). The web UI can
+  query the connected ChirpStack server for its applications, devices, and
+  device profiles, and presents them as **pickers** — so you select real
+  applications/devices by name instead of pasting UUIDs and DevEUIs by hand.
+  Metric wire-type is inferred and surfaced during mapping. A manual-entry
+  fallback remains for offline editing.
+- **Duplicate-prevention validator** (Epic C / C-3). Creating or editing
+  applications, devices, and metric mappings is validated against existing
+  entries to prevent duplicate names / OPC UA node collisions before the change
+  is persisted.
+- **Inventory drift view** (Epic C / C-4). A web page diffs the gateway's
+  configured inventory against what ChirpStack currently reports (added /
+  removed / changed / in-sync), with deep links into the application and device
+  editors and a degraded-mode banner when ChirpStack is unreachable.
+- **Singleton configuration editor** (Epic D / D-1). The `[global]`,
+  `[chirpstack]`, `[opcua]`, and `[web]` settings are editable from the web UI,
+  with explicit handling for knobs that require a restart to take effect.
+
+### Changed
+
+- **All configuration now lives in SQLite.** Applications, devices, metric
+  mappings, and command definitions (Epic C / C-6) plus the singleton
+  `[global]` / `[chirpstack]` / `[opcua]` / `[web]` sections (Epic D / D-0)
+  are stored in the gateway database. Configuration precedence is
+  **environment variable > SQLite > `config.toml` > built-in default**,
+  implemented as a layered figment provider (D-2).
+- **`config.toml` is bootstrap-only.** It is read once on first start to seed an
+  empty database and is never written back to. The previous "edit `config.toml`
+  and the running gateway picks it up" model — including the SIGHUP reload
+  listener and the `toml_edit` write-back path — has been **removed**. Edit
+  configuration through the web UI (or environment variables) instead.
+- **SQLite schema bumped to v010.** v009 adds the configuration tables for
+  applications/devices/metrics/commands (Epic C / C-6); v010 adds the
+  key/value singleton-configuration tables (Epic D / D-0). Migration is
+  automatic and forward-only on first boot.
+- **`secrets.toml` replaces inline tokens.** The ChirpStack API token and OPC UA
+  credentials are sourced from `config/secrets.toml` (mode `0600`) or
+  environment variables rather than being stored alongside non-secret config.
+
+### Notes
+
+- No public OPC UA address-space or `/api/metrics` wire-format changes relative
+  to v2.0 — this release is about how the gateway is *configured*, not how
+  metrics are exposed.
+- Documentation refreshed across `README.md`, the GitHub Pages site under
+  `docs/`, the DocBook user manual, and the Docker Hub Overview to describe the
+  web-first install/configuration flow.
+
+---
+
 ## [2.0.2] — 2026-05-21 — expanded Docker Hub Overview
 
 The 2.0.1 release published Docker images correctly but `peter-evans/dockerhub-description@v4` synced the v2.0.1-pinned (thin) Overview content to <https://hub.docker.com/r/gcorbaz/opcgw>. 2.0.2 is a docs-only patch that pushes a substantially expanded Overview page to Docker Hub on tag — same image bytes, better landing page for first-time visitors.
