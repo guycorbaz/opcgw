@@ -74,6 +74,23 @@
         pinned to ubuntu:24.04 and runs as non-root opcgw user (UID
         10001).</revremark>
       </revision>
+      <revision>
+        <revnumber>2.1.0</revnumber>
+        <date>2026-05-28</date>
+        <authorinitials>GC</authorinitials>
+        <revremark>Web-first configuration and auto-discovery. Epic C
+        (first-run setup wizard, ChirpStack inventory query layer and web
+        UI pickers, duplicate-prevention validator, inventory drift view,
+        and the TOML-to-SQLite migration of applications, devices,
+        metrics, and commands); Epic D (singleton
+        [global]/[chirpstack]/[opcua]/[web] configuration moved into
+        SQLite with a web editor, and decommissioning of the TOML
+        write-back / SIGHUP hot-reload surface). Configuration now lives
+        in SQLite and is managed from the web UI; config.toml is a
+        one-time bootstrap seed. Schema advanced to v010. Configuration
+        precedence: environment variable &gt; SQLite &gt; config.toml &gt;
+        default.</revremark>
+      </revision>
     </revhistory>
     <abstract>
       <para>opcgw is a Rust-based gateway that bridges ChirpStack LoRaWAN
@@ -83,12 +100,14 @@
       concurrent reads), exposes them via OPC UA 1.04 with stale-data status
       codes, real-time subscriptions, and HistoryRead, and accepts downlink
       commands from OPC UA clients with end-to-end delivery confirmation. An
-      embedded Axum web UI (opt-in) renders the gateway's live status and
-      per-metric values for operator triage. As of v2.0 GA (Epic A), the
-      gateway persists real typed measurement payloads end-to-end. This
-      manual provides comprehensive guidance on installation, configuration,
-      operation, observability, troubleshooting, and upgrade /
-      migration.</para>
+      embedded Axum web UI — enabled by default and the primary configuration
+      surface as of v2.1.0 — provides a first-run setup wizard, ChirpStack
+      inventory pickers, a configuration editor, and live status / metric
+      views. Configuration is stored in SQLite; config.toml is a one-time
+      bootstrap seed. As of v2.1.0 the gateway persists real typed measurement
+      payloads end-to-end. This manual provides comprehensive guidance on
+      installation, configuration, operation, observability, troubleshooting,
+      and upgrade / migration.</para>
     </abstract>
   </bookinfo>
 
@@ -443,8 +462,8 @@
           <listitem>
             <para><emphasis>Runtime options</emphasis> — three supported
             paths: a published Docker image
-            (<literal>docker.io/gcorbaz/opcgw:2.0</literal> primary;
-            <literal>ghcr.io/guycorbaz/opcgw:2.0</literal> mirror; multi-arch
+            (<literal>docker.io/gcorbaz/opcgw:2.1</literal> primary;
+            <literal>ghcr.io/guycorbaz/opcgw:2.1</literal> mirror; multi-arch
             <literal>linux/amd64</literal> + <literal>linux/arm64</literal>),
             a systemd-managed binary, or a from-source build. See
             <xref linkend="ch-installation"/>.</para>
@@ -527,13 +546,13 @@
             <tbody>
               <row>
                 <entry><literal>&lt;major&gt;.&lt;minor&gt;.&lt;patch&gt;</literal></entry>
-                <entry><literal>2.0.0</literal></entry>
+                <entry><literal>2.1.0</literal></entry>
                 <entry>Exact release. Pin for fully reproducible
                 deployments.</entry>
               </row>
               <row>
                 <entry><literal>&lt;major&gt;.&lt;minor&gt;</literal></entry>
-                <entry><literal>2.0</literal></entry>
+                <entry><literal>2.1</literal></entry>
                 <entry>Latest patch within a minor line. Auto-updates on
                 patch releases.</entry>
               </row>
@@ -556,7 +575,7 @@
           </step>
           <step>
             <para>Pull the image:</para>
-            <screen>docker pull docker.io/gcorbaz/opcgw:2.0</screen>
+            <screen>docker pull docker.io/gcorbaz/opcgw:2.1</screen>
           </step>
           <step>
             <para>Prepare the host-side bind-mount directories. The
@@ -599,7 +618,9 @@ find ./pki/private -type f -name '*.pem' -exec chmod 600 {} +    # no-op on fres
   -v "$(pwd)/pki:/usr/local/bin/pki" \
   -v "$(pwd)/log:/usr/local/bin/log" \
   -v "$(pwd)/data:/usr/local/bin/data" \
-  docker.io/gcorbaz/opcgw:2.0</screen>
+  -p 8080:8080 \
+  -e OPCGW_WEB__ENABLED=true \
+  docker.io/gcorbaz/opcgw:2.1</screen>
           </step>
           <step>
             <para>Verify the container is running as a non-root user (UID
@@ -688,7 +709,7 @@ find ./pki/private -type f -name '*.pem' -exec chmod 600 {} +    # no-op on fres
         <xref linkend="sec-docker-hub-installation"/>; only the
         <command>docker pull</command> and <command>docker run</command>
         image references change:</para>
-        <screen>docker pull ghcr.io/guycorbaz/opcgw:2.0
+        <screen>docker pull ghcr.io/guycorbaz/opcgw:2.1
 
 docker run -d \
   --name opcgw \
@@ -700,7 +721,9 @@ docker run -d \
   -v "$(pwd)/pki:/usr/local/bin/pki" \
   -v "$(pwd)/log:/usr/local/bin/log" \
   -v "$(pwd)/data:/usr/local/bin/data" \
-  ghcr.io/guycorbaz/opcgw:2.0</screen>
+  -p 8080:8080 \
+  -e OPCGW_WEB__ENABLED=true \
+  ghcr.io/guycorbaz/opcgw:2.1</screen>
       </section>
 
       <section id="sec-docker-compose-installation">
@@ -764,12 +787,12 @@ find ./pki/private -type f -name '*.pem' -exec chmod 600 {} +    # no-op on fres
         <note>
           <title>Choosing the Image</title>
           <para>The shipped <filename>docker-compose.yml</filename> pins
-          <literal>image: docker.io/gcorbaz/opcgw:2.0</literal>, which
+          <literal>image: docker.io/gcorbaz/opcgw:2.1</literal>, which
           pulls the published Docker Hub image. To switch to the GHCR
           mirror (e.g. in environments that block Docker Hub or to
           avoid the public-rate-limit on anonymous pulls), edit the
           <literal>image:</literal> line to
-          <literal>ghcr.io/guycorbaz/opcgw:2.0</literal>. To run a
+          <literal>ghcr.io/guycorbaz/opcgw:2.1</literal>. To run a
           locally-built image instead (development, fork builds), run
           <command>docker build -t opcgw .</command> in the project
           root and change the <literal>image:</literal> line to
