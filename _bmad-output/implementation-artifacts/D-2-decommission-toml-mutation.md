@@ -1,13 +1,13 @@
 # Story D-2: Decommission TOML Mutation Surface (must-land-last)
 
-Status: review
+Status: done
 
 | Field           | Value                                                                                                       |
 | --------------- | ----------------------------------------------------------------------------------------------------------- |
 | Story key       | `D-2-decommission-toml-mutation`                                                                            |
 | Epic            | D — Singleton Configuration → SQLite                                                                        |
 | FRs             | none (Epic D is post-PRD)                                                                                   |
-| Status          | review                                                                                                      |
+| Status          | done                                                                                                        |
 | Created         | 2026-05-27                                                                                                  |
 | Source epic     | `_bmad-output/planning-artifacts/epics.md § Epic D § Story D.2`                                             |
 | Depends on      | D-0 (SQLite singleton store + boot-time migration) and D-1 (web editor + boot-time AppConfig overlay + `seed_post_overlay`). Strictly: D-2 is the LAST story in Epic D and MUST land after D-0 + D-1 since it removes the TOML safety net that both of them fall back to. |
@@ -610,3 +610,26 @@ iter-1 introduced brand-new code: the `maybe_emit_config_toml_unused_warning` pu
 ### iter-3 assessment
 
 iter-2's production change was a **control-flow restructure** in main.rs (relocating the count + warn into the reload `Ok` arm) — no new helper, parser, classifier, or predicate; the logic is identical, only the location changed to fix the ordering bug. The other two patches are test-only (t16 new test + t07b `logs_assert`). Per the iter-N+1 doctrine the borderline question is whether a flow-control *relocation* (vs. net-new flow-control) triggers a mandatory iter-3. Deferred to the user per the strict-doctrine pattern.
+
+---
+
+## Senior Developer Review (AI) — iter-3 (2026-05-28)
+
+**Reviewers:** Blind Hunter + Edge Case Hunter, on Sonnet. 32nd cumulative iter-N+1 doctrine validation. Reviewed iter-2's patch round (commit `4d8066e`, code-only diff) — the main.rs control-flow relocation + the two new/strengthened tests.
+
+**Outcome:** **CLEAN — zero findings from both reviewers.** Loop TERMINATES under CLAUDE.md condition #1 (zero findings).
+
+### What both reviewers verified
+
+- **main.rs relocation walk:** the new `Ok`-arm sequence (snapshot swap → `seed_post_overlay` → `match count {Ok→info+warn, Err→config_provider_failed}`) is correctly ordered; the count runs only on the successful-reload path (fixes ECH2-1); the `Err` arm correctly skips both the info log and the warn; the removed `reload_succeeded` bool has no dangling use site; `sqlite_backend.clone()` (not a move) keeps the local valid for the subsequent count borrow. All four reload×count×config-presence paths enumerated and guarded. No stale comments.
+- **t16 (secret-filter test) is NOT trivially passing:** deleting the filter block would make `root` contain `{"chirpstack":{"api_token":"LEAKED-FROM-SQLITE"}}`, failing both `!rendered.contains(...)` assertions. The `config_provider_failed` assertion is specific — in this healthy-DB, well-formed-JSON, valid-section scenario, the secret-filter warn is the only reachable source of that event.
+- **t07b `logs_assert` is correct:** the `config_toml_unused_warning` substring matches exactly one `warn!` site; `tracing_test` captures one line per event (no double-count); the `no-env-filter` feature makes the lib-crate warn visible; the count of exactly 1 is the precise once-per-boot proof.
+- **Process-global static** is function-local to `main`, never exported, never touched by tests (which use per-call fresh `AtomicBool`s) — no cross-test leakage.
+
+### Final disposition
+
+D-2 review loop terminated after **3 iterations** (iter-1: 1 HIGH + converged MEDs patched; iter-2: 2 MED + LOW converged patched in iter-1's new code; iter-3: clean). 30th + 31st + 32nd cumulative iter-N+1 doctrine validations. Status flipped **review → done**.
+
+**Final test gate:** `cargo test` 1544 passed / 0 failed / 73 ignored; `cargo clippy --all-targets -- -D warnings` clean; `xmllint --noout --valid docs/manual/opcgw-user-manual.xml` clean.
+
+**Epic D is now 3/3 done.** Next mandatory BMad action per CLAUDE.md: `epic-D-retrospective` (flips from `optional` to required once the last story lands).
