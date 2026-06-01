@@ -92,13 +92,13 @@ docker pull docker.io/gcorbaz/opcgw:2.1
 docker pull ghcr.io/guycorbaz/opcgw:2.1
 ```
 
-The container runs as non-root user `opcgw` (UID 10001) and exposes port `4855` (OPC UA). Minimal `docker run` example:
+The container runs as non-root user `opcgw` (UID 10001) and exposes port `4840` (OPC UA). Minimal `docker run` example:
 
 ```bash
 docker run -d \
   --name opcgw \
   --restart unless-stopped \
-  -p 4855:4855 \
+  -p 4840:4840 \
   -e OPCGW_CHIRPSTACK__API_TOKEN='<your-chirpstack-api-token>' \
   -e OPCGW_OPCUA__USER_PASSWORD='<your-opc-ua-user-password>' \
   -v "$(pwd)/config:/usr/local/bin/config" \
@@ -132,7 +132,7 @@ tenant_id = "<your-tenant-id>"
 [opcua]
 application_name = "Chirpstack OPC UA Gateway"
 pki_dir = "./pki"
-# host_ip_address / host_port are optional (defaults apply).
+# host_port defaults to 4840 (standard OPC UA port); set it to change.
 # user_name defaults to "opcua-user".
 # user_password is collected by the /setup wizard on first boot (or set
 # OPCGW_OPCUA__USER_PASSWORD).
@@ -165,11 +165,12 @@ sudo find ./pki/private -type f -name '*.pem' -exec chmod 600 {} +
 git clone https://github.com/guycorbaz/opcgw.git
 cd opcgw
 cp .env.example .env
+chmod 600 .env
 # Edit .env to set OPCGW_CHIRPSTACK__API_TOKEN + OPCGW_OPCUA__USER_PASSWORD
 docker compose up -d
 ```
 
-See [`docker-compose.yml`](./docker-compose.yml) for the canonical recipe; see [`docs/security.md`](./docs/security.md) for the secret-management contract.
+`docker-compose.yml` loads **all** environment variables from `.env` via `env_file`, so `.env` is the single place to set every `OPCGW_*` variable — nothing is configured in the compose file itself. See [`.env.example`](./.env.example) for the template and the user manual's *Environment Variable Reference* appendix for the full list; see [`docs/security.md`](./docs/security.md) for the secret-management contract.
 
 ### Documentation
 
@@ -213,7 +214,7 @@ inventory_uplink_max_wait_seconds = 5
 
 [opcua]
 application_name = "My IoT Gateway"
-host_port = 4855
+host_port = 4840
 user_name = "admin"
 user_password = "secure-password"
 

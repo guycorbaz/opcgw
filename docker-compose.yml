@@ -6,7 +6,7 @@
 #
 #   sudo chown -R 10001:10001 ./log ./config ./pki ./data
 #   sudo chmod 700 ./pki/private
-#   sudo chmod 600 ./pki/private/*    # NFR9 — OPC UA private-key permissions
+#   sudo chmod 600 ./pki/private/*    # OPC UA private-key permissions
 #
 # Pull the published v2.1 image instead of building locally by either:
 #   * `docker compose pull` (uses the `image:` declared below), or
@@ -20,25 +20,29 @@ services:
     image: docker.io/gcorbaz/opcgw:2.1
     restart: always
     ports:
-      - "4855:4855"
-      # Web UI (setup wizard + configuration). Enabled by default in v2.1.0
-      # (OPCGW_WEB__ENABLED below). The gateway binds the Web UI on container
-      # port 8080 (Dockerfile EXPOSE 8080); this maps it to host port 8080.
-      # Browse http://localhost:8080 to reach the first-run setup wizard.
-      - "8080:8080"
-    # Secret credentials are injected via env vars (Story 7-1, AC#6).
-    # Compose reads `.env` from this directory and substitutes the values
-    # below into the container's environment. The `:?` form fails compose
-    # parsing immediately if the variable is unset, instead of silently
-    # passing an empty string through to the gateway. See docs/security.md
-    # and `.env.example` for the canonical recipe.
-    environment:
-      - OPCGW_CHIRPSTACK__API_TOKEN=${OPCGW_CHIRPSTACK__API_TOKEN:?missing - copy .env.example to .env and set this variable, see docs/security.md}
-      - OPCGW_OPCUA__USER_PASSWORD=${OPCGW_OPCUA__USER_PASSWORD:?missing - copy .env.example to .env and set this variable, see docs/security.md}
-      # Web UI is the primary configuration surface in v2.1.0 (first-run setup
-      # wizard, ChirpStack inventory pickers, drift view, singleton-config
-      # editor). Set to false to disable the web server.
-      - OPCGW_WEB__ENABLED=true
+      # OPC UA. Uses OPCGW_OPCUA__HOST_PORT from `.env` when set, else 4840.
+      - "${OPCGW_OPCUA__HOST_PORT:-4840}:${OPCGW_OPCUA__HOST_PORT:-4840}"
+      # Web UI (setup wizard + configuration), enabled via OPCGW_WEB__ENABLED
+      # in `.env`. Uses OPCGW_WEB__PORT when set, else 8080. Browse
+      # http://localhost:<port> to reach the first-run setup wizard.
+      - "${OPCGW_WEB__PORT:-8080}:${OPCGW_WEB__PORT:-8080}"
+    # All gateway environment variables — secret credentials and any optional
+    # OPCGW_* overrides — live in a single `.env` file in this directory.
+    # Copy `.env.example` to `.env`, fill in the required values, then
+    # `chmod 600 .env`. Keeping everything in one file avoids splitting
+    # configuration between `.env` and this compose file. See the user
+    # manual's environment-variable appendix for the full list.
+    env_file:
+      - .env
+    # Liveness probe: confirm the OPC UA listener is accepting TCP. The runtime
+    # image has no curl/wget, so this uses bash's /dev/tcp. If you change the
+    # OPC UA port via OPCGW_OPCUA__HOST_PORT, this probe follows it.
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 3 bash -c '</dev/tcp/127.0.0.1/${OPCGW_OPCUA__HOST_PORT:-4840}' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     volumes:
       - ./log:/usr/local/bin/log
       - ./config:/usr/local/bin/config

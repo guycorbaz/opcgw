@@ -76,8 +76,9 @@ COPY --from=builder --chown=opcgw:opcgw /usr/src/opcgw/static /usr/local/bin/sta
 # Drop privileges before launching the entrypoint.
 USER opcgw
 
-# OPC UA endpoint (default; configurable via `[opcua].host_port` in config.toml).
-EXPOSE 4855
+# OPC UA endpoint (standard OPC UA port 4840; configurable via
+# `[opcua].host_port` in config.toml or OPCGW_OPCUA__HOST_PORT).
+EXPOSE 4840
 # Embedded Axum web UI port (only bound when `[web].enabled = true`; configurable
 # via `[web].port`). Declared here as informational metadata; not auto-published.
 EXPOSE 8080

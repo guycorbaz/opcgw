@@ -104,7 +104,9 @@ product_uri = "urn:chirpstack:opcua:gateway"
 diagnostics_enabled = true
 #hello_timeout = 10
 #host_ip_address = "localhost"
-#host_port = 9090
+# OPC UA listen port. Default: 4840 (standard OPC UA port). Uncomment to
+# change; also overridable via OPCGW_OPCUA__HOST_PORT.
+#host_port = 4840
 # OPC UA self-signed-keypair generation.
 #
 # Production: false. Provision your keypair manually under pki/own/cert.der
