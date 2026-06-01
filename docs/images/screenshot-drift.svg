@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450" viewBox="0 0 800 450">
+  <rect x="1" y="1" width="798" height="448" fill="#F7F9FB" stroke="#1A3F5C" stroke-width="2" rx="10"/>
+  <path d="M1 11 a10 10 0 0 1 10 -10 h778 a10 10 0 0 1 10 10 v40 h-798 z" fill="#1A3F5C"/>
+  <text x="22" y="34" font-family="Helvetica, sans-serif" font-size="18" fill="#FFFFFF">opcgw — Inventory drift view</text>
+  <text x="400" y="215" font-family="Helvetica, sans-serif" font-size="22" fill="#1A3F5C" text-anchor="middle" font-weight="bold">Screenshot placeholder</text>
+  <text x="400" y="250" font-family="Helvetica, sans-serif" font-size="14" fill="#888888" text-anchor="middle">Replace docs/images/screenshot-drift.svg with a real capture of this page.</text>
+  <text x="400" y="280" font-family="Helvetica, sans-serif" font-size="14" fill="#CE7B3C" text-anchor="middle">Reconciling configured inventory against ChirpStack.</text>
+</svg>

@@ -1,0 +1,58 @@
+// opcgw system architecture / data-flow diagram.
+// Render with:  dot -Tsvg architecture.dot -o architecture.svg
+// Brand palette: navy #1A3F5C, orange #CE7B3C (from docs/logo).
+digraph opcgw_architecture {
+    rankdir=LR;
+    splines=spline;
+    nodesep=0.45;
+    ranksep=1.1;
+    bgcolor="transparent";
+    fontname="Helvetica";
+    pad=0.3;
+
+    node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled",
+          color="#1A3F5C", fillcolor="white", fontcolor="#1A3F5C", penwidth=1.4,
+          margin="0.20,0.13"];
+    edge [fontname="Helvetica", fontsize=9, color="#1A3F5C", fontcolor="#1A3F5C",
+          penwidth=1.3, arrowsize=0.8];
+
+    // --- External actors -----------------------------------------------------
+    chirpstack [label="ChirpStack\n(LoRaWAN Network Server)", fillcolor="#EAF0F5"];
+    scada      [label="OPC UA / SCADA\nclients", fillcolor="#EAF0F5"];
+    operator   [label="Operator\n(web browser)", fillcolor="#EAF0F5"];
+
+    // --- opcgw process -------------------------------------------------------
+    subgraph cluster_opcgw {
+        label="opcgw gateway";
+        fontname="Helvetica-Bold";
+        fontsize=13;
+        fontcolor="#1A3F5C";
+        labeljust="l";
+        style="rounded,filled";
+        fillcolor="#F7F9FB";
+        color="#CE7B3C";
+        penwidth=2;
+        margin=20;
+
+        poller  [label="Poller\n(ChirpStack gRPC client)"];
+        storage [label="SQLite store\nvalues · history · config", fillcolor="#1A3F5C", fontcolor="white"];
+        opcua   [label="OPC UA 1.04\nserver"];
+        web     [label="Web UI\nsetup · configuration"];
+    }
+
+    // --- Telemetry read path (solid) ----------------------------------------
+    chirpstack -> poller   [label="poll metrics\n(gRPC)"];
+    poller     -> storage  [label="write values"];
+    storage    -> opcua    [label="read values"];
+    opcua      -> scada    [label="serve / subscribe"];
+
+    // --- Configuration path (solid) -----------------------------------------
+    operator -> web     [label="HTTPS /\nBasic auth"];
+    web      -> storage [label="read / write\nconfig"];
+
+    // --- Command (downlink) path (dashed, orange) ---------------------------
+    edge [style=dashed, color="#CE7B3C", fontcolor="#CE7B3C", constraint=false];
+    scada  -> opcua      [label="write\ncommand"];
+    opcua  -> poller     [label="queue command"];
+    poller -> chirpstack [label="send downlink"];
+}

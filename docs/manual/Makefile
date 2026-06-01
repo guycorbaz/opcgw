@@ -41,12 +41,25 @@ LOGO_SRC   := ../logo
 LOGO_FILES := opcgw-horizontal.svg opcgw-mark.svg opcgw-favicon.svg
 LOGO_DEST  := $(addprefix $(OUT_DIR)/logo/,$(LOGO_FILES))
 
+# Manual figures (e.g. the architecture diagram). Resolved exactly like logos:
+# referenced from the XML as "../images/<file>" so the path works for both
+# dblatex (run from this directory) and the chunked HTML (copied into
+# $(OUT_DIR)/images). Regenerate an SVG from its .dot source with graphviz:
+#   dot -Tsvg ../images/architecture.dot -o ../images/architecture.svg
+IMAGE_SRC   := ../images
+IMAGE_FILES := architecture.svg \
+               screenshot-setup-wizard.svg \
+               screenshot-pickers.svg \
+               screenshot-drift.svg \
+               screenshot-dashboard.svg
+IMAGE_DEST  := $(addprefix $(OUT_DIR)/images/,$(IMAGE_FILES))
+
 .PHONY: all html html-single pdf validate clean print-deps
 
 all: html html-single pdf
 
 # ── HTML (chunked, multi-page) ─────────────────────────────────────────────
-html: $(MANUAL) $(LOGO_DEST) | $(HTML_DIR)
+html: $(MANUAL) $(LOGO_DEST) $(IMAGE_DEST) | $(HTML_DIR)
 	@echo "→ Building chunked HTML to $(HTML_DIR)/"
 	xsltproc \
 	    --output $(HTML_DIR)/ \
@@ -58,7 +71,7 @@ html: $(MANUAL) $(LOGO_DEST) | $(HTML_DIR)
 	@echo "✓ HTML manual:  $(HTML_DIR)/index.html"
 
 # ── HTML (single-page) ─────────────────────────────────────────────────────
-html-single: $(MANUAL) $(LOGO_DEST) | $(HTML_SINGLE_DIR)
+html-single: $(MANUAL) $(LOGO_DEST) $(IMAGE_DEST) | $(HTML_SINGLE_DIR)
 	@echo "→ Building single-page HTML to $(HTML_SINGLE)"
 	xsltproc \
 	    --output $(HTML_SINGLE) \
@@ -103,8 +116,15 @@ $(HTML_SINGLE_DIR): | $(OUT_DIR)
 $(OUT_DIR)/logo: | $(OUT_DIR)
 	@mkdir -p $(OUT_DIR)/logo
 
+$(OUT_DIR)/images: | $(OUT_DIR)
+	@mkdir -p $(OUT_DIR)/images
+
 # Pattern rule: each per-file logo copy depends on its source SVG.
 # A missing source SVG triggers a clean make-level failure before any
 # xsltproc run, instead of leaving partial $(HTML_DIR)/ output.
 $(OUT_DIR)/logo/%.svg: $(LOGO_SRC)/%.svg | $(OUT_DIR)/logo
+	cp $< $@
+
+# Same contract for manual figures copied into $(OUT_DIR)/images.
+$(OUT_DIR)/images/%.svg: $(IMAGE_SRC)/%.svg | $(OUT_DIR)/images
 	cp $< $@
