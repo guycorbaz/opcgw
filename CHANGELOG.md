@@ -72,6 +72,16 @@ required.
   credentials are sourced from `config/secrets.toml` (mode `0600`) or
   environment variables rather than being stored alongside non-secret config.
 
+### Fixed
+
+- **ChirpStack TCP availability probe now resolves DNS hostnames** (#122). The
+  pre-flight connectivity probe used `SocketAddr::parse()`, which only accepts a
+  numeric `IP:port` and rejected service names such as `http://chirpstack:8080`
+  with `invalid socket address syntax` — even though the gRPC client resolves
+  them fine. It now uses `to_socket_addrs()` (and tries each resolved IPv4/IPv6
+  address until one connects), so a Docker/Compose service name on a shared
+  network works for `chirpstack.server_address` as documented.
+
 ### Notes
 
 - No public OPC UA address-space or `/api/metrics` wire-format changes relative

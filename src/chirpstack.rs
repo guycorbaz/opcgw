@@ -37,7 +37,7 @@ use tracing::{debug, error, info, trace, warn};
 use chirpstack_api::prost_types::Timestamp;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use tokio::time::Duration;
@@ -793,37 +793,58 @@ impl ChirpstackPoller {
         })?;
         let port = url.port().unwrap_or(8080); // Default Chirpstack port
 
-        // Create socket address
-        let socket_addr: SocketAddr = format!("{}:{}", host, port)
-            .parse()
-            .map_err(|e| OpcGwError::Configuration(format!("Invalid socket address: {}", e)))?;
+        // Resolve host:port to socket addresses. We use to_socket_addrs()
+        // rather than SocketAddr::parse() so DNS hostnames are resolved — the
+        // common Docker / Compose case where opcgw and ChirpStack share a
+        // user-defined network and the address is the service name
+        // (e.g. http://chirpstack:8080). SocketAddr::parse() only accepts a
+        // numeric IP and rejected hostnames with "invalid socket address
+        // syntax" (GH #122). This matches the DNS resolution the gRPC client
+        // already performs. A hostname may resolve to several addresses
+        // (IPv4 + IPv6); we try each until one connects.
+        let socket_addrs: Vec<SocketAddr> = format!("{}:{}", host, port)
+            .to_socket_addrs()
+            .map_err(|e| {
+                OpcGwError::Configuration(format!("Cannot resolve {}:{}: {}", host, port, e))
+            })?
+            .collect();
+        if socket_addrs.is_empty() {
+            return Err(OpcGwError::Configuration(format!(
+                "No socket address resolved for {}:{}",
+                host, port
+            )));
+        }
 
-        trace!(address = %socket_addr, "Attempting TCP connection to Chirpstack server");
         let timeout = Duration::from_secs(1);
         let start = Instant::now();
-        // Attempt TCP connection
-        let result = TcpStream::connect_timeout(&socket_addr, timeout);
-        let elapsed = start.elapsed();
+        let mut last_error: Option<std::io::Error> = None;
 
-        trace!(address = %socket_addr, elapsed = ?elapsed, "TCP connection to Chirpstack server completed");
-
-        match result {
-            Ok(_) => {
-                trace!("TCP connection to Chirpstack server successful");
-                // TODO: Persist status update to storage (server_available=true, last_poll_time=now)
-                // TODO: Add clock skew detection - validate that Utc::now() >= previous last_poll_time
-                // to catch system clock adjustments (NTP corrections, VM clock skew)
-                Ok(elapsed)
-            }
-            Err(error) => {
-                trace!(error = %error, "TCP connection to Chirpstack server failed");
-                // TODO: Persist status update to storage (server_available=false, error_count++)
-                Err(OpcGwError::ChirpStack(format!(
-                    "TCP connection to Chirpstrack server failed: {}",
-                    error
-                )))
+        for socket_addr in &socket_addrs {
+            trace!(address = %socket_addr, "Attempting TCP connection to Chirpstack server");
+            match TcpStream::connect_timeout(socket_addr, timeout) {
+                Ok(_) => {
+                    let elapsed = start.elapsed();
+                    trace!(address = %socket_addr, elapsed = ?elapsed, "TCP connection to Chirpstack server successful");
+                    // TODO: Persist status update to storage (server_available=true, last_poll_time=now)
+                    // TODO: Add clock skew detection - validate that Utc::now() >= previous last_poll_time
+                    // to catch system clock adjustments (NTP corrections, VM clock skew)
+                    return Ok(elapsed);
+                }
+                Err(error) => {
+                    trace!(address = %socket_addr, error = %error, "TCP connection to Chirpstack server failed");
+                    last_error = Some(error);
+                }
             }
         }
+
+        // Every resolved address failed to connect within the timeout.
+        // TODO: Persist status update to storage (server_available=false, error_count++)
+        let error =
+            last_error.expect("socket_addrs is non-empty, so at least one connect was attempted");
+        Err(OpcGwError::ChirpStack(format!(
+            "TCP connection to ChirpStack server failed: {}",
+            error
+        )))
     }
 
     /// Extracts the IP address from the ChirpStack server address.
@@ -3416,6 +3437,37 @@ mod tests {
         assert!(
             !logs_contain("operation=\"recovery_failed\""),
             "must not emit recovery_failed when probe succeeds"
+        );
+
+        drop(listener);
+    }
+
+    /// GH #122 regression: the TCP availability probe must resolve DNS
+    /// hostnames, not only numeric IPs. Before the fix, the probe used
+    /// `SocketAddr::parse()`, which rejected `localhost:<port>` (and any
+    /// Docker service name such as `chirpstack:8080`) with "invalid socket
+    /// address syntax". With `to_socket_addrs()` the hostname resolves and
+    /// the probe connects to the listening port.
+    #[tokio::test]
+    async fn probe_resolves_dns_hostname() {
+        // Bind a real listener on the IPv4 loopback, then probe via the
+        // `localhost` hostname. `localhost` may resolve to both 127.0.0.1 and
+        // ::1; the probe tries each resolved address until one connects, so
+        // this is deterministic regardless of resolution order.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        let server_address = format!("http://localhost:{port}");
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let cancel_token = CancellationToken::new();
+        let poller =
+            make_recovery_test_poller(server_address, 1, 0, backend, cancel_token).await;
+
+        let result = poller.check_server_availability();
+        assert!(
+            result.is_ok(),
+            "probe must resolve the `localhost` hostname and connect, got: {result:?}"
         );
 
         drop(listener);
