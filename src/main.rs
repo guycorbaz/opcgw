@@ -804,6 +804,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // empty-bootstrap since load_all_applications_config returns []).
     match sqlite_backend.load_all_applications_config() {
         Ok(sqlite_apps) if !sqlite_apps.is_empty() => {
+            // #123: SQLite is authoritative for `application_list` across
+            // restarts. Fold the loaded applications into the
+            // construction-time `application_config` BEFORE storage, the
+            // poller, and the OPC UA address space are built — each reads
+            // `application_config.application_list` at construction
+            // (`Storage::new`, `ChirpstackPoller::new_with_reload`,
+            // `OpcUa::new` → `add_nodes`). Without this, web-configured
+            // applications lived only in the watch channel and the gateway
+            // rebuilt from the `config.toml` bootstrap seed on every restart
+            // — web-created apps/devices/metrics vanished from the running
+            // gateway and SQLite metric restore orphaned against the
+            // seed-built storage skeleton.
+            let application_count = sqlite_apps.len();
+            std::sync::Arc::make_mut(&mut application_config).application_list =
+                sqlite_apps.clone();
+            // Rebuild the in-memory storage device/metric skeleton from the
+            // corrected config so the metric restore below lands in the
+            // right slots instead of orphaning against the seed skeleton.
+            match storage.lock() {
+                Ok(mut guard) => *guard = Storage::new(&application_config),
+                Err(e) => {
+                    error!(error = %e, "Failed to lock storage to rebuild it from the SQLite application list");
+                    return Err(crate::utils::OpcGwError::Storage(format!(
+                        "Storage lock poisoned while loading SQLite applications: {e}"
+                    ))
+                    .into());
+                }
+            }
+            info!(
+                event = "application_list_from_sqlite",
+                application_count,
+                "Runtime application_list sourced from SQLite (authoritative across restart, #123)"
+            );
             reload_handle.notify_crud_write(sqlite_apps).await;
         }
         Ok(_) => {

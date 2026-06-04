@@ -74,6 +74,7 @@ required.
 
 ### Fixed
 
+- **Web-configured applications now survive a gateway restart** (#123). Applications/devices/metrics created through the web UI are stored in SQLite, but on restart the poller, the in-memory storage skeleton, and the OPC UA address space were rebuilt from the `config.toml` bootstrap *seed* — the SQLite-stored topology was loaded into the live watch channel only, never folded back into the construction-time config. The gateway therefore reverted to the seed on every restart (the data stayed safe in SQLite but vanished from the running gateway, and SQLite metric restore orphaned against the seed skeleton). Startup now sources `application_list` from SQLite (when present) before constructing those subsystems, making SQLite authoritative for the application topology across restarts.
 - **ChirpStack TCP availability probe now resolves DNS hostnames** (#122). The
   pre-flight connectivity probe used `SocketAddr::parse()`, which only accepts a
   numeric `IP:port` and rejected service names such as `http://chirpstack:8080`
