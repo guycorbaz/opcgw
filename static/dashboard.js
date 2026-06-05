@@ -271,4 +271,16 @@
   // Initial fetch + periodic refresh.
   fetchStatus();
   setInterval(fetchStatus, REFRESH_INTERVAL_MS);
+
+  // #128: one-time version fetch for the dashboard subtitle. Cosmetic —
+  // failures are ignored so a hiccup never blocks the dashboard.
+  fetch("/api/health", { credentials: "same-origin" })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (j) {
+      if (j && j.version) {
+        var elv = document.getElementById("app-version");
+        if (elv) { elv.textContent = " · v" + j.version; }
+      }
+    })
+    .catch(function () { /* version display is cosmetic; ignore */ });
 })();

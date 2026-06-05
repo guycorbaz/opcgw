@@ -51,6 +51,8 @@ required.
   `[chirpstack]`, `[opcua]`, and `[web]` settings are editable from the web UI,
   with explicit handling for knobs that require a restart to take effect.
 
+- **Version shown in the web UI** (#128). The dashboard subtitle now displays the running version after "ChirpStack → OPC UA gateway", and `GET /api/health` includes a `version` field (`{"status":"ok","version":"…"}`).
+
 ### Changed
 
 - **All configuration now lives in SQLite.** Applications, devices, metric

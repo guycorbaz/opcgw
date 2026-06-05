@@ -659,10 +659,17 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
 /// a known route they can hit to verify the auth middleware fires
 /// without depending on a static-file fixture.
 async fn api_health() -> impl IntoResponse {
+    // #128: surface the build version so the web UI can display it. Built at
+    // compile time from CARGO_PKG_VERSION (the Cargo `version`, e.g. "2.1.0").
+    const HEALTH_BODY: &str = concat!(
+        "{\"status\":\"ok\",\"version\":\"",
+        env!("CARGO_PKG_VERSION"),
+        "\"}"
+    );
     (
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "application/json")],
-        "{\"status\":\"ok\"}",
+        HEALTH_BODY,
     )
 }
 
