@@ -526,11 +526,15 @@
         placeholder.selected = true;
         devPickerSelect.appendChild(placeholder);
         items.forEach(function (item) {
-          const opt = el('option', { value: item.id, text: item.name });
+          // #125: the InventoryDevice JSON field is `dev_eui` (normalised
+          // lowercase hex), NOT `id`. Reading `item.id` returned JS
+          // `undefined`, and `dataset.devEui = undefined` stores the STRING
+          // "undefined" — so EVERY picker-created device was POSTed with
+          // device_id="undefined" (rejected since the #125 backend guard).
+          // Read `item.dev_eui`; the /uplinks endpoint expects the same value.
+          const opt = el('option', { value: item.dev_eui, text: item.name });
           opt.dataset.devName = item.name;
-          // The C-1 InventoryDevice carries id == dev_eui (normalised
-          // lowercase hex). The /uplinks endpoint expects the same.
-          opt.dataset.devEui = item.id;
+          opt.dataset.devEui = item.dev_eui;
           devPickerSelect.appendChild(opt);
         });
         devPickerSelect.disabled = false;
