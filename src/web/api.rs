@@ -3824,6 +3824,39 @@ fn validate_device_field(field: &str, value: &str, addr: &SocketAddr) -> Result<
             .into_response());
     }
 
+    // #125: reject frontend capture-failure sentinels for device_id. A
+    // ChirpStack DevEUI is never one of these; their presence means the device
+    // picker didn't capture a DevEUI (a JS `undefined`/`null` coerced to a
+    // string), and persisting one yields a device that can never poll —
+    // ChirpStack rejects GetDeviceMetrics with "Odd number of digits".
+    // (Full 16-hex DevEUI enforcement is intentionally NOT done here:
+    // `device_id` is a free-form identifier across the seed config and the CRUD
+    // API/tests; requiring a real picker selection is the frontend's job. This
+    // guard just stops the observed capture-failure class.)
+    if field == "device_id"
+        && matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "undefined" | "null" | "nan" | "none"
+        )
+    {
+        warn!(
+            event = "device_crud_rejected",
+            reason = "validation",
+            field = %field,
+            source_ip = %addr.ip(),
+            value = %value,
+            "device CRUD field validation failed: device_id is a capture-failure placeholder, not a DevEUI"
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                "device_id is not a valid DevEUI (received a placeholder such as 'undefined')",
+                "select the device from the ChirpStack picker so its DevEUI is captured",
+            )),
+        )
+            .into_response());
+    }
+
     if value.len() > max_len {
         warn!(
             event = "device_crud_rejected",
@@ -4364,6 +4397,37 @@ pub async fn audit_drift_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GH #125: `validate_device_field` must reject device_id capture-failure
+    /// sentinels (the picker leaking a JS `undefined`/`null`), case- and
+    /// whitespace-insensitive, so a device that can never poll is never saved.
+    #[test]
+    fn device_id_rejects_capture_failure_sentinels() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().expect("parse addr");
+        for bad in [
+            "undefined",
+            "null",
+            "NaN",
+            "None",
+            " undefined ",
+            "UNDEFINED",
+        ] {
+            assert!(
+                validate_device_field("device_id", bad, &addr).is_err(),
+                "device_id {bad:?} must be rejected (#125)"
+            );
+        }
+    }
+
+    /// GH #125: real DevEUIs and the free-form device ids used by the seed
+    /// config + CRUD tests must still be accepted (the guard only blocks the
+    /// sentinel class, it does not impose strict 16-hex DevEUI format here).
+    #[test]
+    fn device_id_accepts_deveui_and_freeform() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().expect("parse addr");
+        assert!(validate_device_field("device_id", "a840414bf185f365", &addr).is_ok());
+        assert!(validate_device_field("device_id", "dev-1", &addr).is_ok());
+    }
     use crate::storage::memory::InMemoryBackend;
     use crate::storage::types::ChirpstackStatus;
     use crate::storage::{MetricType, StorageBackend};

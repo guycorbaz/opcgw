@@ -847,6 +847,22 @@ impl ChirpstackPoller {
         )))
     }
 
+    /// GH #126: decide whether a per-device poll error should be treated as a
+    /// ChirpStack *outage* (gateway-wide unavailability) rather than a
+    /// per-device data error.
+    ///
+    /// A non-`ChirpStack` error is never an outage. A `ChirpStack` error is an
+    /// outage only if a live TCP availability probe confirms the server is
+    /// unreachable. If the probe succeeds, ChirpStack responded to a request,
+    /// so a per-device failure (e.g. an `Internal` gRPC status for a malformed
+    /// DevEUI — "Odd number of digits") is a data error: it must NOT flip
+    /// `chirpstack_available` or trigger the recovery loop. This prevents one
+    /// misconfigured device from making the whole gateway report ChirpStack as
+    /// down on every poll cycle.
+    fn device_error_is_outage(&self, error: &OpcGwError) -> bool {
+        matches!(error, OpcGwError::ChirpStack(_)) && self.check_server_availability().is_err()
+    }
+
     /// Extracts the IP address from the ChirpStack server address.
     ///
     /// Parses the configured server address as a URL and extracts the host portion
@@ -1370,8 +1386,16 @@ impl ChirpstackPoller {
                     // would wrap to i32::MIN in release builds and silently
                     // bypass the saturation warn.
                     error_count = error_count.saturating_add(1);
-                    // Check if this is a ChirpStack connectivity error
-                    if matches!(e, OpcGwError::ChirpStack(_)) {
+                    // #126: a per-device GetDeviceMetrics error is only a real
+                    // outage if ChirpStack is actually unreachable. A server-
+                    // responded error (e.g. an `Internal` gRPC status for a
+                    // malformed DevEUI — "Odd number of digits") means the
+                    // server is UP; that's a per-device data error, counted
+                    // above but NOT a gateway-wide outage. Gating on a live
+                    // connectivity probe stops one bad device from flipping
+                    // `chirpstack_available=false` and triggering the recovery
+                    // loop every poll cycle.
+                    if self.device_error_is_outage(&e) {
                         chirpstack_available = false;
                         // Story 6-3, AC#5: chirpstack_outage diagnostic on
                         // the first per-device connectivity failure of the
@@ -3440,6 +3464,58 @@ mod tests {
         );
 
         drop(listener);
+    }
+
+    /// GH #126 regression: a per-device error while ChirpStack is **reachable**
+    /// must NOT be treated as a gateway-wide outage. A real listener makes the
+    /// availability probe succeed, so `device_error_is_outage` returns false
+    /// even for a `ChirpStack(_)` error (the server responded → per-device data
+    /// error). Pre-fix, any `ChirpStack(_)` error flipped `chirpstack_available`
+    /// and triggered the recovery loop.
+    #[tokio::test]
+    async fn device_error_with_reachable_server_is_not_outage() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        let server_address = format!("http://127.0.0.1:{port}");
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let poller =
+            make_recovery_test_poller(server_address, 1, 0, backend, CancellationToken::new())
+                .await;
+
+        let err = OpcGwError::ChirpStack(
+            "Error getting device metrics: code: 'Internal error', message: \"Odd number of digits\""
+                .to_string(),
+        );
+        assert!(
+            !poller.device_error_is_outage(&err),
+            "server reachable → a per-device ChirpStack error must NOT be an outage (#126)"
+        );
+        drop(listener);
+    }
+
+    /// GH #126 regression: a `ChirpStack(_)` error while the server is genuinely
+    /// **unreachable** still counts as an outage (recovery path preserved).
+    #[tokio::test]
+    async fn device_error_with_unreachable_server_is_outage() {
+        // bind+drop yields a (probabilistically) free port nothing listens on.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        drop(listener);
+        let server_address = format!("http://127.0.0.1:{port}");
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let poller =
+            make_recovery_test_poller(server_address, 1, 0, backend, CancellationToken::new())
+                .await;
+
+        let err = OpcGwError::ChirpStack("transport error: connection refused".to_string());
+        assert!(
+            poller.device_error_is_outage(&err),
+            "server unreachable → a ChirpStack error IS an outage (#126)"
+        );
     }
 
     /// GH #122 regression: the TCP availability probe must resolve DNS
