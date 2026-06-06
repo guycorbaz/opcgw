@@ -656,6 +656,10 @@ pub fn apply_diff_to_address_space(
             command_name: a.command_name.clone(),
             command_confirmed: a.command_confirmed,
             command_port: a.command_port,
+            // The OPC UA command node (write callback) is identical regardless
+            // of device class; the runtime poller reads command_class from the
+            // (SQLite-sourced) application_list when encoding the downlink.
+            command_class: None,
         };
         manager
             .inner()
@@ -1256,6 +1260,7 @@ mod tests {
             command_name: name.to_string(),
             command_confirmed: confirmed,
             command_port: port,
+            command_class: None,
         }
     }
 

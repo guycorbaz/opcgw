@@ -2784,15 +2784,16 @@ impl SqliteBackend {
         conn.execute(
             "INSERT INTO commands \
              (application_id, device_id, command_name, command_id, \
-              command_confirmed, command_port) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+              command_confirmed, command_port, command_class) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 application_id,
                 device_id,
                 cmd.command_name,
                 cmd.command_id,
                 cmd.command_confirmed as i32,
-                cmd.command_port
+                cmd.command_port,
+                cmd.command_class
             ],
         )
         .map_err(|e| {
@@ -2825,12 +2826,14 @@ impl SqliteBackend {
         })?;
         let changed = conn
             .execute(
-                "UPDATE commands SET command_id = ?1, command_confirmed = ?2, command_port = ?3 \
-                 WHERE application_id = ?4 AND device_id = ?5 AND command_name = ?6",
+                "UPDATE commands SET command_id = ?1, command_confirmed = ?2, command_port = ?3, \
+                 command_class = ?4 \
+                 WHERE application_id = ?5 AND device_id = ?6 AND command_name = ?7",
                 params![
                     cmd.command_id,
                     cmd.command_confirmed as i32,
                     cmd.command_port,
+                    cmd.command_class,
                     application_id,
                     device_id,
                     cmd.command_name
@@ -3022,11 +3025,15 @@ impl SqliteBackend {
         let mut stmt = conn
             .prepare(
                 "SELECT application_id, device_id, command_name, \
-                        command_id, command_confirmed, command_port \
+                        command_id, command_confirmed, command_port, command_class \
                  FROM commands ORDER BY application_id, device_id, command_name",
             )
             .map_err(|e| OpcGwError::Database(format!("prepare commands: {}", e)))?;
-        let cmd_rows: Vec<(String, String, String, i32, i32, Option<i32>)> = stmt
+        // Row shape for the application-config `commands` table:
+        // (application_id, device_id, command_name, command_id,
+        //  command_confirmed, command_port, command_class).
+        type CommandRow = (String, String, String, i32, i32, Option<i32>, Option<String>);
+        let cmd_rows: Vec<CommandRow> = stmt
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -3035,6 +3042,7 @@ impl SqliteBackend {
                     row.get::<_, i32>(3)?,
                     row.get::<_, i32>(4)?,
                     row.get::<_, Option<i32>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             })
             .map_err(|e| OpcGwError::Database(format!("query commands: {}", e)))?
@@ -3070,11 +3078,12 @@ impl SqliteBackend {
                 let commands: Vec<DeviceCommandCfg> = cmd_rows
                     .iter()
                     .filter(|(c_app, c_dev, ..)| c_app == &app_id && c_dev == dev_id)
-                    .map(|(_, _, c_name, c_id, c_confirmed, c_port)| DeviceCommandCfg {
+                    .map(|(_, _, c_name, c_id, c_confirmed, c_port, c_class)| DeviceCommandCfg {
                         command_name: c_name.clone(),
                         command_id: *c_id,
                         command_confirmed: *c_confirmed != 0,
                         command_port: c_port.unwrap_or(0),
+                        command_class: c_class.clone(),
                     })
                     .collect();
 

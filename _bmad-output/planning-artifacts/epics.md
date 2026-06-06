@@ -1356,3 +1356,98 @@ So that the operator contract is unambiguous: edit SQLite via the web UI (or `se
 - Secrets-in-SQLite (encrypted-at-rest) — operator threat model has not shifted to justify the key-management surface; secrets stay in `secrets.toml`.
 - Live hot-reload for restart-required knobs (PKI paths, ports, `allowed_origins`) — issue #113 territory; D-1 surfaces restart-required UX clearly but does NOT change the underlying restart-required semantics.
 - `CR-EPIC-C-MQTT` (MQTT real-time path) — still deferred per Epic C scope decision; re-promote only on explicit operator request.
+
+## Epic E: Model-Agnostic, Class-Aware Device-Abstraction Layer
+
+**Tracking:** GitHub issue [#129](https://github.com/guycorbaz/opcgw/issues/129). Literal name `Epic E` in `sprint-status.yaml`, continuing the lettered post-numeric-epic convention (A/B/C/D → E). Stories use sprint-status keys `E-0`, `E-1`, `E-2`, `E-3`.
+
+**Why it exists:** opcgw today exposes whatever metrics and (queued-but-never-sent) commands a device's config declares, with the device's protocol details leaking onto the OPC UA side — the OPC UA client must know each model's raw fPort and byte codes. Guy's 2026-06-06 requirement: opcgw should present heterogeneous devices with a **common OPC UA view** — every *model* of a given *device kind* looks identical on OPC UA. An "open/close" command for a motorized valve is the same regardless of valve vendor/model; valve status is a normalized state, not a raw byte. This extends opcgw's name-translation role (Epic C) into a full **semantic device-abstraction layer**. First concrete driver: 3 Tonhe E20 motorized valves (LoRaWAN 868, Class A, single-byte open/close); protocol + ChirpStack codec in `docs/LoRa/TONHE Valve/`. **Crucially NOT valve-specific** — the architecture generalizes to other device kinds (sensors, meters, other actuators); valves are simply the first kind used to prove the pattern.
+
+**Two extension axes (the load-bearing design call):** (a) **Model** — byte layout, fPort, raw codes — handled OUTSIDE opcgw in the ChirpStack codec (`encodeDownlink`/`decodeUplink`); a new model of an existing kind is just a codec, zero opcgw change. (b) **Class / device kind** — canonical command vocabulary + canonical status/measurement semantics — handled IN opcgw; a new kind defines its canonical OPC UA surface once. The class layer is **additive**: devices not bound to a class keep working exactly as today (arbitrary numeric metrics + raw writable command nodes).
+
+**Locked design decisions (2026-06-06, via design dialogue):**
+
+- Command surface: one writable OPC UA node per device, canonical values (valve class: `1` = Open / `0` = Close). Command vocabulary is per-class; pure sensors have none.
+- Status surface: normalized state + flags (valve class: `ValveState` Closed/Open/Opening/Closing/Fault/Unknown + `Moving`/`Fault`/`LowBattery`), identical across models.
+- Per-model protocol lives entirely in the ChirpStack codec; opcgw stays model-agnostic.
+- Downlink mechanism: opcgw enqueues a **semantic object** (`{"command":"open"}`) so the codec encodes the bytes — not raw-byte enqueue.
+- Uplink mechanism: **Route B** — consume ChirpStack's decoded uplink EVENTS via gRPC `InternalService.StreamDeviceEvents` (reusing inventory stream code), NOT the metrics poll, NOT MQTT. (Route A — codec emits numeric state-code via metrics poll — was rejected: time-bucketed aggregation lags/averages the transient opening/closing/fault states that matter for sleepy event-driven valves.)
+
+**Feasibility baseline (verified in code 2026-06-06):** the downlink command path is built but UNWIRED — `process_command_queue` (`src/chirpstack.rs:2430`, called each poll at `:1317`) dequeues each command and silently discards it behind a "Story 4-1 Phase 3" TODO (`:2437-2442`); `enqueue_device_request_to_server` (`:2511`) is `#[allow(dead_code)]` with zero call sites and currently builds raw bytes (`data`) not an object (`:2523-2534`). The decoded uplink object cannot flow through the metrics poll (`GetDeviceMetrics`, `:2376`; string metrics unsupported at `:1733`) — it is only available via `StreamDeviceEvents`, already read for inventory at `src/chirpstack_inventory.rs:373` but not in the runtime poller.
+
+**FRs covered:** none from the original PRD (Epic E is a post-PRD addition driven by the 2026-06-06 valve-piloting requirement; design captured in GH #129 + memory `project_device_abstraction_valves.md`). Implicit functional contract per story below.
+
+**Sequencing:** E-0 is the first slice and is independently testable (it makes OPC UA command writes actually reach the device). E-1 (uplink ingestion) and E-2 (class registry) build on the patterns E-0 establishes; E-2 generalizes the canonical-mapping concept that E-0 and E-1 each introduce concretely for the valve. E-3 (delivery confirmation) depends on E-0's send path. Recommended order: **E-0 → E-1 → E-2 → E-3**, with E-2 starting only once E-0 + E-1 have proven the valve mapping concretely (avoid over-abstracting before one driver works end-to-end).
+
+### Story E.0: Downlink Command Path (first testable slice)
+
+As an **opcgw operator with a device command defined**,
+I want an OPC UA write to a command node to actually be delivered to the device via ChirpStack,
+So that I can pilot an actuator (e.g. open/close a valve) from the OPC UA / SCADA side.
+
+**Scope summary (full Acceptance Criteria to be drafted when `bmad-create-story E-0` is invoked):**
+
+- Finish the Story 4-1 Phase 3 wiring: `process_command_queue` dequeues a command and calls `enqueue_device_request_to_server` (remove the drop-and-skip TODO + the `#[allow(dead_code)]`). Resolve the `Command` ↔ `DeviceCommandInternal` type unification the TODO references.
+- Switch the enqueue from raw-byte `data` to **semantic object** (`object: Some(Struct)`, empty `data`) so the device profile's `encodeDownlink` produces the wire bytes — keeping opcgw model-agnostic. Map the canonical OPC UA node value to the command object (valve: `1` → `{"command":"open"}`, `0` → `{"command":"close"}`).
+- Preserve the existing raw-byte path as a fallback for devices/commands not bound to a class (additive, not a replacement).
+- Command status transitions Pending → Sent on successful enqueue; enqueue failure is logged and reflected in status (full delivery confirmation is E-3).
+- Integration tests: a queued command is enqueued to a mock/stub ChirpStack `DeviceService` with the expected object + fPort; the failure path; the canonical-value → object mapping; the raw-byte fallback still works.
+- **Real-world validation gate** (per the main-deadlock incident doctrine, memory `incident_main_deadlock_2026_05_20`): OPEN/CLOSE one of the 3 Tonhe E20 valves from opcgw end-to-end before E-0 flips to done.
+
+### Story E.1: gRPC Uplink-Event Ingestion (normalized status)
+
+As an **opcgw operator**,
+I want the gateway to read ChirpStack's decoded uplink events in real time and expose normalized device status on OPC UA,
+So that I see device state (e.g. valve open/closed/fault/low-battery) promptly and identically across models.
+
+**Scope summary:**
+
+- New runtime task consuming `InternalService.StreamDeviceEvents` (reuse the `src/chirpstack_inventory.rs:373` `stream_recent_device_uplinks` patterns), running alongside the metrics poller; reconnect/backoff on stream drop mirroring the Epic 4 auto-recovery resilience.
+- For class-bound devices, map decoded-object fields → canonical status variables in Storage (valve: `ValveState` + `Moving`/`Fault`/`LowBattery`). Storage already supports `MetricType::String`; this is the first poller-side path that populates it.
+- gRPC, **NOT** MQTT — does not reopen `CR-EPIC-C-MQTT`.
+- OPC UA exposes the normalized status variables; stale-data / status-code handling consistent with Story 5-2.
+- Config to enable/scope the stream (which applications/devices) to avoid unbounded event volume.
+- Tests: a stream event with a decoded object → canonical Storage write → OPC UA variant; reconnect after drop; non-class device passthrough.
+
+### Story E.2: Device-Class Registry
+
+As an **opcgw maintainer**,
+I want a device-class registry that declares each kind's canonical OPC UA surface and its mapping to/from the codec's semantic object,
+So that adding a new device kind is a single declarative addition and all models of a kind look identical on OPC UA.
+
+**Scope summary:**
+
+- Introduce a device "class/kind" concept; a device may optionally be tagged with a kind (config + web surface; default none = generic device, behaviour unchanged).
+- Per-kind declaration: canonical command nodes + node-value → command-object map (downlink); decoded-field → canonical-variable map (uplink). Valve = first registered class, refactoring E-0/E-1's concrete valve mapping into the registry.
+- Web/config UI to assign a device's kind (extends the device-config pages; picker pattern from C-2).
+- Generic devices remain fully functional (additive over the existing behaviour).
+- Tests: the valve kind round-trips through the registry; a generic device is unaffected; a second stub kind validates extensibility.
+
+### Story E.3: Command Delivery Confirmation
+
+As an **opcgw operator**,
+I want command delivery/confirmation status reflected back to me,
+So that I know whether a command actually reached the device.
+
+**Scope summary:**
+
+- Implement the `CommandStatusPoller` stub (`src/chirpstack.rs:~2749`) to observe ChirpStack for delivery/ack of confirmed downlinks and update command status Sent → Confirmed/Failed.
+- For Class-A confirmed uplinks (the Tonhe valve sends a conform packet), correlate the next status uplink with the queued command where feasible.
+- Surface command status on OPC UA and in the audit log.
+- Tests: confirmation updates status; timeout / failure path.
+
+### Epic E — Story Acceptance Criteria
+
+**Given** a device bound to the valve class with a command defined on the canonical command node,
+**When** the operator writes `1` (open) or `0` (close) to that node via an OPC UA client,
+**Then** opcgw enqueues the corresponding semantic command object to ChirpStack (E-0), the device profile's codec encodes the model-specific bytes, the valve actuates, and the resulting decoded status uplink flows back via the gRPC event stream (E-1) to update the normalized `ValveState` + flags on OPC UA — all without the OPC UA client knowing the model's raw protocol.
+**And** adding another valve model requires only a new ChirpStack codec (zero opcgw change), adding another device kind requires only a new class-registry entry (E-2), and command delivery is reflected in command status (E-3).
+**And** generic devices not bound to any class continue to expose arbitrary numeric metrics + raw writable command nodes exactly as before Epic E.
+
+**Vision capture reference:** GitHub issue #129; memory `project_device_abstraction_valves.md`; the 2026-06-06 valve-piloting design dialogue (AskUserQuestion decisions: one command node `1`/`0`, normalized `ValveState` + flags, per-model mapping in the ChirpStack codec, Route B gRPC uplink ingestion).
+
+**Deferred / out-of-scope:**
+
+- `CR-EPIC-C-MQTT` (MQTT real-time path) — Route B uses gRPC `StreamDeviceEvents` instead; MQTT stays deferred.
+- Modulating / proportional actuators (0–100% position) — the valve class is binary open/close for now; a `SetPosition` abstraction is deferred until a proportional device exists.
+- Encrypted-secrets-in-SQLite and other unrelated v2.x carry-forwards.

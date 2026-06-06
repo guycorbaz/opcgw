@@ -1505,7 +1505,8 @@ application_name = "Arrosage"
     command_name      = "Open_close_valve01"
     command_id        = 1
     command_confirmed = true     # request ChirpStack delivery confirmation
-    command_port      = 10       # downlink fPort</programlisting>
+    command_port      = 10       # downlink fPort
+    command_class     = "valve"  # optional device-class binding (Epic E)</programlisting>
 
         <itemizedlist>
           <listitem>
@@ -1584,6 +1585,21 @@ application_name = "Arrosage"
             when <literal>command_confirmed = true</literal> the queue
             tracks delivery state and times out per the
             <literal>[command_delivery]</literal> settings.</para>
+          </listitem>
+          <listitem>
+            <para>The optional <literal>command_class</literal> binds the
+            command to a device class so opcgw can present a
+            model-independent command surface. When omitted, an OPC UA write
+            is delivered as raw payload bytes (the value is sent verbatim as a
+            single byte). When set to <literal>"valve"</literal>, opcgw maps
+            the canonical value <literal>1</literal> (open) /
+            <literal>0</literal> (close) to a semantic command object
+            (<literal>{"command":"open"}</literal> /
+            <literal>{"command":"close"}</literal>) that the ChirpStack
+            device-profile codec encodes into the model-specific wire bytes —
+            so every valve model looks identical on OPC UA. (Adding new device
+            classes and a web surface for them arrives in later Epic E
+            stories.)</para>
           </listitem>
         </itemizedlist>
 

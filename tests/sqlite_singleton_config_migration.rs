@@ -111,7 +111,7 @@ fn setup(toml_content: &str) -> (TempDir, AppConfig, SqliteBackend) {
 // ── AC#17 test list ───────────────────────────────────────────────────────────
 
 /// Test 1 — Fresh DB + populated TOML → migration runs; SQLite singleton rows
-/// populate; `is_d0_migration_done() == Ok(true)`; `PRAGMA user_version == 10`.
+/// populate; `is_d0_migration_done() == Ok(true)`; `PRAGMA user_version == 11`.
 #[test]
 fn singleton_fresh_db_populated_toml_returns_migrated() {
     let (_dir, cfg, backend) = setup(TOML_FULL);
@@ -127,7 +127,7 @@ fn singleton_fresh_db_populated_toml_returns_migrated() {
     let count = backend.count_singleton_config().expect("count");
     assert!(count > 0, "singleton_config must have rows after migration");
 
-    // I1-F9 (iter-1): verify PRAGMA user_version == 10 via a raw
+    // I1-F9 (iter-1): verify PRAGMA user_version == 11 via a raw
     // connection to the temp DB. The docstring promised this assertion;
     // the body now delivers it.
     let db_path = _dir.path().join("test.db");
@@ -135,7 +135,7 @@ fn singleton_fresh_db_populated_toml_returns_migrated() {
     let version: u32 = raw
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("read user_version");
-    assert_eq!(version, 10, "fresh DB after migration must be at v010");
+    assert_eq!(version, 11, "fresh DB after migration must be at v011");
 }
 
 /// Test 2 — Already-migrated DB → second call is no-op via primary guard.

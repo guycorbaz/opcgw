@@ -47,7 +47,7 @@ use tonic::{transport::Channel, Request, Status};
 use url::Url;
 
 // Import generated types
-use crate::storage::{MetricType, StorageBackend};
+use crate::storage::{CommandStatus, DeviceCommand, MetricType, StorageBackend};
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
 use chirpstack_api::api::{
@@ -2430,130 +2430,53 @@ impl ChirpstackPoller {
     async fn process_command_queue(&mut self) -> Result<(), OpcGwError> {
         trace!("Process command queue");
 
-        loop {
-            // TODO (Phase 3): Refactor command queue processing to use dequeue_command from StorageBackend trait
-            // Current implementation requires conversion between Command (trait) and DeviceCommandInternal (internal)
-            // For now, skip command processing until type unification is complete in Story 4-1 Phase 3
-            match self.backend.dequeue_command() {
-                Ok(Some(_command)) => {
-                    // TODO: Convert Command to DeviceCommandInternal and call enqueue_device_request_to_server
-                    trace!("Command dequeued but not yet processed (Phase 3 work)");
-                    // For now, just skip it and continue
-                    continue;
-                }
-                Ok(None) => {
-                    // Queue is empty, exit loop
-                    break;
-                }
-                Err(e) => {
-                    error!(error = %e, "Failed to dequeue command");
-                    return Err(e);
-                }
-            }
+        // Story E-0: drain the queue that the OPC UA write path actually feeds.
+        // `OpcUa::set_command` enqueues a `DeviceCommand` via
+        // `StorageBackend::queue_command`; those are returned by
+        // `get_pending_commands`. (The high-level `Command` / `dequeue_command`
+        // FIFO of Story 3-1 has no producer in the OPC UA flow and is left
+        // untouched here.)
+        //
+        // A storage-lock failure propagates (it aborts the poll cycle, matching
+        // the pre-existing `?` at the call site); a per-command enqueue failure
+        // is logged and reflected in the command's status but never aborts the
+        // batch — one undeliverable command must not block the others or the
+        // metrics poll.
+        let pending = self.backend.get_pending_commands()?;
+        if pending.is_empty() {
+            return Ok(());
         }
-
+        debug!(count = pending.len(), "Processing pending device commands");
+        for command in pending {
+            self.deliver_command(command).await;
+        }
         Ok(())
     }
 
-    /// Enqueues a device command to the ChirpStack server for transmission to a LoRaWAN device.
+    /// Delivers a single queued command to ChirpStack and records the outcome.
     ///
-    /// This method takes a device command from the local queue and sends it to the ChirpStack
-    /// server, which will then transmit it to the specified LoRaWAN device when the device
-    /// next communicates with the network.
-    ///
-    /// # Arguments
-    ///
-    /// * `command` - The device command containing the target device EUI, payload data,
-    ///   port number, and confirmation settings
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(())` - If the command was successfully enqueued on the server
-    /// * `Err(OpcGwError)` - If validation failed or the server request failed
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - The `f_port` is 0 or invalid (ports 0 are reserved for MAC commands)
-    /// - The device EUI is invalid (validated by the server)
-    /// - Server communication fails
-    /// - Client creation fails
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// use chrono::Utc;
-    /// use crate::storage::CommandStatus;
-    ///
-    /// let command = crate::storage::DeviceCommandInternal {
-    ///     id: 1,
-    ///     device_id: "1234567890abcdef".to_string(),
-    ///     payload: vec![0x01, 0x02, 0x03],
-    ///     f_port: 1,
-    ///     status: CommandStatus::Pending,
-    ///     created_at: Utc::now(),
-    ///     error_message: None,
-    /// };
-    ///
-    /// match chirpstack_client.enqueue_device_command(command).await {
-    ///     Ok(()) => println!("Command enqueued successfully"),
-    ///     Err(e) => eprintln!("Failed to enqueue command: {}", e),
-    /// }
-    /// ```
-    ///
-    /// # Panics
-    ///
-    /// The method currently panics if client creation fails. This should be handled
-    /// properly in production code.
-    // Reserved for future direct-enqueue paths (Epic 7+); retained even though no
-    // current call site exists.
-    #[allow(dead_code)]
-    async fn enqueue_device_request_to_server(
-        &self,
-        command: crate::storage::DeviceCommandInternal,
-    ) -> Result<(), OpcGwError> {
-        trace!("Enqueue device request");
-        if command.f_port < 1 {
-            return Err(OpcGwError::ChirpStack("Invalid fPort".to_string()));
-        }
-        // Create a new request
-        debug!("Create request");
-        // Determine if confirmed based on status (pending commands are not yet sent/confirmed)
-        let is_confirmed = command.status == crate::storage::CommandStatus::Sent;
-        let queue_item = DeviceQueueItem {
-            id: "".to_string(),
-            dev_eui: command.device_id.clone(),
-            confirmed: is_confirmed,
-            f_port: command.f_port as u32,
-            data: command.payload.clone(),
-            object: None,
-            is_pending: command.status == crate::storage::CommandStatus::Pending,
-            f_cnt_down: 0,
-            is_encrypted: false,
-            expires_at: None,
-        };
-        debug!(queue_item = ?queue_item, "Request created");
+    /// Resolves the command's device-class binding from the (SQLite-sourced)
+    /// `application_list` and delegates to [`deliver_one`]. Never returns an
+    /// error: every failure mode is logged and reflected in storage so the
+    /// caller's batch loop continues.
+    async fn deliver_command(&self, command: DeviceCommand) {
+        // Resolve the per-command class + confirmed flag from config BEFORE the
+        // await so the borrow of `self.config` does not cross the await point.
+        let (command_class, confirmed) =
+            match find_command_cfg(&self.config.application_list, &command.device_id, command.f_port)
+            {
+                Some(cfg) => (cfg.command_class.clone(), cfg.command_confirmed),
+                None => (None, false),
+            };
 
-        // Send request to server
-        let request = Request::new(EnqueueDeviceQueueItemRequest {
-            queue_item: Some(queue_item),
-            flush_queue: false,
-        });
-
-        let mut device_client = self.create_device_client().await?;
-        match device_client.enqueue(request).await {
-            Ok(response) => {
-                let inner_response = response.into_inner();
-                trace!(response = ?inner_response, "Response received");
-                Ok(())
-            }
-            Err(e) => {
-                error!(error = %e, "Error enqueueing device request");
-                Err(OpcGwError::ChirpStack(
-                    "Error enqueuing request".to_string(),
-                ))
-            }
-        }
+        deliver_one(
+            self,
+            &self.backend,
+            command_class.as_deref(),
+            confirmed,
+            &command,
+        )
+        .await;
     }
 
     /// Converts a `ListApplicationsResponse` into a vector of `ApplicationDetail`.
@@ -2640,6 +2563,236 @@ impl ChirpstackPoller {
                 }
             })
             .collect()
+    }
+}
+
+// ===========================================================================
+// Story E-0: downlink command path
+// ===========================================================================
+
+/// Form of a downlink payload handed to ChirpStack.
+///
+/// - `Object` carries a *semantic* command object (e.g. `{"command":"open"}`)
+///   that the device-profile codec's `encodeDownlink` turns into the wire bytes
+///   — opcgw stays model-agnostic.
+/// - `Raw` carries pre-encoded bytes for devices/commands not bound to a class
+///   (the legacy path, preserved as a fallback).
+#[derive(Debug, Clone, PartialEq)]
+enum DownlinkPayload {
+    Object(chirpstack_api::prost_types::Struct),
+    Raw(Vec<u8>),
+}
+
+/// Abstraction over the ChirpStack downlink-enqueue gRPC call.
+///
+/// Extracting it behind a trait lets the command-queue processing loop be
+/// unit-tested (success / failure outcomes, status transitions) without a live
+/// gRPC server. Production uses the [`ChirpstackPoller`] implementation.
+#[async_trait::async_trait]
+trait DownlinkSink: Send + Sync {
+    async fn enqueue_downlink(&self, item: DeviceQueueItem) -> Result<(), OpcGwError>;
+}
+
+#[async_trait::async_trait]
+impl DownlinkSink for ChirpstackPoller {
+    async fn enqueue_downlink(&self, item: DeviceQueueItem) -> Result<(), OpcGwError> {
+        trace!(queue_item = ?item, "Enqueue downlink to ChirpStack");
+        let request = Request::new(EnqueueDeviceQueueItemRequest {
+            queue_item: Some(item),
+            flush_queue: false,
+        });
+
+        // Client-creation failure is a handled error, never a panic.
+        let mut device_client = self.create_device_client().await?;
+        match device_client.enqueue(request).await {
+            Ok(response) => {
+                let inner_response = response.into_inner();
+                trace!(response = ?inner_response, "Downlink enqueued");
+                Ok(())
+            }
+            Err(e) => {
+                error!(error = %e, "Error enqueueing device request");
+                Err(OpcGwError::ChirpStack(
+                    "Error enqueuing request".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+/// Maps, enqueues, and records the outcome for one queued command.
+///
+/// Maps the canonical value to a semantic object (class-bound) or raw bytes
+/// (fallback), enqueues it via `sink`, and updates the command's status to
+/// `Sent` (success) or `Failed` (mapping or enqueue error). Never panics or
+/// returns an error: every failure mode is logged and reflected in storage so
+/// the batch loop continues. Factored out of [`ChirpstackPoller::deliver_command`]
+/// so the outcome logic is unit-testable with a stub [`DownlinkSink`].
+async fn deliver_one(
+    sink: &dyn DownlinkSink,
+    backend: &Arc<dyn StorageBackend>,
+    command_class: Option<&str>,
+    confirmed: bool,
+    command: &DeviceCommand,
+) {
+    let downlink = match map_command_to_downlink(command_class, &command.payload) {
+        Ok(d) => d,
+        Err(e) => {
+            error!(
+                error = %e,
+                device_id = %command.device_id,
+                command_id = command.id,
+                f_port = command.f_port,
+                "Command mapping failed; marking command Failed"
+            );
+            if let Err(e2) =
+                backend.update_command_status(command.id, CommandStatus::Failed, Some(e.to_string()))
+            {
+                error!(error = %e2, command_id = command.id, "Failed to mark command Failed");
+            }
+            return;
+        }
+    };
+
+    let item = build_queue_item(&command.device_id, command.f_port, &downlink, confirmed);
+    match sink.enqueue_downlink(item).await {
+        Ok(()) => {
+            debug!(
+                device_id = %command.device_id,
+                command_id = command.id,
+                f_port = command.f_port,
+                class = ?command_class,
+                "Command enqueued to ChirpStack"
+            );
+            if let Err(e) =
+                backend.update_command_status(command.id, CommandStatus::Sent, None)
+            {
+                error!(error = %e, command_id = command.id, "Failed to mark command Sent");
+            }
+        }
+        Err(e) => {
+            error!(
+                error = %e,
+                device_id = %command.device_id,
+                command_id = command.id,
+                "Failed to enqueue command; marking command Failed"
+            );
+            if let Err(e2) =
+                backend.update_command_status(command.id, CommandStatus::Failed, Some(e.to_string()))
+            {
+                error!(error = %e2, command_id = command.id, "Failed to mark command Failed");
+            }
+        }
+    }
+}
+
+/// Finds the command config for a queued command, keyed by `(device_id, f_port)`.
+///
+/// A queued [`DeviceCommand`] carries only `device_id` + `f_port`, not its
+/// class; this resolves the matching [`crate::config::DeviceCommandCfg`] from
+/// the (SQLite-sourced) `application_list` so the class binding can be applied.
+/// Returns the first command on that device whose `command_port` equals
+/// `f_port`.
+fn find_command_cfg<'a>(
+    apps: &'a [crate::config::ChirpStackApplications],
+    device_id: &str,
+    f_port: u8,
+) -> Option<&'a crate::config::DeviceCommandCfg> {
+    for app in apps {
+        for dev in &app.device_list {
+            if dev.device_id != device_id {
+                continue;
+            }
+            if let Some(cmds) = &dev.device_command_list {
+                if let Some(cfg) = cmds.iter().find(|c| {
+                    u8::try_from(c.command_port)
+                        .map(|p| p == f_port)
+                        .unwrap_or(false)
+                }) {
+                    return Some(cfg);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Maps a command's canonical OPC UA value to a downlink payload.
+///
+/// - No class (`None`) → raw-byte fallback: the bytes are sent verbatim.
+/// - `"valve"` class → semantic object: canonical `1` → `{"command":"open"}`,
+///   `0` → `{"command":"close"}`. Any other value is rejected so a bad write is
+///   visible rather than silently mis-sent.
+/// - Any other (unknown) class string is rejected — surfaces a config typo
+///   instead of silently falling back.
+fn map_command_to_downlink(
+    command_class: Option<&str>,
+    raw_payload: &[u8],
+) -> Result<DownlinkPayload, OpcGwError> {
+    match command_class {
+        None => Ok(DownlinkPayload::Raw(raw_payload.to_vec())),
+        Some("valve") => {
+            let value = raw_payload.first().copied().ok_or_else(|| {
+                OpcGwError::ChirpStack("valve command has empty payload".to_string())
+            })?;
+            let command = match value {
+                1 => "open",
+                0 => "close",
+                other => {
+                    return Err(OpcGwError::ChirpStack(format!(
+                        "valve command value {} out of range (expected 1=open or 0=close)",
+                        other
+                    )))
+                }
+            };
+            Ok(DownlinkPayload::Object(valve_command_object(command)))
+        }
+        Some(unknown) => Err(OpcGwError::ChirpStack(format!(
+            "unknown command_class '{}' (expected \"valve\" or none)",
+            unknown
+        ))),
+    }
+}
+
+/// Builds a `{ "command": <command> }` protobuf struct for the device codec.
+fn valve_command_object(command: &str) -> chirpstack_api::prost_types::Struct {
+    use chirpstack_api::prost_types::{value::Kind, Struct, Value};
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert(
+        "command".to_string(),
+        Value {
+            kind: Some(Kind::StringValue(command.to_string())),
+        },
+    );
+    Struct { fields }
+}
+
+/// Builds the ChirpStack `DeviceQueueItem` for a downlink.
+///
+/// For `Object`, `data` is empty and the device-profile codec produces the
+/// bytes; for `Raw`, `data` carries the bytes and `object` is `None`.
+fn build_queue_item(
+    device_id: &str,
+    f_port: u8,
+    payload: &DownlinkPayload,
+    confirmed: bool,
+) -> DeviceQueueItem {
+    let (data, object) = match payload {
+        DownlinkPayload::Object(s) => (Vec::new(), Some(s.clone())),
+        DownlinkPayload::Raw(bytes) => (bytes.clone(), None),
+    };
+    DeviceQueueItem {
+        id: String::new(),
+        dev_eui: device_id.to_string(),
+        confirmed,
+        f_port: f_port as u32,
+        data,
+        object,
+        // Output-only field on enqueue; ChirpStack manages pending state.
+        is_pending: false,
+        f_cnt_down: 0,
+        is_encrypted: false,
+        expires_at: None,
     }
 }
 
@@ -4080,5 +4233,235 @@ mod tests {
             5,
             "after send, receiver must observe the new retry value"
         );
+    }
+
+    // =======================================================================
+    // Story E-0: downlink command path
+    // =======================================================================
+
+    use chirpstack_api::prost_types::value::Kind as PbKind;
+
+    /// Stub [`DownlinkSink`] recording enqueued items and a configurable result.
+    struct MockSink {
+        fail: bool,
+        calls: std::sync::Mutex<Vec<DeviceQueueItem>>,
+    }
+
+    impl MockSink {
+        fn new(fail: bool) -> Self {
+            Self {
+                fail,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn calls(&self) -> Vec<DeviceQueueItem> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DownlinkSink for MockSink {
+        async fn enqueue_downlink(&self, item: DeviceQueueItem) -> Result<(), OpcGwError> {
+            self.calls.lock().unwrap().push(item);
+            if self.fail {
+                Err(OpcGwError::ChirpStack("mock enqueue failure".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn device_command(id: u64, device_id: &str, f_port: u8, payload: Vec<u8>) -> DeviceCommand {
+        DeviceCommand {
+            id,
+            device_id: device_id.to_string(),
+            payload,
+            f_port,
+            status: CommandStatus::Pending,
+            created_at: chrono::Utc::now(),
+            error_message: None,
+        }
+    }
+
+    fn object_command_string(item: &DeviceQueueItem) -> Option<String> {
+        let s = item.object.as_ref()?;
+        match s.fields.get("command")?.kind.as_ref()? {
+            PbKind::StringValue(v) => Some(v.clone()),
+            _ => None,
+        }
+    }
+
+    // ---- AC#8(a,b,f): canonical value -> semantic object mapping -----------
+
+    #[test]
+    fn map_valve_open_close_to_object() {
+        // value 1 -> open
+        let open = map_command_to_downlink(Some("valve"), &[1]).unwrap();
+        match open {
+            DownlinkPayload::Object(s) => {
+                assert_eq!(
+                    s.fields.get("command").and_then(|v| v.kind.clone()),
+                    Some(PbKind::StringValue("open".to_string()))
+                );
+            }
+            other => panic!("expected Object, got {:?}", other),
+        }
+        // value 0 -> close
+        let close = map_command_to_downlink(Some("valve"), &[0]).unwrap();
+        match close {
+            DownlinkPayload::Object(s) => {
+                assert_eq!(
+                    s.fields.get("command").and_then(|v| v.kind.clone()),
+                    Some(PbKind::StringValue("close".to_string()))
+                );
+            }
+            other => panic!("expected Object, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn map_valve_out_of_range_value_errors() {
+        let err = map_command_to_downlink(Some("valve"), &[5]).unwrap_err();
+        assert!(err.to_string().contains("out of range"), "got: {err}");
+    }
+
+    #[test]
+    fn map_unknown_class_errors() {
+        let err = map_command_to_downlink(Some("sprocket"), &[1]).unwrap_err();
+        assert!(err.to_string().contains("unknown command_class"), "got: {err}");
+    }
+
+    #[test]
+    fn map_no_class_is_raw_fallback() {
+        let raw = map_command_to_downlink(None, &[2]).unwrap();
+        assert_eq!(raw, DownlinkPayload::Raw(vec![2]));
+    }
+
+    // ---- AC#3,4: DeviceQueueItem shape ------------------------------------
+
+    #[test]
+    fn build_queue_item_object_has_empty_data() {
+        let payload = DownlinkPayload::Object(valve_command_object("open"));
+        let item = build_queue_item("devEUI-1", 10, &payload, true);
+        assert_eq!(item.dev_eui, "devEUI-1");
+        assert_eq!(item.f_port, 10);
+        assert!(item.confirmed);
+        assert!(item.data.is_empty(), "object path must send empty data");
+        assert_eq!(object_command_string(&item).as_deref(), Some("open"));
+    }
+
+    #[test]
+    fn build_queue_item_raw_has_no_object() {
+        let payload = DownlinkPayload::Raw(vec![0x01]);
+        let item = build_queue_item("devEUI-2", 7, &payload, false);
+        assert_eq!(item.f_port, 7);
+        assert!(!item.confirmed);
+        assert_eq!(item.data, vec![0x01]);
+        assert!(item.object.is_none(), "raw path must not set object");
+    }
+
+    // ---- AC#8(e): success path marks Sent ---------------------------------
+
+    #[tokio::test]
+    async fn deliver_one_success_marks_sent() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        backend
+            .queue_command(device_command(0, "dev-A", 10, vec![1]))
+            .unwrap();
+        let cmd = backend.get_pending_commands().unwrap()[0].clone();
+        let sink = MockSink::new(false);
+
+        deliver_one(&sink, &backend, Some("valve"), true, &cmd).await;
+
+        // No longer pending => marked Sent.
+        assert!(backend.get_pending_commands().unwrap().is_empty());
+        // Enqueued exactly one object downlink with the open command.
+        let calls = sink.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(object_command_string(&calls[0]).as_deref(), Some("open"));
+        assert!(calls[0].data.is_empty());
+    }
+
+    // ---- AC#8(d): failure path marks Failed, batch continues --------------
+
+    #[tokio::test]
+    async fn deliver_one_enqueue_failure_marks_failed() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        backend
+            .queue_command(device_command(0, "dev-B", 10, vec![0]))
+            .unwrap();
+        let cmd = backend.get_pending_commands().unwrap()[0].clone();
+        let sink = MockSink::new(true);
+
+        deliver_one(&sink, &backend, Some("valve"), false, &cmd).await;
+
+        // Enqueue was attempted...
+        assert_eq!(sink.calls().len(), 1);
+        // ...and the command is no longer Pending (it is Failed, not retried here).
+        assert!(backend.get_pending_commands().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn deliver_one_mapping_failure_does_not_enqueue() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        backend
+            .queue_command(device_command(0, "dev-C", 10, vec![9]))
+            .unwrap();
+        let cmd = backend.get_pending_commands().unwrap()[0].clone();
+        let sink = MockSink::new(false);
+
+        // Value 9 is out of range for the valve class -> mapping fails before enqueue.
+        deliver_one(&sink, &backend, Some("valve"), false, &cmd).await;
+
+        assert!(sink.calls().is_empty(), "must not enqueue on mapping failure");
+        assert!(backend.get_pending_commands().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn deliver_one_raw_fallback_sends_bytes() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        backend
+            .queue_command(device_command(0, "dev-D", 7, vec![42]))
+            .unwrap();
+        let cmd = backend.get_pending_commands().unwrap()[0].clone();
+        let sink = MockSink::new(false);
+
+        // No class => raw-byte fallback.
+        deliver_one(&sink, &backend, None, false, &cmd).await;
+
+        let calls = sink.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].data, vec![42]);
+        assert!(calls[0].object.is_none());
+        assert_eq!(calls[0].f_port, 7);
+        assert!(backend.get_pending_commands().unwrap().is_empty());
+    }
+
+    // ---- find_command_cfg: config lookup by (device_id, f_port) ------------
+
+    #[test]
+    fn find_command_cfg_matches_device_and_port() {
+        let apps = vec![crate::config::ChirpStackApplications {
+            application_id: "app-1".to_string(),
+            application_name: "App".to_string(),
+            device_list: vec![crate::config::ChirpstackDevice {
+                device_id: "dev-1".to_string(),
+                device_name: "Dev".to_string(),
+                read_metric_list: vec![],
+                device_command_list: Some(vec![crate::config::DeviceCommandCfg {
+                    command_id: 1,
+                    command_name: "valve".to_string(),
+                    command_confirmed: true,
+                    command_port: 10,
+                    command_class: Some("valve".to_string()),
+                }]),
+            }],
+        }];
+        let cfg = find_command_cfg(&apps, "dev-1", 10).expect("must match");
+        assert_eq!(cfg.command_class.as_deref(), Some("valve"));
+        assert!(cfg.command_confirmed);
+        // Wrong port / device => no match.
+        assert!(find_command_cfg(&apps, "dev-1", 11).is_none());
+        assert!(find_command_cfg(&apps, "dev-x", 10).is_none());
     }
 }

@@ -3505,6 +3505,7 @@
             command_id: 1,
             command_confirmed: false,
             command_port: 10,
+            command_class: None,
         }
     }
 
@@ -3662,6 +3663,7 @@
             command_id: 42,
             command_confirmed: true,
             command_port: 15,
+            command_class: None,
         };
         b.insert_command("app-1", "dev-1", &cmd).unwrap();
         let loaded = b.load_all_applications_config().unwrap();
@@ -3686,6 +3688,7 @@
             command_id: 99,
             command_confirmed: true,
             command_port: 20,
+            command_class: None,
         };
         b.update_command("app-1", "dev-1", &updated).unwrap();
         let loaded = b.load_all_applications_config().unwrap();

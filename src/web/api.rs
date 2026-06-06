@@ -3181,6 +3181,10 @@ pub async fn create_command(
         command_name: command_name.clone(),
         command_confirmed,
         command_port,
+        // E-0: the web command surface does not yet expose device-class
+        // binding (that arrives with the E-2 class registry). Web-created
+        // commands default to the generic raw-byte downlink path.
+        command_class: None,
     };
     state
         .sqlite_config

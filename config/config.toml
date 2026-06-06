@@ -248,6 +248,21 @@ application_name = "Example"
         metric_type = "Int"
         metric_unit = ""
 
+        # Optional command(s) the device can receive. An OPC UA write to the
+        # command node is delivered as a LoRaWAN downlink on `command_port`.
+        #
+        #   [[application.device.command]]
+        #   command_id = 1
+        #   command_name = "Valve"
+        #   command_confirmed = true
+        #   command_port = 10
+        #   # Optional device-class binding (Epic E). When omitted, the OPC UA
+        #   # value is sent verbatim as raw payload bytes (legacy path). When
+        #   # set to "valve", opcgw enqueues a *semantic* command object that
+        #   # the ChirpStack device-profile codec encodes into wire bytes:
+        #   # write 1 (open) / 0 (close) to the command node.
+        #   command_class = "valve"
+
 
 # Command Delivery Status Configuration
 #

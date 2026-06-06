@@ -24,6 +24,7 @@ const MIGRATION_V007: &str = include_str!("../../migrations/v007_typed_value_col
 const MIGRATION_V008: &str = include_str!("../../migrations/v008_typed_value_constraints.sql");
 const MIGRATION_V009: &str = include_str!("../../migrations/v009_application_config_tables.sql");
 const MIGRATION_V010: &str = include_str!("../../migrations/v010_singleton_config_tables.sql");
+const MIGRATION_V011: &str = include_str!("../../migrations/v011_command_class.sql");
 
 /// Run all pending migrations based on current schema version.
 ///
@@ -60,7 +61,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
 
     // Latest available schema version
     #[allow(dead_code)]
-    const LATEST_VERSION: u32 = 10;
+    const LATEST_VERSION: u32 = 11;
 
     // Apply migrations in order
     if current_version < 1 {
@@ -303,6 +304,28 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
         info!(version = 10, "Applied migration v010_singleton_config_tables");
     }
 
+    if current_version < 11 {
+        debug!("Applying migration v011_command_class");
+
+        conn.execute_batch(MIGRATION_V011)
+            .map_err(|e| {
+                OpcGwError::Database(format!(
+                    "Failed to execute migration v011_command_class: {}",
+                    e
+                ))
+            })?;
+
+        conn.pragma_update(None, "user_version", 11u32.to_string())
+            .map_err(|e| {
+                OpcGwError::Database(format!(
+                    "Failed to set schema version to 11: {}",
+                    e
+                ))
+            })?;
+
+        info!(version = 11, "Applied migration v011_command_class");
+    }
+
     // Verify final version
     let final_version: u32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -347,7 +370,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read version");
-        assert_eq!(version, 10, "Schema version should be 10 (latest — D-0 singleton config tables)");
+        assert_eq!(version, 11, "Schema version should be 11 (latest — E-0 command_class column)");
 
         // Verify tables were created (excluding sqlite_sequence which is created automatically for AUTOINCREMENT)
         let table_count: i32 = conn
@@ -376,7 +399,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read version");
-        assert_eq!(version, 10, "Version should still be 10 (latest)");
+        assert_eq!(version, 11, "Version should still be 11 (latest)");
 
         // Cleanup
         let _ = fs::remove_file(&path);
@@ -553,7 +576,7 @@ mod tests {
         let post_version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read post-migration version");
-        assert_eq!(post_version, 10, "Post-upgrade version must be 10 (v006 → v007 → v008 → v009 → v010 in one pass)");
+        assert_eq!(post_version, 11, "Post-upgrade version must be 11 (v006 → v007 → v008 → v009 → v010 → v011 in one pass)");
 
         // Row counts preserved
         let mv_count: i32 = conn
@@ -1330,7 +1353,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10, "run_migrations must have advanced user_version to 10 (v008 + v009 + v010)");
+        assert_eq!(version, 11, "run_migrations must have advanced user_version to 11 (v008 + v009 + v010 + v011)");
 
         // Sanity: row counts preserved through the recreate
         let mv_count: i32 = conn
@@ -1464,8 +1487,8 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(
-            version, 10,
-            "run_migrations must advance v006 -> v010 in a single call (real \
+            version, 11,
+            "run_migrations must advance v006 -> v011 in a single call (real \
              operator upgrade path)"
         );
 
@@ -1604,7 +1627,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("read version");
-        assert_eq!(version, 10, "fresh DB must land at v010 (D-0 singleton config tables)");
+        assert_eq!(version, 11, "fresh DB must land at v011 (E-0 command_class column)");
 
         for table in &["applications", "devices", "metrics", "commands"] {
             let exists: bool = conn
@@ -1634,7 +1657,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("read version");
-        assert_eq!(version, 10, "version must stay at 10 after second run");
+        assert_eq!(version, 11, "version must stay at 11 after second run");
 
         let _ = fs::remove_file(&path);
     }
@@ -1738,7 +1761,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("read version");
-        assert_eq!(version, 10, "version must stay at 10 after second run");
+        assert_eq!(version, 11, "version must stay at 11 after second run");
 
         let _ = fs::remove_file(&path);
     }

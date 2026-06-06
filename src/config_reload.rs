@@ -626,11 +626,13 @@ fn command_list_equal(
             command_name,
             command_confirmed,
             command_port,
+            command_class,
         } = *x;
         command_id == &y.command_id
             && command_name == &y.command_name
             && command_confirmed == &y.command_confirmed
             && command_port == &y.command_port
+            && command_class == &y.command_class
     })
 }
 

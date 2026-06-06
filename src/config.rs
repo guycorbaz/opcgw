@@ -700,6 +700,19 @@ pub struct DeviceCommandCfg {
     pub command_confirmed: bool,
     /// The port of the chirpstack device
     pub command_port: i32,
+    /// Optional device-class binding for the command (Epic E, Story E-0).
+    ///
+    /// When absent (the default), an OPC UA command write is delivered as raw
+    /// payload bytes on `command_port` — the legacy, model-specific path. When
+    /// set, the canonical OPC UA value is translated into a semantic command
+    /// object that the ChirpStack device-profile codec (`encodeDownlink`)
+    /// turns into the wire bytes, keeping opcgw model-agnostic.
+    ///
+    /// Only `"valve"` is recognised in E-0 (canonical value `1` -> open,
+    /// `0` -> close). Story E-2 generalises this into a device-class registry;
+    /// the field is the forward-compatible opt-in that registry will subsume.
+    #[serde(default)]
+    pub command_class: Option<String>,
 }
 
 /// SQLite storage configuration parameters.
@@ -3411,12 +3424,14 @@ mod tests {
                 command_name: "cmd_one".to_string(),
                 command_confirmed: false,
                 command_port: 10,
+                command_class: None,
             },
             DeviceCommandCfg {
                 command_id: 42,
                 command_name: "cmd_two".to_string(),
                 command_confirmed: true,
                 command_port: 20,
+                command_class: None,
             },
         ]);
 
@@ -3447,12 +3462,14 @@ mod tests {
                 command_name: "OpenValve".to_string(),
                 command_confirmed: false,
                 command_port: 10,
+                command_class: None,
             },
             DeviceCommandCfg {
                 command_id: 2,
                 command_name: "OpenValve".to_string(),
                 command_confirmed: true,
                 command_port: 20,
+                command_class: None,
             },
         ]);
 
@@ -3483,6 +3500,7 @@ mod tests {
                 command_name: "zero_cmd".to_string(),
                 command_confirmed: false,
                 command_port: 10,
+                command_class: None,
             }]);
 
         let result = config.validate();
@@ -3510,6 +3528,7 @@ mod tests {
                 command_name: "neg_cmd".to_string(),
                 command_confirmed: false,
                 command_port: 10,
+                command_class: None,
             }]);
 
         let result = config.validate();
@@ -3549,6 +3568,7 @@ mod tests {
                 command_name: "cmd_a".to_string(),
                 command_confirmed: false,
                 command_port: 10,
+                command_class: None,
             }]);
         config.application_list[a2].device_list[d2].device_command_list =
             Some(vec![DeviceCommandCfg {
@@ -3556,6 +3576,7 @@ mod tests {
                 command_name: "cmd_b".to_string(),
                 command_confirmed: false,
                 command_port: 10,
+                command_class: None,
             }]);
 
         let result = config.validate();
