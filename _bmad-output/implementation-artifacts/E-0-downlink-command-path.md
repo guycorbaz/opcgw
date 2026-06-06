@@ -86,6 +86,24 @@ This story wires step 2→3 so a write becomes a real LoRaWAN downlink, and swit
   - [x] SPDX headers; `cargo test`; `cargo clippy --all-targets -- -D warnings`.
 - [ ] **Task 8 — Real-world valve test (AC: 10)** — open AND close a physical Tonhe E20 from opcgw; record outcome in Completion Notes. **Gate for `done`.**
 
+### Review Findings (iter-1, 2026-06-06 — 3 layers: Blind Hunter + Edge Case Hunter + Acceptance Auditor)
+
+Decision-needed (resolved 2026-06-06):
+- [x] [Review][Decision] Queued command loses its identity — class resolved by `(device_id, f_port)` only [`src/chirpstack.rs` `find_command_cfg`] — **DEFERRED to E-2** (Guy, 2026-06-06): the E-2 class registry will carry command identity; harmless for the E-0 valve (single command on port 10). `DeviceCommand` carries no `command_id`/class, so a device with two same-port commands of different classes resolves to whichever appears first.
+- [x] [Review][Decision] At-least-once delivery — duplicate downlink / no retry [`src/chirpstack.rs` `deliver_one`] — **DEFERRED to E-3 + documented** (Guy, 2026-06-06): E-3 (command delivery confirmation) adds Sent→Confirmed tracking + retry; at-least-once is the accepted E-0 semantic (see Dev Notes "Delivery semantics"). If `update_command_status(Sent)` fails after a successful enqueue the row re-sends next cycle; transient enqueue failures go to `Failed` with no retry.
+
+Patch (all applied 2026-06-06; iter-2 re-review clean — mutation test confirmed the strengthened tests discriminate Sent vs Failed):
+- [x] [Review][Patch] Status-transition tests assert "not pending", not actual `Sent`/`Failed` [`src/chirpstack.rs` tests] — FIXED: added `InMemoryBackend::command_status_for_test` and rewrote `deliver_one_success_marks_sent` / `deliver_one_enqueue_failure_marks_failed` / `deliver_one_mapping_failure_does_not_enqueue` / `deliver_one_raw_fallback_sends_bytes` to assert the actual `Sent`/`Failed` status + error_message.
+- [x] [Review][Patch] AC#8(d) "batch continues / no poll abort" untested [`src/chirpstack.rs` tests] — FIXED: new `deliver_batch_continues_past_a_failure` (3 commands, middle one fails mapping → other two still enqueued + Sent, bad one Failed).
+- [x] [Review][Patch] AC#5 SQLite round-trip of a non-None `command_class` untested [`src/storage/sqlite_tests.rs`] — FIXED: new `test_e0_command_class_roundtrip` (insert `Some("valve")` → load asserts round-trip → update to `None` → reload asserts cleared).
+- [x] [Review][Patch] `valve` mapping silently truncates multi-byte payloads [`src/chirpstack.rs` `map_command_to_downlink`] — FIXED: now rejects `payload.len() != 1` (covers empty + multi-byte); new `map_valve_empty_payload_errors` + `map_valve_multibyte_payload_errors` tests.
+
+Deferred (pre-existing / out of E-0 scope):
+- [x] [Review][Defer] Command queue drains on the metrics-poll cadence, not `[command_delivery]` interval [`src/chirpstack.rs:1317`] — deferred, pre-existing (the `process_command_queue` call site predates E-0).
+- [x] [Review][Defer] In-memory backend `queue_command` skips the f_port/payload validation SQLite enforces (backend parity) [`src/storage/memory.rs:127`] — deferred, pre-existing test-fidelity gap; production (SQLite + `set_command`) validates.
+
+Dismissed (4): `is_pending: false` (correct — ChirpStack-managed output field); `command_port` 0/>255 silent no-match (rejected upstream by config validation + `set_command`); f_port validated at producer not send path (defense-in-depth, AC#7 met); AC#10 informational (correctly pending).
+
 ## Design Decisions (confirm before or during dev)
 
 These are genuine forks where the epic text and the code diverge. Recommendations below; confirm with Guy if unsure — they change the implementation shape.
@@ -146,6 +164,18 @@ Source: `docs/LoRa/TONHE Valve/chirpstack-codec.js` + `README.md`. LoRaWAN 868, 
   2. For the call-path tests (AC#8d, e), inject a trait object over `DeviceServiceClient::enqueue` (a small `trait DownlinkSink { async fn enqueue(&self, item: DeviceQueueItem, confirmed: bool) -> Result<...> }`) so a mock can record calls and simulate failure.
 - Keep the in-memory backend for status-transition assertions (`get_pending_commands` → process → assert `Sent`/`Failed`).
 - `cargo test` must stay green (current baseline ~1544 tests per Epic D close); add net-new tests, don't weaken existing ones.
+
+### Delivery semantics (E-0 — at-least-once; accepted, review D2)
+E-0 delivers commands **at-least-once**. A command leaves `Pending` only when its
+status is updated to `Sent`/`Failed` after the enqueue attempt. Two consequences,
+both accepted for E-0 and owned by **E-3** (delivery confirmation):
+- If `update_command_status(Sent)` fails *after* a successful enqueue (storage
+  error in the narrow window between enqueue and status-write), the row stays
+  `Pending` and is re-enqueued next poll cycle → a possible **duplicate
+  downlink** (duplicate actuation for a valve).
+- A transient enqueue failure goes straight to `Failed` with **no retry**.
+E-3 will add `Sent → Confirmed` tracking plus retry/idempotency. Do not add
+retry/idempotency in E-0.
 
 ### Out of scope (do NOT do here)
 - E-1 uplink ingestion (`StreamDeviceEvents`, normalized `ValveState`) — separate story.
@@ -264,3 +294,4 @@ Added:
 | Date | Change |
 |------|--------|
 | 2026-06-06 | Story E-0 implementation complete (Tasks 1–7). Downlink command path wired end-to-end: OPC UA command writes now reach the device via ChirpStack; valve-class commands send a semantic command object, generic commands keep the raw-byte path. Schema migration v011 adds `command_class`. 12 new tests; full suite 1577/0, clippy + xmllint clean. Status → review. **AC#10 real-world valve gate (Task 8) pending before `done`.** |
+| 2026-06-06 | Code review iter-1 (Blind Hunter + Edge Case Hunter + Acceptance Auditor). 2 decision-needed (D1 queued-command identity → deferred to E-2; D2 at-least-once delivery → deferred to E-3 + documented), 4 patches applied (3 test-strength gaps + valve multi-byte guard), 2 pre-existing defers logged, 4 dismissed. iter-2 focused re-review of the patches: clean (mutation test confirmed status-transition tests now discriminate). Full suite 1585/0; clippy clean. Review loop terminated (0 HIGH/MEDIUM open). Story remains `review` — blocked only on the AC#10 real-world valve gate before `done`. |

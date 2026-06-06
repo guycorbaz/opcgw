@@ -68,6 +68,22 @@ impl InMemoryBackend {
         }
     }
 
+    /// Test helper: read a queued `DeviceCommand`'s status and error message by
+    /// id. Returns `None` if no command with that id exists. Used by command-
+    /// delivery tests to assert the actual `Sent`/`Failed` transition (not just
+    /// "no longer pending").
+    #[cfg(test)]
+    pub fn command_status_for_test(
+        &self,
+        id: u64,
+    ) -> Option<(CommandStatus, Option<String>)> {
+        let commands = self.commands.lock().ok()?;
+        commands
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| (c.status, c.error_message.clone()))
+    }
+
     /// Creates a new InMemoryBackend with an optional command validator
     pub fn with_validator(validator: Option<Arc<CommandValidator>>) -> Self {
         Self {

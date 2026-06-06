@@ -2732,9 +2732,16 @@ fn map_command_to_downlink(
     match command_class {
         None => Ok(DownlinkPayload::Raw(raw_payload.to_vec())),
         Some("valve") => {
-            let value = raw_payload.first().copied().ok_or_else(|| {
-                OpcGwError::ChirpStack("valve command has empty payload".to_string())
-            })?;
+            // A valve command is a single canonical byte (1=open / 0=close).
+            // Reject empty or multi-byte payloads rather than silently
+            // truncating to the first byte.
+            if raw_payload.len() != 1 {
+                return Err(OpcGwError::ChirpStack(format!(
+                    "valve command expects a 1-byte payload, got {} byte(s)",
+                    raw_payload.len()
+                )));
+            }
+            let value = raw_payload[0];
             let command = match value {
                 1 => "open",
                 0 => "close",
@@ -4326,6 +4333,19 @@ mod tests {
     }
 
     #[test]
+    fn map_valve_empty_payload_errors() {
+        let err = map_command_to_downlink(Some("valve"), &[]).unwrap_err();
+        assert!(err.to_string().contains("1-byte payload"), "got: {err}");
+    }
+
+    #[test]
+    fn map_valve_multibyte_payload_errors() {
+        // Must reject rather than silently truncate to the first byte.
+        let err = map_command_to_downlink(Some("valve"), &[1, 99]).unwrap_err();
+        assert!(err.to_string().contains("1-byte payload"), "got: {err}");
+    }
+
+    #[test]
     fn map_unknown_class_errors() {
         let err = map_command_to_downlink(Some("sprocket"), &[1]).unwrap_err();
         assert!(err.to_string().contains("unknown command_class"), "got: {err}");
@@ -4364,17 +4384,23 @@ mod tests {
 
     #[tokio::test]
     async fn deliver_one_success_marks_sent() {
-        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let backend = Arc::new(InMemoryBackend::new());
+        let dyn_backend: Arc<dyn StorageBackend> = backend.clone();
         backend
             .queue_command(device_command(0, "dev-A", 10, vec![1]))
             .unwrap();
         let cmd = backend.get_pending_commands().unwrap()[0].clone();
         let sink = MockSink::new(false);
 
-        deliver_one(&sink, &backend, Some("valve"), true, &cmd).await;
+        deliver_one(&sink, &dyn_backend, Some("valve"), true, &cmd).await;
 
-        // No longer pending => marked Sent.
-        assert!(backend.get_pending_commands().unwrap().is_empty());
+        // The command's terminal status must actually be Sent (not merely
+        // "no longer pending") with no error message.
+        assert_eq!(
+            backend.command_status_for_test(cmd.id),
+            Some((CommandStatus::Sent, None)),
+            "success path must transition to Sent with no error"
+        );
         // Enqueued exactly one object downlink with the open command.
         let calls = sink.calls();
         assert_eq!(calls.len(), 1);
@@ -4382,28 +4408,35 @@ mod tests {
         assert!(calls[0].data.is_empty());
     }
 
-    // ---- AC#8(d): failure path marks Failed, batch continues --------------
+    // ---- AC#8(d): failure path marks Failed --------------------------------
 
     #[tokio::test]
     async fn deliver_one_enqueue_failure_marks_failed() {
-        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let backend = Arc::new(InMemoryBackend::new());
+        let dyn_backend: Arc<dyn StorageBackend> = backend.clone();
         backend
             .queue_command(device_command(0, "dev-B", 10, vec![0]))
             .unwrap();
         let cmd = backend.get_pending_commands().unwrap()[0].clone();
         let sink = MockSink::new(true);
 
-        deliver_one(&sink, &backend, Some("valve"), false, &cmd).await;
+        deliver_one(&sink, &dyn_backend, Some("valve"), false, &cmd).await;
 
         // Enqueue was attempted...
         assert_eq!(sink.calls().len(), 1);
-        // ...and the command is no longer Pending (it is Failed, not retried here).
-        assert!(backend.get_pending_commands().unwrap().is_empty());
+        // ...and the command's terminal status is Failed with an error message
+        // (asserting the actual Failed transition, not just "not pending").
+        let (status, err) = backend
+            .command_status_for_test(cmd.id)
+            .expect("command must still exist");
+        assert_eq!(status, CommandStatus::Failed, "enqueue failure must mark Failed");
+        assert!(err.is_some(), "Failed command must carry an error message");
     }
 
     #[tokio::test]
     async fn deliver_one_mapping_failure_does_not_enqueue() {
-        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let backend = Arc::new(InMemoryBackend::new());
+        let dyn_backend: Arc<dyn StorageBackend> = backend.clone();
         backend
             .queue_command(device_command(0, "dev-C", 10, vec![9]))
             .unwrap();
@@ -4411,15 +4444,20 @@ mod tests {
         let sink = MockSink::new(false);
 
         // Value 9 is out of range for the valve class -> mapping fails before enqueue.
-        deliver_one(&sink, &backend, Some("valve"), false, &cmd).await;
+        deliver_one(&sink, &dyn_backend, Some("valve"), false, &cmd).await;
 
         assert!(sink.calls().is_empty(), "must not enqueue on mapping failure");
-        assert!(backend.get_pending_commands().unwrap().is_empty());
+        let (status, err) = backend
+            .command_status_for_test(cmd.id)
+            .expect("command must still exist");
+        assert_eq!(status, CommandStatus::Failed, "mapping failure must mark Failed");
+        assert!(err.is_some(), "Failed command must carry an error message");
     }
 
     #[tokio::test]
     async fn deliver_one_raw_fallback_sends_bytes() {
-        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let backend = Arc::new(InMemoryBackend::new());
+        let dyn_backend: Arc<dyn StorageBackend> = backend.clone();
         backend
             .queue_command(device_command(0, "dev-D", 7, vec![42]))
             .unwrap();
@@ -4427,14 +4465,69 @@ mod tests {
         let sink = MockSink::new(false);
 
         // No class => raw-byte fallback.
-        deliver_one(&sink, &backend, None, false, &cmd).await;
+        deliver_one(&sink, &dyn_backend, None, false, &cmd).await;
 
         let calls = sink.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].data, vec![42]);
         assert!(calls[0].object.is_none());
         assert_eq!(calls[0].f_port, 7);
-        assert!(backend.get_pending_commands().unwrap().is_empty());
+        assert_eq!(
+            backend.command_status_for_test(cmd.id).map(|(s, _)| s),
+            Some(CommandStatus::Sent),
+            "raw fallback success must mark Sent"
+        );
+    }
+
+    // ---- AC#8(d): a failure mid-batch does not stop the other commands -----
+
+    #[tokio::test]
+    async fn deliver_batch_continues_past_a_failure() {
+        // Mirrors process_command_queue's loop: drain all pending, deliver each.
+        // One command fails mapping (valve value 9); the others must still be
+        // delivered and marked Sent — the batch is not aborted by one failure.
+        let backend = Arc::new(InMemoryBackend::new());
+        let dyn_backend: Arc<dyn StorageBackend> = backend.clone();
+        backend
+            .queue_command(device_command(0, "dev-1", 10, vec![1]))
+            .unwrap(); // ok -> open
+        backend
+            .queue_command(device_command(0, "dev-2", 10, vec![9]))
+            .unwrap(); // bad -> mapping failure
+        backend
+            .queue_command(device_command(0, "dev-3", 10, vec![0]))
+            .unwrap(); // ok -> close
+        let pending = backend.get_pending_commands().unwrap();
+        assert_eq!(pending.len(), 3);
+        let sink = MockSink::new(false);
+
+        for cmd in &pending {
+            deliver_one(&sink, &dyn_backend, Some("valve"), false, cmd).await;
+        }
+
+        // The two valid commands were enqueued (the failure did not abort the loop).
+        let calls = sink.calls();
+        assert_eq!(calls.len(), 2, "both valid commands must be enqueued");
+        let commands: Vec<_> = calls
+            .iter()
+            .filter_map(object_command_string)
+            .collect();
+        assert!(commands.contains(&"open".to_string()));
+        assert!(commands.contains(&"close".to_string()));
+
+        // Per-command terminal statuses: the two good ones Sent, the bad one Failed.
+        assert_eq!(
+            backend.command_status_for_test(pending[0].id).map(|(s, _)| s),
+            Some(CommandStatus::Sent)
+        );
+        assert_eq!(
+            backend.command_status_for_test(pending[1].id).map(|(s, _)| s),
+            Some(CommandStatus::Failed)
+        );
+        assert_eq!(
+            backend.command_status_for_test(pending[2].id).map(|(s, _)| s),
+            Some(CommandStatus::Sent)
+        );
     }
 
     // ---- find_command_cfg: config lookup by (device_id, f_port) ------------

@@ -3676,6 +3676,51 @@
         let _ = fs::remove_file(&path);
     }
 
+    /// Story E-0: a non-None `command_class` must round-trip through the SQLite
+    /// commands table (migration v011 column + insert/select wiring). Guards the
+    /// `?7` bind / `row.get(6)` read against a silent column-mismatch regression.
+    #[test]
+    fn test_e0_command_class_roundtrip() {
+        let path = temp_backend_path();
+        let b = SqliteBackend::new(&path).unwrap();
+        b.insert_application(&make_app("app-1", "App")).unwrap();
+        b.insert_device("app-1", &make_device("dev-1", "Dev")).unwrap();
+        let cmd = DeviceCommandCfg {
+            command_name: "Valve".to_string(),
+            command_id: 1,
+            command_confirmed: true,
+            command_port: 10,
+            command_class: Some("valve".to_string()),
+        };
+        b.insert_command("app-1", "dev-1", &cmd).unwrap();
+
+        let loaded = b.load_all_applications_config().unwrap();
+        let cmds = loaded[0].device_list[0].device_command_list.as_ref().unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(
+            cmds[0].command_class.as_deref(),
+            Some("valve"),
+            "command_class must round-trip through SQLite"
+        );
+
+        // And an update must change it (e.g. clear the class back to None).
+        let cleared = DeviceCommandCfg {
+            command_class: None,
+            ..cmd.clone()
+        };
+        b.update_command("app-1", "dev-1", &cleared).unwrap();
+        let reloaded = b.load_all_applications_config().unwrap();
+        let cmds2 = reloaded[0].device_list[0]
+            .device_command_list
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            cmds2[0].command_class, None,
+            "update_command must persist a cleared command_class"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
     #[test]
     fn test_c6_update_command() {
         let path = temp_backend_path();
