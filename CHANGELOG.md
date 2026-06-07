@@ -5,11 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — unreleased — Epic E: model-agnostic, class-aware device abstraction
+
+> **Status:** in development. `v2.2.0-rc1` is cut for **pre-production testing**:
+> the tag publishes a `2.2.0-rc1` Docker image (it does **not** move the
+> `latest` / `2.1` tags, so production deployments are unaffected) so Story E-0's
+> downlink command path can be validated against a real Tonhe E20 valve before
+> E-0 flips to `done`.
+
+### Added
+
+- **Downlink command path wired end-to-end** (Epic E / E-0). An OPC UA write to a
+  command node is now delivered to the device as a LoRaWAN downlink via
+  ChirpStack's `DeviceService.Enqueue`. The poller drains the command queue that
+  the OPC UA write path feeds and transitions each command `Pending → Sent`
+  (failures → `Failed`, batch continues; full delivery confirmation is E-3).
+- **`command_class` config field** on `[[application.device.command]]`. When set
+  to `"valve"`, opcgw enqueues a **semantic command object**
+  (`1` = open → `{"command":"open"}`, `0` = close → `{"command":"close"}`) and
+  the ChirpStack device-profile codec produces the wire bytes — keeping opcgw
+  model-agnostic. Absent = legacy raw-byte path (backward compatible).
+- **Schema migration v011** adds the `command_class` column to the `commands`
+  table (round-trips through the SQLite application store).
+
 ## [2.1.0] — 2026-05-28 — web-first configuration & auto-discovery
 
-> **Status:** prepared but **not yet tagged or published**. Docker images and the
-> Docker Hub Overview sync trigger on the `v2.1.0` git tag, which is held pending
-> an operator end-to-end smoke test against a live ChirpStack server.
+> **Status:** released — tagged `v2.1.0` and published to Docker Hub
+> (`2.1.0` / `2.1` / `latest`) and GHCR; GitHub release published.
 
 v2.1.0 changes how opcgw is configured. Through v2.0 you hand-edited
 `config/config.toml` and restarted the gateway. From v2.1.0 the gateway is

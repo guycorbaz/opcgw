@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/guycorbaz/opcgw/actions/workflows/ci.yml"><img src="https://github.com/guycorbaz/opcgw/actions/workflows/ci.yml/badge.svg" alt="build and test"></a>
-  <img src="https://img.shields.io/badge/version-2.1.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-2.2.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-green" alt="License">
   <img src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64-brightgreen" alt="Architectures">
 </p>
@@ -322,7 +322,7 @@ layout + dark mode as the dashboard. JSON contract at `GET /api/devices`.
 
 > **Status:** the payload-less metric-storage bug ([#108](https://github.com/guycorbaz/opcgw/issues/108)) was resolved by **Epic A** — opcgw now persists and serves real measurement values end-to-end (OPC UA Read / HistoryRead and the web dashboard all return typed values, not type-name strings). The gateway is suitable for production measurement collection.
 
-**Current Version:** 2.1.0 (prepared, pending publish) — web-first configuration & auto-discovery. Epic C (first-run setup wizard, ChirpStack inventory pickers, duplicate-prevention, drift view, TOML→SQLite config migration) and Epic D (SQLite singleton configuration + web editor) are complete on `main`. All configuration now lives in SQLite and is managed from the web UI; `config.toml` is a one-time bootstrap seed. The `v2.1.0` tag and Docker publish are held pending an operator end-to-end smoke test. See [`CHANGELOG.md`](./CHANGELOG.md) for full release notes.
+**Current Version:** 2.2.0 (in development — `v2.2.0-rc1` cut for pre-production testing). v2.1.0 shipped web-first configuration & auto-discovery (Epic C first-run setup wizard, ChirpStack inventory pickers, duplicate-prevention, drift view, TOML→SQLite config migration; Epic D SQLite singleton configuration + web editor). v2.2.0 brings **Epic E — the model-agnostic, class-aware device-abstraction layer**: Story E-0 wires the downlink command path end-to-end so an OPC UA command write is delivered to the device via ChirpStack (valve-class commands send a semantic command object, generic commands keep the raw-byte path). The `v2.2.0-rc1` tag publishes a `2.2.0-rc1` Docker image (it does **not** move the `latest`/`2.1` tags) for a real-world Tonhe E20 valve OPEN/CLOSE test before E-0 flips to `done`. See [`CHANGELOG.md`](./CHANGELOG.md) for full release notes.
 
 The roadmap is tracked in [`_bmad-output/implementation-artifacts/sprint-status.yaml`](./_bmad-output/implementation-artifacts/sprint-status.yaml). The table below mirrors the current state of every epic; story-level detail lives in the sprint status file and the per-story documents under `_bmad-output/implementation-artifacts/`.
 
