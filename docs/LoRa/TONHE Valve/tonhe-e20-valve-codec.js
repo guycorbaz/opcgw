@@ -37,6 +37,29 @@
 //       bit4 (0x10) set => LOW BATTERY  (e.g. 0xC1 -> 0xD1)
 //     fPort 0x0B (11):  current report period in minutes (0x01..0x3C)
 //
+// ---------------------------------------------------------------------------
+// DECODED FIELDS (fPort 0x0A status)
+//
+//   opcgw reads ChirpStack's numeric `metrics` map only (it ignores the
+//   `states` map), so the machine-readable fields are emitted as INTEGERS.
+//   In the device profile give each one kind = Gauge.
+//
+//     valveStatusCode  int   raw status byte, lossless (see table below)
+//     valvePosition    int   1 = open, 0 = closed, -1 = indeterminate
+//     moving           int   0 / 1
+//     fault            int   0 / 1
+//     lowBattery       int   0 / 1   (status-byte bit4)
+//
+//   String fields below are for the ChirpStack UI only; opcgw never sees them
+//   (leave them kind = String, or omit them from Measurements):
+//     state            string  open / opening / closed / closing / blocked / ...
+//     statusText       string  human-readable description
+//
+//   valveStatusCode values (low-battery variant = base + 16):
+//     193 (0xC1) open      194 (0xC2) opening   195 (0xC3) closed
+//     196 (0xC4) closing   197 (0xC5) blocked   198 (0xC6) fault_open
+//     199 (0xC7) fault_close                    255 (0xFF) unknown
+//
 //   Class A: the valve only receives a downlink right after it uplinks. It
 //   sleeps and (by default) wakes every 20 min to report status + pull any
 //   queued downlink; a button press triggers an immediate report. So a queued
@@ -64,37 +87,57 @@ function decodeUplink(input) {
   var warnings = [];
   var errors = [];
 
+  // Empty uplinks are normal LoRaWAN traffic: a confirmed-downlink ACK or a
+  // MAC-only frame arrives with no application payload. ChirpStack still runs
+  // the codec on it, so treat 0 bytes as a no-op (no decoded state) rather than
+  // an error -- erroring here just floods the device log with false UPLINK_CODEC
+  // failures on every open/close acknowledgement.
+  if (bytes.length === 0) {
+    data.empty = true;
+    warnings.push("empty uplink (no application payload, e.g. confirmed-downlink ACK) - nothing to decode");
+    return { data: data, warnings: warnings, errors: errors };
+  }
+
   if (bytes.length !== 1) {
     errors.push("expected a 1-byte payload, got " + bytes.length + " byte(s)");
     return { data: data, warnings: warnings, errors: errors };
   }
   var raw = bytes[0] & 0xff;
-  data.raw = "0x" + ("0" + raw.toString(16).toUpperCase()).slice(-2);
+  var rawHex = "0x" + ("0" + raw.toString(16).toUpperCase()).slice(-2);
 
   if (fPort === FPORT_VALVE) {
+    // NOTE: opcgw polls ChirpStack's numeric `metrics` map only; it ignores the
+    // `states` map where ChirpStack files string/boolean values. So every field
+    // opcgw needs is emitted as an INTEGER below (booleans -> 0/1). The two
+    // string fields (state, statusText) are kept for the ChirpStack UI only and
+    // are invisible to opcgw. Give the integer fields kind = Gauge in the device
+    // profile's Measurements so they land in the `metrics` map.
     if (raw === 0xff) {
+      data.valveStatusCode = raw; // 255 = unknown position (power-up / uncertain)
+      data.valvePosition = -1; // indeterminate
+      data.moving = 0;
+      data.fault = 0;
+      data.lowBattery = 0; // not defined for 0xFF
       data.state = "unknown";
       data.statusText = "unknown position (power-up / uncertain) - issue open or close";
-      data.valveOpen = null;
-      data.moving = false;
-      data.fault = false;
-      data.lowBattery = false; // not defined for 0xFF
       return { data: data, warnings: warnings, errors: errors };
     }
     var lowBattery = (raw & 0x10) !== 0; // bit4
     var base = raw & 0xef; // clear bit4 to recover the C1..C7 base code
     var s = STATUS[base];
     if (!s) {
-      errors.push("unknown status byte " + data.raw + " on fPort " + fPort);
+      errors.push("unknown status byte " + rawHex + " on fPort " + fPort);
       return { data: data, warnings: warnings, errors: errors };
     }
+    // --- integer fields (kind = Gauge) -> readable by opcgw -----------------
+    data.valveStatusCode = raw; // lossless: base C1..C7 code + low-battery bit (0x10)
+    data.valvePosition = s.valveOpen === true ? 1 : s.valveOpen === false ? 0 : -1; // 1=open 0=closed -1=indeterminate
+    data.moving = s.moving ? 1 : 0;
+    data.fault = s.fault ? 1 : 0;
+    data.lowBattery = lowBattery ? 1 : 0;
+    // --- string fields (ChirpStack UI only; ignored by opcgw) ---------------
     data.state = s.state;
     data.statusText = s.text;
-    data.valveOpen = s.valveOpen;
-    data.moving = s.moving;
-    data.fault = s.fault;
-    data.lowBattery = lowBattery;
-    data.battery = lowBattery ? "low" : "ok";
     return { data: data, warnings: warnings, errors: errors };
   }
 

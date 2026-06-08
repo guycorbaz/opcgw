@@ -8,7 +8,7 @@ Files in this folder:
 |------|------------|
 | `lorawan868 …通讯协议 20240417A1-中英文.xls` | Manufacturer communication protocol (source of truth) |
 | `A20-LoRaWAN-868规格书.pdf` | Hardware datasheet |
-| `chirpstack-codec.js` | **ChirpStack device-profile codec** (`decodeUplink` + `encodeDownlink`) |
+| `tonhe-e20-valve-codec.js` | **ChirpStack device-profile codec** (`decodeUplink` + `encodeDownlink`) |
 
 > This codec is a ChirpStack artifact, not part of the opcgw Rust binary. It
 > lets you read valve status as decoded fields and pilot the valve directly
@@ -31,6 +31,20 @@ Files in this folder:
 blocked-stop fault · `0xFF` unknown. **bit 4 (`0x10`) set = low battery**
 (e.g. `0xD1` = opened + low battery). fPort 11 uplink = current period (minutes).
 
+**Decoded fields.** opcgw reads ChirpStack's numeric `metrics` map only (it
+ignores the `states` map), so the machine-readable fields are emitted as
+**integers** — give each one kind = **Gauge** in the device profile's
+Measurements:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `valveStatusCode` | int | raw status byte, lossless — `193` open, `194` opening, `195` closed, `196` closing, `197` blocked, `198`/`199` fault, `255` unknown; low-battery variant = base + 16 |
+| `valvePosition` | int | `1` open, `0` closed, `-1` indeterminate |
+| `moving` | int | `0` / `1` |
+| `fault` | int | `0` / `1` |
+| `lowBattery` | int | `0` / `1` (status-byte bit 4) |
+| `state`, `statusText` | string | human-readable; **ChirpStack UI only** — invisible to opcgw |
+
 **Class A timing:** a downlink is delivered only after the valve uplinks. It
 sleeps and (default) wakes every ~20 min to report + pull queued downlinks; a
 button press triggers an immediate report. So a queued open/close lands on the
@@ -42,7 +56,7 @@ during testing.
 1. ChirpStack → **Device profiles → Add** (or edit the valve's profile).
 2. **MAC version** / **Regional parameters**: per the datasheet (EU868).
 3. **Codec** tab → Payload codec = **JavaScript functions** → paste the entire
-   contents of `chirpstack-codec.js`.
+   contents of `tonhe-e20-valve-codec.js`.
 
 ## 2. Add a valve (OTAA)
 
@@ -102,3 +116,31 @@ command.)
 > Commands **without** `command_class` keep the legacy behaviour: the OPC UA
 > value is sent verbatim as a single raw payload byte. For advanced/raw use the
 > codec also accepts a `{ "fPort": 10, "bytes": [1] }` passthrough.
+
+## 5. Reading valve status back into opcgw
+
+> **⚠️ Do not surface valve state through the metrics-poll path.** opcgw's
+> current poller calls ChirpStack `GetMetrics`, which **time-aggregates** every
+> uplink in a bucket (Gauge → average, Absolute → sum, Counter → delta). A valve
+> position is **discrete** — it has no meaningful average or sum — so a
+> close-cycle that emits `closing` then `closed` seconds apart aggregates to
+> nonsense (`valveStatusCode = 196 + 195 = 391`, `valvePosition = 1.5`). This is
+> structural: **no measurement kind makes an enumerated/instantaneous state
+> survive aggregation.** It happens to *look* right only when exactly one uplink
+> falls in a bucket (valve idle).
+>
+> The same flaw applies in principle to **every** point — a SCADA tag is a
+> *last-known value + source timestamp + quality*, and aggregation/trending is
+> the **SCADA's** job, not the gateway's. Analog sensors merely hide it (a short
+> average ≈ the last reading).
+>
+> **Correct path — Story E-1:** ingest the uplink **event stream**
+> (`StreamDeviceEvents`) and store the **last decoded value** of each field with
+> the device's own timestamp — no aggregation. Until E-1 lands, opcgw cannot
+> faithfully represent valve state; tracked as a **2.2.0 release blocker**
+> (see Epic E / issue #129).
+
+The integer fields the codec emits (`valveStatusCode`, `valvePosition`,
+`moving`, `fault`, `lowBattery`) are the values E-1 will read from each event —
+they are correct *at the source*; the corruption is introduced only by the
+metrics-poll aggregation in front of them.

@@ -128,7 +128,7 @@ These are genuine forks where the epic text and the code diverge. Recommendation
 - E-3 stub (`CommandStatusPoller`) lives ~`src/chirpstack.rs:2705`; **do not implement it here** — only the Pending→Sent transition belongs to E-0.
 
 ### Tonhe E20 valve protocol (the concrete driver)
-Source: `docs/LoRa/TONHE Valve/chirpstack-codec.js` + `README.md`. LoRaWAN 868, **Class A**, single-byte.
+Source: `docs/LoRa/TONHE Valve/tonhe-e20-valve-codec.js` + `README.md`. LoRaWAN 868, **Class A**, single-byte.
 - **Downlink fPort 10:** `0x01` = OPEN, `0x02` = CLOSE. The codec's `encodeDownlink` accepts a friendly object: `{"command":"open"}` → `{fPort:10, bytes:[0x01]}`; `{"command":"close"}` → `{fPort:10, bytes:[0x02]}`. (Also `set_period`/`query_period`/`poll`, and a raw `{fPort,bytes}` passthrough — out of E-0 scope.)
 - **Class A timing:** a queued downlink is delivered only on the valve's next wake-up (default ~20 min) or after a SET-button press. For the AC#10 test, **press SET** on the valve to force immediate delivery; do not interpret a delayed actuation as a failure.
 - Config for a valve command: `command_port = 10`, `command_class = "valve"`; operator writes `1` (open) / `0` (close) to the OPC UA command node.
@@ -191,7 +191,7 @@ retry/idempotency in E-0.
 ### References
 - [Source: _bmad-output/planning-artifacts/epics.md#Epic E: Model-Agnostic, Class-Aware Device-Abstraction Layer] (lines 1360-1395, esp. Story E.0 scope + locked design decisions + feasibility baseline)
 - [Source: _bmad-output/planning-artifacts/epics.md#Epic E — Story Acceptance Criteria] (lines 1439-1447)
-- [Source: docs/LoRa/TONHE Valve/chirpstack-codec.js] (protocol summary + `encodeDownlink`)
+- [Source: docs/LoRa/TONHE Valve/tonhe-e20-valve-codec.js] (protocol summary + `encodeDownlink`)
 - [Source: docs/LoRa/TONHE Valve/README.md] (test-from-ChirpStack-UI procedure; §4 maps to opcgw)
 - [Source: src/chirpstack.rs:2430,2511,1317] (the unwired path)
 - [Source: src/opc_ua.rs:1935] (`set_command` producer)
