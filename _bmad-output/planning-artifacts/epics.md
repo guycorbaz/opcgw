@@ -1371,7 +1371,8 @@ So that the operator contract is unambiguous: edit SQLite via the web UI (or `se
 - Status surface: normalized state + flags (valve class: `ValveState` Closed/Open/Opening/Closing/Fault/Unknown + `Moving`/`Fault`/`LowBattery`), identical across models.
 - Per-model protocol lives entirely in the ChirpStack codec; opcgw stays model-agnostic.
 - Downlink mechanism: opcgw enqueues a **semantic object** (`{"command":"open"}`) so the codec encodes the bytes — not raw-byte enqueue.
-- Uplink mechanism: **Route B** — consume ChirpStack's decoded uplink EVENTS via gRPC `InternalService.StreamDeviceEvents` (reusing inventory stream code), NOT the metrics poll, NOT MQTT. (Route A — codec emits numeric state-code via metrics poll — was rejected: time-bucketed aggregation lags/averages the transient opening/closing/fault states that matter for sleepy event-driven valves.)
+- Uplink mechanism: **Route B** — consume ChirpStack's decoded uplink EVENTS via gRPC `InternalService.StreamDeviceEvents` (reusing inventory stream code), NOT the metrics poll, NOT MQTT. (Route A — codec emits numeric state-code via metrics poll — was rejected and **empirically disproven 2026-06-08**: `GetMetrics` aggregation produced impossible values (`valveStatusCode=391` sum, `valvePosition=1.5` avg). No measurement kind survives aggregation; see #130.)
+- **No gateway-side aggregation (locked 2026-06-08, #130):** opcgw exposes the **raw last-known value** of every measurement + the device's **source timestamp** + **quality**; aggregation/trending is the SCADA's responsibility, never the gateway's. The metrics poll (`GetMetrics`) time-aggregates (Gauge=avg, Absolute=sum, Counter=delta) and is therefore unsuitable as the value path. This generalizes Route B from valve status to **all** measurements; see Story E.1.
 
 **Feasibility baseline (verified in code 2026-06-06):** the downlink command path is built but UNWIRED — `process_command_queue` (`src/chirpstack.rs:2430`, called each poll at `:1317`) dequeues each command and silently discards it behind a "Story 4-1 Phase 3" TODO (`:2437-2442`); `enqueue_device_request_to_server` (`:2511`) is `#[allow(dead_code)]` with zero call sites and currently builds raw bytes (`data`) not an object (`:2523-2534`). The decoded uplink object cannot flow through the metrics poll (`GetDeviceMetrics`, `:2376`; string metrics unsupported at `:1733`) — it is only available via `StreamDeviceEvents`, already read for inventory at `src/chirpstack_inventory.rs:373` but not in the runtime poller.
 
@@ -1394,20 +1395,25 @@ So that I can pilot an actuator (e.g. open/close a valve) from the OPC UA / SCAD
 - Integration tests: a queued command is enqueued to a mock/stub ChirpStack `DeviceService` with the expected object + fPort; the failure path; the canonical-value → object mapping; the raw-byte fallback still works.
 - **Real-world validation gate** (per the main-deadlock incident doctrine, memory `incident_main_deadlock_2026_05_20`): OPEN/CLOSE one of the 3 Tonhe E20 valves from opcgw end-to-end before E-0 flips to done.
 
-### Story E.1: gRPC Uplink-Event Ingestion (normalized status)
+### Story E.1: Uplink-Event Ingestion — last-known value for all measurements (no aggregation)
 
 As an **opcgw operator**,
-I want the gateway to read ChirpStack's decoded uplink events in real time and expose normalized device status on OPC UA,
-So that I see device state (e.g. valve open/closed/fault/low-battery) promptly and identically across models.
+I want the gateway to ingest ChirpStack's decoded uplink events and expose each device value as its last-known value with the device's source timestamp,
+So that OPC UA reflects true device state (discrete and analog) without gateway-side aggregation — the SCADA does any averaging/trending.
 
-**Scope summary:**
+**Scope summary (elevated per #130; full ACs drafted at `bmad-create-story E-1`):**
 
-- New runtime task consuming `InternalService.StreamDeviceEvents` (reuse the `src/chirpstack_inventory.rs:373` `stream_recent_device_uplinks` patterns), running alongside the metrics poller; reconnect/backoff on stream drop mirroring the Epic 4 auto-recovery resilience.
-- For class-bound devices, map decoded-object fields → canonical status variables in Storage (valve: `ValveState` + `Moving`/`Fault`/`LowBattery`). Storage already supports `MetricType::String`; this is the first poller-side path that populates it.
+- New runtime task consuming `InternalService.StreamDeviceEvents` (reuse the `src/chirpstack_inventory.rs:373` `stream_recent_device_uplinks` patterns), running alongside the metrics path; reconnect/backoff on stream drop mirroring the Epic 4 auto-recovery resilience.
+- For **every** decoded field, store the **last value** with the device's **source timestamp** (event time, not poll time) — this is the canonical value path for all measurements, not just valve status. Storage already supports `MetricType::String`; this is the first poller-side path that populates it.
+- For class-bound devices, additionally map decoded-object fields → canonical status variables (valve: `ValveState` + `Moving`/`Fault`/`LowBattery`).
+- **No aggregation on the value path.** The metrics poll (`GetMetrics`) is **demoted to a backfill** — initial value before the first stream event, and re-sync after a stream reconnect — or retired; opcgw never exposes an averaged/summed value on OPC UA.
+- Migrate existing analog metric mappings (temperature, water level, flow) from GetMetrics measurement names to decoded-object field names; validate against the live ChirpStack (some values may have no uplink object and must keep the backfill).
+- OPC UA quality (Good/Uncertain/Bad) driven by real device-report age (consistent with Story 5-2).
 - gRPC, **NOT** MQTT — does not reopen `CR-EPIC-C-MQTT`.
-- OPC UA exposes the normalized status variables; stale-data / status-code handling consistent with Story 5-2.
 - Config to enable/scope the stream (which applications/devices) to avoid unbounded event volume.
-- Tests: a stream event with a decoded object → canonical Storage write → OPC UA variant; reconnect after drop; non-class device passthrough.
+- May split into **E-1a** (stream mechanism + last-value store + valve class) and **E-1b** (migrate all mappings, demote poll) if oversized.
+- Tests: stream event → last-value Storage write with source timestamp → OPC UA variant; reconnect after drop; quality reflects report age; no aggregation anywhere in the value path; backfill still serves a value before the first event.
+- **Release gate:** E-1 must land before tagging **v2.2.0** stable (#130).
 
 ### Story E.2: Device-Class Registry
 
@@ -1443,6 +1449,8 @@ So that I know whether a command actually reached the device.
 **Then** opcgw enqueues the corresponding semantic command object to ChirpStack (E-0), the device profile's codec encodes the model-specific bytes, the valve actuates, and the resulting decoded status uplink flows back via the gRPC event stream (E-1) to update the normalized `ValveState` + flags on OPC UA — all without the OPC UA client knowing the model's raw protocol.
 **And** adding another valve model requires only a new ChirpStack codec (zero opcgw change), adding another device kind requires only a new class-registry entry (E-2), and command delivery is reflected in command status (E-3).
 **And** generic devices not bound to any class continue to expose arbitrary numeric metrics + raw writable command nodes exactly as before Epic E.
+
+**Release gate (#130):** E-1 must land before tagging **v2.2.0** stable. opcgw must expose raw last-known values with the device's source timestamp and no aggregation (aggregation is the SCADA's job); v2.2.0-rc1 must not be promoted to production with gateway-side aggregation in the value path.
 
 **Vision capture reference:** GitHub issue #129; memory `project_device_abstraction_valves.md`; the 2026-06-06 valve-piloting design dialogue (AskUserQuestion decisions: one command node `1`/`0`, normalized `ValveState` + flags, per-model mapping in the ChirpStack codec, Route B gRPC uplink ingestion).
 
