@@ -28,6 +28,7 @@ use crate::chirpstack_internal_proto::api::internal_service_client::InternalServ
 use crate::chirpstack_internal_proto::api::{LogItem, StreamDeviceEventsRequest};
 use crate::storage::{BatchMetricWrite, MetricType, StorageBackend};
 use chrono::{DateTime, Utc};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio_util::sync::CancellationToken;
@@ -41,6 +42,11 @@ use tracing::{debug, error, info, warn};
 const RECONNECT_BACKOFF_START: Duration = Duration::from_secs(1);
 /// Maximum reconnect backoff (capped exponential).
 const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// After this many uplink events, warn (once per field) about configured
+/// read_metrics that have never appeared in the device's decoded object —
+/// they will not populate via the stream (e.g. DevStatus-sourced battery, or a
+/// `chirpstack_metric_name` that doesn't match the codec's field name).
+const ORPHAN_WARN_AFTER_EVENTS: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Pure mapping — the testable core (no gRPC, no I/O).
@@ -115,6 +121,23 @@ pub(crate) fn map_uplink_to_writes(
         }
     }
     writes
+}
+
+/// Configured `chirpstack_metric_name`s that have not yet been observed in any
+/// uplink object (`seen`) and have not already been warned about (`warned`).
+/// Used to flag metrics that won't populate via the stream (e.g. battery from
+/// DevStatus, or a codec field-name mismatch).
+fn newly_orphaned(
+    metrics: &[ReadMetric],
+    seen: &HashSet<String>,
+    warned: &HashSet<String>,
+) -> Vec<String> {
+    metrics
+        .iter()
+        .map(|m| &m.chirpstack_metric_name)
+        .filter(|name| !seen.contains(*name) && !warned.contains(*name))
+        .cloned()
+        .collect()
 }
 
 /// True if `device_id` has a command bound to the valve class
@@ -242,6 +265,7 @@ fn grpc_endpoint(server_address: &str) -> String {
 /// stream closes, errors, or `cancel` fires. Returns `Ok(())` on a clean
 /// close / cancellation, `Err` on a connection or stream error (the caller
 /// reconnects with backoff).
+#[allow(clippy::too_many_arguments)]
 async fn connect_and_stream(
     server_address: &str,
     api_token: &str,
@@ -249,6 +273,9 @@ async fn connect_and_stream(
     metrics: &[ReadMetric],
     backend: &Arc<dyn StorageBackend>,
     cancel: &CancellationToken,
+    seen: &mut HashSet<String>,
+    warned: &mut HashSet<String>,
+    events_seen: &mut u32,
 ) -> Result<(), OpcGwStreamError> {
     let channel = Channel::from_shared(grpc_endpoint(server_address))
         .map_err(|e| OpcGwStreamError(format!("invalid server_address: {}", e)))?
@@ -283,6 +310,31 @@ async fn connect_and_stream(
                 match msg {
                     Ok(Some(item)) => {
                         if let Some((event_time, object)) = parse_up_event(&item) {
+                            // Track which configured fields this device actually
+                            // emits, and warn (once per field) about ones that
+                            // never appear — they won't populate via the stream.
+                            *events_seen = events_seen.saturating_add(1);
+                            for m in metrics {
+                                if object
+                                    .get(&m.chirpstack_metric_name)
+                                    .map(|v| !v.is_null())
+                                    .unwrap_or(false)
+                                {
+                                    seen.insert(m.chirpstack_metric_name.clone());
+                                }
+                            }
+                            if *events_seen >= ORPHAN_WARN_AFTER_EVENTS {
+                                for name in newly_orphaned(metrics, seen, warned) {
+                                    warn!(
+                                        event = "uplink_metric_never_seen",
+                                        device_id = %device_id,
+                                        metric = %name,
+                                        events_observed = *events_seen,
+                                        "configured read_metric absent from every uplink object so far; it will not populate via the stream (DevStatus-sourced battery, or chirpstack_metric_name vs codec field-name mismatch)"
+                                    );
+                                    warned.insert(name);
+                                }
+                            }
                             let writes = map_uplink_to_writes(device_id, metrics, &object, event_time);
                             if !writes.is_empty() {
                                 let n = writes.len();
@@ -328,6 +380,11 @@ async fn run_device_stream(
     cancel: CancellationToken,
 ) {
     let mut backoff = RECONNECT_BACKOFF_START;
+    // Orphan-tracking state persists across reconnects so the "never seen"
+    // warning isn't re-evaluated from scratch on every stream drop.
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut warned: HashSet<String> = HashSet::new();
+    let mut events_seen: u32 = 0;
     loop {
         if cancel.is_cancelled() {
             return;
@@ -339,6 +396,9 @@ async fn run_device_stream(
             &metrics,
             &backend,
             &cancel,
+            &mut seen,
+            &mut warned,
+            &mut events_seen,
         )
         .await
         {
@@ -517,6 +577,27 @@ mod tests {
         let object = json!({ "other": 1 });
         let writes = map_uplink_to_writes("dev1", &metrics, &object, fixed_time());
         assert!(writes.is_empty(), "absent field leaves last value untouched");
+    }
+
+    #[test]
+    fn newly_orphaned_flags_unseen_unwarned_fields() {
+        let metrics = vec![
+            rm("Status", "valveStatusCode", OpcMetricTypeConfig::Int),
+            rm("Battery", "batteryLevel", OpcMetricTypeConfig::Int),
+            rm("State", "state", OpcMetricTypeConfig::String),
+        ];
+        let mut seen = HashSet::new();
+        seen.insert("valveStatusCode".to_string());
+        seen.insert("state".to_string());
+        let mut warned = HashSet::new();
+        // batteryLevel never seen → orphaned.
+        assert_eq!(
+            newly_orphaned(&metrics, &seen, &warned),
+            vec!["batteryLevel".to_string()]
+        );
+        // already warned → not re-reported.
+        warned.insert("batteryLevel".to_string());
+        assert!(newly_orphaned(&metrics, &seen, &warned).is_empty());
     }
 
     #[test]
