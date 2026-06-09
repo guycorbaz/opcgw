@@ -162,6 +162,23 @@ pub struct ChirpstackPollerConfig {
     /// Can be overridden via env-var: `OPCGW_CHIRPSTACK__INVENTORY_UPLINK_MAX_WAIT_SECONDS`.
     #[serde(default = "default_inventory_uplink_max_wait_seconds")]
     pub inventory_uplink_max_wait_seconds: u64,
+
+    /// Story E-1 (E-1b, #130): when `true`, opcgw ingests **all** devices'
+    /// values from the uplink **event stream** (raw last-known value with the
+    /// device's source timestamp, no aggregation) and the metrics poll stops
+    /// writing their values. When `false` (default), only **valve-class**
+    /// devices stream (E-1a) and other devices stay on the aggregated
+    /// `GetMetrics` poll. This is the fleet-wide switch to fully de-aggregate
+    /// the read path for a v2.2.0 deployment.
+    ///
+    /// Restart-required: the streamed device set is fixed at startup. Metrics
+    /// whose `chirpstack_metric_name` is not present in a device's decoded
+    /// uplink object (e.g. DevStatus-sourced battery) will not populate via the
+    /// stream — verify per device before enabling fleet-wide.
+    ///
+    /// Override via env-var: `OPCGW_CHIRPSTACK__STREAM_ALL_DEVICES`.
+    #[serde(default)]
+    pub stream_all_devices: bool,
 }
 
 /// OPC UA server configuration parameters.
@@ -4395,6 +4412,7 @@ mod tests {
             list_page_size: 100,
             inventory_cache_ttl_seconds: 60,
             inventory_uplink_max_wait_seconds: 5,
+            stream_all_devices: false,
         };
         let formatted = format!("{:?}", cfg);
         assert!(

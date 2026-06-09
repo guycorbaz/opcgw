@@ -91,6 +91,17 @@ delay = 10
 # Page size for pagination in list API calls (Story 4-3)
 # Default: 100 (valid range: 1-1000)
 list_page_size = 100
+# Story E-1 (E-1b, #130): de-aggregate the read path for ALL devices.
+# When true, opcgw ingests every device's values from the uplink EVENT STREAM
+# (raw last-known value + device source timestamp, NO aggregation) and the
+# metrics poll stops writing them. When false (default), only valve-class
+# devices (command_class = "valve") stream; other devices stay on the
+# aggregated GetMetrics poll.
+# Restart-required. NOTE: metrics not present in a device's decoded uplink
+# object (e.g. DevStatus-sourced battery) will not populate via the stream —
+# verify each device's codec output before enabling fleet-wide.
+# Override via env-var: OPCGW_CHIRPSTACK__STREAM_ALL_DEVICES
+#stream_all_devices = false
 
 
 # OPC UA parameters

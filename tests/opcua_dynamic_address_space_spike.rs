@@ -131,6 +131,7 @@ fn dyn_spike_test_config(
             list_page_size: 100,
             inventory_cache_ttl_seconds: 60,
             inventory_uplink_max_wait_seconds: 5,
+            stream_all_devices: false,
         },
         opcua: OpcUaConfig {
             application_name: "opcgw-spike-9-0".to_string(),

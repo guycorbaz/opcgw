@@ -134,8 +134,38 @@ pub(crate) fn device_is_valve_class(config: &AppConfig, device_id: &str) -> bool
         .unwrap_or(false)
 }
 
-/// Collect the (device_id, read_metric_list) pairs that E-1a should stream:
-/// every valve-class device with at least one configured read_metric.
+/// Pure routing predicate: should this device's values come from the uplink
+/// event stream (vs the aggregated metrics poll)? A device streams if it has
+/// metrics AND (it is valve-class — E-1a — OR the fleet-wide
+/// `stream_all_devices` switch is on — E-1b).
+pub(crate) fn should_stream(
+    is_valve_class: bool,
+    stream_all_devices: bool,
+    has_metrics: bool,
+) -> bool {
+    has_metrics && (is_valve_class || stream_all_devices)
+}
+
+/// True if `device_id`'s values are served by the event stream — and therefore
+/// must be SKIPPED by the metrics poll so no aggregated value reaches OPC UA.
+pub(crate) fn device_is_streamed(config: &AppConfig, device_id: &str) -> bool {
+    let has_metrics = config
+        .application_list
+        .iter()
+        .flat_map(|app| app.device_list.iter())
+        .find(|dev| dev.device_id == device_id)
+        .map(|dev| !dev.read_metric_list.is_empty())
+        .unwrap_or(false);
+    should_stream(
+        device_is_valve_class(config, device_id),
+        config.chirpstack.stream_all_devices,
+        has_metrics,
+    )
+}
+
+/// Collect the (device_id, read_metric_list) pairs to stream: valve-class
+/// devices (E-1a) plus — when `stream_all_devices` is set (E-1b) — every
+/// device with at least one configured read_metric.
 fn streamed_devices(config: &AppConfig) -> Vec<(String, Vec<ReadMetric>)> {
     let mut out = Vec::new();
     for app in &config.application_list {
@@ -143,7 +173,11 @@ fn streamed_devices(config: &AppConfig) -> Vec<(String, Vec<ReadMetric>)> {
             if dev.read_metric_list.is_empty() {
                 continue;
             }
-            if device_is_valve_class(config, &dev.device_id) {
+            if should_stream(
+                device_is_valve_class(config, &dev.device_id),
+                config.chirpstack.stream_all_devices,
+                true, // non-empty read_metric_list checked above
+            ) {
                 out.push((dev.device_id.clone(), dev.read_metric_list.clone()));
             }
         }
@@ -355,7 +389,8 @@ pub async fn run_event_ingestion(
     if devices.is_empty() {
         info!(
             event = "uplink_ingestion_idle",
-            "no valve-class devices configured; uplink event ingestion idle (E-1a scope)"
+            stream_all_devices = config.chirpstack.stream_all_devices,
+            "no devices to stream; uplink event ingestion idle (set command_class=\"valve\" or chirpstack.stream_all_devices=true)"
         );
         // Still honour cancellation so the task exits cleanly on shutdown.
         cancel.cancelled().await;
@@ -367,7 +402,8 @@ pub async fn run_event_ingestion(
     info!(
         event = "uplink_ingestion_start",
         device_count = devices.len(),
-        "starting uplink event ingestion (E-1a: valve-class devices)"
+        stream_all_devices = config.chirpstack.stream_all_devices,
+        "starting uplink event ingestion (valve-class + stream_all_devices)"
     );
 
     let mut handles = Vec::with_capacity(devices.len());
@@ -481,6 +517,19 @@ mod tests {
         let object = json!({ "other": 1 });
         let writes = map_uplink_to_writes("dev1", &metrics, &object, fixed_time());
         assert!(writes.is_empty(), "absent field leaves last value untouched");
+    }
+
+    #[test]
+    fn should_stream_routing() {
+        // valve-class always streams (E-1a), regardless of the fleet switch.
+        assert!(should_stream(true, false, true));
+        assert!(should_stream(true, true, true));
+        // non-valve streams only when the fleet switch is on (E-1b).
+        assert!(!should_stream(false, false, true), "default: non-valve stays on poll");
+        assert!(should_stream(false, true, true), "stream_all_devices migrates non-valve");
+        // no metrics → never streamed (nothing to write).
+        assert!(!should_stream(false, true, false));
+        assert!(!should_stream(true, true, false));
     }
 
     #[test]

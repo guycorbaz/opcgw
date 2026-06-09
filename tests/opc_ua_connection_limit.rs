@@ -178,6 +178,7 @@ fn test_config(port: u16, pki_dir: &std::path::Path, max_connections: usize) -> 
             list_page_size: 100,
             inventory_cache_ttl_seconds: 60,
             inventory_uplink_max_wait_seconds: 5,
+            stream_all_devices: false,
         },
         opcua: OpcUaConfig {
             application_name: "opcgw-test".to_string(),
