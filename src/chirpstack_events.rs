@@ -315,12 +315,24 @@ async fn connect_and_stream(
                             // never appear — they won't populate via the stream.
                             *events_seen = events_seen.saturating_add(1);
                             for m in metrics {
-                                if object
+                                let present = object
                                     .get(&m.chirpstack_metric_name)
                                     .map(|v| !v.is_null())
-                                    .unwrap_or(false)
+                                    .unwrap_or(false);
+                                // First time we observe this field, self-correct
+                                // any earlier "never seen" warning — it was just
+                                // late or only emitted on some uplinks (e.g. a
+                                // conditionally-reported value), not a true orphan.
+                                if present && seen.insert(m.chirpstack_metric_name.clone())
+                                    && warned.remove(&m.chirpstack_metric_name)
                                 {
-                                    seen.insert(m.chirpstack_metric_name.clone());
+                                    info!(
+                                        event = "uplink_metric_now_seen",
+                                        device_id = %device_id,
+                                        metric = %m.chirpstack_metric_name,
+                                        events_observed = *events_seen,
+                                        "previously-unseen configured read_metric is now present in an uplink (intermittent/late, not a true orphan)"
+                                    );
                                 }
                             }
                             if *events_seen >= ORPHAN_WARN_AFTER_EVENTS {
@@ -330,7 +342,7 @@ async fn connect_and_stream(
                                         device_id = %device_id,
                                         metric = %name,
                                         events_observed = *events_seen,
-                                        "configured read_metric absent from every uplink object so far; it will not populate via the stream (DevStatus-sourced battery, or chirpstack_metric_name vs codec field-name mismatch)"
+                                        "configured read_metric not seen in the first uplinks; may be DevStatus-sourced (e.g. battery), a chirpstack_metric_name vs codec field-name mismatch, OR only emitted on some uplinks — if it arrives later an uplink_metric_now_seen will follow"
                                     );
                                     warned.insert(name);
                                 }
