@@ -249,6 +249,12 @@ auth_realm = "opcgw-example"
 # [[application.device]]
 # device_name = "Device Name" # name displayed in opc ua
 # device_id = "device_id" # Chirpstack device id
+# # Story E-1 (#132): optional per-device OPC UA stale threshold (seconds).
+# # Overrides the global [opcua].stale_threshold_seconds for THIS device only.
+# # Set it above the device's report period so a slow LoRaWAN sensor reads
+# # Good instead of Uncertain between uplinks. Omit = use the global default.
+# # NOTE: applied on first-boot seed / device insert; restart-required.
+# stale_threshold_seconds = 1800
 #
 # [[application.device.metric]]
 # metric_name = "metric_name" # name displayed in opc ua

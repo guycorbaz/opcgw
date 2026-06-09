@@ -134,6 +134,7 @@ fn history_test_config(
             application_id: "00000000-0000-0000-0000-000000000001".to_string(),
             device_list: vec![ChirpstackDevice {
                 device_name: "HistoryDevice".to_string(),
+                stale_threshold_seconds: None,
                 device_id: TEST_DEVICE_ID.to_string(),
                 read_metric_list: vec![ReadMetric {
                     metric_name: TEST_METRIC_OPCUA_NAME.to_string(),
@@ -845,6 +846,7 @@ async fn test_history_read_multi_device_no_node_id_collision_issue_99() {
             device_list: vec![
                 ChirpstackDevice {
                     device_name: "DeviceA".to_string(),
+                    stale_threshold_seconds: None,
                     device_id: DEVICE_A_ID.to_string(),
                     read_metric_list: vec![ReadMetric {
                         metric_name: SHARED_METRIC_OPCUA_NAME.to_string(),
@@ -856,6 +858,7 @@ async fn test_history_read_multi_device_no_node_id_collision_issue_99() {
                 },
                 ChirpstackDevice {
                     device_name: "DeviceB".to_string(),
+                    stale_threshold_seconds: None,
                     device_id: DEVICE_B_ID.to_string(),
                     read_metric_list: vec![ReadMetric {
                         metric_name: SHARED_METRIC_OPCUA_NAME.to_string(),

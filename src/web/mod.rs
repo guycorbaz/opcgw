@@ -880,6 +880,7 @@ mod tests {
                 .map(|i| ChirpstackDevice {
                     device_id: format!("dev-{name}-{i}"),
                     device_name: format!("Device {i}"),
+                    stale_threshold_seconds: None,
                     read_metric_list: vec![ReadMetric {
                         metric_name: "temperature".to_string(),
                         chirpstack_metric_name: "temp".to_string(),
@@ -932,6 +933,7 @@ mod tests {
             device_list: vec![ChirpstackDevice {
                 device_id: "dev-empty".to_string(),
                 device_name: "Empty Device".to_string(),
+                stale_threshold_seconds: None,
                 read_metric_list: vec![],
                 device_command_list: None,
             }],
@@ -956,6 +958,7 @@ mod tests {
             device_list: vec![ChirpstackDevice {
                 device_id: "dev-1".to_string(),
                 device_name: "Device 1".to_string(),
+                stale_threshold_seconds: None,
                 read_metric_list: vec![
                     ReadMetric {
                         metric_name: "temperature".to_string(),
@@ -995,6 +998,7 @@ mod tests {
             device_list: vec![ChirpstackDevice {
                 device_id: "dev-1".to_string(),
                 device_name: "Device 1".to_string(),
+                stale_threshold_seconds: None,
                 read_metric_list: vec![
                     // Empty string -> None.
                     ReadMetric {

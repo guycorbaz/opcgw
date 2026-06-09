@@ -567,6 +567,7 @@ fn topology_device_diff(old: &AppConfig, new: &AppConfig) -> TopologyDeviceDiff 
                 // ReloadOutcome but emit NO `topology_change_detected`
                 // log — Story 9-8 would silently drop the change.
                 if old_dev.device_name != new_dev.device_name
+                    || old_dev.stale_threshold_seconds != new_dev.stale_threshold_seconds
                     || !metrics_equal(&old_dev.read_metric_list, &new_dev.read_metric_list)
                     || !command_list_equal(
                         &old_dev.device_command_list,

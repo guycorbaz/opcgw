@@ -84,6 +84,7 @@ pub fn stub_app_config() -> AppConfig {
         device_list: vec![ChirpstackDevice {
             device_id: "dev-1".to_string(),
             device_name: "Dev One".to_string(),
+            stale_threshold_seconds: None,
             read_metric_list: vec![ReadMetric {
                 metric_name: "temperature".to_string(),
                 chirpstack_metric_name: "temperature".to_string(),

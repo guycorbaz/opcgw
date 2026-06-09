@@ -209,6 +209,7 @@ fn test_config(port: u16, pki_dir: &std::path::Path, max_connections: usize) -> 
             application_id: "00000000-0000-0000-0000-000000000001".to_string(),
             device_list: vec![ChirpstackDevice {
                 device_name: "TestDevice".to_string(),
+                stale_threshold_seconds: None,
                 device_id: "0000000000000001".to_string(),
                 read_metric_list: vec![ReadMetric {
                     metric_name: "Temperature".to_string(),

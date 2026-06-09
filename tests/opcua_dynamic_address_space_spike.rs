@@ -100,6 +100,7 @@ fn dyn_spike_test_config(
         .iter()
         .map(|d| ChirpstackDevice {
             device_name: d.device_id.to_string(),
+            stale_threshold_seconds: None,
             device_id: d.device_id.to_string(),
             read_metric_list: vec![ReadMetric {
                 metric_name: d.metric_name.to_string(),

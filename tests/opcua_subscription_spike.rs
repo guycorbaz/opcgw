@@ -248,6 +248,7 @@ fn spike_test_config(port: u16, pki_dir: &std::path::Path, max_connections: usiz
             application_id: "00000000-0000-0000-0000-000000000001".to_string(),
             device_list: vec![ChirpstackDevice {
                 device_name: "SpikeDevice".to_string(),
+                stale_threshold_seconds: None,
                 device_id: SPIKE_DEVICE_ID.to_string(),
                 read_metric_list: vec![ReadMetric {
                     metric_name: SPIKE_METRIC_OPCUA_NAME.to_string(),

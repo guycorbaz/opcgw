@@ -645,6 +645,14 @@ pub struct ChirpstackDevice {
     /// List of commands that can be send to this device.
     #[serde(rename = "command")]
     pub device_command_list: Option<Vec<DeviceCommandCfg>>,
+
+    /// Story E-1 (E-1b, #132): optional per-device OPC UA stale threshold in
+    /// seconds. Overrides the global `[opcua].stale_threshold_seconds` (default
+    /// 120 s) for this device only. `None` = use the global. Set it above the
+    /// device's report period so a normally-reporting slow LoRaWAN sensor reads
+    /// `Good` instead of `Uncertain` between uplinks. Restart-required.
+    #[serde(default)]
+    pub stale_threshold_seconds: Option<u64>,
 }
 
 /// Data types supported for OPC UA metric values.

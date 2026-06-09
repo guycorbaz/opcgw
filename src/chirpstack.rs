@@ -4553,6 +4553,7 @@ mod tests {
             device_list: vec![crate::config::ChirpstackDevice {
                 device_id: "dev-1".to_string(),
                 device_name: "Dev".to_string(),
+                stale_threshold_seconds: None,
                 read_metric_list: vec![],
                 device_command_list: Some(vec![crate::config::DeviceCommandCfg {
                     command_id: 1,

@@ -1220,6 +1220,7 @@ mod tests {
                 device_list: vec![ChirpstackDevice {
                     device_id: "dev-1".to_string(),
                     device_name: "Dev 1".to_string(),
+                    stale_threshold_seconds: None,
                     read_metric_list: vec![ReadMetric {
                         metric_name: "temp".to_string(),
                         chirpstack_metric_name: "t".to_string(),
@@ -1241,6 +1242,7 @@ mod tests {
         ChirpstackDevice {
             device_id: id.to_string(),
             device_name: name.to_string(),
+            stale_threshold_seconds: None,
             read_metric_list: metrics,
             device_command_list: commands,
         }

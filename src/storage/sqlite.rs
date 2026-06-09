@@ -2553,9 +2553,18 @@ impl SqliteBackend {
         })?;
         let now = format_rfc3339(&Utc::now());
         conn.execute(
-            "INSERT INTO devices (application_id, device_id, device_name, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![application_id, device.device_id, device.device_name, now, now],
+            "INSERT INTO devices \
+             (application_id, device_id, device_name, stale_threshold_seconds, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                application_id,
+                device.device_id,
+                device.device_name,
+                // Story E-1 (E-1b, #132): persist the per-device stale threshold.
+                device.stale_threshold_seconds.map(|v| v as i64),
+                now,
+                now
+            ],
         )
         .map_err(|e| {
             OpcGwError::Database(format!(
@@ -2982,16 +2991,18 @@ impl SqliteBackend {
         // ── devices ─────────────────────────────────────────────────────────
         let mut stmt = conn
             .prepare(
-                "SELECT application_id, device_id, device_name \
+                "SELECT application_id, device_id, device_name, stale_threshold_seconds \
                  FROM devices ORDER BY application_id, device_id",
             )
             .map_err(|e| OpcGwError::Database(format!("prepare devices: {}", e)))?;
-        let dev_rows: Vec<(String, String, String)> = stmt
+        let dev_rows: Vec<(String, String, String, Option<u64>)> = stmt
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    // Story E-1 (E-1b, #132): per-device stale threshold (NULL = use global).
+                    row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
                 ))
             })
             .map_err(|e| OpcGwError::Database(format!("query devices: {}", e)))?
@@ -3055,7 +3066,7 @@ impl SqliteBackend {
         for (app_id, app_name) in app_rows {
             let mut devices: Vec<ChirpstackDevice> = Vec::new();
 
-            for (dev_app_id, dev_id, dev_name) in &dev_rows {
+            for (dev_app_id, dev_id, dev_name, dev_stale) in &dev_rows {
                 if dev_app_id != &app_id {
                     continue;
                 }
@@ -3090,6 +3101,7 @@ impl SqliteBackend {
                 devices.push(ChirpstackDevice {
                     device_id: dev_id.clone(),
                     device_name: dev_name.clone(),
+                    stale_threshold_seconds: *dev_stale,
                     read_metric_list: metrics,
                     device_command_list: if commands.is_empty() {
                         None
@@ -3685,12 +3697,14 @@ impl SqliteBackend {
                 for device in &app.device_list {
                     conn.execute(
                         "INSERT INTO devices \
-                         (application_id, device_id, device_name, created_at, updated_at) \
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                         (application_id, device_id, device_name, stale_threshold_seconds, created_at, updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                         params![
                             app.application_id,
                             device.device_id,
                             device.device_name,
+                            // Story E-1 (E-1b, #132): persist a TOML-seeded per-device threshold.
+                            device.stale_threshold_seconds.map(|v| v as i64),
                             now,
                             now
                         ],

@@ -3485,6 +3485,7 @@
         ChirpstackDevice {
             device_id: id.to_string(),
             device_name: name.to_string(),
+            stale_threshold_seconds: None,
             read_metric_list: vec![],
             device_command_list: None,
         }
@@ -3717,6 +3718,35 @@
         assert_eq!(
             cmds2[0].command_class, None,
             "update_command must persist a cleared command_class"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_e1_per_device_stale_threshold_roundtrip() {
+        let path = temp_backend_path();
+        let b = SqliteBackend::new(&path).unwrap();
+        b.insert_application(&make_app("app-1", "App")).unwrap();
+        // Device WITH a per-device override.
+        let mut d1 = make_device("dev-1", "Dev1");
+        d1.stale_threshold_seconds = Some(1800);
+        b.insert_device("app-1", &d1).unwrap();
+        // Device WITHOUT an override → uses the global (None).
+        b.insert_device("app-1", &make_device("dev-2", "Dev2"))
+            .unwrap();
+
+        let loaded = b.load_all_applications_config().unwrap();
+        let devs = &loaded[0].device_list;
+        let d1l = devs.iter().find(|d| d.device_id == "dev-1").unwrap();
+        let d2l = devs.iter().find(|d| d.device_id == "dev-2").unwrap();
+        assert_eq!(
+            d1l.stale_threshold_seconds,
+            Some(1800),
+            "per-device stale threshold must round-trip through SQLite (#132)"
+        );
+        assert_eq!(
+            d2l.stale_threshold_seconds, None,
+            "absent override must load as None (use global)"
         );
         let _ = fs::remove_file(&path);
     }

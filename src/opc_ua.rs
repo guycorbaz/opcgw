@@ -1039,7 +1039,13 @@ impl OpcUa {
                     let last_status_clone = self.last_status.clone();
                     let device_id = device.device_id.clone();
                     let chirpstack_metric_name = read_metric.chirpstack_metric_name.clone();
-                    let stale_threshold = self.config.opcua.stale_threshold_seconds.unwrap_or(DEFAULT_STALE_THRESHOLD_SECS);
+                    // Story E-1 (E-1b, #132): per-device stale threshold wins
+                    // over the global, which wins over the built-in default.
+                    // Resolved once here and captured in the read callback.
+                    let stale_threshold = device
+                        .stale_threshold_seconds
+                        .or(self.config.opcua.stale_threshold_seconds)
+                        .unwrap_or(DEFAULT_STALE_THRESHOLD_SECS);
                     // Story 8-3: register the NodeId → (device_id, chirpstack_metric_name)
                     // mapping so HistoryRead requests can resolve back to the
                     // storage layer. This is the same pair the read callback
