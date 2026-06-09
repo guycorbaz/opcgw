@@ -7,15 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.0] — unreleased — Epic E: model-agnostic, class-aware device abstraction
 
-> **Status:** in development. `v2.2.0-rc2` is cut for **pre-production testing**
-> (supersedes `rc1`): the tag publishes a `2.2.0-rc2` Docker image (it does
+> **Status:** in development. `v2.2.0-rc3` is cut for **pre-production testing**
+> (supersedes `rc2`): the tag publishes a `2.2.0-rc3` Docker image (it does
 > **not** move the `latest` / `2.1` tags, so production deployments are
-> unaffected). rc1 validated Story E-0's downlink command path; **rc2 adds
-> Story E-1 (E-1a + E-1b mechanism): uplink-event ingestion with last-known
-> values and no gateway-side aggregation**, plus the Tonhe codec fixes. Test the
-> valve OPEN/CLOSE (E-0 / AC#10) **and** set `chirpstack.stream_all_devices =
-> true` to validate the de-aggregated read path (E-1 / AC#11) before E-1 flips
-> to `done`.
+> unaffected). rc1 validated Story E-0's downlink command path; rc2 validated
+> the de-aggregated read path (E-1, `stream_all_devices`) on hardware. **rc3
+> adds the per-device stale threshold ([#132](https://github.com/guycorbaz/opcgw/issues/132))
+> and orphan-warn self-correction.** Test the valve OPEN/CLOSE (E-0 / AC#10),
+> the de-aggregated reads with `chirpstack.stream_all_devices = true`
+> (E-1 / AC#11), and optionally a per-device `stale_threshold_seconds` before
+> E-1 flips to `done`.
 
 ### Added
 
@@ -47,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model-agnostic. Absent = legacy raw-byte path (backward compatible).
 - **Schema migration v011** adds the `command_class` column to the `commands`
   table (round-trips through the SQLite application store).
+- **Per-device OPC UA stale threshold** ([#132](https://github.com/guycorbaz/opcgw/issues/132)).
+  Optional `stale_threshold_seconds` on `[[application.device]]` overrides the
+  global `[opcua].stale_threshold_seconds` (default 120 s) for that device only —
+  set it above a slow LoRaWAN sensor's report period so it reads `Good` instead
+  of `Uncertain` between uplinks. Schema **migration v012** adds the column;
+  resolution is device-override → global → default. Restart-required.
+- **Orphan-warn for stream-covered metrics** (Epic E / E-1b). When
+  `stream_all_devices` is on, `uplink_metric_never_seen` (warn) flags a
+  configured metric not yet present in a device's decoded object (e.g.
+  DevStatus-sourced battery, or a field-name mismatch); a sibling
+  `uplink_metric_now_seen` (info) self-corrects the warning if the field is
+  merely intermittent and later arrives.
 
 ## [2.1.0] — 2026-05-28 — web-first configuration & auto-discovery
 
