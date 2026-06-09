@@ -1414,6 +1414,7 @@ So that OPC UA reflects true device state (discrete and analog) without gateway-
 - May split into **E-1a** (stream mechanism + last-value store + valve class) and **E-1b** (migrate all mappings, demote poll) if oversized.
 - Tests: stream event → last-value Storage write with source timestamp → OPC UA variant; reconnect after drop; quality reflects report age; no aggregation anywhere in the value path; backfill still serves a value before the first event.
 - **Adapter note (2026-06-09, → E-1b):** the uplink mapping must later grow a **value-transform hook** (enum map / scale+offset / bitmask-shift) for **Tier-2** object-remap devices (codec installed but uneditable; see E-2). **E-1a (Tier-1 Tonhe valve) needs none and is unaffected** — it ships as-is.
+- **Per-device stale threshold (2026-06-09, → E-1b; [#132](https://github.com/guycorbaz/opcgw/issues/132)):** now that quality ages from the device's real report timestamp, slow LoRaWAN sensors (~15–20 min cadence) read *Uncertain* between uplinks under the global 120 s threshold. Add an optional per-device `stale_threshold_secs` (override of the global default; absent = global; restart-required; schema migration v012). Companion to the de-aggregation so the read path is usable. Validated need on rc2 pre-prod 2026-06-09.
 - **Release gate:** E-1 must land before tagging **v2.2.0** stable (#130).
 
 ### Story E.2: Device-Class + Per-Model Adapter Registry
