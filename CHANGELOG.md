@@ -7,11 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.0] — unreleased — Epic E: model-agnostic, class-aware device abstraction
 
-> **Status:** in development. `v2.2.0-rc1` is cut for **pre-production testing**:
-> the tag publishes a `2.2.0-rc1` Docker image (it does **not** move the
-> `latest` / `2.1` tags, so production deployments are unaffected) so Story E-0's
-> downlink command path can be validated against a real Tonhe E20 valve before
-> E-0 flips to `done`.
+> **Status:** in development. `v2.2.0-rc2` is cut for **pre-production testing**
+> (supersedes `rc1`): the tag publishes a `2.2.0-rc2` Docker image (it does
+> **not** move the `latest` / `2.1` tags, so production deployments are
+> unaffected). rc1 validated Story E-0's downlink command path; **rc2 adds
+> Story E-1 (E-1a + E-1b mechanism): uplink-event ingestion with last-known
+> values and no gateway-side aggregation**, plus the Tonhe codec fixes. Test the
+> valve OPEN/CLOSE (E-0 / AC#10) **and** set `chirpstack.stream_all_devices =
+> true` to validate the de-aggregated read path (E-1 / AC#11) before E-1 flips
+> to `done`.
 
 ### Added
 
@@ -20,6 +24,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ChirpStack's `DeviceService.Enqueue`. The poller drains the command queue that
   the OPC UA write path feeds and transitions each command `Pending → Sent`
   (failures → `Failed`, batch continues; full delivery confirmation is E-3).
+- **Uplink-event ingestion — last-known value, no aggregation** (Epic E / E-1,
+  [#130](https://github.com/guycorbaz/opcgw/issues/130)). New `chirpstack_events`
+  runtime task consumes ChirpStack's decoded uplink events
+  (`InternalService.StreamDeviceEvents`) and stores each configured metric's
+  **raw last value stamped with the device's source timestamp** — no averaging
+  or summing. The metrics poll (`GetMetrics`) time-aggregates and corrupted
+  discrete valve state (e.g. `valveStatusCode` aggregated to a nonsense `391`);
+  it now **skips** streamed devices, and the OPC UA `source_timestamp` reflects
+  the device report time. Valve-class devices stream by default (E-1a); set
+  **`chirpstack.stream_all_devices = true`** to de-aggregate the whole fleet
+  (E-1b). `uplink_metric_never_seen` warns when a configured metric never
+  appears in a device's decoded object (e.g. DevStatus-sourced battery).
+- **Tonhe E20 valve codec fixes** ([#131](https://github.com/guycorbaz/opcgw/issues/131)).
+  `decodeUplink` no longer errors on empty (0-byte) confirmed-downlink ACK
+  uplinks, and emits integer measurements (`valveStatusCode` / `valvePosition` /
+  `moving` / `fault` / `lowBattery`). Renamed to `tonhe-e20-valve-codec.js`.
 - **`command_class` config field** on `[[application.device.command]]`. When set
   to `"valve"`, opcgw enqueues a **semantic command object**
   (`1` = open → `{"command":"open"}`, `0` = close → `{"command":"close"}`) and
