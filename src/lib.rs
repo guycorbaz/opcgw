@@ -6,6 +6,8 @@
 //! This module re-exports the main components for use in integration tests.
 
 pub mod chirpstack;
+/// Story E-1 (E-1a): gRPC uplink-event ingestion — last-known value, no aggregation.
+pub mod chirpstack_events;
 /// Story C-1: ChirpStack inventory layer — types + cache + stream helper.
 pub mod chirpstack_inventory;
 /// Story C-1: locally-compiled ChirpStack proto types.

@@ -1457,11 +1457,16 @@ impl OpcUa {
                     }
                 }
 
-                // Create a DataValue with the variant and staleness status code
+                // Create a DataValue with the variant and staleness status code.
+                // Story E-1 (#130): the OPC UA *source* timestamp is the device's
+                // own report time (`metric_value.timestamp`), NOT `now()` — a SCADA
+                // tag is a value + its source timestamp + quality, and aggregation
+                // is the SCADA's job. The *server* timestamp stays `now()` (when
+                // the gateway produced this response).
                 let data_value = DataValue {
                     value: Some(variant),
                     status: Some(status_code.bits().into()),
-                    source_timestamp: Some(DateTime::now()),
+                    source_timestamp: Some(DateTime::from(metric_value.timestamp)),
                     source_picoseconds: None,
                     server_timestamp: Some(DateTime::now()),
                     server_picoseconds: None,
@@ -2154,6 +2159,47 @@ mod tests {
         assert!(
             logs_contain("staleness_check"),
             "expected staleness_check log line not emitted"
+        );
+    }
+
+    /// Story E-1 (#130, AC#3): the OPC UA `source_timestamp` must reflect the
+    /// device's own report time (the stored `MetricValue.timestamp`), NOT the
+    /// server's `now()`. We seed a metric stamped ~5 s in the past and assert
+    /// the returned `source_timestamp` is meaningfully older than the
+    /// `server_timestamp` (which is `now()`).
+    #[test]
+    fn source_timestamp_is_device_event_time_not_now() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let last_status = make_status_cache();
+        let device_id = "dev-ts".to_string();
+        let metric_name = "state".to_string();
+
+        let event_time = SystemTime::now() - Duration::from_secs(5);
+        backend
+            .batch_write_metrics(vec![BatchMetricWrite {
+                device_id: device_id.clone(),
+                metric_name: metric_name.clone(),
+                data_type: MetricType::Int(195),
+                timestamp: event_time,
+            }])
+            .expect("seed device-stamped metric");
+
+        let dv = OpcUa::get_value(&backend, &last_status, device_id, metric_name, 60)
+            .expect("read should succeed");
+
+        let src = dv
+            .source_timestamp
+            .expect("source_timestamp present")
+            .as_chrono();
+        let srv = dv
+            .server_timestamp
+            .expect("server_timestamp present")
+            .as_chrono();
+        let delta_secs = (srv - src).num_seconds();
+        assert!(
+            delta_secs >= 4,
+            "source_timestamp must be the ~5s-old device event time, not server now \
+             (server - source = {delta_secs}s)"
         );
     }
 

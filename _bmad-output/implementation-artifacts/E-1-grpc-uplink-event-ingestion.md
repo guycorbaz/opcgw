@@ -1,6 +1,6 @@
 # Story E.1: Uplink-Event Ingestion — last-known value for all measurements (no aggregation)
 
-Status: ready-for-dev
+Status: in-progress
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 <!-- This story is a v2.2.0 RELEASE BLOCKER (#130). It MUST be done before tagging v2.2.0 stable. -->
@@ -73,6 +73,31 @@ This story makes the **gRPC uplink event stream the canonical last-value path fo
 
 ## Tasks / Subtasks
 
+> **Phasing (dev-story split, 2026-06-09, user-confirmed):** this run implements **E-1a** — stream ingestion + last-value store with the device event timestamp + OPC UA source-timestamp fix + valve mapping + no-aggregation precedence for valve-class devices. **E-1b** (migrate all non-valve analog sensors off the poll + explicit stream-scope config + backfill-via-recent-events + integration/real-world gates) is left unchecked; the story **stays `in-progress`** until E-1b lands. Both are required before v2.2.0.
+
+- [x] **Task 1 — Long-lived per-device event-stream consumer (AC: 1, 6)** — `src/chirpstack_events.rs`: `run_event_ingestion` supervisor spawns one `run_device_stream` per valve-class device; reconnect with capped-exponential backoff; `tokio::select!` on `CancellationToken`.
+  - [x] Long-lived stream loop (`connect_and_stream`) reusing the `chirpstack_inventory` pattern (`InternalServiceClient::stream_device_events`, filter `"up"`, `body.object` + `LogItem.time` via `parse_up_event`).
+  - [x] Spawned from `main.rs` (per-task `SqliteBackend`, Story 5-1 pattern) + joined at shutdown.
+  - [x] Reconnect/backoff; per-device failure isolated (supervisor + other devices unaffected).
+  - [x] `CancellationToken` honoured; no orphaned tasks.
+- [x] **Task 2 — Decoded-object → last-value Storage write with event timestamp (AC: 2, 3, 4)** — `map_uplink_to_writes` (pure) + `json_to_metric`.
+  - [x] Pure mapping fn (takes `&[ReadMetric]` for testability); keyed by `chirpstack_metric_name` (the storage key the poll writes + OPC UA reads).
+  - [x] Writes via `BatchMetricWrite.timestamp = event_time.into()` (device time, NOT `now()`).
+  - [x] JSON conversion number→Int/Float, bool/0-1→Bool, str→String; mismatch → `uplink_field_type_mismatch` warn + skip (no panic).
+- [x] **Task 3 — String metric path end-to-end (AC: 4)** — stream populates `MetricType::String` (test `string_field_maps_end_to_end`); OPC UA `Variant::String` read already supported. (The poll-path String rejection at `chirpstack.rs:1733` stays — it's only reached by poll-served non-valve devices, accurate until E-1b.)
+- [x] **Task 4 — Valve status mapping (AC: 5)** — decoded `state`/`valveStatusCode`/`valvePosition`/`moving`/`fault`/`lowBattery` flow to their configured `read_metric`s with correct types (tests `valve_flags_map_to_bool_and_int`, `maps_each_field_with_event_timestamp`). NOTE: separate **canonically-named** `ValveState` nodes are deferred to E-2's class registry — in E-1a the operator's configured read_metrics carry the normalized values.
+- [ ] **Task 5 — No-aggregation precedence: demote the poll (AC: 2, 7)** — *E-1a partial (valve scope); full demotion = E-1b.*
+  - [x] `poll_metrics` **skips valve-class devices** (`device_is_valve_class`) so the stream is the sole writer for them — no aggregated value reaches OPC UA for valves.
+  - [ ] Stop poll writes for *all* stream-covered fields (E-1b).
+  - [ ] Startup/reconnect backfill via the bounded recent-events fetch (E-1b; E-1a relies on the live stream's initial delivery).
+- [x] **Task 6 — OPC UA source timestamp fix (AC: 3)** — `get_value` now sets `source_timestamp = DateTime::from(metric_value.timestamp)`; server_timestamp stays `now()`. Test `source_timestamp_is_device_event_time_not_now`.
+- [ ] **Task 7 — Stream-scope config (AC: 8)** — *E-1b.* E-1a streams valve-class devices implicitly (bounded by valve count); explicit application/device scoping config deferred.
+- [ ] **Task 8 — Tests (AC: 9)** — *E-1a unit-level done; integration deferred.* ✅ pure mapping ×6 (a,b,c,d + float-coercion + absent-field + type-mismatch) + ✅ `source_timestamp` (h). ⏳ stream-connect/reconnect (e), backfill (f), end-to-end precedence (g) need a gRPC stub harness → E-1b. `cargo test` 597/0 (+7 new).
+- [ ] **Task 9 — Real-world validation (AC: 11)** — *pending.* Against live ChirpStack + physical valve: true discrete state + correct source timestamps + no aggregated values over OPC UA. **Gate for `done`.**
+- [ ] **Task 10 — Docs + quality (AC: 10)** — *E-1a partial.* ✅ `docs/logging.md` (6 new `uplink_*` events), `docs/LoRa/TONHE Valve/README.md` §5 (E-1a implemented note), `docs/architecture.md` (new module + data flow). ⏳ `README.md` planning row, `config/config.example.toml`, DocBook manual → E-1b/full-E-1. SPDX present; `cargo clippy --all-targets -- -D warnings` clean.
+
+<details><summary>Original (pre-split) task detail — retained for E-1b</summary>
+
 - [ ] **Task 1 — Long-lived per-device event-stream consumer (AC: 1, 6)**
   - [ ] Factor a long-lived stream loop out of / alongside the bounded `stream_recent_device_uplinks` (`src/chirpstack_inventory.rs:373-470`): open `InternalServiceClient::stream_device_events`, iterate `stream.message()` until cancelled, parse via `log_item_to_uplink`-style logic (filter `description == "up"`, extract `body.object` + `LogItem.time`).
   - [ ] Spawn one task per configured (scoped) device from `main.rs` near the poller spawn (`src/main.rs:1064`), passing `Arc<dyn StorageBackend>` + `cancel_token.clone()`. Decide single-supervisor-task-fans-out vs one-tokio-task-per-device; document the choice.
@@ -99,6 +124,8 @@ This story makes the **gRPC uplink event stream the canonical last-value path fo
 - [ ] **Task 8 — Tests (AC: 9)** — implement (a)–(h) using the parse-level pure-fn seam + an injectable stream source; keep `cargo test` green, add net-new tests.
 - [ ] **Task 9 — Real-world validation (AC: 11)** — against live ChirpStack + physical valve: verify true discrete state + real analog last-value over OPC UA, correct source timestamps, no aggregated values. Record in Completion Notes. **Gate for `done`.**
 - [ ] **Task 10 — Docs + quality (AC: 10)** — README, config.toml/example, DocBook manual, `docs/architecture.md`, `docs/LoRa/TONHE Valve/README.md` §5, `docs/logging.md` (if new events); SPDX; `cargo test`; `cargo clippy --all-targets -- -D warnings`; `xmllint` the manual.
+
+</details>
 
 ## Design Decisions (confirm before or during dev)
 
@@ -164,8 +191,45 @@ Devices currently on the aggregated poll that move to the stream: water/tank lev
 
 ### Agent Model Used
 
+claude-opus-4-8 (1M context) — bmad-dev-story, 2026-06-09 (E-1a slice).
+
 ### Debug Log References
+
+- `cargo check --all-targets` → clean.
+- `cargo clippy --all-targets -- -D warnings` → clean.
+- `cargo test` → all binaries pass, 0 failed (lib 597 incl. 7 new: 6 `chirpstack_events` mapping tests + 1 `opc_ua` source-timestamp test).
 
 ### Completion Notes List
 
+**E-1a implemented (story split — E-1b deferred, story stays `in-progress`).** Design decisions DD1–DD4 taken as recommended; DD5 split confirmed with the user.
+
+- **Task 1/2 (AC#1,2,3,4)** — New `src/chirpstack_events.rs`. `run_event_ingestion` supervisor spawns one `run_device_stream` per **valve-class** device (E-1a scope), each a long-lived `InternalService.StreamDeviceEvents` consumer with capped-exponential reconnect backoff and `CancellationToken` shutdown (DD4: supervisor + per-device child tasks; stream-set fixed from the startup snapshot, hot-reload deferred). The pure `map_uplink_to_writes(device_id, &[ReadMetric], &object, event_time)` maps each configured `read_metric` present in the decoded object to a `BatchMetricWrite` stamped with the **device event time** (`LogItem.time`) — no aggregation — keyed by `chirpstack_metric_name` (the same storage key the poll writes and `OpcUa::get_value` reads). `json_to_metric` coerces number↔Int/Float, integer-0/1→Bool, str→String; mismatches emit `uplink_field_type_mismatch` and skip.
+- **Task 3 (AC#4)** — String metrics now populate poller-side via the stream (`MetricType::String`), read back as `Variant::String`. The poll-path String-rejection (`chirpstack.rs:1733`) is left intact: it is only reachable by poll-served (non-valve) devices and stays accurate until E-1b.
+- **Task 4 (AC#5)** — Valve decoded fields (`state`, `valveStatusCode`, `valvePosition`, `moving`, `fault`, `lowBattery`) flow to their configured read_metrics with correct types. Canonically-named `ValveState` nodes are an E-2 registry concern; in E-1a the configured read_metric names carry the normalized values.
+- **Task 5 (AC#2,7 — partial, valve scope)** — `poll_metrics` skips valve-class devices (`device_is_valve_class`) so the stream is the **sole, authoritative writer** for valves and no `GetMetrics`-aggregated value (the `391`/`1.5` bug) ever reaches OPC UA for them. Full demotion for all devices + explicit backfill = **E-1b**.
+- **Task 6 (AC#3, DD per #130)** — `OpcUa::get_value` now sets the OPC UA `source_timestamp` from `metric_value.timestamp` (device report time) instead of `DateTime::now()`; `server_timestamp` stays `now()`. Quality (`compute_status_code`) already keyed off `metric.timestamp`, so it now reflects real device-report age.
+- **Wiring** — `chirpstack_events` declared in `main.rs` + `lib.rs`; ingestion task spawned alongside the poller (independent `SqliteBackend` per task) and joined at shutdown.
+
+**No new dependencies.** No schema migration. New structured events documented in `docs/logging.md`.
+
+⚠️ **Deferred to E-1b / pending before the story may flip `done`:** migrate non-valve analog sensors off the aggregated poll (Task 5 full + Task 7 stream-scope config); integration tests for stream connect/reconnect + end-to-end precedence + backfill (Task 8 e/f/g, need a gRPC stub harness); `README.md`/`config.example.toml`/DocBook manual doc-sync (Task 10 remainder); **AC#11 real-world validation against live ChirpStack + physical valve (Task 9) — the binding `done` gate** (main-deadlock doctrine). E-1 (E-1a + E-1b) remains a **v2.2.0 release blocker** (#130).
+
 ### File List
+
+Added:
+- `src/chirpstack_events.rs` — uplink event ingestion: pure mapping (`map_uplink_to_writes`, `json_to_metric`) + `device_is_valve_class`/`streamed_devices` + long-lived stream consumer (`run_device_stream`, `connect_and_stream`, `parse_up_event`) + supervisor (`run_event_ingestion`) + 6 unit tests.
+
+Modified:
+- `src/lib.rs` / `src/main.rs` — declare `chirpstack_events`; spawn `run_event_ingestion` (per-task SqliteBackend) alongside the poller + join at shutdown.
+- `src/chirpstack.rs` — `poll_metrics` skips valve-class devices (no-aggregation precedence, E-1a).
+- `src/opc_ua.rs` — `get_value` source_timestamp = device event time; new `source_timestamp_is_device_event_time_not_now` test.
+- `docs/logging.md` — 6 new `uplink_*` operations-reference events.
+- `docs/LoRa/TONHE Valve/README.md` — §5 E-1a "implemented for valves" note.
+- `docs/architecture.md` — new `chirpstack_events.rs` module + data-flow section.
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — E-1 ready-for-dev → in-progress (split note).
+
+## Change Log
+
+| Date | Change |
+|------|--------|
+| 2026-06-09 | Story E-1 dev-story **E-1a slice** implemented (user-confirmed split). New `chirpstack_events` module: long-lived `StreamDeviceEvents` ingestion for valve-class devices → last-known value with device source timestamp, no aggregation (#130); poll skips valve-class devices; OPC UA `source_timestamp` = device event time. 7 new tests; full suite 597/0 lib + all integration bins green; clippy `-D warnings` clean. Status stays **in-progress** (E-1b + AC#11 real-world gate pending; E-1 is a v2.2.0 release blocker). |

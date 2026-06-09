@@ -136,9 +136,34 @@ command.)
 >
 > **Correct path — Story E-1:** ingest the uplink **event stream**
 > (`StreamDeviceEvents`) and store the **last decoded value** of each field with
-> the device's own timestamp — no aggregation. Until E-1 lands, opcgw cannot
-> faithfully represent valve state; tracked as a **2.2.0 release blocker**
-> (see Epic E / issue #129).
+> the device's own timestamp — no aggregation.
+
+**✅ Implemented for valves (Story E-1a).** opcgw now runs an uplink
+event-ingestion task that consumes `InternalService.StreamDeviceEvents` for
+**valve-class devices** (any device whose command has `command_class = "valve"`)
+and writes each configured `read_metric`'s **last decoded value** stamped with
+the **device's source timestamp** — never aggregated. The metrics poll
+**skips** valve-class devices so the stream is the sole, authoritative writer.
+So with the valve command configured as `command_class = "valve"`, your
+configured valve `read_metric`s (`valveStatusCode`, `state`, `valvePosition`,
+`moving`, `fault`, `lowBattery`) show their true last values — `valveStatusCode`
+reads a clean `195` (closed), not the aggregated `391`.
+
+Configure them as normal `read_metric` entries (the `chirpstack_metric_name`
+must match the codec's decoded-object field name):
+
+```toml
+[[application.device.read_metric]]
+metric_name            = "Status_v01"
+chirpstack_metric_name = "valveStatusCode"   # codec field; stored via the event stream
+metric_type            = "Int"
+```
+
+> **Still pending (Story E-1b):** migrating **non-valve** analog sensors
+> (water level, meteo, SHT, …) off the aggregated poll. Until E-1b lands, those
+> devices remain on the `GetMetrics` poll (their slowly-changing analog values
+> are approximately last-value). E-1 (E-1a + E-1b) is a **v2.2.0 release
+> blocker** (Epic E / issues #129, #130).
 
 The integer fields the codec emits (`valveStatusCode`, `valvePosition`,
 `moving`, `fault`, `lowBattery`) are the values E-1 will read from each event —

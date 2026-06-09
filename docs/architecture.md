@@ -120,6 +120,18 @@ The in-memory snapshot (`Arc<watch::Sender<Arc<AppConfig>>>`) is rebuilt from SQ
 - `process_command_queue()` drains commands from storage queue one by one
 - Each command is sent to ChirpStack via `enqueue_device_request_to_server()` (DeviceQueueItem gRPC)
 
+### `chirpstack_events.rs` — Uplink Event Ingestion (Story E-1 / E-1a, #130)
+
+**Responsibility:** Expose each device value as its **raw last-known value** with the device's **source timestamp** — no gateway-side aggregation. Aggregation/trending is the SCADA's job; the `GetMetrics` poll time-aggregates (Gauge→avg, Absolute→sum) and therefore cannot faithfully carry discrete state (e.g. a valve's `valveStatusCode` aggregates to a nonsense `391`).
+
+**Data flow:**
+1. `run_event_ingestion()` (a tokio task spawned from `main.rs`) supervises one long-lived stream per **valve-class** device (E-1a scope: `command_class = "valve"`).
+2. Each `run_device_stream()` opens `InternalService.StreamDeviceEvents` (reusing the `chirpstack_inventory` consumer pattern) and reconnects with capped-exponential backoff; it honours the shared `CancellationToken`.
+3. `map_uplink_to_writes()` (pure, testable) maps each configured `read_metric` whose `chirpstack_metric_name` is present in the decoded `object` to a `BatchMetricWrite` stamped with the device event time (`LogItem.time`) — the value verbatim, never aggregated.
+4. `poll_metrics()` **skips valve-class devices** so the stream is the sole, authoritative writer for them. The OPC UA read path exposes `MetricValue.timestamp` as the DataValue `source_timestamp`.
+
+**Pending (E-1b):** widen ingestion to all devices and retire the poll value-path. E-1 (E-1a + E-1b) is a **v2.2.0 release blocker**.
+
 ### `storage/` — Storage Layer
 
 **Responsibility:** All persistent state — metric values, application configuration, and gateway status.

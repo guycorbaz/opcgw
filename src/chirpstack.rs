@@ -1336,6 +1336,18 @@ impl ChirpstackPoller {
 
         // Get metrics from server for each device (Story 5-3: track errors per device, don't abort)
         for dev_id in device_ids {
+            // Story E-1 (E-1a, #130): valve-class devices are served by the
+            // uplink event stream (`chirpstack_events`), which writes the raw
+            // last-known value with the device's source timestamp — no
+            // aggregation. The metrics poll (`GetMetrics`) time-aggregates
+            // (Gauge=avg, Absolute=sum) and would clobber the stream's correct
+            // value with a meaningless one (e.g. valveStatusCode 196+195=391),
+            // so skip valve-class devices here to keep the stream authoritative.
+            // E-1b extends this to all devices and retires the poll value-path.
+            if crate::chirpstack_events::device_is_valve_class(&self.config, &dev_id) {
+                trace!(device_id = %dev_id, "Skipping valve-class device in poll (served by uplink stream, E-1a)");
+                continue;
+            }
             match self
                 .get_device_metrics_from_server(
                     dev_id.clone(),

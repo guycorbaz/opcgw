@@ -22,6 +22,8 @@
 //! `[logging].dir` in `config.toml`, then the default `./log`.
 
 mod chirpstack;
+/// Story E-1 (E-1a): gRPC uplink-event ingestion — last-known value, no aggregation.
+mod chirpstack_events;
 /// Story C-1: ChirpStack inventory layer — types + cache + stream helper.
 mod chirpstack_inventory;
 /// Story C-1: locally-compiled ChirpStack proto types — see lib.rs doc-
@@ -1111,6 +1113,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Story E-1 (E-1a): spawn the uplink-event ingestion task. It consumes
+    // ChirpStack's decoded uplink events (InternalService.StreamDeviceEvents)
+    // for valve-class devices and writes their last-known values stamped with
+    // the device's source timestamp — no aggregation (#130). Independent
+    // SQLite backend per task (Story 5-1 pattern). Idle (cancellation-only) if
+    // no valve-class device is configured.
+    let pool_events = pool.clone();
+    let cancel_events = cancel_token.clone();
+    let config_events = application_config.clone();
+    let events_handle = tokio::spawn(async move {
+        let backend: Arc<dyn storage::StorageBackend> = Arc::new(
+            storage::SqliteBackend::with_pool(pool_events)
+                .expect("Failed to create SqliteBackend for uplink event ingestion"),
+        );
+        chirpstack_events::run_event_ingestion(config_events, backend, cancel_events).await;
+    });
+
     // Story 9-1: start the embedded Axum web server when [web].enabled.
     // Defaults to `false` so existing operators upgrading from Phase A
     // don't get a surprise new listening port. The server shares the
@@ -1444,6 +1463,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // promptly; error path is best-effort logged.
             if let Err(e) = opcua_listener_handle.await {
                 error!(error = %e, "OPC UA config-listener task error during shutdown");
+            }
+            // Story E-1 (E-1a): join the uplink event-ingestion task. Observes
+            // `cancel_token.cancelled()` and exits promptly; not load-bearing
+            // for the data plane, so joined asymmetrically like the listeners.
+            if let Err(e) = events_handle.await {
+                error!(error = %e, "Uplink event-ingestion task error during shutdown");
             }
             // Iter-1 review P8: web config-listener was previously
             // dropped without being awaited. Surface any panic via
