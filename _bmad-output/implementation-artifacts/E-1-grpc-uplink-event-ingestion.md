@@ -214,6 +214,8 @@ claude-opus-4-8 (1M context) — bmad-dev-story, 2026-06-09 (E-1a slice).
 
 ⚠️ **Deferred to E-1b / pending before the story may flip `done`:** migrate non-valve analog sensors off the aggregated poll (Task 5 full + Task 7 stream-scope config); integration tests for stream connect/reconnect + end-to-end precedence + backfill (Task 8 e/f/g, need a gRPC stub harness); `README.md`/`config.example.toml`/DocBook manual doc-sync (Task 10 remainder); **AC#11 real-world validation against live ChirpStack + physical valve (Task 9) — the binding `done` gate** (main-deadlock doctrine). E-1 (E-1a + E-1b) remains a **v2.2.0 release blocker** (#130).
 
+> **Adapter note (2026-06-09 E-2 correct-course):** E-1b's uplink mapping must grow a **value-transform hook** (enum map / linear scale+offset / bitmask-shift) so **Tier-2 object-remap** devices (codec installed but uneditable) translate the vendor decoded-object into canonical values. E-1a (Tier-1 Tonhe valve) needs none. See `_bmad-output/planning-artifacts/sprint-change-proposal-2026-06-09.md` + Epic E Story E.2.
+
 ### File List
 
 Added:

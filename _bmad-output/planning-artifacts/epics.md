@@ -1363,14 +1363,14 @@ So that the operator contract is unambiguous: edit SQLite via the web UI (or `se
 
 **Why it exists:** opcgw today exposes whatever metrics and (queued-but-never-sent) commands a device's config declares, with the device's protocol details leaking onto the OPC UA side — the OPC UA client must know each model's raw fPort and byte codes. Guy's 2026-06-06 requirement: opcgw should present heterogeneous devices with a **common OPC UA view** — every *model* of a given *device kind* looks identical on OPC UA. An "open/close" command for a motorized valve is the same regardless of valve vendor/model; valve status is a normalized state, not a raw byte. This extends opcgw's name-translation role (Epic C) into a full **semantic device-abstraction layer**. First concrete driver: 3 Tonhe E20 motorized valves (LoRaWAN 868, Class A, single-byte open/close); protocol + ChirpStack codec in `docs/LoRa/TONHE Valve/`. **Crucially NOT valve-specific** — the architecture generalizes to other device kinds (sensors, meters, other actuators); valves are simply the first kind used to prove the pattern.
 
-**Two extension axes (the load-bearing design call):** (a) **Model** — byte layout, fPort, raw codes — handled OUTSIDE opcgw in the ChirpStack codec (`encodeDownlink`/`decodeUplink`); a new model of an existing kind is just a codec, zero opcgw change. (b) **Class / device kind** — canonical command vocabulary + canonical status/measurement semantics — handled IN opcgw; a new kind defines its canonical OPC UA surface once. The class layer is **additive**: devices not bound to a class keep working exactly as today (arbitrary numeric metrics + raw writable command nodes).
+**Two extension axes (the load-bearing design call):** (a) **Model** — byte layout, fPort, raw codes — translated by a per-(class,model) **adapter**. *Preferably* in the ChirpStack codec (**Tier 1**, when the codec is editable — a new model is then just a codec, zero opcgw change); otherwise **owned by opcgw** (**Tier 2** vendor-object remap / **Tier 3** native bytes) for the common case where a codec is installed but **cannot be edited** to opcgw's canonical shape. opcgw is model-*aware* via declarative profiles, not model-coupled in core. (b) **Class / device kind** — canonical command kinds + canonical status/measurement semantics — handled IN opcgw; a new kind defines its canonical OPC UA surface once. The class layer is **additive**: devices not bound to a class keep working exactly as today (arbitrary numeric metrics + raw writable command nodes).
 
 **Locked design decisions (2026-06-06, via design dialogue):**
 
-- Command surface: one writable OPC UA node per device, canonical values (valve class: `1` = Open / `0` = Close). Command vocabulary is per-class; pure sensors have none.
-- Status surface: normalized state + flags (valve class: `ValveState` Closed/Open/Opening/Closing/Fault/Unknown + `Moving`/`Fault`/`LowBattery`), identical across models.
-- Per-model protocol lives entirely in the ChirpStack codec; opcgw stays model-agnostic.
-- Downlink mechanism: opcgw enqueues a **semantic object** (`{"command":"open"}`) so the codec encodes the bytes — not raw-byte enqueue.
+- Command surface (revised 2026-06-09): one or more **writable OPC UA Variables** per device — **NOT** OPC UA Methods (universal SCADA/PLC client compatibility + reuse of E-0's writable command node). Canonical command **kinds**: **On/Off** (binary `1`/`0`, value→lookup→payload — the primitive shared across valves/switches/relays/pumps/motors; `on`→`open` polarity is **per-model configurable**, default valve `1`=open) and **SetLevel** (analog, value→scale/encode→payload — proportional valves/dimmers/VFD). `raw` legacy preserved; pure sensors have no command. OPC UA **Methods reserved** for future momentary/parameterless actions (Reset/Trigger/Home) only.
+- Status surface (revised 2026-06-09): a small **uniform core** — `Active` (on/off [+`Unknown`]), `Transitioning`, `Fault` — generalizing across binary actuators (valve "opening" = Active-target-on + Transitioning; "closed" = Active off, steady), **plus** class/model extras (e.g. `LowBattery`). Canonical state vocabularies per class (valve: open/opening/closed/closing/blocked/fault/unknown; switch: on/off). **Discipline:** keep the status ontology light until a **second** class (switch/motor) forces the shape.
+- Per-model protocol (revised 2026-06-09 — **supersedes** the original "lives entirely in the ChirpStack codec"): lives in a per-(class,model) **adapter** with 3 tiers chosen **independently per direction** (uplink/downlink): **T1 codec-canonical** (editable codec — the Tonhe valve), **T2 object-remap** (vendor decoded object ↔ canonical via field rename [already via `chirpstack_metric_name`→`metric_name`] + value transforms: enum map, linear scale+offset, bitmask/shift), **T3 native-bytes** (opcgw decodes raw uplink `data` / encodes raw `bytes`+`fPort` — fallback when the codec object/input is unusable). **Adapter expressiveness:** hybrid — declarative profiles (config/SQLite) for simple models + a Rust `trait DeviceDriver { encode; decode }` escape hatch for complex ones (multi-byte, CRC, stateful).
+- Downlink mechanism: the adapter enqueues **either** a semantic object (T1/T2) **or** raw `bytes`+`fPort` (T3) — E-0's `build_queue_item` already supports both forms.
 - Uplink mechanism: **Route B** — consume ChirpStack's decoded uplink EVENTS via gRPC `InternalService.StreamDeviceEvents` (reusing inventory stream code), NOT the metrics poll, NOT MQTT. (Route A — codec emits numeric state-code via metrics poll — was rejected and **empirically disproven 2026-06-08**: `GetMetrics` aggregation produced impossible values (`valveStatusCode=391` sum, `valvePosition=1.5` avg). No measurement kind survives aggregation; see #130.)
 - **No gateway-side aggregation (locked 2026-06-08, #130):** opcgw exposes the **raw last-known value** of every measurement + the device's **source timestamp** + **quality**; aggregation/trending is the SCADA's responsibility, never the gateway's. The metrics poll (`GetMetrics`) time-aggregates (Gauge=avg, Absolute=sum, Counter=delta) and is therefore unsuitable as the value path. This generalizes Route B from valve status to **all** measurements; see Story E.1.
 
@@ -1413,21 +1413,24 @@ So that OPC UA reflects true device state (discrete and analog) without gateway-
 - Config to enable/scope the stream (which applications/devices) to avoid unbounded event volume.
 - May split into **E-1a** (stream mechanism + last-value store + valve class) and **E-1b** (migrate all mappings, demote poll) if oversized.
 - Tests: stream event → last-value Storage write with source timestamp → OPC UA variant; reconnect after drop; quality reflects report age; no aggregation anywhere in the value path; backfill still serves a value before the first event.
+- **Adapter note (2026-06-09, → E-1b):** the uplink mapping must later grow a **value-transform hook** (enum map / scale+offset / bitmask-shift) for **Tier-2** object-remap devices (codec installed but uneditable; see E-2). **E-1a (Tier-1 Tonhe valve) needs none and is unaffected** — it ships as-is.
 - **Release gate:** E-1 must land before tagging **v2.2.0** stable (#130).
 
-### Story E.2: Device-Class Registry
+### Story E.2: Device-Class + Per-Model Adapter Registry
 
 As an **opcgw maintainer**,
-I want a device-class registry that declares each kind's canonical OPC UA surface and its mapping to/from the codec's semantic object,
-So that adding a new device kind is a single declarative addition and all models of a kind look identical on OPC UA.
+I want a registry of device **classes** (canonical OPC UA surface) and per-(class,model) **adapters** (canonical↔ChirpStack translation),
+So that every model of a class — even one whose ChirpStack codec I cannot edit — presents one identical On/Off/SetLevel + status surface to SCADA, and adding a model is a declarative addition.
 
-**Scope summary:**
+**Scope summary (revised 2026-06-09; full ACs at `bmad-create-story E-2`):**
 
-- Introduce a device "class/kind" concept; a device may optionally be tagged with a kind (config + web surface; default none = generic device, behaviour unchanged).
-- Per-kind declaration: canonical command nodes + node-value → command-object map (downlink); decoded-field → canonical-variable map (uplink). Valve = first registered class, refactoring E-0/E-1's concrete valve mapping into the registry.
-- Web/config UI to assign a device's kind (extends the device-config pages; picker pattern from C-2).
-- Generic devices remain fully functional (additive over the existing behaviour).
-- Tests: the valve kind round-trips through the registry; a generic device is unaffected; a second stub kind validates extensibility.
+- **Class** = the canonical OPC UA surface: command **kinds** (On/Off binary, SetLevel analog; `raw` legacy) exposed as **writable Variables** (not Methods) + a normalized **status** vocabulary (uniform `Active`/`Transitioning`/`Fault` core + class extras). A device is optionally tagged with a `(class, model)`; default none = generic device, behaviour unchanged.
+- **Adapter** per `(class, model)`, with 3 tiers chosen **independently per direction**: **T1 codec-canonical**, **T2 vendor-object remap** (field rename + value transforms: enum map / linear scale+offset / bitmask-shift), **T3 native bytes** (decode raw `data` / encode raw `bytes`+`fPort`). Hybrid expressiveness: **declarative profiles** for simple models + a Rust `trait DeviceDriver { encode; decode }` for complex ones.
+- **Command bindings:** generalize E-0's `[[application.device.command]]` into `command_kind`-tagged bindings (onoff/setlevel/raw); the writable Variable's value drives the adapter's downlink (value→lookup for onoff, value→scale/encode for setlevel). `on→open` polarity per-model configurable.
+- **Drivers to ship:** refactor the concrete valve mapping (E-0/E-1a) into the registry as the **first T1 driver**; add **one T2 object-remap profile** (a second valve/switch model with an uneditable codec) to prove the can't-edit-the-codec path; add a **stub second class** (e.g. switch On/Off) to prove class extensibility.
+- Web/config UI to assign a device's `(class, model)` (extends device-config pages; C-2 picker pattern).
+- Generic + T1 devices remain fully functional (additive). Tests: valve T1 round-trip; T2 remap round-trip (enum + scale + bitmask); SetLevel encode; generic device unaffected; a 2nd class validates extensibility.
+- Docs: `docs/architecture.md` (adapter/registry model), config + DocBook manual (class/model + command_kind surface), `docs/logging.md` if new events.
 
 ### Story E.3: Command Delivery Confirmation
 
