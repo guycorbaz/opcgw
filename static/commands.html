@@ -72,6 +72,11 @@
       <label for="edit-command-port">Command port (LoRaWAN f_port, 1&ndash;223)</label>
       <input id="edit-command-port" name="command_port" type="number" min="1" max="223" required>
       <label><input type="checkbox" id="edit-command-confirmed" name="command_confirmed"> Confirmed downlink</label>
+      <label for="edit-command-class">command_class</label>
+      <select id="edit-command-class" name="command_class">
+        <option value="">(none &mdash; generic raw byte)</option>
+        <option value="valve">valve</option>
+      </select>
       <div id="edit-error" class="error-banner" hidden></div>
       <div class="actions">
         <button type="submit">Save changes</button>

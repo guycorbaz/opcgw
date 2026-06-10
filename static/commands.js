@@ -136,7 +136,7 @@
       }
       let html = "<table class=\"commands\"><thead><tr>" +
         "<th>command_id</th><th>command_name</th><th>command_port</th>" +
-        "<th>command_confirmed</th><th>Actions</th></tr></thead><tbody>";
+        "<th>command_confirmed</th><th>command_class</th><th>Actions</th></tr></thead><tbody>";
       for (const c of commands) {
         html +=
           "<tr>" +
@@ -144,6 +144,7 @@
             "<td>" + escapeHtml(c.command_name) + "</td>" +
             "<td>" + c.command_port + "</td>" +
             "<td>" + (c.command_confirmed ? "true" : "false") + "</td>" +
+            "<td>" + (c.command_class ? escapeHtml(c.command_class) : "—") + "</td>" +
             "<td class=\"actions\">" +
               "<button class=\"btn-edit\" data-app=\"" + escapeHtml(applicationId) +
               "\" data-dev=\"" + escapeHtml(deviceId) +
@@ -182,6 +183,11 @@
       "<label>command_name <input type=\"text\" required name=\"command_name\"></label>" +
       "<label>command_port (LoRaWAN f_port, 1&ndash;223) <input type=\"number\" min=\"1\" max=\"223\" required name=\"command_port\"></label>" +
       "<label><input type=\"checkbox\" name=\"command_confirmed\"> Confirmed downlink</label>" +
+      "<label>command_class " +
+        "<select name=\"command_class\">" +
+          "<option value=\"\">(none — generic raw byte)</option>" +
+          "<option value=\"valve\">valve</option>" +
+        "</select></label>" +
       "<div class=\"create-error error-banner\" hidden></div>" +
       "<button type=\"submit\" class=\"btn-add\">Create command</button>";
     parent.appendChild(form);
@@ -197,6 +203,10 @@
         command_port: parseInt(fd.get("command_port"), 10),
         command_confirmed: fd.get("command_confirmed") === "on",
       };
+      // Only send command_class when a class is selected; a blank selection
+      // means generic (the server treats absent as None).
+      const cc = String(fd.get("command_class") || "").trim();
+      if (cc) payload.command_class = cc;
       try {
         await fetchJson(
           "/api/applications/" + encodeURIComponent(applicationId) +
@@ -238,6 +248,7 @@
         document.getElementById("edit-command-name").value = data.command_name;
         document.getElementById("edit-command-port").value = data.command_port;
         document.getElementById("edit-command-confirmed").checked = !!data.command_confirmed;
+        document.getElementById("edit-command-class").value = data.command_class || "";
         editModal.showModal();
       } catch (e) {
         showError(listError, "Could not load command for editing: " + (e.message || e));
@@ -262,6 +273,9 @@
       command_name: document.getElementById("edit-command-name").value.trim(),
       command_port: parseInt(document.getElementById("edit-command-port").value, 10),
       command_confirmed: document.getElementById("edit-command-confirmed").checked,
+      // Send the class explicitly on PUT so a blank selection clears it back
+      // to generic (null), and "valve" sets the binding.
+      command_class: (document.getElementById("edit-command-class").value.trim() || null),
     };
     try {
       await fetchJson(

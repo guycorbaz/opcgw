@@ -611,6 +611,167 @@ async fn put_command_updates_fields_then_get_reflects() {
     fx.shutdown().await;
 }
 
+// ----------------------------------------------------------------------
+// Story E-2 (#135): command_class device-class binding round-trips through
+// the web command CRUD. Without this, opcgw falls back to the raw-byte
+// downlink path and a valve close goes out as 0x00 (invalid) instead of the
+// codec's 0x02.
+// ----------------------------------------------------------------------
+
+#[tokio::test]
+#[serial(captured_logs)]
+async fn post_command_with_command_class_valve_persists_and_round_trips() {
+    let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
+    let client = reqwest::Client::new();
+    let payload = r#"{"command_id":60,"command_name":"valve_cmd","command_port":10,"command_confirmed":true,"command_class":"valve"}"#;
+    let resp = json_request(
+        &client,
+        reqwest::Method::POST,
+        &fx.url("/api/applications/app-1/devices/probe-1/commands"),
+        Some(&fx.base_url),
+        Some(payload),
+    )
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    // Response body echoes the binding.
+    let created: Value = resp.json().await.expect("json");
+    assert_eq!(created["command_class"], "valve");
+
+    wait_until_listener_swap().await;
+    let get_resp = client
+        .get(fx.url("/api/applications/app-1/devices/probe-1/commands/60"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    let body: Value = get_resp.json().await.expect("json");
+    assert_eq!(
+        body["command_class"], "valve",
+        "command_class must persist + round-trip through SQLite and the GET view"
+    );
+    fx.shutdown().await;
+}
+
+#[tokio::test]
+#[serial(captured_logs)]
+async fn post_command_with_unknown_command_class_returns_400() {
+    let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
+    let client = reqwest::Client::new();
+    let payload = r#"{"command_id":61,"command_name":"bad_cmd","command_port":10,"command_confirmed":false,"command_class":"sprocket"}"#;
+    let resp = json_request(
+        &client,
+        reqwest::Method::POST,
+        &fx.url("/api/applications/app-1/devices/probe-1/commands"),
+        Some(&fx.base_url),
+        Some(payload),
+    )
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "an unknown command_class must be rejected, not silently stored"
+    );
+    fx.shutdown().await;
+}
+
+#[tokio::test]
+#[serial(captured_logs)]
+async fn post_command_without_command_class_defaults_to_none() {
+    let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
+    let client = reqwest::Client::new();
+    let payload = r#"{"command_id":62,"command_name":"generic_cmd","command_port":11,"command_confirmed":false}"#;
+    let resp = json_request(
+        &client,
+        reqwest::Method::POST,
+        &fx.url("/api/applications/app-1/devices/probe-1/commands"),
+        Some(&fx.base_url),
+        Some(payload),
+    )
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    wait_until_listener_swap().await;
+    let get_resp = client
+        .get(fx.url("/api/applications/app-1/devices/probe-1/commands/62"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .send()
+        .await
+        .expect("send");
+    let body: Value = get_resp.json().await.expect("json");
+    assert!(
+        body["command_class"].is_null(),
+        "a command created without command_class must read back null (generic path)"
+    );
+    fx.shutdown().await;
+}
+
+#[tokio::test]
+#[serial(captured_logs)]
+async fn put_command_sets_then_clears_command_class() {
+    let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
+    let client = reqwest::Client::new();
+
+    // Set command_class on the seeded command 1 via PUT.
+    let set_payload = r#"{"command_name":"set_temp","command_port":20,"command_confirmed":false,"command_class":"valve"}"#;
+    let resp = json_request(
+        &client,
+        reqwest::Method::PUT,
+        &fx.url("/api/applications/app-1/devices/probe-1/commands/1"),
+        Some(&fx.base_url),
+        Some(set_payload),
+    )
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(resp.status(), StatusCode::OK);
+    wait_until_listener_swap().await;
+    let body: Value = client
+        .get(fx.url("/api/applications/app-1/devices/probe-1/commands/1"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["command_class"], "valve", "PUT must persist command_class");
+
+    // Clear it back to generic with command_class: null.
+    let clear_payload = r#"{"command_name":"set_temp","command_port":20,"command_confirmed":false,"command_class":null}"#;
+    let resp = json_request(
+        &client,
+        reqwest::Method::PUT,
+        &fx.url("/api/applications/app-1/devices/probe-1/commands/1"),
+        Some(&fx.base_url),
+        Some(clear_payload),
+    )
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(resp.status(), StatusCode::OK);
+    wait_until_listener_swap().await;
+    let body: Value = client
+        .get(fx.url("/api/applications/app-1/devices/probe-1/commands/1"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    assert!(
+        body["command_class"].is_null(),
+        "PUT with command_class:null must clear the binding back to generic"
+    );
+    fx.shutdown().await;
+}
+
 #[tokio::test]
 #[serial(captured_logs)]
 async fn delete_command_returns_204_then_404() {

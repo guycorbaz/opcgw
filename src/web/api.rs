@@ -1235,6 +1235,47 @@ fn validate_command_id_value(value: i32, addr: &SocketAddr) -> Result<(), Respon
     Ok(())
 }
 
+/// Device classes opcgw can bind a command to (Story E-2). Kept in sync with
+/// the runtime dispatch in `chirpstack::map_command_to_downlink`, which rejects
+/// any class string not handled there. Validating here gives the operator an
+/// immediate 400 at write time rather than a silent delivery-time failure.
+/// E-2's full registry will source this list from the registry; for now the
+/// single Tier-1 driver is the valve.
+const KNOWN_COMMAND_CLASSES: &[&str] = &["valve"];
+
+/// Story E-2: validate the optional `command_class` binding on a command
+/// create/update body. `None` (absent / null) is always valid — the generic
+/// raw-byte downlink path. A present value must be a non-empty, known class.
+#[allow(clippy::result_large_err)]
+fn validate_command_class(value: Option<&str>, addr: &SocketAddr) -> Result<(), Response> {
+    let class = match value {
+        None => return Ok(()),
+        Some(c) => c,
+    };
+    if !KNOWN_COMMAND_CLASSES.contains(&class) {
+        warn!(
+            event = "command_crud_rejected",
+            reason = "validation",
+            field = "command_class",
+            source_ip = %addr.ip(),
+            // Debug-format the attacker-controlled value so CR/LF/control
+            // chars cannot inject newlines into the audit log (matches the
+            // unknown_field B-H5 fix elsewhere in this module).
+            value = ?class,
+            "command CRUD field validation failed: unknown command_class"
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_hint(
+                format!("unknown command_class {class:?}"),
+                "omit command_class for a generic device, or use one of: valve",
+            )),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
 /// Story 9-6 AC#6: parallel to `application_not_found_response` /
 /// `device_not_found_response` for the `:command_id` URL segment.
 /// Returns 404 + the same `ErrorResponse` body shape; the audit-
@@ -2792,6 +2833,9 @@ pub struct CommandResponse {
     pub command_name: String,
     pub command_port: i32,
     pub command_confirmed: bool,
+    /// Optional device-class binding (Story E-2). `None` = generic raw-byte
+    /// downlink path; `Some("valve")` = the canonical valve command surface.
+    pub command_class: Option<String>,
 }
 
 /// `GET /api/applications/:application_id/devices/:device_id/commands`
@@ -2837,6 +2881,7 @@ pub async fn list_commands(
                     command_name: c.command_name.clone(),
                     command_port: c.command_port,
                     command_confirmed: c.command_confirmed,
+                    command_class: c.command_class.clone(),
                 })
                 .collect()
         })
@@ -2889,6 +2934,7 @@ pub async fn get_command(
         command_name: cmd.command_name.clone(),
         command_port: cmd.command_port,
         command_confirmed: cmd.command_confirmed,
+        command_class: cmd.command_class.clone(),
     }))
 }
 
@@ -2932,9 +2978,15 @@ pub async fn create_command(
     })?;
 
     // Walk-and-reject any unknown field with reason="unknown_field"
-    // audit. The allowed set is the 4 fields of DeviceCommandCfg.
-    const ALLOWED_FIELDS: &[&str] =
-        &["command_id", "command_name", "command_port", "command_confirmed"];
+    // audit. The allowed set is the 5 settable fields of DeviceCommandCfg
+    // (command_class added in Story E-2).
+    const ALLOWED_FIELDS: &[&str] = &[
+        "command_id",
+        "command_name",
+        "command_port",
+        "command_confirmed",
+        "command_class",
+    ];
     for key in obj.keys() {
         if !ALLOWED_FIELDS.contains(&key.as_str()) {
             warn!(
@@ -2953,7 +3005,7 @@ pub async fn create_command(
                     // attacker-controlled field name (parallel to
                     // iter-1 B-H5 audit-log fix).
                     format!("unknown field {key:?} in request body"),
-                    "allowed fields: command_id, command_name, command_port, command_confirmed",
+                    "allowed fields: command_id, command_name, command_port, command_confirmed, command_class",
                 )),
             )
                 .into_response());
@@ -3085,10 +3137,36 @@ pub async fn create_command(
                 .into_response()
         })?;
 
+    // Optional device-class binding (Story E-2). Absent or JSON null => None
+    // (the generic raw-byte downlink path); a present value must be a string.
+    let command_class: Option<String> = match obj.get("command_class") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(_) => {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "validation",
+                field = "command_class",
+                application_id = %application_id,
+                device_id = %device_id,
+                source_ip = %addr.ip(),
+                "create_command: command_class must be a string or null"
+            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::from_error(
+                    "command_class must be a string or null",
+                )),
+            )
+                .into_response());
+        }
+    };
+
     // Body field validation BEFORE touching the disk.
     validate_command_id_value(command_id, &addr)?;
     validate_command_name(&command_name, &addr)?;
     validate_command_port(command_port, &addr)?;
+    validate_command_class(command_class.as_deref(), &addr)?;
     // `command_confirmed` is bool — type-checked above.
 
     // Pre-check via watch channel: app + device must exist; no
@@ -3181,10 +3259,10 @@ pub async fn create_command(
         command_name: command_name.clone(),
         command_confirmed,
         command_port,
-        // E-0: the web command surface does not yet expose device-class
-        // binding (that arrives with the E-2 class registry). Web-created
-        // commands default to the generic raw-byte downlink path.
-        command_class: None,
+        // Story E-2: the web command surface now exposes the device-class
+        // binding. Absent => None => the generic raw-byte downlink path
+        // (unchanged behaviour for unclassed commands).
+        command_class: command_class.clone(),
     };
     state
         .sqlite_config
@@ -3215,6 +3293,7 @@ pub async fn create_command(
         command_name,
         command_port,
         command_confirmed,
+        command_class,
     };
     Ok((
         StatusCode::CREATED,
@@ -3266,8 +3345,9 @@ pub async fn update_command(
     })?;
 
     // Walk-and-reject: detect immutable_field (command_id) and any
-    // other unknown field.
-    const ALLOWED_FIELDS: &[&str] = &["command_name", "command_port", "command_confirmed"];
+    // other unknown field. command_class added in Story E-2.
+    const ALLOWED_FIELDS: &[&str] =
+        &["command_name", "command_port", "command_confirmed", "command_class"];
     for key in obj.keys() {
         match key.as_str() {
             "command_id" => {
@@ -3314,7 +3394,7 @@ pub async fn update_command(
                         // attacker-controlled field name (parallel
                         // to iter-1 B-H5 audit-log fix).
                         format!("unknown field {other:?} in request body"),
-                        "allowed fields: command_name, command_port, command_confirmed",
+                        "allowed fields: command_name, command_port, command_confirmed, command_class",
                     )),
                 )
                     .into_response());
@@ -3411,8 +3491,35 @@ pub async fn update_command(
                 .into_response()
         })?;
 
+    // Optional device-class binding (Story E-2). Absent or JSON null => None
+    // (clears the binding back to the generic raw-byte path).
+    let command_class: Option<String> = match obj.get("command_class") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(_) => {
+            warn!(
+                event = "command_crud_rejected",
+                reason = "validation",
+                field = "command_class",
+                application_id = %application_id,
+                device_id = %device_id,
+                command_id = command_id,
+                source_ip = %addr.ip(),
+                "update_command: command_class must be a string or null"
+            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::from_error(
+                    "command_class must be a string or null",
+                )),
+            )
+                .into_response());
+        }
+    };
+
     validate_command_name(&command_name, &addr)?;
     validate_command_port(command_port, &addr)?;
+    validate_command_class(command_class.as_deref(), &addr)?;
 
     // Pre-check via watch channel: app + device + command must exist;
     // new command_name must not collide with a sibling.
@@ -3499,7 +3606,7 @@ pub async fn update_command(
 
     state
         .sqlite_config
-        .update_command_by_id(&application_id, &device_id, command_id, &command_name, command_port, command_confirmed)
+        .update_command_by_id(&application_id, &device_id, command_id, &command_name, command_port, command_confirmed, command_class.as_deref())
         .map_err(|e| sqlite_crud_error(e, "command", "update_command", &addr))?;
 
     let all_apps = state
@@ -3522,6 +3629,7 @@ pub async fn update_command(
         command_name,
         command_port,
         command_confirmed,
+        command_class,
     }))
 }
 

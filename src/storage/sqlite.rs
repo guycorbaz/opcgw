@@ -2872,9 +2872,13 @@ impl SqliteBackend {
 
     /// Update a command identified by its integer `command_id` (HTTP API key).
     ///
-    /// Updates `command_name`, `command_confirmed`, and `command_port`.
+    /// Updates `command_name`, `command_confirmed`, `command_port`, and the
+    /// optional `command_class` device-class binding (Story E-2).
     /// The `command_name` UNIQUE constraint serves as the concurrent-write
     /// guard for rename collisions.
+    // Thin keyed-by-command_id SQL wrapper for the web PUT path: the mutable
+    // command fields are passed positionally (Story E-2 added command_class).
+    #[allow(clippy::too_many_arguments)]
     pub fn update_command_by_id(
         &self,
         application_id: &str,
@@ -2883,6 +2887,7 @@ impl SqliteBackend {
         new_name: &str,
         new_port: i32,
         new_confirmed: bool,
+        new_class: Option<&str>,
     ) -> Result<(), OpcGwError> {
         let mut __op = StorageOpLog::start("update_command_by_id");
         let conn = self.pool.checkout(Duration::from_secs(5)).map_err(|e| {
@@ -2891,9 +2896,10 @@ impl SqliteBackend {
         })?;
         let changed = conn
             .execute(
-                "UPDATE commands SET command_name = ?1, command_confirmed = ?2, command_port = ?3 \
-                 WHERE application_id = ?4 AND device_id = ?5 AND command_id = ?6",
-                params![new_name, new_confirmed as i32, new_port, application_id, device_id, command_id],
+                "UPDATE commands SET command_name = ?1, command_confirmed = ?2, command_port = ?3, \
+                 command_class = ?4 \
+                 WHERE application_id = ?5 AND device_id = ?6 AND command_id = ?7",
+                params![new_name, new_confirmed as i32, new_port, new_class, application_id, device_id, command_id],
             )
             .map_err(|e| {
                 OpcGwError::Database(format!(
