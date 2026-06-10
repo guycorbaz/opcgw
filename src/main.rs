@@ -49,6 +49,7 @@ pub mod chirpstack_internal_proto {
 mod command_validation;
 mod config;
 mod config_reload;
+mod device_registry;
 mod opc_ua;
 mod opc_ua_auth;
 mod opc_ua_history;

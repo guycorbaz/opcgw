@@ -171,10 +171,24 @@ What landed:
 
 **Validation:** unknown class rejected with `event="command_crud_rejected" reason="validation" field="command_class"` (value Debug-formatted to prevent log injection — matches the B-H5 house pattern). No new audit-event *type* (reuses `command_crud_rejected`), so `docs/logging.md` needs no change.
 
-**NOT done in this increment (remaining E-2 scope — Increments 2–3):** Tasks 1–5, 7 (registry abstraction + `DeviceDriver` trait, valve T1 refactor, `command_kind`/SetLevel, T2 object-remap engine, 2nd class) and the registry-dependent parts of Tasks 6 (model/command_kind selectors) and 8 (architecture/DocBook docs). Task checkboxes left unchecked because no *whole* task is 100% complete. Recommend `bmad-correct-course` to formally split E-2a (this increment, shippable now) / E-2b (the rest) before continuing.
+**Increment 2 — registry + valve T1 refactor (Tasks 1–2 core) — COMPLETE & VERIFIED (2026-06-10).**
+Zero behaviour change; pure architectural groundwork for the additive driver model.
+
+What landed:
+- New `src/device_registry.rs`: `trait DeviceDriver { class_name; encode_command }`, the Tier-1 `ValveDriver` (encode `1`→open / `0`→close object; same payload-length + value validation + error messages as before), a `ClassRegistry` resolving `command_class` → driver, and a process-wide `LazyLock` `registry()`. +3 unit tests. (Tier model documented in the module header; a `decode_uplink` hook + declarative-profile interpreter land with the Tier-2 work — valve decode is a passthrough since the codec emits canonical fields, stored as-is by `chirpstack_events::map_uplink_to_writes`.)
+- `src/chirpstack.rs`: `map_command_to_downlink` is now thin dispatch — `None`→raw, bound class→`registry().driver_for(class).encode_command(...)`, unknown→error. `DownlinkPayload` + `valve_command_object` made `pub(crate)` so the registry can build the codec object.
+- `src/lib.rs` + `src/main.rs`: declare `device_registry`.
+
+**Verification:** existing `map_valve_*` (4) + `deliver_one_*` (4) tests pass unchanged (the regression gate for the refactor); +3 new registry unit tests; full suite 0 failures; `clippy -D warnings` clean.
+
+**NOT done (remaining E-2 scope — Increment 3 = E-2b):** Tasks 3–5, 7 (the `command_kind`/SetLevel bindings, the Tier-2 object-remap transform engine + a second driver, a stub 2nd class) plus the registry-dependent parts of Task 6 (model/command_kind selectors) and Task 8 (architecture/DocBook docs of the tier model). Task checkboxes left unchecked because no *whole* task is end-to-end complete. Recommend `bmad-correct-course` to formally split E-2a (Increments 1–2, shippable now) / E-2b (Increment 3) before continuing.
 
 ### File List
 
+- `src/device_registry.rs` (new) — DeviceDriver trait + ValveDriver (T1) + ClassRegistry + registry()
+- `src/chirpstack.rs` (modified) — map_command_to_downlink delegates to the registry; DownlinkPayload/valve_command_object pub(crate)
+- `src/lib.rs` (modified) — declare device_registry module
+- `src/main.rs` (modified) — declare device_registry module
 - `src/web/api.rs` (modified) — command_class CRUD surface + validator + CommandResponse field
 - `src/storage/sqlite.rs` (modified) — `update_command_by_id` persists command_class
 - `static/commands.html` (modified) — edit-modal class selector

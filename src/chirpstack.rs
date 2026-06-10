@@ -2591,7 +2591,7 @@ impl ChirpstackPoller {
 /// - `Raw` carries pre-encoded bytes for devices/commands not bound to a class
 ///   (the legacy path, preserved as a fallback).
 #[derive(Debug, Clone, PartialEq)]
-enum DownlinkPayload {
+pub(crate) enum DownlinkPayload {
     Object(chirpstack_api::prost_types::Struct),
     Raw(Vec<u8>),
 }
@@ -2733,49 +2733,34 @@ fn find_command_cfg<'a>(
 /// Maps a command's canonical OPC UA value to a downlink payload.
 ///
 /// - No class (`None`) → raw-byte fallback: the bytes are sent verbatim.
-/// - `"valve"` class → semantic object: canonical `1` → `{"command":"open"}`,
-///   `0` → `{"command":"close"}`. Any other value is rejected so a bad write is
-///   visible rather than silently mis-sent.
-/// - Any other (unknown) class string is rejected — surfaces a config typo
-///   instead of silently falling back.
+/// - A bound class → its [`crate::device_registry::DeviceDriver`] encodes the
+///   canonical value (e.g. valve `1` → `{"command":"open"}`, `0` →
+///   `{"command":"close"}`); a bad value is rejected so it is visible rather
+///   than silently mis-sent.
+/// - An unknown class string is rejected — surfaces a config typo instead of
+///   silently falling back.
+///
+/// Story E-2 moved the concrete per-class encoding into the device-class
+/// registry; this function is now the thin dispatch + raw-byte fallback.
 fn map_command_to_downlink(
     command_class: Option<&str>,
     raw_payload: &[u8],
 ) -> Result<DownlinkPayload, OpcGwError> {
     match command_class {
         None => Ok(DownlinkPayload::Raw(raw_payload.to_vec())),
-        Some("valve") => {
-            // A valve command is a single canonical byte (1=open / 0=close).
-            // Reject empty or multi-byte payloads rather than silently
-            // truncating to the first byte.
-            if raw_payload.len() != 1 {
-                return Err(OpcGwError::ChirpStack(format!(
-                    "valve command expects a 1-byte payload, got {} byte(s)",
-                    raw_payload.len()
-                )));
-            }
-            let value = raw_payload[0];
-            let command = match value {
-                1 => "open",
-                0 => "close",
-                other => {
-                    return Err(OpcGwError::ChirpStack(format!(
-                        "valve command value {} out of range (expected 1=open or 0=close)",
-                        other
-                    )))
-                }
-            };
-            Ok(DownlinkPayload::Object(valve_command_object(command)))
-        }
-        Some(unknown) => Err(OpcGwError::ChirpStack(format!(
-            "unknown command_class '{}' (expected \"valve\" or none)",
-            unknown
-        ))),
+        Some(class) => match crate::device_registry::registry().driver_for(class) {
+            Some(driver) => driver.encode_command(raw_payload),
+            None => Err(OpcGwError::ChirpStack(format!(
+                "unknown command_class '{}' (expected \"valve\" or none)",
+                class
+            ))),
+        },
     }
 }
 
 /// Builds a `{ "command": <command> }` protobuf struct for the device codec.
-fn valve_command_object(command: &str) -> chirpstack_api::prost_types::Struct {
+/// Used by the device-class registry's valve driver (Story E-2).
+pub(crate) fn valve_command_object(command: &str) -> chirpstack_api::prost_types::Struct {
     use chirpstack_api::prost_types::{value::Kind, Struct, Value};
     let mut fields = std::collections::BTreeMap::new();
     fields.insert(
