@@ -1235,24 +1235,24 @@ fn validate_command_id_value(value: i32, addr: &SocketAddr) -> Result<(), Respon
     Ok(())
 }
 
-/// Device classes opcgw can bind a command to (Story E-2). Kept in sync with
-/// the runtime dispatch in `chirpstack::map_command_to_downlink`, which rejects
-/// any class string not handled there. Validating here gives the operator an
-/// immediate 400 at write time rather than a silent delivery-time failure.
-/// E-2's full registry will source this list from the registry; for now the
-/// single Tier-1 driver is the valve.
-const KNOWN_COMMAND_CLASSES: &[&str] = &["valve"];
-
 /// Story E-2: validate the optional `command_class` binding on a command
 /// create/update body. `None` (absent / null) is always valid — the generic
-/// raw-byte downlink path. A present value must be a non-empty, known class.
+/// raw-byte downlink path. A present value must resolve to a registered device
+/// class.
+///
+/// The device-class registry ([`crate::device_registry`]) is the **single
+/// source of truth** for what classes exist — the same registry the runtime
+/// dispatch (`chirpstack::map_command_to_downlink`) and `AppConfig::validate`
+/// consult, so the three cannot drift. Validating here gives the operator an
+/// immediate 400 at write time rather than a silent delivery-time failure.
 #[allow(clippy::result_large_err)]
 fn validate_command_class(value: Option<&str>, addr: &SocketAddr) -> Result<(), Response> {
     let class = match value {
         None => return Ok(()),
         Some(c) => c,
     };
-    if !KNOWN_COMMAND_CLASSES.contains(&class) {
+    let registry = crate::device_registry::registry();
+    if registry.driver_for(class).is_none() {
         warn!(
             event = "command_crud_rejected",
             reason = "validation",
@@ -1268,7 +1268,10 @@ fn validate_command_class(value: Option<&str>, addr: &SocketAddr) -> Result<(), 
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::with_hint(
                 format!("unknown command_class {class:?}"),
-                "omit command_class for a generic device, or use one of: valve",
+                format!(
+                    "omit command_class for a generic device, or use one of: {}",
+                    registry.class_names().join(", ")
+                ),
             )),
         )
             .into_response());

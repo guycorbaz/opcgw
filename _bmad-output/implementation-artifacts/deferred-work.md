@@ -868,3 +868,8 @@ E-2 was delivered as **E-2a** (Increments 1–2: the `command_class` web/config 
 - **E-2b-2 (`command_kind` + SetLevel)** — generalize the command binding into `command_kind` (onoff / setlevel / raw); add the analog SetLevel encode path (scale/offset). Build when a proportional/analog actuator exists.
 - **E-2b-3 (second class stub)** — register a 2nd class (e.g. `switch` On/Off) to validate class extensibility, plus the model/command_kind web selectors (Task 6 remainder) and the architecture/DocBook tier-model docs (Task 8 remainder). Build alongside E-2b-1.
 - Tracking: stays under Epic E (#129); open a dedicated GH issue when E-2b is scheduled.
+
+## Deferred from: code review of E-2-device-class-registry (2026-06-10)
+
+- **JS edit-form silent class-coercion (LOW, → E-2b)** — `static/commands.js` populates the edit modal's `command_class` `<select>` from a fixed 2-option list (`""` / `valve`); a stored class not in the list assigns to the first option (none), and a subsequent Save sends `null`, silently stripping the binding. Cannot trigger in E-2a (only `valve` is registered). Fix when E-2b adds a 2nd class by driving the dropdown from the registry (a `GET /api/command-classes` or embedded list) instead of hardcoded `<option>`s.
+- **No end-to-end persisted-class → downlink-object test (LOW, → E-2b)** — the CRUD round-trip tests prove `command_class` persists; the registry unit tests prove `ValveDriver` encodes `1`/`0` → object; nothing ties a persisted `"valve"` binding through `map_command_to_downlink` to a `DownlinkPayload::Object` in one test. Acceptable layering for E-2a; add a thin end-to-end guard alongside the E-2b driver work.

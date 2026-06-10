@@ -681,6 +681,31 @@ async fn post_command_with_unknown_command_class_returns_400() {
 
 #[tokio::test]
 #[serial(captured_logs)]
+async fn post_command_with_non_string_command_class_returns_400() {
+    let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
+    let client = reqwest::Client::new();
+    // command_class is a JSON number, not a string or null.
+    let payload = r#"{"command_id":64,"command_name":"badtype","command_port":10,"command_confirmed":false,"command_class":5}"#;
+    let resp = json_request(
+        &client,
+        reqwest::Method::POST,
+        &fx.url("/api/applications/app-1/devices/probe-1/commands"),
+        Some(&fx.base_url),
+        Some(payload),
+    )
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "a non-string/non-null command_class must be rejected (string-or-null type guard)"
+    );
+    fx.shutdown().await;
+}
+
+#[tokio::test]
+#[serial(captured_logs)]
 async fn post_command_without_command_class_defaults_to_none() {
     let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
     let client = reqwest::Client::new();

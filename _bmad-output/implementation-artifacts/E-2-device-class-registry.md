@@ -86,6 +86,18 @@ This story generalizes both into a **registry**, and — critically — adds the
 - [ ] **Task 8 — Docs sync (AC: 12)**
   - [ ] `docs/architecture.md`, `docs/manual/opcgw-user-manual.xml`, `docs/logging.md` (if new events), README Planning section, `sprint-status.yaml`. SPDX headers on new files. `xmllint` the DocBook.
 
+### Review Findings (iter-1, 2026-06-10)
+
+Code review of **E-2a** (commits `336cd94` + `ca34449`) via 3 adversarial layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor). **0 HIGH.** In-scope ACs #8, #3/#9, #1–2 core, #11 verified satisfied; the valve refactor preserves error strings byte-for-byte (genuine regression gate, not a fake guard).
+
+- [ ] [Review][Patch] `command_class` validation not single-sourced + not enforced at config-load (MEDIUM, converged blind+edge+auditor / AC#10) — web validator uses a hand-maintained `KNOWN_COMMAND_CLASSES` const duplicating the registry (drift), and `AppConfig::validate()` doesn't check `command_class` at all (a bad class via TOML/SQLite boots clean, fails silently at delivery). Fix: registry = single source of truth (`validate_command_class` → `registry().driver_for()`) + add a `command_class` arm to `AppConfig::validate()`. [src/web/api.rs, src/config.rs]
+- [ ] [Review][Patch] No test for the non-string `command_class` rejection branch (LOW) — add `command_class: 5` → 400. [tests/web_command_crud.rs]
+- [ ] [Review][Patch] Weak valve-encode test assertion (Debug substring) (LOW) — assert the codec object structurally. [src/device_registry.rs]
+- [ ] [Review][Patch] README Planning understates Increment 2 registry refactor (LOW / AC#12). [README.md]
+- [x] [Review][Defer] JS edit-form silently coerces an unknown stored class to "(none)" and clears it on save (LOW) [static/commands.js] — deferred to E-2b: cannot trigger with a single registered class; fix with a registry-driven dropdown.
+- [x] [Review][Defer] No end-to-end persisted-class → downlink-object test (LOW) — deferred to E-2b: unit (encode) + CRUD (persist) layers cover the halves.
+- Dismissed (2): case/whitespace strictness (consistent exact-match, not a defect); valve-decode "boundary" (accepted/documented E-2a/E-2b split).
+
 ## Dev Notes
 
 ### Architecture patterns & constraints

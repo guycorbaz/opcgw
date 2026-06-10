@@ -2124,6 +2124,27 @@ impl AppConfig {
                                 } else {
                                     seen_command_names.insert(command.command_name.clone());
                                 }
+
+                                // Story E-2 code-review iter-1 (AC#10): validate
+                                // the optional device-class binding at config
+                                // load against the device-class registry — the
+                                // same single source of truth the web CRUD uses.
+                                // Without this, a class unknown to the registry
+                                // (a TOML typo, a hand-edited / migrated SQLite
+                                // row) boots clean and fails only at downlink
+                                // time in `map_command_to_downlink`.
+                                if let Some(class) = command.command_class.as_deref() {
+                                    let registry = crate::device_registry::registry();
+                                    if registry.driver_for(class).is_none() {
+                                        errors.push(format!(
+                                            "{}.command_class: '{}' is not a known device class \
+                                             (expected one of: {})",
+                                            command_context,
+                                            class,
+                                            registry.class_names().join(", ")
+                                        ));
+                                    }
+                                }
                             }
                         }
                     }
@@ -3560,6 +3581,54 @@ mod tests {
         assert!(result.is_err(), "command_id = -5 must be rejected");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("command_id"), "unexpected: {err}");
+    }
+
+    /// Story E-2 code-review iter-1 (AC#10): a command bound to an unknown
+    /// device class must be rejected at config-load — the device-class registry
+    /// is the single source of truth. Without this, a typo'd class (TOML or a
+    /// hand-edited/migrated SQLite row) boots clean and fails only at downlink
+    /// time. The known class ("valve") must NOT be flagged.
+    #[test]
+    fn test_validation_unknown_command_class_rejected() {
+        let mut config = get_config();
+        assert!(
+            !config.application_list[0].device_list.is_empty(),
+            "test fixture precondition: application[0] must have at least one device"
+        );
+
+        // A known class must not itself produce a command_class error
+        // (robust to the fixture's baseline validity: we only assert that
+        // "valve" is not what gets flagged).
+        config.application_list[0].device_list[0].device_command_list =
+            Some(vec![DeviceCommandCfg {
+                command_id: 1,
+                command_name: "valve_ok".to_string(),
+                command_confirmed: false,
+                command_port: 10,
+                command_class: Some("valve".to_string()),
+            }]);
+        if let Err(e) = config.validate() {
+            assert!(
+                !e.to_string().contains("command_class"),
+                "a known device class must not be flagged: {e}"
+            );
+        }
+
+        // An unknown class is rejected with a class-naming error.
+        config.application_list[0].device_list[0].device_command_list =
+            Some(vec![DeviceCommandCfg {
+                command_id: 1,
+                command_name: "valve_bad".to_string(),
+                command_confirmed: false,
+                command_port: 10,
+                command_class: Some("sprocket".to_string()),
+            }]);
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("command_class"), "unexpected: {err}");
+        assert!(
+            err.contains("known device class"),
+            "error must explain the unknown class: {err}"
+        );
     }
 
     /// Story 9-6 AC#3: cross-device same `command_id` MUST be allowed

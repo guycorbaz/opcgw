@@ -105,6 +105,13 @@ impl ClassRegistry {
             .find(|d| d.class_name() == class)
             .map(|d| d.as_ref())
     }
+
+    /// All registered class names — the single source of truth for "what is a
+    /// valid `command_class`", used by the web CRUD validator and
+    /// `AppConfig::validate` so neither maintains a separate hardcoded list.
+    pub(crate) fn class_names(&self) -> Vec<&'static str> {
+        self.drivers.iter().map(|d| d.class_name()).collect()
+    }
 }
 
 /// Process-wide registry. The built-in driver set is static (compiled in), so a
@@ -133,18 +140,25 @@ mod tests {
     #[test]
     fn valve_driver_encodes_open_and_close() {
         let d = ValveDriver;
-        match d.encode_command(&[1]).expect("open encodes") {
-            DownlinkPayload::Object(s) => {
-                // The codec object must carry command="open".
-                let v = s.fields.get("command").expect("command field");
-                assert!(format!("{v:?}").contains("open"));
-            }
-            other => panic!("expected Object, got {other:?}"),
-        }
-        assert!(matches!(
-            d.encode_command(&[0]).expect("close encodes"),
-            DownlinkPayload::Object(_)
-        ));
+        let open = d.encode_command(&[1]).expect("open encodes");
+        let close = d.encode_command(&[0]).expect("close encodes");
+        // Both must produce a semantic object (not raw bytes)...
+        assert!(matches!(open, DownlinkPayload::Object(_)), "1 must encode an Object");
+        assert!(matches!(close, DownlinkPayload::Object(_)), "0 must encode an Object");
+        // ...carrying the correct, DISTINCT command verb. Asserting open
+        // contains "open" but not "close" (and vice-versa) catches a swapped
+        // or identical mapping — the failure mode a Debug-substring-only guard
+        // on a single direction would miss.
+        let open_s = format!("{open:?}");
+        let close_s = format!("{close:?}");
+        assert!(
+            open_s.contains("open") && !open_s.contains("close"),
+            "1 must encode open exactly, got {open_s}"
+        );
+        assert!(
+            close_s.contains("close") && !close_s.contains("open"),
+            "0 must encode close exactly, got {close_s}"
+        );
     }
 
     #[test]
