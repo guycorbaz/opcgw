@@ -7,16 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.0] — unreleased — Epic E: model-agnostic, class-aware device abstraction
 
-> **Status:** in development. `v2.2.0-rc3` is cut for **pre-production testing**
-> (supersedes `rc2`): the tag publishes a `2.2.0-rc3` Docker image (it does
+> **Status:** in development. `v2.2.0-rc4` is cut for **pre-production testing**
+> (supersedes `rc3`): the tag publishes a `2.2.0-rc4` Docker image (it does
 > **not** move the `latest` / `2.1` tags, so production deployments are
 > unaffected). rc1 validated Story E-0's downlink command path; rc2 validated
-> the de-aggregated read path (E-1, `stream_all_devices`) on hardware. **rc3
-> adds the per-device stale threshold ([#132](https://github.com/guycorbaz/opcgw/issues/132))
-> and orphan-warn self-correction.** Test the valve OPEN/CLOSE (E-0 / AC#10),
-> the de-aggregated reads with `chirpstack.stream_all_devices = true`
-> (E-1 / AC#11), and optionally a per-device `stale_threshold_seconds` before
-> E-1 flips to `done`.
+> the de-aggregated read path (E-1, `stream_all_devices`) on hardware; rc3 added
+> the per-device stale threshold ([#132](https://github.com/guycorbaz/opcgw/issues/132))
+> and orphan-warn self-correction. **rc4 adds Story E-2a — the device-class
+> registry and the `command_class` web/config surface
+> ([#135](https://github.com/guycorbaz/opcgw/issues/135)):** a valve command can
+> now be bound to `command_class = "valve"` **through the web command editor**
+> (previously only via a direct DB edit), so opcgw sends the semantic open/close
+> object → codec → `0x01`/`0x02` instead of an invalid raw byte. Test the valve
+> OPEN **and CLOSE** end-to-end from Fuxa/OPC UA (E-0 / AC#10), the de-aggregated
+> reads with `chirpstack.stream_all_devices = true` (E-1 / AC#11), and optionally
+> a per-device `stale_threshold_seconds`. **E-1 / E-1b remains the v2.2.0 release
+> blocker** before a stable tag.
 
 ### Added
 
@@ -48,6 +54,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model-agnostic. Absent = legacy raw-byte path (backward compatible).
 - **Schema migration v011** adds the `command_class` column to the `commands`
   table (round-trips through the SQLite application store).
+- **`command_class` settable from the web command editor + device-class registry**
+  (Epic E / E-2a, closes [#135](https://github.com/guycorbaz/opcgw/issues/135)).
+  The command CRUD API (`POST`/`PUT`) and the `commands.html` editor now expose a
+  `command_class` selector, so a valve command can be bound to `"valve"` from the
+  UI — previously the web layer hard-coded it to `None`, so a Fuxa/OPC UA close
+  went out as an invalid raw `0x00` instead of the codec's `0x02`. The class is
+  validated against a **device-class registry** (new `src/device_registry.rs`: a
+  `DeviceDriver` trait + `ClassRegistry`, valve as the first Tier-1 driver) at
+  **both** the web layer and `AppConfig::validate()` config-load — one source of
+  truth shared with the runtime downlink dispatch. The concrete valve mapping
+  moved behind the registry with zero behaviour change. (E-2b — a Tier-2
+  object-remap adapter, `command_kind`/SetLevel, and a second device class — is
+  deferred to backlog until a concrete second model/class exists.)
 - **Per-device OPC UA stale threshold** ([#132](https://github.com/guycorbaz/opcgw/issues/132)).
   Optional `stale_threshold_seconds` on `[[application.device]]` overrides the
   global `[opcua].stale_threshold_seconds` (default 120 s) for that device only —
