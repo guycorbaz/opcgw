@@ -1,6 +1,13 @@
 # Story E.2: Device-Class + Per-Model Adapter Registry
 
-Status: in-progress
+Status: review
+
+<!-- Delivered as E-2a (Increments 1–2): the command_class web/config surface
+(#135) + the device-class registry / DeviceDriver trait with the valve as the
+first Tier-1 driver. E-2b (Tier-2 object-remap engine + command_kind/SetLevel +
+2nd class) is deferred to backlog — see deferred-work.md "E-2 scope split". This
+review covers the E-2a scope only. -->
+
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
