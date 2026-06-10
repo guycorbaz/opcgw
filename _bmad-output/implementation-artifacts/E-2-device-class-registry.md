@@ -1,6 +1,6 @@
 # Story E.2: Device-Class + Per-Model Adapter Registry
 
-Status: review
+Status: done
 
 <!-- Delivered as E-2a (Increments 1–2): the command_class web/config surface
 (#135) + the device-class registry / DeviceDriver trait with the valve as the
@@ -97,6 +97,16 @@ Code review of **E-2a** (commits `336cd94` + `ca34449`) via 3 adversarial layers
 - [x] [Review][Defer] JS edit-form silently coerces an unknown stored class to "(none)" and clears it on save (LOW) [static/commands.js] — deferred to E-2b: cannot trigger with a single registered class; fix with a registry-driven dropdown.
 - [x] [Review][Defer] No end-to-end persisted-class → downlink-object test (LOW) — deferred to E-2b: unit (encode) + CRUD (persist) layers cover the halves.
 - Dismissed (2): case/whitespace strictness (consistent exact-match, not a defect); valve-decode "boundary" (accepted/documented E-2a/E-2b split).
+
+### Review Findings (iter-2, 2026-06-10)
+
+Mandatory re-review of iter-1's new code (registry-sourced validation + the `AppConfig::validate` arm + `class_names()`), 3 layers on the iter-1 diff. **0 HIGH.** Acceptance Auditor: **AC#10 now genuinely satisfied, AC#8 single-source confirmed (`KNOWN_COMMAND_CLASSES` fully removed; 3 consumers share the registry), AC#11 coverage holds — eligible-for-done.**
+
+- [x] [Review][Patch] Strengthened the config positive-case test (Blind MEDIUM) — was `if let Err(e) { assert !contains command_class }` (weak); now asserts `config.validate().is_ok()` for a `"valve"`-bound command (the fixture validates clean), a strong positive guard that fails if the new arm wrongly rejects a registered class. [src/config.rs]
+- [x] [Review][Accept-as-intended] Config-load now hard-rejects an unknown `command_class` at boot (Edge MEDIUM) — the **intended** fail-fast (vs iter-0's silent-until-delivery), matched exactly (no case/whitespace normalization, consistent with the web layer). Real-world impact ~nil: no existing config sets `command_class`, and the web UI sets it via an exact-value dropdown. If lenient matching is ever wanted, trim symmetrically in both `validate_command_class` and `AppConfig::validate`.
+- Dismissed (4): (a) web-vs-registry "cross-file invariant" (Blind MED) — the single-sourcing patch *is* the fix; all three consumers now share one registry, so no divergence exists. (b) valve-encode `!contains` substring fragility (Blind MED, conditional) — verified sound for the actual prost `Debug` shape (no type/field name contains "open"/"close"); test passes bidirectionally. (c) per-command `registry()` re-fetch (LOW) — micro; the accessor is a `LazyLock` deref. (d) empty-registry dangling hint (LOW) — unreachable; the built-in driver set is compiled-in and non-empty.
+
+**Loop termination:** after the iter-2 test strengthening, only LOW / dismissed / accepted-as-intended remain (CLAUDE.md condition #2). The iter-2 change was a test-assertion strengthening — not new production flow-control — so iter-3 is not mandated. Story → done.
 
 ## Dev Notes
 

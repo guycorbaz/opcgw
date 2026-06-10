@@ -3596,9 +3596,9 @@ mod tests {
             "test fixture precondition: application[0] must have at least one device"
         );
 
-        // A known class must not itself produce a command_class error
-        // (robust to the fixture's baseline validity: we only assert that
-        // "valve" is not what gets flagged).
+        // A known class ("valve") must pass config validation outright — a
+        // strong positive guard (not merely "valve isn't the thing flagged"):
+        // if the new arm wrongly rejected a registered class, this would fail.
         config.application_list[0].device_list[0].device_command_list =
             Some(vec![DeviceCommandCfg {
                 command_id: 1,
@@ -3607,12 +3607,11 @@ mod tests {
                 command_port: 10,
                 command_class: Some("valve".to_string()),
             }]);
-        if let Err(e) = config.validate() {
-            assert!(
-                !e.to_string().contains("command_class"),
-                "a known device class must not be flagged: {e}"
-            );
-        }
+        assert!(
+            config.validate().is_ok(),
+            "a command bound to the known 'valve' class must pass config validation: {:?}",
+            config.validate().err()
+        );
 
         // An unknown class is rejected with a class-naming error.
         config.application_list[0].device_list[0].device_command_list =
