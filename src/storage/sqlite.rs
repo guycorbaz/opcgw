@@ -3009,8 +3009,20 @@ impl SqliteBackend {
                     row.get::<_, String>(2)?,
                     // Story E-1 (E-1b, #132): per-device stale threshold (NULL = use global).
                     // A negative value (hand-edited DB) must not wrap to a huge
-                    // u64 — treat it as unset.
-                    row.get::<_, Option<i64>>(3)?.filter(|v| *v >= 0).map(|v| v as u64),
+                    // u64 — treat it as unset, audibly (config-side validation
+                    // rejects the same input hard; the DB load can only warn).
+                    row.get::<_, Option<i64>>(3)?.and_then(|v| {
+                        if v >= 0 {
+                            Some(v as u64)
+                        } else {
+                            tracing::warn!(
+                                event = "storage_invalid_stale_threshold",
+                                value = v,
+                                "negative per-device stale_threshold_seconds in DB; using global threshold"
+                            );
+                            None
+                        }
+                    }),
                 ))
             })
             .map_err(|e| OpcGwError::Database(format!("query devices: {}", e)))?

@@ -208,9 +208,11 @@ pub(crate) fn device_is_streamed(config: &AppConfig, device_id: &str) -> bool {
 fn streamed_devices(config: &AppConfig) -> Vec<(String, Vec<ReadMetric>)> {
     let mut out: Vec<(String, Vec<ReadMetric>)> = Vec::new();
     // The same DevEUI may legally appear under several applications (C-3
-    // allows it); stream it once — a second task would just duplicate the
-    // gRPC stream and the writes.
-    let mut seen_devices: HashSet<String> = HashSet::new();
+    // allows it); stream it ONCE — a second task would just duplicate the
+    // gRPC stream — but MERGE the metric lists so a mapping that only the
+    // later application configures still streams (first occurrence wins per
+    // chirpstack_metric_name on conflicts).
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for app in &config.application_list {
         for dev in &app.device_list {
             if dev.read_metric_list.is_empty() {
@@ -223,14 +225,28 @@ fn streamed_devices(config: &AppConfig) -> Vec<(String, Vec<ReadMetric>)> {
             ) {
                 continue;
             }
-            if !seen_devices.insert(dev.device_id.clone()) {
-                debug!(
-                    device_id = %dev.device_id,
-                    "device configured under multiple applications; streaming once"
-                );
-                continue;
+            match index.get(&dev.device_id) {
+                None => {
+                    index.insert(dev.device_id.clone(), out.len());
+                    out.push((dev.device_id.clone(), dev.read_metric_list.clone()));
+                }
+                Some(&i) => {
+                    let merged = &mut out[i].1;
+                    for m in &dev.read_metric_list {
+                        if !merged
+                            .iter()
+                            .any(|e| e.chirpstack_metric_name == m.chirpstack_metric_name)
+                        {
+                            merged.push(m.clone());
+                        }
+                    }
+                    debug!(
+                        device_id = %dev.device_id,
+                        application = %app.application_name,
+                        "device configured under multiple applications; streaming once with merged metric list"
+                    );
+                }
             }
-            out.push((dev.device_id.clone(), dev.read_metric_list.clone()));
         }
     }
     out
@@ -399,9 +415,12 @@ fn parse_up_event(item: &LogItem) -> Option<(DateTime<Utc>, serde_json::Value)> 
     let body: serde_json::Value = match serde_json::from_str(&item.body) {
         Ok(v) => v,
         Err(_) => {
+            // body itself is upstream-controlled free text — log only its
+            // length (numeric, injection-safe) for diagnostics.
             warn!(
                 event = "uplink_event_dropped",
                 reason = "unparseable_body",
+                body_len = item.body.len(),
                 "dropping uplink event: LogItem body is not valid JSON"
             );
             return None;
@@ -479,11 +498,24 @@ fn filter_fresher_writes(
 ) -> Vec<BatchMetricWrite> {
     let mut writes = Vec::with_capacity(candidates.len());
     for write in candidates {
-        let stored_ts = backend
-            .get_metric_value(device_id, &write.metric_name)
-            .ok()
-            .flatten()
-            .map(|v| v.timestamp);
+        let stored_ts = match backend.get_metric_value(device_id, &write.metric_name) {
+            Ok(stored) => stored.map(|v| v.timestamp),
+            Err(e) => {
+                // Fail CLOSED: if we cannot read the stored timestamp we
+                // cannot prove the candidate is fresher, so we skip it
+                // rather than let a replayed older event regress the value
+                // (the next live event retries; a write would most likely
+                // fail on the same contention anyway).
+                warn!(
+                    event = "uplink_guard_read_failed",
+                    device_id = %device_id,
+                    metric = %write.metric_name,
+                    error = %e,
+                    "freshness-guard storage read failed; skipping this write (fail-closed)"
+                );
+                continue;
+            }
+        };
         if is_fresher(write.timestamp, stored_ts) {
             writes.push(write);
         }
@@ -674,7 +706,13 @@ async fn connect_and_stream(
 
     // Backfill AFTER the live stream is open so no event can slip into a gap;
     // the freshness guard resolves the (rare) overlap in the stream's favour.
-    backfill_device(source, device_id, metrics, backend).await;
+    // Cancellation-aware: the bounded fetch opens its own channel, and
+    // shutdown must not wait on it.
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Ok(()),
+        _ = backfill_device(source, device_id, metrics, backend) => {}
+    }
 
     loop {
         tokio::select! {
@@ -1032,14 +1070,19 @@ mod tests {
     }
 
     /// Scripted [`UplinkStream`]: yields the scripted items in order, then
-    /// stays open forever (pending) — mimicking a quiet live stream.
+    /// stays open forever (pending) — mimicking a quiet live stream. Counts
+    /// `next_event` calls (shared with the source) so tests get a POSITIVE
+    /// signal that scripted items were fully consumed: the pump only issues
+    /// call N+1 after it has finished ingesting item N.
     struct ScriptedStream {
         items: VecDeque<ScriptItem>,
+        next_event_calls: Arc<AtomicUsize>,
     }
 
     #[async_trait::async_trait]
     impl UplinkStream for ScriptedStream {
         async fn next_event(&mut self) -> Result<Option<UplinkEvent>, OpcGwStreamError> {
+            self.next_event_calls.fetch_add(1, Ordering::SeqCst);
             match self.items.pop_front() {
                 Some(ScriptItem::Event(e)) => Ok(Some(e)),
                 Some(ScriptItem::Error(m)) => Err(OpcGwStreamError(m.to_string())),
@@ -1055,6 +1098,7 @@ mod tests {
         connects: Mutex<VecDeque<Vec<ScriptItem>>>,
         recent: Mutex<Option<UplinkEvent>>,
         connect_count: AtomicUsize,
+        next_event_calls: Arc<AtomicUsize>,
     }
 
     impl ScriptedSource {
@@ -1063,6 +1107,7 @@ mod tests {
                 connects: Mutex::new(connects.into()),
                 recent: Mutex::new(recent),
                 connect_count: AtomicUsize::new(0),
+                next_event_calls: Arc::new(AtomicUsize::new(0)),
             })
         }
     }
@@ -1082,6 +1127,7 @@ mod tests {
                 .unwrap_or_default();
             Ok(Box::new(ScriptedStream {
                 items: items.into(),
+                next_event_calls: Arc::clone(&self.next_event_calls),
             }))
         }
 
@@ -1191,28 +1237,36 @@ mod tests {
         task.await.unwrap();
     }
 
-    /// Review iter-1 P2: the same DevEUI under two applications (legal per
-    /// C-3) must stream once, not twice.
+    /// Review iter-1 P2 (+ iter-2 merge fix): the same DevEUI under two
+    /// applications (legal per C-3) must stream once — with the two apps'
+    /// metric lists MERGED, so a mapping only the second app configures is
+    /// not silently lost.
     #[test]
-    fn streamed_devices_dedups_cross_application_deveui() {
+    fn streamed_devices_dedups_and_merges_cross_application_deveui() {
         use crate::config::{ChirpStackApplications, ChirpstackDevice};
-        let dev = ChirpstackDevice {
+        let mk_dev = |metrics: Vec<ReadMetric>| ChirpstackDevice {
             device_id: "dev-dup".to_string(),
             device_name: "Dup".to_string(),
             stale_threshold_seconds: None,
-            read_metric_list: vec![rm("T", "temperature", OpcMetricTypeConfig::Float)],
+            read_metric_list: metrics,
             device_command_list: None,
         };
         let apps = vec![
             ChirpStackApplications {
                 application_name: "App A".to_string(),
                 application_id: "app-a".to_string(),
-                device_list: vec![dev.clone()],
+                // "temperature" configured as Float here…
+                device_list: vec![mk_dev(vec![rm("T", "temperature", OpcMetricTypeConfig::Float)])],
             },
             ChirpStackApplications {
                 application_name: "App B".to_string(),
                 application_id: "app-b".to_string(),
-                device_list: vec![dev],
+                // …and as Int here (conflict: first wins), plus a metric
+                // ONLY this app maps (must survive the merge).
+                device_list: vec![mk_dev(vec![
+                    rm("T2", "temperature", OpcMetricTypeConfig::Int),
+                    rm("H", "humidity", OpcMetricTypeConfig::Float),
+                ])],
             },
         ];
         let mut config = crate::web::test_support::stub_app_config_with_apps(&apps);
@@ -1222,6 +1276,21 @@ mod tests {
             devices.len(),
             1,
             "same DevEUI under two applications must stream exactly once"
+        );
+        let metrics = &devices[0].1;
+        assert_eq!(metrics.len(), 2, "metric lists must merge, not first-app-wins-all");
+        let temp = metrics
+            .iter()
+            .find(|m| m.chirpstack_metric_name == "temperature")
+            .unwrap();
+        assert_eq!(
+            temp.metric_type,
+            OpcMetricTypeConfig::Float,
+            "on per-metric conflict the FIRST application's mapping wins"
+        );
+        assert!(
+            metrics.iter().any(|m| m.chirpstack_metric_name == "humidity"),
+            "a metric only the second application maps must survive"
         );
     }
 
@@ -1253,8 +1322,17 @@ mod tests {
         ));
 
         wait_for_stored(&backend, 193).await;
-        // Give the replayed older event time to be pumped (and discarded).
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // POSITIVE consumption signal: the pump issues its 3rd next_event
+        // call only after it has fully ingested (and here: discarded) the
+        // 2nd scripted item — so the replayed older event was definitely
+        // processed, not merely "not yet delivered".
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while source.next_event_calls.load(Ordering::SeqCst) < 3 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("replayed older event was never consumed by the pump");
 
         let stored = backend
             .get_metric_value("dev1", "valveStatusCode")
