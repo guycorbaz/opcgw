@@ -7,22 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.0] — unreleased — Epic E: model-agnostic, class-aware device abstraction
 
-> **Status:** in development. `v2.2.0-rc4` is cut for **pre-production testing**
-> (supersedes `rc3`): the tag publishes a `2.2.0-rc4` Docker image (it does
+> **Status:** in development. `v2.2.0-rc5` is cut for **pre-production testing**
+> (supersedes `rc4`): the tag publishes a `2.2.0-rc5` Docker image (it does
 > **not** move the `latest` / `2.1` tags, so production deployments are
-> unaffected). rc1 validated Story E-0's downlink command path; rc2 validated
-> the de-aggregated read path (E-1, `stream_all_devices`) on hardware; rc3 added
-> the per-device stale threshold ([#132](https://github.com/guycorbaz/opcgw/issues/132))
-> and orphan-warn self-correction. **rc4 adds Story E-2a — the device-class
-> registry and the `command_class` web/config surface
-> ([#135](https://github.com/guycorbaz/opcgw/issues/135)):** a valve command can
-> now be bound to `command_class = "valve"` **through the web command editor**
-> (previously only via a direct DB edit), so opcgw sends the semantic open/close
-> object → codec → `0x01`/`0x02` instead of an invalid raw byte. Test the valve
-> OPEN **and CLOSE** end-to-end from Fuxa/OPC UA (E-0 / AC#10), the de-aggregated
-> reads with `chirpstack.stream_all_devices = true` (E-1 / AC#11), and optionally
-> a per-device `stale_threshold_seconds`. **E-1 / E-1b remains the v2.2.0 release
-> blocker** before a stable tag.
+> unaffected). On rc4 the **full Fuxa-driven valve OPEN+CLOSE cycle passed**
+> (2026-06-11, E-0 / AC#10 → **Story E-0 is `done`**); rc2 had already validated
+> the de-aggregated read path on hardware. **rc5 completes Story E-1 — the
+> v2.2.0 release blocker ([#130](https://github.com/guycorbaz/opcgw/issues/130)):
+> startup/reconnect backfill plus a 4-iteration adversarial code-review
+> hardening of the whole event-stream value path.** On every stream (re)connect
+> opcgw now backfills the device's newest recent event (bounded recent-events
+> fetch, never `GetMetrics`), and ALL stream writes pass a freshness guard, so
+> ChirpStack's event-history replay on reconnect can never regress a last-known
+> value. **The rc5 test gate (E-1 / AC#11 — the last one before v2.2.0
+> stable): cold-start.** Right after the container (re)starts, every streamed
+> device's value must appear on OPC UA immediately via the backfill (true value,
+> device source timestamp, no aggregates) — without waiting for the device's
+> next report.
 
 ### Added
 
@@ -79,6 +80,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   DevStatus-sourced battery, or a field-name mismatch); a sibling
   `uplink_metric_now_seen` (info) self-corrects the warning if the field is
   merely intermittent and later arrives.
+- **Startup/reconnect backfill** (Epic E / E-1b, rc5). On every successful
+  stream (re)connect, opcgw fetches the device's newest recent uplink via the
+  bounded recent-events read (real decoded events — never the aggregating
+  `GetMetrics`) and stores it, so a correct last-known value is on OPC UA
+  **immediately after a (re)start** instead of after the device's next report
+  (which can be 15–20 min away). New events: `uplink_backfill` /
+  `uplink_backfill_empty` / `uplink_backfill_skipped` / `uplink_backfill_failed`.
+- **Freshness guard on the whole event-stream value path** (E-1 code review,
+  rc5). ChirpStack **replays recent event history on every stream (re)connect**;
+  all stream writes (live pump **and** backfill) now pass an `is_fresher`
+  timestamp guard, so a replayed or out-of-order event can never regress a
+  last-known value — the value path is monotonic by device-report time
+  (`uplink_replay_skipped` debug traces the discards). On a storage read error
+  the guard **fails open, audibly** (`uplink_guard_read_failed` warn): a
+  transient unverified write beats permanently freezing a metric on a
+  self-repairable fault. Review hardening also: cross-application DevEUI
+  dedup with **merged** metric lists (+ `uplink_metric_type_conflict` warn),
+  per-device `stale_threshold_seconds` range validation (0, 86400] + negative
+  DB-value guard (`storage_invalid_stale_threshold`), strict `Bool` 0/1 and
+  integral-only `Int` JSON coercions (codec mismatches warn instead of silent
+  truthiness/truncation), `uplink_event_dropped` diagnostics for malformed
+  uplinks, and cancellation-aware connect/backfill (clean shutdown). The
+  gRPC stream now sits behind an injectable `UplinkSource` seam with
+  reconnect/backfill/no-regression tests.
 
 ## [2.1.0] — 2026-05-28 — web-first configuration & auto-discovery
 
