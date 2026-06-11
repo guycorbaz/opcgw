@@ -3003,27 +3003,27 @@ impl SqliteBackend {
             .map_err(|e| OpcGwError::Database(format!("prepare devices: {}", e)))?;
         let dev_rows: Vec<(String, String, String, Option<u64>)> = stmt
             .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    // Story E-1 (E-1b, #132): per-device stale threshold (NULL = use global).
-                    // A negative value (hand-edited DB) must not wrap to a huge
-                    // u64 — treat it as unset, audibly (config-side validation
-                    // rejects the same input hard; the DB load can only warn).
-                    row.get::<_, Option<i64>>(3)?.and_then(|v| {
-                        if v >= 0 {
-                            Some(v as u64)
-                        } else {
-                            tracing::warn!(
-                                event = "storage_invalid_stale_threshold",
-                                value = v,
-                                "negative per-device stale_threshold_seconds in DB; using global threshold"
-                            );
-                            None
-                        }
-                    }),
-                ))
+                let application_id = row.get::<_, String>(0)?;
+                let device_id = row.get::<_, String>(1)?;
+                let device_name = row.get::<_, String>(2)?;
+                // Story E-1 (E-1b, #132): per-device stale threshold (NULL = use global).
+                // A negative value (hand-edited DB) must not wrap to a huge
+                // u64 — treat it as unset, audibly (config-side validation
+                // rejects the same input hard; the DB load can only warn).
+                let stale_threshold = row.get::<_, Option<i64>>(3)?.and_then(|v| {
+                    if v >= 0 {
+                        Some(v as u64)
+                    } else {
+                        tracing::warn!(
+                            event = "storage_invalid_stale_threshold",
+                            device_id = %device_id,
+                            value = v,
+                            "negative per-device stale_threshold_seconds in DB; using global threshold"
+                        );
+                        None
+                    }
+                });
+                Ok((application_id, device_id, device_name, stale_threshold))
             })
             .map_err(|e| OpcGwError::Database(format!("query devices: {}", e)))?
             .collect::<Result<_, _>>()

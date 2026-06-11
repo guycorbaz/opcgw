@@ -233,11 +233,31 @@ fn streamed_devices(config: &AppConfig) -> Vec<(String, Vec<ReadMetric>)> {
                 Some(&i) => {
                     let merged = &mut out[i].1;
                     for m in &dev.read_metric_list {
-                        if !merged
+                        match merged
                             .iter()
-                            .any(|e| e.chirpstack_metric_name == m.chirpstack_metric_name)
+                            .find(|e| e.chirpstack_metric_name == m.chirpstack_metric_name)
                         {
-                            merged.push(m.clone());
+                            None => merged.push(m.clone()),
+                            Some(existing) => {
+                                // First occurrence wins; surface a TYPE
+                                // conflict so the operator knows the second
+                                // application's nodes read values stored
+                                // under the first's type. (The collision
+                                // itself pre-dates streaming — both apps'
+                                // mappings always shared the storage key
+                                // (device_id, chirpstack_metric_name).)
+                                if existing.metric_type != m.metric_type {
+                                    warn!(
+                                        event = "uplink_metric_type_conflict",
+                                        device_id = %dev.device_id,
+                                        metric = %m.chirpstack_metric_name,
+                                        kept_type = ?existing.metric_type,
+                                        conflicting_type = ?m.metric_type,
+                                        application = %app.application_name,
+                                        "same device field mapped with different metric_type across applications; first mapping wins"
+                                    );
+                                }
+                            }
                         }
                     }
                     debug!(
@@ -496,23 +516,34 @@ fn filter_fresher_writes(
     device_id: &str,
     candidates: Vec<BatchMetricWrite>,
 ) -> Vec<BatchMetricWrite> {
+    // Note: when one metric's guard read fails (below) the OTHER metrics of
+    // the same event still write — a single uplink is not atomic across its
+    // metrics on the storage layer (it never was: batch_write_metrics has no
+    // cross-metric transaction tie observable by readers mid-batch).
     let mut writes = Vec::with_capacity(candidates.len());
     for write in candidates {
         let stored_ts = match backend.get_metric_value(device_id, &write.metric_name) {
             Ok(stored) => stored.map(|v| v.timestamp),
             Err(e) => {
-                // Fail CLOSED: if we cannot read the stored timestamp we
-                // cannot prove the candidate is fresher, so we skip it
-                // rather than let a replayed older event regress the value
-                // (the next live event retries; a write would most likely
-                // fail on the same contention anyway).
+                // Fail OPEN, audibly: if the stored timestamp can't be read,
+                // write the candidate anyway. Rationale (review iter-3): the
+                // worst case of writing unverified is a TRANSIENT regression
+                // (a replayed older event lands, corrected by the next live
+                // event), whereas skipping on a PERSISTENT read failure
+                // (e.g. one corrupt stored row that the UPSERT below would
+                // actually repair) would freeze the metric forever. When the
+                // fault IS a repairable row, the warn stops once the write
+                // repairs it; for other faults (lock contention, I/O) it
+                // recurs per event at LoRaWAN cadence — by design, so a
+                // storage fault stays visible.
                 warn!(
                     event = "uplink_guard_read_failed",
                     device_id = %device_id,
                     metric = %write.metric_name,
                     error = %e,
-                    "freshness-guard storage read failed; skipping this write (fail-closed)"
+                    "freshness-guard storage read failed; writing unverified (fail-open)"
                 );
+                writes.push(write);
                 continue;
             }
         };
@@ -1094,6 +1125,11 @@ mod tests {
     /// Scripted [`UplinkSource`]: each `connect` hands out the next script;
     /// `recent` returns a fixed backfill event. Counts connects so reconnect
     /// behaviour is assertable.
+    ///
+    /// NOTE: `next_event_calls` is CUMULATIVE across every stream this source
+    /// hands out (it is shared, not per-stream). Single-connect tests can use
+    /// it as a consumption signal; multi-connect tests must account for calls
+    /// made by earlier streams.
     struct ScriptedSource {
         connects: Mutex<VecDeque<Vec<ScriptItem>>>,
         recent: Mutex<Option<UplinkEvent>>,
