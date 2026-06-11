@@ -393,7 +393,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read version");
-        assert_eq!(version, 12, "Schema version should be 11 (latest — E-0 command_class column)");
+        assert_eq!(version, 12, "Schema version should be 12 (latest — E-1 per-device stale_threshold_seconds column)");
 
         // Verify tables were created (excluding sqlite_sequence which is created automatically for AUTOINCREMENT)
         let table_count: i32 = conn
@@ -422,7 +422,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read version");
-        assert_eq!(version, 12, "Version should still be 11 (latest)");
+        assert_eq!(version, 12, "Version should still be 12 (latest)");
 
         // Cleanup
         let _ = fs::remove_file(&path);
@@ -599,7 +599,7 @@ mod tests {
         let post_version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read post-migration version");
-        assert_eq!(post_version, 12, "Post-upgrade version must be 11 (v006 → v007 → v008 → v009 → v010 → v011 in one pass)");
+        assert_eq!(post_version, 12, "Post-upgrade version must be 12 (v006 → v007 → v008 → v009 → v010 → v011 → v012 in one pass)");
 
         // Row counts preserved
         let mv_count: i32 = conn
@@ -1376,7 +1376,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12, "run_migrations must have advanced user_version to 11 (v008 + v009 + v010 + v011)");
+        assert_eq!(version, 12, "run_migrations must have advanced user_version to 12 (v008 + v009 + v010 + v011 + v012)");
 
         // Sanity: row counts preserved through the recreate
         let mv_count: i32 = conn
@@ -1511,7 +1511,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             version, 12,
-            "run_migrations must advance v006 -> v011 in a single call (real \
+            "run_migrations must advance v006 -> v012 in a single call (real \
              operator upgrade path)"
         );
 
@@ -1650,7 +1650,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("read version");
-        assert_eq!(version, 12, "fresh DB must land at v011 (E-0 command_class column)");
+        assert_eq!(version, 12, "fresh DB must land at v012 (E-1 per-device stale_threshold_seconds column)");
 
         for table in &["applications", "devices", "metrics", "commands"] {
             let exists: bool = conn

@@ -3008,7 +3008,9 @@ impl SqliteBackend {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     // Story E-1 (E-1b, #132): per-device stale threshold (NULL = use global).
-                    row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+                    // A negative value (hand-edited DB) must not wrap to a huge
+                    // u64 — treat it as unset.
+                    row.get::<_, Option<i64>>(3)?.filter(|v| *v >= 0).map(|v| v as u64),
                 ))
             })
             .map_err(|e| OpcGwError::Database(format!("query devices: {}", e)))?

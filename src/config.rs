@@ -1904,6 +1904,21 @@ impl AppConfig {
             }
         }
 
+        // Validate per-device stale_threshold_seconds overrides (Story E-1
+        // / #132) — same range as the global knob they override.
+        for app in &self.application_list {
+            for dev in &app.device_list {
+                if let Some(threshold) = dev.stale_threshold_seconds {
+                    if threshold == 0 || threshold > 86400 {
+                        errors.push(format!(
+                            "application '{}' device '{}': stale_threshold_seconds must be in range (0, 86400]",
+                            app.application_name, dev.device_name
+                        ));
+                    }
+                }
+            }
+        }
+
         // Validate application_list. Epic C C-0 (captured 2026-05-20 as "Epic D D-0", renamed 2026-05-21): an empty
         // application_list is a valid baseline state — the gateway can
         // start with zero configured applications, the OPC UA server

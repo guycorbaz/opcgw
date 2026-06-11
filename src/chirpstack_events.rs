@@ -64,6 +64,10 @@ fn json_to_metric(
     target: &crate::config::OpcMetricTypeConfig,
 ) -> Option<MetricType> {
     use crate::config::OpcMetricTypeConfig as T;
+    /// Largest f64 magnitude whose integers are all exactly representable
+    /// (2^53). Beyond it an `as i64` cast would silently snap to a nearby
+    /// value, so such floats are rejected as mismatches instead.
+    const F64_EXACT_INT_MAX: f64 = 9_007_199_254_740_992.0;
     match target {
         T::Float => value
             .as_f64()
@@ -71,11 +75,23 @@ fn json_to_metric(
             .map(MetricType::Float),
         T::Int => value
             .as_i64()
-            .or_else(|| value.as_f64().map(|f| f as i64))
+            .or_else(|| {
+                // Accept a float only when it is integral and exactly
+                // representable — a fractional value for an Int-configured
+                // metric is a codec/config mismatch, not something to
+                // silently truncate.
+                value
+                    .as_f64()
+                    .filter(|f| f.fract() == 0.0 && f.abs() <= F64_EXACT_INT_MAX)
+                    .map(|f| f as i64)
+            })
             .map(MetricType::Int),
         T::Bool => value
             .as_bool()
-            .or_else(|| value.as_i64().map(|i| i != 0))
+            // Strictly 0/1: the codec contract for flags. Any other integer
+            // (e.g. a `fault: 2`) is surfaced as a type mismatch rather than
+            // silently reinterpreted as `true`.
+            .or_else(|| value.as_i64().filter(|i| *i == 0 || *i == 1).map(|i| i != 0))
             .map(MetricType::Bool),
         T::String => value.as_str().map(|s| MetricType::String(s.to_string())),
     }
@@ -190,19 +206,31 @@ pub(crate) fn device_is_streamed(config: &AppConfig, device_id: &str) -> bool {
 /// devices (E-1a) plus — when `stream_all_devices` is set (E-1b) — every
 /// device with at least one configured read_metric.
 fn streamed_devices(config: &AppConfig) -> Vec<(String, Vec<ReadMetric>)> {
-    let mut out = Vec::new();
+    let mut out: Vec<(String, Vec<ReadMetric>)> = Vec::new();
+    // The same DevEUI may legally appear under several applications (C-3
+    // allows it); stream it once — a second task would just duplicate the
+    // gRPC stream and the writes.
+    let mut seen_devices: HashSet<String> = HashSet::new();
     for app in &config.application_list {
         for dev in &app.device_list {
             if dev.read_metric_list.is_empty() {
                 continue;
             }
-            if should_stream(
+            if !should_stream(
                 device_is_valve_class(config, &dev.device_id),
                 config.chirpstack.stream_all_devices,
                 true, // non-empty read_metric_list checked above
             ) {
-                out.push((dev.device_id.clone(), dev.read_metric_list.clone()));
+                continue;
             }
+            if !seen_devices.insert(dev.device_id.clone()) {
+                debug!(
+                    device_id = %dev.device_id,
+                    "device configured under multiple applications; streaming once"
+                );
+                continue;
+            }
+            out.push((dev.device_id.clone(), dev.read_metric_list.clone()));
         }
     }
     out
@@ -365,16 +393,52 @@ fn parse_up_event(item: &LogItem) -> Option<(DateTime<Utc>, serde_json::Value)> 
     if item.description != "up" {
         return None;
     }
-    let body: serde_json::Value = serde_json::from_str(&item.body).ok()?;
+    // From here on the item IS an uplink — a drop is an operator-relevant
+    // diagnostic (mirrors the inventory layer's `inventory_uplink_dropped`),
+    // not routine filtering.
+    let body: serde_json::Value = match serde_json::from_str(&item.body) {
+        Ok(v) => v,
+        Err(_) => {
+            warn!(
+                event = "uplink_event_dropped",
+                reason = "unparseable_body",
+                "dropping uplink event: LogItem body is not valid JSON"
+            );
+            return None;
+        }
+    };
     let object = body
         .get("object")
         .cloned()
         .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
     let event_time = match item.time.as_ref() {
         Some(ts) if ts.nanos >= 0 && ts.nanos < 1_000_000_000 && ts.seconds >= 0 => {
-            DateTime::<Utc>::from_timestamp(ts.seconds, ts.nanos as u32)?
+            match DateTime::<Utc>::from_timestamp(ts.seconds, ts.nanos as u32) {
+                Some(dt) => dt,
+                None => {
+                    warn!(
+                        event = "uplink_event_dropped",
+                        reason = "malformed_proto_timestamp",
+                        timestamp = %format!("seconds={},nanos={}", ts.seconds, ts.nanos),
+                        "dropping uplink event: proto timestamp out of chrono range"
+                    );
+                    return None;
+                }
+            }
         }
-        _ => return None,
+        other => {
+            let ts_repr = match other {
+                Some(ts) => format!("seconds={},nanos={}", ts.seconds, ts.nanos),
+                None => "missing".to_string(),
+            };
+            warn!(
+                event = "uplink_event_dropped",
+                reason = "malformed_proto_timestamp",
+                timestamp = %ts_repr,
+                "dropping uplink event: invalid or missing proto timestamp"
+            );
+            return None;
+        }
     };
     Some((event_time, object))
 }
@@ -399,6 +463,32 @@ fn is_fresher(candidate: SystemTime, stored: Option<DateTime<Utc>>) -> bool {
         None => true,
         Some(stored_ts) => DateTime::<Utc>::from(candidate) > stored_ts,
     }
+}
+
+/// Drop candidate writes that are not fresher than what storage already holds
+/// (see [`is_fresher`]). Shared by the live pump and the (re)connect backfill:
+/// ChirpStack **replays recent event history on every stream connect** (the
+/// very behaviour the bounded recent-events fetch relies on), so BOTH paths
+/// can deliver events older than the stored last-value. This guard makes the
+/// whole value path monotonic by device-report time — no replayed or
+/// out-of-order event ever regresses a last-known value.
+fn filter_fresher_writes(
+    backend: &Arc<dyn StorageBackend>,
+    device_id: &str,
+    candidates: Vec<BatchMetricWrite>,
+) -> Vec<BatchMetricWrite> {
+    let mut writes = Vec::with_capacity(candidates.len());
+    for write in candidates {
+        let stored_ts = backend
+            .get_metric_value(device_id, &write.metric_name)
+            .ok()
+            .flatten()
+            .map(|v| v.timestamp);
+        if is_fresher(write.timestamp, stored_ts) {
+            writes.push(write);
+        }
+    }
+    writes
 }
 
 /// Backfill the last-known value on (re)connect (AC#7): fetch the newest
@@ -434,17 +524,7 @@ async fn backfill_device(
     };
 
     let candidate_writes = map_uplink_to_writes(device_id, metrics, &event.object, event.event_time);
-    let mut writes = Vec::with_capacity(candidate_writes.len());
-    for write in candidate_writes {
-        let stored_ts = backend
-            .get_metric_value(device_id, &write.metric_name)
-            .ok()
-            .flatten()
-            .map(|v| v.timestamp);
-        if is_fresher(write.timestamp, stored_ts) {
-            writes.push(write);
-        }
-    }
+    let writes = filter_fresher_writes(backend, device_id, candidate_writes);
     if writes.is_empty() {
         debug!(
             event = "uplink_backfill_skipped",
@@ -494,13 +574,16 @@ fn ingest_event(
             .get(&m.chirpstack_metric_name)
             .map(|v| !v.is_null())
             .unwrap_or(false);
-        // First time we observe this field, self-correct any earlier "never
-        // seen" warning — it was just late or only emitted on some uplinks
-        // (e.g. a conditionally-reported value), not a true orphan.
-        if present
-            && seen.insert(m.chirpstack_metric_name.clone())
-            && warned.remove(&m.chirpstack_metric_name)
-        {
+        if !present {
+            continue;
+        }
+        // Record the sighting; on the FIRST one, self-correct any earlier
+        // "never seen" warning — the field was just late or only emitted on
+        // some uplinks (e.g. a conditionally-reported value), not a true
+        // orphan. Kept as explicit statements (not a `&&` chain) so the
+        // seen-set population can't be silently broken by a future edit.
+        let first_sighting = seen.insert(m.chirpstack_metric_name.clone());
+        if first_sighting && warned.remove(&m.chirpstack_metric_name) {
             info!(
                 event = "uplink_metric_now_seen",
                 device_id = %device_id,
@@ -522,7 +605,20 @@ fn ingest_event(
             warned.insert(name);
         }
     }
-    let writes = map_uplink_to_writes(device_id, metrics, &event.object, event.event_time);
+    let candidates = map_uplink_to_writes(device_id, metrics, &event.object, event.event_time);
+    let candidate_count = candidates.len();
+    // Freshness guard on the LIVE path too: ChirpStack replays recent event
+    // history on every stream (re)connect, so the pump regularly sees events
+    // older than the stored last-value — they must not regress it.
+    let writes = filter_fresher_writes(backend, device_id, candidates);
+    if writes.len() < candidate_count {
+        debug!(
+            event = "uplink_replay_skipped",
+            device_id = %device_id,
+            skipped = candidate_count - writes.len(),
+            "skipped replayed/older uplink values (not fresher than stored)"
+        );
+    }
     if !writes.is_empty() {
         let n = writes.len();
         if let Err(e) = backend.batch_write_metrics(writes) {
@@ -561,7 +657,14 @@ async fn connect_and_stream(
     warned: &mut HashSet<String>,
     events_seen: &mut u32,
 ) -> Result<(), OpcGwStreamError> {
-    let mut stream = source.connect(device_id).await?;
+    // The initial connect is also cancellation-aware: without this, a child
+    // mid-connect to an unreachable server would block the supervisor's
+    // shutdown join until the transport's own timeout.
+    let mut stream = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Ok(()),
+        res = source.connect(device_id) => res?,
+    };
 
     info!(
         event = "uplink_stream_connected",
@@ -865,6 +968,40 @@ mod tests {
     }
 
     #[test]
+    fn bool_coercion_is_strictly_zero_or_one() {
+        let metrics = vec![rm("Fault", "fault", OpcMetricTypeConfig::Bool)];
+        // 0 and 1 coerce; any other integer is a type mismatch (codec bug),
+        // not a truthy reinterpretation.
+        let ok = map_uplink_to_writes("dev1", &metrics, &json!({"fault": 1}), fixed_time());
+        assert_eq!(ok[0].data_type, MetricType::Bool(true));
+        let bad = map_uplink_to_writes("dev1", &metrics, &json!({"fault": 2}), fixed_time());
+        assert!(bad.is_empty(), "fault=2 must be a mismatch, not true");
+        let neg = map_uplink_to_writes("dev1", &metrics, &json!({"fault": -1}), fixed_time());
+        assert!(neg.is_empty(), "fault=-1 must be a mismatch, not true");
+    }
+
+    #[test]
+    fn int_coercion_rejects_fractional_floats() {
+        let metrics = vec![rm("Code", "valveStatusCode", OpcMetricTypeConfig::Int)];
+        // Integral float is accepted exactly…
+        let ok = map_uplink_to_writes(
+            "dev1",
+            &metrics,
+            &json!({"valveStatusCode": 195.0}),
+            fixed_time(),
+        );
+        assert_eq!(ok[0].data_type, MetricType::Int(195));
+        // …a fractional one is a mismatch, never silently truncated.
+        let bad = map_uplink_to_writes(
+            "dev1",
+            &metrics,
+            &json!({"valveStatusCode": 3.9}),
+            fixed_time(),
+        );
+        assert!(bad.is_empty(), "3.9 must be a mismatch, not truncated to 3");
+    }
+
+    #[test]
     fn is_fresher_guard_boundaries() {
         let t1 = DateTime::<Utc>::from_timestamp(1_700_000_100, 0).unwrap();
         let t2 = DateTime::<Utc>::from_timestamp(1_700_000_200, 0).unwrap();
@@ -1048,6 +1185,89 @@ mod tests {
         assert!(
             source.connect_count.load(Ordering::SeqCst) >= 2,
             "a reconnect must have happened"
+        );
+
+        cancel.cancel();
+        task.await.unwrap();
+    }
+
+    /// Review iter-1 P2: the same DevEUI under two applications (legal per
+    /// C-3) must stream once, not twice.
+    #[test]
+    fn streamed_devices_dedups_cross_application_deveui() {
+        use crate::config::{ChirpStackApplications, ChirpstackDevice};
+        let dev = ChirpstackDevice {
+            device_id: "dev-dup".to_string(),
+            device_name: "Dup".to_string(),
+            stale_threshold_seconds: None,
+            read_metric_list: vec![rm("T", "temperature", OpcMetricTypeConfig::Float)],
+            device_command_list: None,
+        };
+        let apps = vec![
+            ChirpStackApplications {
+                application_name: "App A".to_string(),
+                application_id: "app-a".to_string(),
+                device_list: vec![dev.clone()],
+            },
+            ChirpStackApplications {
+                application_name: "App B".to_string(),
+                application_id: "app-b".to_string(),
+                device_list: vec![dev],
+            },
+        ];
+        let mut config = crate::web::test_support::stub_app_config_with_apps(&apps);
+        config.chirpstack.stream_all_devices = true;
+        let devices = streamed_devices(&config);
+        assert_eq!(
+            devices.len(),
+            1,
+            "same DevEUI under two applications must stream exactly once"
+        );
+    }
+
+    /// Review iter-1 P1: ChirpStack replays recent event history on every
+    /// stream (re)connect — a LIVE event older than the stored value must not
+    /// regress it (the freshness guard applies to the pump, not just the
+    /// backfill).
+    #[tokio::test]
+    async fn replayed_older_live_event_never_regresses_stored_value() {
+        let fresh_ts = 1_700_000_200_i64;
+        let source = ScriptedSource::new(
+            vec![vec![
+                // The live stream delivers the newest event, then a replayed
+                // OLDER one (aggregation-era 391 as a tracer value).
+                ScriptItem::Event(uplink(fresh_ts, 193)),
+                ScriptItem::Event(uplink(fresh_ts - 100, 391)),
+            ]],
+            None,
+        );
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let cancel = CancellationToken::new();
+
+        let task = tokio::spawn(run_device_stream(
+            source.clone() as Arc<dyn UplinkSource>,
+            "dev1".to_string(),
+            valve_metrics(),
+            Arc::clone(&backend),
+            cancel.clone(),
+        ));
+
+        wait_for_stored(&backend, 193).await;
+        // Give the replayed older event time to be pumped (and discarded).
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let stored = backend
+            .get_metric_value("dev1", "valveStatusCode")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.data_type,
+            MetricType::Int(193),
+            "replayed older live event must not regress the stored value"
+        );
+        assert_eq!(
+            stored.timestamp,
+            DateTime::<Utc>::from_timestamp(fresh_ts, 0).unwrap()
         );
 
         cancel.cancel();
