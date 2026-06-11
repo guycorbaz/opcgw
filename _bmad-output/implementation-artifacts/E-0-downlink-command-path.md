@@ -1,9 +1,9 @@
 # Story E.0: Downlink Command Path (first testable slice)
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
-<!-- AC#10 real-world valve OPEN/CLOSE gate (Task 8) is a manual hardware test pending before this story may flip to `done`. -->
+<!-- AC#10 real-world valve OPEN/CLOSE gate (Task 8) PASSED 2026-06-11 on v2.2.0-rc4 (pre-prod, panoramix): FULL open+close cycle driven from Fuxa via OPC UA: each write → opcgw enqueued the semantic object on fPort 10 in ChirpStack → valve physically opened, then closed, each on its next periodic wake (~5 min battery cadence). command_class="valve" set via the web editor (E-2a surface, #135). Story flipped review → done. -->
 
 ## Story
 
