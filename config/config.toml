@@ -88,6 +88,16 @@ retry = 30
 delay = 1
 # Page size for pagination in list API calls (Story 4-3). Range: 1-1000.
 list_page_size = 100
+# Story E-1 (#130): route EVERY device's values through the uplink event
+# stream — raw last-known value with the device's source timestamp, no
+# aggregation (the SCADA does any averaging/trending). When false (default),
+# only valve-class devices (commands with command_class = "valve") stream;
+# other devices stay on the legacy aggregated metrics poll.
+# CAVEAT: DevStatus-sourced fields (e.g. "batteryLevel") are not part of the
+# codec's uplink object and will not populate via the stream — watch for
+# `uplink_metric_never_seen` in the logs after enabling.
+# Override via env-var: OPCGW_CHIRPSTACK__STREAM_ALL_DEVICES
+#stream_all_devices = false
 
 
 # OPC UA server parameters

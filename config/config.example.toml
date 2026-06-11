@@ -305,6 +305,10 @@ application_name = "Arrosage"
     # DevEUI
     device_id = "0000000000000002"
 
+        # Valve status fields come from the UPLINK EVENT STREAM (Story E-1):
+        # raw last-known values from the codec's decoded object, stamped with
+        # the device's report time — never aggregated. The names below are the
+        # Tonhe E20 codec's decoded-object fields.
         [[application.device.read_metric]]
         # This value must be unique
         metric_name ="Status_v01"
@@ -312,10 +316,23 @@ application_name = "Arrosage"
         metric_type = "Int"
 
         [[application.device.read_metric]]
-        # This value must be unique
-        metric_name ="BatteryLevel_v01"
-        chirpstack_metric_name = "batteryLevel"
+        metric_name ="State_v01"
+        chirpstack_metric_name = "state"
+        metric_type = "String"
+
+        [[application.device.read_metric]]
+        metric_name ="Position_v01"
+        chirpstack_metric_name = "valvePosition"
         metric_type = "Int"
+
+        # NOTE: do NOT map "batteryLevel" — it is DevStatus-sourced (not part
+        # of the codec's uplink object) and never appears on the event stream
+        # (you would see `uplink_metric_never_seen` in the logs). Map a codec
+        # field like `lowBattery` instead if the codec emits one.
+        [[application.device.read_metric]]
+        metric_name ="LowBattery_v01"
+        chirpstack_metric_name = "lowBattery"
+        metric_type = "Bool"
 
         [[application.device.command]]
         # This value must be unique
@@ -323,6 +340,11 @@ application_name = "Arrosage"
         command_id = 1
         command_confirmed = true
         command_port = 10
+        # Device-class binding (Story E-0/E-2): the OPC UA write 1 (open) /
+        # 0 (close) is delivered as the semantic {"command": "open"/"close"}
+        # object for the device-profile codec — and marks the device
+        # valve-class, which also routes its values to the event stream.
+        command_class = "valve"
 
 
     [[application.device]]
@@ -334,17 +356,13 @@ application_name = "Arrosage"
         metric_name ="Status_v02"
         chirpstack_metric_name = "valveStatusCode"
         metric_type = "Int"
-        [[application.device.read_metric]]
-        # This value must be unique
-        metric_name ="BatteryLevel_v02"
-        chirpstack_metric_name = "batteryLevel"
-        metric_type = "Int"
 
         [[application.device.command]]
         command_name = "Open_close_valve02"
         command_id = 2
         command_confirmed = true
         command_port = 10
+        command_class = "valve"
 
 
     [[application.device]]
@@ -353,14 +371,11 @@ application_name = "Arrosage"
 
         [[application.device.read_metric]]
         # This value must be unique
-        metric_name ="Status_v02"
+        metric_name ="Status_v03"
+        # The stream delivers the true status byte (e.g. 193 open / 195
+        # closed) — Int, not Float (the old Float mapping was an artifact of
+        # the retired aggregating poll path).
         chirpstack_metric_name = "valveStatusCode"
-        metric_type = "Float"
-
-        [[application.device.read_metric]]
-        # This value must be unique
-        metric_name ="BatteryLevel_v03"
-        chirpstack_metric_name = "batteryLevel"
         metric_type = "Int"
 
         [[application.device.command]]
@@ -368,6 +383,7 @@ application_name = "Arrosage"
         command_id = 3
         command_confirmed = true
         command_port = 10
+        command_class = "valve"
 
 
 

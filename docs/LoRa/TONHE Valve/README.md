@@ -159,11 +159,12 @@ chirpstack_metric_name = "valveStatusCode"   # codec field; stored via the event
 metric_type            = "Int"
 ```
 
-> **Still pending (Story E-1b):** migrating **non-valve** analog sensors
-> (water level, meteo, SHT, …) off the aggregated poll. Until E-1b lands, those
-> devices remain on the `GetMetrics` poll (their slowly-changing analog values
-> are approximately last-value). E-1 (E-1a + E-1b) is a **v2.2.0 release
-> blocker** (Epic E / issues #129, #130).
+> **E-1b implemented:** non-valve devices migrate off the aggregated poll by
+> setting `chirpstack.stream_all_devices = true` (validated on v2.2.0-rc2
+> pre-prod), and on startup/reconnect opcgw backfills the last value from the
+> device's recent event history (timestamp-guarded, never `GetMetrics`).
+> E-1 is a **v2.2.0 release blocker** (Epic E / issues #129, #130) — final
+> fleet sign-off on a release candidate is the remaining `done` gate.
 
 The integer fields the codec emits (`valveStatusCode`, `valvePosition`,
 `moving`, `fault`, `lowBattery`) are the values E-1 will read from each event —

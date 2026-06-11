@@ -1109,7 +1109,34 @@ retry = 10
 delay = 10
 
 # Page size for pagination in list APIs (default: 100, range 1-1000)
-list_page_size = 100</programlisting>
+list_page_size = 100
+
+# Route ALL devices' values through the uplink event stream (default: false).
+# See "How device values reach OPC UA" below.
+#stream_all_devices = false</programlisting>
+
+        <para><emphasis role="bold">How device values reach OPC
+        UA.</emphasis> opcgw has two value paths. The <emphasis>uplink
+        event stream</emphasis> delivers every decoded device report as it
+        happens: OPC UA shows the raw last-known value, stamped with the
+        device's own report time — no averaging or summing (trending is
+        your SCADA's job). The legacy <emphasis>metrics poll</emphasis>
+        instead asks ChirpStack for time-aggregated buckets every
+        <literal>polling_frequency</literal> seconds; averages and sums
+        corrupt discrete states (a valve status byte must read
+        <literal>195</literal>, not an average), so the poll is being
+        retired as a value source. Valve-class devices (any device whose
+        command has <literal>command_class = "valve"</literal>) always use
+        the stream. Set <literal>stream_all_devices = true</literal> to
+        route every device with read metrics through the stream — the
+        recommended setting. One caveat: fields that ChirpStack sources
+        outside the codec's uplink object (typically
+        <literal>batteryLevel</literal> from DevStatus) never appear on
+        the stream; if you map one, the log warns with
+        <literal>uplink_metric_never_seen</literal>. On startup or after a
+        reconnect, opcgw backfills the last value from the device's recent
+        event history, so OPC UA is not empty while waiting for the next
+        report.</para>
 
         <warning>
           <title>API Token Security</title>
@@ -1597,9 +1624,14 @@ application_name = "Arrosage"
             (<literal>{"command":"open"}</literal> /
             <literal>{"command":"close"}</literal>) that the ChirpStack
             device-profile codec encodes into the model-specific wire bytes —
-            so every valve model looks identical on OPC UA. (Adding new device
-            classes and a web surface for them arrives in later Epic E
-            stories.)</para>
+            so every valve model looks identical on OPC UA. Binding a command
+            to a class also routes the device's <emphasis>values</emphasis>
+            through the uplink event stream (raw last-known value with the
+            device's report time — see the
+            <literal>[chirpstack]</literal> section), so the valve's status
+            fields always show the true reported state. (Adding new device
+            classes arrives in later Epic E stories; the class is settable
+            from the web command editor.)</para>
           </listitem>
         </itemizedlist>
 
@@ -1820,7 +1852,10 @@ rm config/config.toml</screen>
         <title>Stale-Data Status Codes</title>
         <para>Every metric read returns a value plus an OPC UA
         <literal>StatusCode</literal> derived from the metric's age relative
-        to <literal>[opcua].stale_threshold_seconds</literal>:</para>
+        to <literal>[opcua].stale_threshold_seconds</literal>. The age is
+        measured from the <emphasis>device's report time</emphasis> (the
+        OPC UA <literal>source_timestamp</literal>), not from the moment
+        opcgw received the value:</para>
         <table frame="all">
           <title>Metric staleness mapping</title>
           <tgroup cols="3">
@@ -1850,6 +1885,14 @@ rm config/config.toml</screen>
             </tbody>
           </tgroup>
         </table>
+        <para>The global threshold (default 120 s) is often too tight for
+        battery-powered LoRaWAN sensors that report every 15–20 minutes —
+        they would read <literal>Uncertain</literal> between two perfectly
+        normal reports. Set a per-device override in that case:
+        <literal>stale_threshold_seconds = 1800</literal> on the
+        <literal>[[application.device]]</literal> block (the device-level
+        value wins over <literal>[opcua].stale_threshold_seconds</literal>).
+        Pick roughly twice the device's report interval.</para>
         <para>Transitions between status codes emit
         <literal>operation = "staleness_transition"</literal>:
         in-flight transitions at <literal>info</literal>, the cold-start
