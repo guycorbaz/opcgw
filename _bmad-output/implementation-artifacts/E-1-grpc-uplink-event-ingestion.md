@@ -1,12 +1,13 @@
 # Story E.1: Uplink-Event Ingestion — last-known value for all measurements (no aggregation)
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 <!-- This story is a v2.2.0 RELEASE BLOCKER (#130). It MUST be done before tagging v2.2.0 stable. -->
-<!-- AC#11 real-world validation gate (Task 9) is a manual hardware test pending before this story may flip to `done`:
-     rc2 de-aggregated-read strong PASS (2026-06-09) + rc4 valve-cycle PASS (2026-06-11) recorded; the 2026-06-11
-     backfill code is new and needs the next rc's fleet sign-off (cold-start values present right after boot). -->
+<!-- AC#11 real-world validation gate (Task 9) CLOSED: rc2 de-aggregated-read strong PASS (2026-06-09) +
+     rc4 valve-cycle PASS (2026-06-11) + rc5 COLD-START PASS (2026-06-12, production boot 08:54:41Z on panoramix):
+     SQLite metric restore 40/40 (0 orphans) before poller start, backfill freshness-guard correct-skip on all
+     8 devices, 346 live uplinks applied post-boot, zero stream drops. Story flipped to done 2026-06-12. -->
 
 ## Story
 
