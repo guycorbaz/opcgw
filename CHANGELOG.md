@@ -7,23 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.0] — unreleased — Epic E: model-agnostic, class-aware device abstraction
 
-> **Status:** in development. `v2.2.0-rc5` is cut for **pre-production testing**
-> (supersedes `rc4`): the tag publishes a `2.2.0-rc5` Docker image (it does
+> **Status:** in development. `v2.2.0-rc6` is cut for **pre-production testing**
+> (supersedes `rc5`): the tag publishes a `2.2.0-rc6` Docker image (it does
 > **not** move the `latest` / `2.1` tags, so production deployments are
-> unaffected). On rc4 the **full Fuxa-driven valve OPEN+CLOSE cycle passed**
-> (2026-06-11, E-0 / AC#10 → **Story E-0 is `done`**); rc2 had already validated
-> the de-aggregated read path on hardware. **rc5 completes Story E-1 — the
-> v2.2.0 release blocker ([#130](https://github.com/guycorbaz/opcgw/issues/130)):
-> startup/reconnect backfill plus a 4-iteration adversarial code-review
-> hardening of the whole event-stream value path.** On every stream (re)connect
-> opcgw now backfills the device's newest recent event (bounded recent-events
-> fetch, never `GetMetrics`), and ALL stream writes pass a freshness guard, so
-> ChirpStack's event-history replay on reconnect can never regress a last-known
-> value. **The rc5 test gate (E-1 / AC#11 — the last one before v2.2.0
-> stable): cold-start.** Right after the container (re)starts, every streamed
-> device's value must appear on OPC UA immediately via the backfill (true value,
-> device source timestamp, no aggregates) — without waiting for the device's
-> next report.
+> unaffected). All v2.2.0 story gates have now passed on hardware: rc4 proved
+> the **full Fuxa-driven valve OPEN+CLOSE cycle** (2026-06-11, E-0 / AC#10 →
+> **Story E-0 `done`**), rc2 validated the de-aggregated read path, and **rc5
+> passed the cold-start gate in production (2026-06-12, E-1 / AC#11 → Story
+> E-1 `done`** — SQLite metric restore before poller start, backfill
+> freshness-guard correct-skip, live uplinks flowing with zero stream drops;
+> [#130](https://github.com/guycorbaz/opcgw/issues/130) closed). rc6 adds one
+> fix on top of rc5: the CommandStatusPoller no longer errors every 5 s on
+> downlink commands queued from OPC UA
+> ([#134](https://github.com/guycorbaz/opcgw/issues/134)). **The rc6 test gate
+> (the last one before v2.2.0 stable):** after deploying rc6 on the
+> pre-production NAS, the recurring `Failed to query pending command
+> confirmations` ERROR must be gone from the logs — no DB cleanup required.
 
 ### Added
 
@@ -104,6 +103,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   uplinks, and cancellation-aware connect/backfill (clean shutdown). The
   gRPC stream now sits behind an injectable `UplinkSource` seam with
   reconnect/backfill/no-regression tests.
+
+### Fixed
+
+- **CommandStatusPoller no longer errors every 5 s on OPC-UA-queued downlinks**
+  ([#134](https://github.com/guycorbaz/opcgw/issues/134), rc6). Commands queued
+  by an OPC UA write left `command_name`/`parameters`/`command_hash` NULL in
+  `command_queue`, and the confirmation/timeout readers mapped those nullable
+  columns as non-NULL types — one such row failed the **entire** poll
+  (`Failed to query pending command confirmations … Invalid column type Null`),
+  killing delivery-confirmation tracking and spamming an ERROR every 5 s. All
+  four command readers now share a single NULL-safe row mapper (corrupt
+  `parameters` JSON also soft-fails per row instead of collapsing the batch),
+  and the OPC-UA write path persists `command_name` + `enqueued_at`. Existing
+  databases are handled as-is — no migration or manual cleanup needed.
 
 ## [2.1.0] — 2026-05-28 — web-first configuration & auto-discovery
 
