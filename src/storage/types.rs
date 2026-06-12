@@ -174,6 +174,10 @@ pub struct DeviceCommand {
     pub created_at: DateTime<Utc>,
     /// Error message if delivery failed
     pub error_message: Option<String>,
+    /// Configured OPC UA command name (e.g., "valveCmd") carried from the
+    /// device configuration into storage so queued rows are self-describing
+    /// (Story GH-134). `None` for legacy rows or callers without a name.
+    pub command_name: Option<String>,
 }
 
 impl DeviceCommand {
@@ -497,6 +501,7 @@ mod tests {
             status: CommandStatus::Pending,
             created_at: now,
             error_message: None,
+            command_name: None,
         };
 
         assert_eq!(cmd.id, 1);

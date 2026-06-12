@@ -423,6 +423,55 @@ impl SqliteBackend {
         }
     }
 
+    /// Map an 11-column `command_queue` SELECT row into a [`Command`],
+    /// tolerating NULLs in the nullable v002 columns (GH #134).
+    ///
+    /// Expected column order:
+    /// `id, device_id, command_name, parameters, status, enqueued_at,
+    /// sent_at, confirmed_at, error_message, command_hash, chirpstack_result_id`.
+    ///
+    /// NULL handling: `command_name` and `command_hash` map to `""`,
+    /// `parameters` maps to `serde_json::Value::Null` — and so does corrupt
+    /// non-NULL JSON (with a warn), because the readers collect rows with
+    /// `Result`-collapsing semantics. This is the single shared mapper for
+    /// all four `Command` reader queries so one bad row — legacy NULLs from
+    /// the pre-fix OPC-UA path or corrupted content — can never collapse an
+    /// entire poll into an error.
+    fn command_from_row(row: &rusqlite::Row) -> rusqlite::Result<Command> {
+        Ok(Command {
+            id: row.get::<_, i64>(0)? as u64,
+            device_id: row.get(1)?,
+            metric_id: String::new(), // Will be populated from config if needed
+            command_name: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            parameters: match row.get::<_, Option<String>>(3)? {
+                None => serde_json::Value::Null,
+                Some(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
+                    warn!(
+                        command_id = row.get::<_, i64>(0).unwrap_or(-1),
+                        error = %e,
+                        "Corrupted command parameters JSON in database; treating as null"
+                    );
+                    serde_json::Value::Null
+                }),
+            },
+            enqueued_at: row.get::<_, Option<String>>(5)?
+                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc)))
+                .unwrap_or_else(|| {
+                    // Legacy pre-#134 rows have NULL enqueued_at; they are
+                    // returned by the 5s confirmation poll, so keep this at
+                    // debug to avoid per-row log spam on every cycle.
+                    debug!("Command missing or unparseable enqueued_at timestamp, using current time");
+                    Utc::now()
+                }),
+            sent_at: row.get::<_, Option<String>>(6)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
+            confirmed_at: row.get::<_, Option<String>>(7)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
+            status: Self::status_from_string(&row.get::<_, String>(4)?),
+            error_message: row.get(8)?,
+            command_hash: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+            chirpstack_result_id: row.get(10)?,
+        })
+    }
+
     /// Create a new SqliteBackend with a dedicated single-connection pool (for tests).
     ///
     /// This creates a new connection pool internally with size 1, suitable for testing.
@@ -923,16 +972,20 @@ impl crate::storage::StorageBackend for SqliteBackend {
             })?;
 
         let status_str = Self::status_to_string(&CommandStatus::Pending);
-        let now = Utc::now().to_rfc3339();
+        // Use the project-canonical RFC3339 format so enqueued_at sorts
+        // consistently against rows written by enqueue_command (GH #134).
+        let now = format_rfc3339(&Utc::now());
 
         conn.execute(
-                "INSERT INTO command_queue (device_id, payload, f_port, status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO command_queue (device_id, payload, f_port, status, created_at, updated_at, command_name, enqueued_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     command.device_id,
                     &command.payload,
                     command.f_port as i32,
                     status_str,
                     now,
+                    now,
+                    command.command_name,
                     now
                 ],
             )
@@ -996,6 +1049,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
                     status: CommandStatus::Pending,
                     created_at,
                     error_message: None,
+                    command_name: None, // E-0 drain path does not need the name (GH-134)
                 })
             })
             .map_err(|e| {
@@ -1933,35 +1987,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
             "SELECT id, device_id, command_name, parameters, status, enqueued_at, sent_at, confirmed_at, error_message, command_hash, chirpstack_result_id
              FROM command_queue WHERE status = 'Pending' ORDER BY id ASC LIMIT 1",
             [],
-            |row| {
-                Ok(Command {
-                    id: row.get::<_, i64>(0)? as u64,
-                    device_id: row.get(1)?,
-                    metric_id: String::new(), // Will be populated from config if needed
-                    command_name: row.get(2)?,
-                    parameters: serde_json::from_str(&row.get::<_, String>(3)?)
-                        .map_err(|e| {
-                            error!("Corrupted command parameters in database: {}", e);
-                            rusqlite::Error::InvalidParameterName(format!("JSON parse error: {}", e))
-                        })?,
-                    enqueued_at: row.get::<_, Option<String>>(5)?
-                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc)))
-                        .unwrap_or_else(|| {
-                            warn!("Command missing or unparseable enqueued_at timestamp, using current time");
-                            Utc::now()
-                        }),
-                    sent_at: row.get::<_, Option<String>>(6)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
-                    confirmed_at: row.get::<_, Option<String>>(7)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
-                    status: match row.get::<_, String>(4)?.as_str() {
-                        "Sent" => CommandStatus::Sent,
-                        "Failed" => CommandStatus::Failed,
-                        _ => CommandStatus::Pending,
-                    },
-                    error_message: row.get(8)?,
-                    command_hash: row.get(9)?,
-                    chirpstack_result_id: row.get(10)?,
-                })
-            }
+            Self::command_from_row,
         ).optional()
         .map_err(|e| {
             OpcGwError::Database(format!("Failed to dequeue command: {}", e))
@@ -2032,31 +2058,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
         let mut stmt = conn.prepare(&query)
             .map_err(|e| OpcGwError::Database(format!("Failed to prepare command list query: {}", e)))?;
 
-        let commands = stmt.query_map(rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())), |row| {
-            Ok(Command {
-                id: row.get::<_, i64>(0)? as u64,
-                device_id: row.get(1)?,
-                metric_id: String::new(),
-                command_name: row.get(2)?,
-                parameters: serde_json::from_str(&row.get::<_, String>(3)?)
-                    .unwrap_or_else(|e| {
-                        warn!("Failed to parse command parameters: {}", e);
-                        serde_json::json!({})
-                    }),
-                enqueued_at: row.get::<_, Option<String>>(5)?
-                    .and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc)))
-                    .unwrap_or_else(|| {
-                        warn!("Command missing or unparseable enqueued_at timestamp, using current time");
-                        Utc::now()
-                    }),
-                sent_at: row.get::<_, Option<String>>(6)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
-                confirmed_at: row.get::<_, Option<String>>(7)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
-                status: Self::status_from_string(&row.get::<_, String>(4)?),
-                error_message: row.get(8)?,
-                command_hash: row.get(9)?,
-                chirpstack_result_id: row.get(10)?,
-            })
-        })
+        let commands = stmt.query_map(rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())), Self::command_from_row)
         .map_err(|e| OpcGwError::Database(format!("Failed to query commands: {}", e)))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| OpcGwError::Database(format!("Failed to collect commands: {}", e)))?;
@@ -2185,28 +2187,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
         )
             .map_err(|e| OpcGwError::Database(format!("Failed to prepare statement: {}", e)))?;
 
-        let commands = stmt.query_map([], |row| {
-            Ok(Command {
-                id: row.get::<_, i64>(0)? as u64,
-                device_id: row.get(1)?,
-                metric_id: String::new(),
-                command_name: row.get(2)?,
-                parameters: serde_json::from_str(&row.get::<_, String>(3)?)
-                    .map_err(|e| {
-                        error!("Failed to parse command parameters: {}", e);
-                        rusqlite::Error::InvalidParameterName("Invalid JSON".to_string())
-                    })?,
-                enqueued_at: row.get::<_, Option<String>>(5)?
-                    .and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc)))
-                    .unwrap_or_else(Utc::now),
-                sent_at: row.get::<_, Option<String>>(6)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
-                confirmed_at: row.get::<_, Option<String>>(7)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
-                status: Self::status_from_string(&row.get::<_, String>(4)?),
-                error_message: row.get(8)?,
-                command_hash: row.get(9)?,
-                chirpstack_result_id: row.get(10)?,
-            })
-        })
+        let commands = stmt.query_map([], Self::command_from_row)
             .map_err(|e| OpcGwError::Database(format!("Failed to query pending confirmations: {}", e)))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| OpcGwError::Database(format!("Failed to collect commands: {}", e)))?;
@@ -2235,28 +2216,7 @@ impl crate::storage::StorageBackend for SqliteBackend {
         )
             .map_err(|e| OpcGwError::Database(format!("Failed to prepare statement: {}", e)))?;
 
-        let commands = stmt.query_map(params![&cutoff_rfc3339], |row| {
-            Ok(Command {
-                id: row.get::<_, i64>(0)? as u64,
-                device_id: row.get(1)?,
-                metric_id: String::new(),
-                command_name: row.get(2)?,
-                parameters: serde_json::from_str(&row.get::<_, String>(3)?)
-                    .map_err(|e| {
-                        error!("Failed to parse command parameters: {}", e);
-                        rusqlite::Error::InvalidParameterName("Invalid JSON".to_string())
-                    })?,
-                enqueued_at: row.get::<_, Option<String>>(5)?
-                    .and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc)))
-                    .unwrap_or_else(Utc::now),
-                sent_at: row.get::<_, Option<String>>(6)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
-                confirmed_at: row.get::<_, Option<String>>(7)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
-                status: Self::status_from_string(&row.get::<_, String>(4)?),
-                error_message: row.get(8)?,
-                command_hash: row.get(9)?,
-                chirpstack_result_id: row.get(10)?,
-            })
-        })
+        let commands = stmt.query_map(params![&cutoff_rfc3339], Self::command_from_row)
             .map_err(|e| OpcGwError::Database(format!("Failed to query timed out commands: {}", e)))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| OpcGwError::Database(format!("Failed to collect commands: {}", e)))?;

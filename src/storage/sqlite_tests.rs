@@ -171,6 +171,7 @@
                 status: CommandStatus::Pending,
                 created_at: Utc::now(),
                 error_message: None,
+                command_name: None,
             };
             backend.queue_command(cmd).expect("Should queue command");
         }
@@ -186,6 +187,261 @@
                 "Commands should be in FIFO order"
             );
         }
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// GH-134 regression: a `command_queue` row written by the pre-fix OPC-UA
+    /// path has NULL `command_name`/`parameters`/`command_hash`/`enqueued_at`.
+    /// `find_pending_confirmations` must return it with safe defaults instead
+    /// of erroring out the whole poll (the CommandStatusPoller ERROR-every-5s
+    /// failure mode reported in GH #134).
+    #[test]
+    fn test_find_pending_confirmations_tolerates_null_command_name() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        // Mimic the pre-fix queue_command INSERT: only the 6 v001 columns,
+        // status 'Sent' with confirmed_at NULL so the row is poll-eligible.
+        {
+            let conn = backend.pool.checkout(Duration::from_secs(5))
+                .expect("Should checkout");
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO command_queue (device_id, payload, f_port, status, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params!["device_gh134", vec![0x01u8], 10, "Sent", &now, &now],
+            ).expect("Should insert legacy NULL row");
+        }
+
+        let commands = backend
+            .find_pending_confirmations()
+            .expect("NULL columns must not collapse the poll (GH-134)");
+        assert_eq!(commands.len(), 1, "Legacy NULL row must be returned");
+        assert_eq!(commands[0].command_name, "", "NULL command_name maps to empty string");
+        assert_eq!(commands[0].parameters, serde_json::Value::Null, "NULL parameters map to Value::Null");
+        assert_eq!(commands[0].command_hash, "", "NULL command_hash maps to empty string");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// GH-134 regression: the same legacy NULL row, once `sent_at` is older
+    /// than the TTL, must surface through `find_timed_out_commands` without
+    /// erroring (second reader on the CommandStatusPoller/TimeoutHandler path).
+    #[test]
+    fn test_find_timed_out_commands_tolerates_null_columns() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        {
+            let conn = backend.pool.checkout(Duration::from_secs(5))
+                .expect("Should checkout");
+            let now = Utc::now().to_rfc3339();
+            let old_sent_at = (Utc::now() - chrono::Duration::seconds(3600)).to_rfc3339();
+            conn.execute(
+                "INSERT INTO command_queue (device_id, payload, f_port, status, created_at, updated_at, sent_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params!["device_gh134", vec![0x01u8], 10, "Sent", &now, &now, &old_sent_at],
+            ).expect("Should insert legacy NULL row with old sent_at");
+        }
+
+        let commands = backend
+            .find_timed_out_commands(1)
+            .expect("NULL columns must not collapse the timeout scan (GH-134)");
+        assert_eq!(commands.len(), 1, "Timed-out legacy NULL row must be returned");
+        assert_eq!(commands[0].command_name, "", "NULL command_name maps to empty string");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// GH-134 write-side fix: `queue_command` must persist `command_name`
+    /// and `enqueued_at` so new OPC-UA rows are self-describing.
+    #[test]
+    fn test_queue_command_populates_command_name_and_enqueued_at() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        let cmd = DeviceCommand {
+            id: 0,
+            device_id: "device_123".to_string(),
+            payload: vec![0x01],
+            f_port: 10,
+            status: CommandStatus::Pending,
+            created_at: Utc::now(),
+            error_message: None,
+            command_name: Some("valveCmd".to_string()),
+        };
+        backend.queue_command(cmd).expect("Should queue command");
+
+        let (name, enqueued_at, parameters, command_hash): (Option<String>, Option<String>, Option<String>, Option<String>) = {
+            let conn = backend.pool.checkout(Duration::from_secs(5))
+                .expect("Should checkout");
+            conn.query_row(
+                "SELECT command_name, enqueued_at, parameters, command_hash FROM command_queue \
+                 ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            ).expect("Should read back queued row")
+        };
+
+        assert_eq!(name.as_deref(), Some("valveCmd"), "command_name must be persisted");
+        let enqueued_at = enqueued_at.expect("enqueued_at must be non-NULL");
+        assert!(!enqueued_at.is_empty(), "enqueued_at must be a non-empty timestamp");
+        // Pin the partial-write contract: the OPC-UA path deliberately does
+        // NOT fabricate parameters or a command_hash (dedup hashing belongs
+        // to enqueue_command); readers must stay NULL-tolerant for these.
+        assert!(parameters.is_none(), "queue_command must not fabricate parameters");
+        assert!(command_hash.is_none(), "queue_command must not fabricate command_hash");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// GH-134 regression: a legacy 6-column row in `Pending` state must not
+    /// error out `dequeue_command` (third reader on the shared mapper).
+    #[test]
+    fn test_dequeue_command_tolerates_null_columns() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        {
+            let conn = backend.pool.checkout(Duration::from_secs(5))
+                .expect("Should checkout");
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO command_queue (device_id, payload, f_port, status, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params!["device_gh134", vec![0x01u8], 10, "Pending", &now, &now],
+            ).expect("Should insert legacy NULL row");
+        }
+
+        let cmd = backend
+            .dequeue_command()
+            .expect("NULL columns must not error the dequeue (GH-134)")
+            .expect("Legacy NULL Pending row must be dequeued");
+        assert_eq!(cmd.command_name, "", "NULL command_name maps to empty string");
+        assert_eq!(cmd.parameters, serde_json::Value::Null, "NULL parameters map to Value::Null");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// GH-134 regression: a legacy 6-column row must not error out
+    /// `list_commands` (fourth reader on the shared mapper).
+    #[test]
+    fn test_list_commands_tolerates_null_columns() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        {
+            let conn = backend.pool.checkout(Duration::from_secs(5))
+                .expect("Should checkout");
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO command_queue (device_id, payload, f_port, status, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params!["device_gh134", vec![0x01u8], 10, "Sent", &now, &now],
+            ).expect("Should insert legacy NULL row");
+        }
+
+        let filter = CommandFilter {
+            device_id: Some("device_gh134".to_string()),
+            status: None,
+            command_name_contains: None,
+            older_than_days: None,
+        };
+        let commands = backend
+            .list_commands(&filter)
+            .expect("NULL columns must not collapse list_commands (GH-134)");
+        assert_eq!(commands.len(), 1, "Legacy NULL row must be listed");
+        assert_eq!(commands[0].command_name, "", "NULL command_name maps to empty string");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// GH-134 hardening: corrupt non-NULL `parameters` JSON must soft-fail
+    /// to `Value::Null` per row instead of collapsing the whole poll —
+    /// otherwise the exact GH-134 failure mode survives for a different
+    /// trigger (truncated write, manual DB edit).
+    #[test]
+    fn test_command_readers_tolerate_corrupt_parameters_json() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        {
+            let conn = backend.pool.checkout(Duration::from_secs(5))
+                .expect("Should checkout");
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO command_queue (device_id, payload, f_port, status, created_at, updated_at, parameters) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params!["device_gh134", vec![0x01u8], 10, "Sent", &now, &now, "{not valid json"],
+            ).expect("Should insert corrupt-JSON row");
+        }
+
+        let commands = backend
+            .find_pending_confirmations()
+            .expect("Corrupt parameters JSON must not collapse the poll (GH-134)");
+        assert_eq!(commands.len(), 1, "Corrupt-JSON row must still be returned");
+        assert_eq!(commands[0].parameters, serde_json::Value::Null, "Corrupt JSON soft-fails to Value::Null");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// GH-134 matrix row 4: a legacy NULL row and a fully-populated
+    /// `enqueue_command` row pending confirmation are BOTH returned by one
+    /// query — one bad row never hides good rows.
+    #[test]
+    fn test_mixed_queue_null_and_populated_rows_both_returned() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        // Legacy NULL row (pre-fix OPC-UA shape), poll-eligible.
+        {
+            let conn = backend.pool.checkout(Duration::from_secs(5))
+                .expect("Should checkout");
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO command_queue (device_id, payload, f_port, status, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params!["device_legacy", vec![0x01u8], 10, "Sent", &now, &now],
+            ).expect("Should insert legacy NULL row");
+        }
+
+        // Fully-populated high-level row, flipped to Sent so it is poll-eligible.
+        let cmd = Command {
+            id: 0,
+            device_id: "device_populated".to_string(),
+            metric_id: "valve".to_string(),
+            command_name: "open_valve".to_string(),
+            parameters: serde_json::json!({"position": 1}),
+            enqueued_at: Utc::now(),
+            sent_at: None,
+            confirmed_at: None,
+            status: CommandStatus::Pending,
+            error_message: None,
+            command_hash: "hash_gh134_mixed".to_string(),
+            chirpstack_result_id: None,
+        };
+        let id = backend.enqueue_command(cmd).expect("Should enqueue populated command");
+        {
+            let conn = backend.pool.checkout(Duration::from_secs(5))
+                .expect("Should checkout");
+            conn.execute(
+                "UPDATE command_queue SET status = 'Sent' WHERE id = ?1",
+                rusqlite::params![id as i64],
+            ).expect("Should mark populated row Sent");
+        }
+
+        let commands = backend
+            .find_pending_confirmations()
+            .expect("Mixed queue must not error (GH-134)");
+        assert_eq!(commands.len(), 2, "Both the NULL row and the populated row must be returned");
+        let populated = commands.iter().find(|c| c.device_id == "device_populated")
+            .expect("Populated row present");
+        assert_eq!(populated.command_name, "open_valve");
+        assert_eq!(populated.parameters, serde_json::json!({"position": 1}));
+        let legacy = commands.iter().find(|c| c.device_id == "device_legacy")
+            .expect("Legacy row present");
+        assert_eq!(legacy.command_name, "");
 
         let _ = fs::remove_file(&path);
     }

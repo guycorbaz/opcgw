@@ -4285,6 +4285,7 @@ mod tests {
             status: CommandStatus::Pending,
             created_at: chrono::Utc::now(),
             error_message: None,
+            command_name: None,
         }
     }
 

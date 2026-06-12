@@ -122,10 +122,14 @@ use rusqlite::Result as SqliteResult;
 ///
 /// // Queue a command
 /// let cmd = DeviceCommand {
+///     id: 0, // assigned by the backend
 ///     device_id: "device_123".to_string(),
-///     confirmed: true,
+///     payload: vec![0x01, 0x02],
 ///     f_port: 10,
-///     data: vec![0x01, 0x02],
+///     status: CommandStatus::Pending,
+///     created_at: Utc::now(),
+///     error_message: None,
+///     command_name: Some("toggle_relay".to_string()),
 /// };
 /// backend.queue_command(cmd)?;
 /// # Ok(())
@@ -1492,11 +1496,14 @@ impl Storage {
     /// # Examples
     /// ```rust,ignore
     /// let mut storage = Storage::new(&config);
-    /// let command = DeviceCommand {
+    /// let command = DeviceCommandInternal {
+    ///     id: 0,
     ///     device_id: "device_123".to_string(),
-    ///     confirmed: true,
+    ///     payload: vec![0x01, 0x02, 0x03],
     ///     f_port: 1,
-    ///     data: vec![0x01, 0x02, 0x03],
+    ///     status: CommandStatus::Pending,
+    ///     created_at: Utc::now(),
+    ///     error_message: None,
     /// };
     /// storage.push_command(command);
     /// ```

@@ -2023,6 +2023,9 @@ impl OpcUa {
                     status: CommandStatus::Pending,
                     created_at: Utc::now(),
                     error_message: None,
+                    // GH-134: thread the configured OPC UA command name into
+                    // storage so the queued row is self-describing.
+                    command_name: Some(command.command_name.clone()),
                 };
                 // Queue command to storage (no lock needed, StorageBackend handles concurrency)
                 match storage.queue_command(command_to_send) {
