@@ -5,24 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.2.0] — unreleased — Epic E: model-agnostic, class-aware device abstraction
+## [2.2.0] — 2026-06-13 — Epic E: model-agnostic, class-aware device abstraction
 
-> **Status:** in development. `v2.2.0-rc6` is cut for **pre-production testing**
-> (supersedes `rc5`): the tag publishes a `2.2.0-rc6` Docker image (it does
-> **not** move the `latest` / `2.1` tags, so production deployments are
-> unaffected). All v2.2.0 story gates have now passed on hardware: rc4 proved
-> the **full Fuxa-driven valve OPEN+CLOSE cycle** (2026-06-11, E-0 / AC#10 →
-> **Story E-0 `done`**), rc2 validated the de-aggregated read path, and **rc5
-> passed the cold-start gate in production (2026-06-12, E-1 / AC#11 → Story
-> E-1 `done`** — SQLite metric restore before poller start, backfill
-> freshness-guard correct-skip, live uplinks flowing with zero stream drops;
-> [#130](https://github.com/guycorbaz/opcgw/issues/130) closed). rc6 adds one
-> fix on top of rc5: the CommandStatusPoller no longer errors every 5 s on
-> downlink commands queued from OPC UA
-> ([#134](https://github.com/guycorbaz/opcgw/issues/134)). **The rc6 test gate
-> (the last one before v2.2.0 stable):** after deploying rc6 on the
-> pre-production NAS, the recurring `Failed to query pending command
-> confirmations` ERROR must be gone from the logs — no DB cleanup required.
+> **Status:** released — tagged `v2.2.0` and published to Docker Hub
+> (`2.2.0` / `2.2` / `latest`) and GHCR; GitHub release published. All v2.2.0
+> story gates passed on hardware: rc4 proved the **full Fuxa-driven valve
+> OPEN+CLOSE cycle** (2026-06-11, E-0 / AC#10 → **Story E-0 `done`**), rc2
+> validated the de-aggregated read path, and **rc5 passed the cold-start gate
+> in production** (2026-06-12, E-1 / AC#11 → **Story E-1 `done`** — SQLite
+> metric restore before poller start, backfill freshness-guard correct-skip,
+> live uplinks flowing with zero stream drops;
+> [#130](https://github.com/guycorbaz/opcgw/issues/130) closed). rc6 added the
+> CommandStatusPoller NULL-row fix
+> ([#134](https://github.com/guycorbaz/opcgw/issues/134)) and **soaked clean
+> in pre-production**: the recurring `Failed to query pending command
+> confirmations` ERROR is gone (zero ERROR lines on 06-13, poller alive),
+> clearing the last gate to stable.
 
 ### Added
 
