@@ -254,6 +254,115 @@
         let _ = fs::remove_file(&path);
     }
 
+    // ----- Story E-3: delivery confirmation (single unified command_queue) ---
+
+    /// Build a Sent command in the unified `command_queue` table and return its
+    /// id. Mirrors the production flow: queue_command (DeviceCommand) →
+    /// mark_command_sent (sets status, sent_at, chirpstack_result_id).
+    fn sent_command_sqlite(backend: &SqliteBackend, device_id: &str, result_id: &str) -> u64 {
+        backend
+            .queue_command(DeviceCommand {
+                id: 0,
+                device_id: device_id.to_string(),
+                payload: vec![1],
+                f_port: 10,
+                status: CommandStatus::Pending,
+                created_at: Utc::now(),
+                error_message: None,
+                command_name: Some("valveCmd".to_string()),
+            })
+            .expect("queue");
+        let id = backend.get_pending_commands().expect("pending")[0].id;
+        backend.mark_command_sent(id, result_id).expect("mark sent");
+        id
+    }
+
+    /// AC#1: mark_command_sent persists the queue-item id, and
+    /// find_command_by_result_id round-trips it back to the same Sent command.
+    #[test]
+    fn test_mark_command_sent_persists_result_id_and_lookup() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("backend");
+        let id = sent_command_sqlite(&backend, "dev-e3", "qid-abc");
+
+        let found = backend
+            .find_command_by_result_id("qid-abc")
+            .expect("lookup")
+            .expect("must find the command by its result id");
+        assert_eq!(found.id, id);
+        assert_eq!(found.status, CommandStatus::Sent);
+        assert_eq!(found.chirpstack_result_id.as_deref(), Some("qid-abc"));
+        assert!(found.sent_at.is_some(), "mark_command_sent must stamp sent_at");
+
+        // Unknown id → None (an ack for a command we did not send).
+        assert!(backend
+            .find_command_by_result_id("qid-nonexistent")
+            .expect("lookup")
+            .is_none());
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// AC#2 + AC#4: confirm transitions Sent → Confirmed; a second confirm and
+    /// a failed-after-confirm are guarded no-ops (Err on 0 rows), so a replayed
+    /// ack cannot regress a terminal command.
+    #[test]
+    fn test_confirm_is_terminal_and_idempotent() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("backend");
+        let id = sent_command_sqlite(&backend, "dev-e3", "qid-conf");
+
+        backend.mark_command_confirmed(id).expect("first confirm ok");
+        let c = backend.find_command_by_result_id("qid-conf").unwrap().unwrap();
+        assert_eq!(c.status, CommandStatus::Confirmed);
+        assert!(c.confirmed_at.is_some());
+
+        // Replayed ack → guarded UPDATE affects 0 rows → Err (the ack handler
+        // treats this as benign). State must NOT change.
+        assert!(backend.mark_command_confirmed(id).is_err(), "re-confirm must be a guarded no-op");
+        // Timeout can't override a confirmed command either.
+        assert!(backend.mark_command_failed(id, "Confirmation timeout").is_err(),
+            "failing an already-Confirmed command must be a guarded no-op");
+        let c = backend.find_command_by_result_id("qid-conf").unwrap().unwrap();
+        assert_eq!(c.status, CommandStatus::Confirmed, "terminal state is immutable");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// AC#5: a command whose sent_at is older than the TTL is found by the
+    /// timeout sweep; once confirmed, it is no longer timeout-eligible (the
+    /// confirm/timeout race resolves to a single terminal transition).
+    #[test]
+    fn test_confirm_removes_from_timeout_eligibility() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("backend");
+        let id = sent_command_sqlite(&backend, "dev-e3", "qid-race");
+
+        // Back-date sent_at well past any TTL (no sleeping, no clock injection).
+        {
+            let conn = backend.pool.checkout(Duration::from_secs(5)).expect("checkout");
+            let old = (Utc::now() - chrono::Duration::seconds(3600)).to_rfc3339();
+            conn.execute(
+                "UPDATE command_queue SET sent_at = ? WHERE id = ?",
+                rusqlite::params![&old, id as i64],
+            ).expect("backdate");
+        }
+        assert_eq!(
+            backend.find_timed_out_commands(60).expect("scan").len(),
+            1,
+            "back-dated Sent command must be timeout-eligible"
+        );
+
+        // Confirm wins: now the command is terminal and no longer eligible.
+        backend.mark_command_confirmed(id).expect("confirm");
+        assert!(
+            backend.find_timed_out_commands(60).expect("scan").is_empty(),
+            "a Confirmed command must not be timeout-eligible"
+        );
+
+        let _ = fs::remove_file(&path);
+    }
+
     /// GH-134 write-side fix: `queue_command` must persist `command_name`
     /// and `enqueued_at` so new OPC-UA rows are self-describing.
     #[test]

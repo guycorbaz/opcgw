@@ -290,12 +290,48 @@ pub(crate) struct UplinkEvent {
     pub object: serde_json::Value,
 }
 
+/// Story E-3: a downlink **delivery acknowledgement** parsed from a ChirpStack
+/// `ack` device event (`LogItem.description == "ack"`, body = `AckEvent`).
+/// Emitted only for **confirmed** downlinks: `acknowledged == true` means the
+/// device received it. Correlated to a queued command via `queue_item_id`
+/// (== the `chirpstack_result_id` stored at enqueue).
+#[derive(Debug, Clone)]
+pub(crate) struct AckInfo {
+    /// ChirpStack queue-item UUID (== command `chirpstack_result_id`).
+    pub queue_item_id: String,
+    /// Whether the device acknowledged the confirmed downlink.
+    pub acknowledged: bool,
+}
+
+/// Story E-3: a **transmit acknowledgement** parsed from a ChirpStack `txack`
+/// device event (`LogItem.description == "txack"`, body = `TxAckEvent`). Means
+/// the gateway *transmitted* the downlink over the air — NOT that the device
+/// received it. Recorded as a diagnostic only; it never confirms a command
+/// (the locked E-3 policy: confirmation requires an `ack`, unconfirmed
+/// downlinks resolve via the timeout sweep).
+#[derive(Debug, Clone)]
+pub(crate) struct TxAckInfo {
+    /// ChirpStack queue-item UUID (== command `chirpstack_result_id`).
+    pub queue_item_id: String,
+}
+
+/// One parsed device event from the `StreamDeviceEvents` stream. E-1 ingests
+/// `Uplink`; Story E-3 additionally observes `Ack` (delivery confirmation) and
+/// `TxAck` (transmit diagnostic) on the **same** stream.
+#[derive(Debug, Clone)]
+pub(crate) enum DeviceEvent {
+    Uplink(UplinkEvent),
+    Ack(AckInfo),
+    TxAck(TxAckInfo),
+}
+
 /// An open per-device event stream. `next_event` returns `Ok(Some)` per
-/// uplink, `Ok(None)` on a clean server-side close, `Err` on a transport
-/// error (the consumer reconnects with backoff).
+/// recognised device event (uplink / ack / txack — Story E-3 widened this
+/// beyond uplinks), `Ok(None)` on a clean server-side close, `Err` on a
+/// transport error (the consumer reconnects with backoff).
 #[async_trait::async_trait]
 pub(crate) trait UplinkStream: Send {
-    async fn next_event(&mut self) -> Result<Option<UplinkEvent>, OpcGwStreamError>;
+    async fn next_event(&mut self) -> Result<Option<DeviceEvent>, OpcGwStreamError>;
 }
 
 /// Source of uplink events for one device: the long-lived stream plus the
@@ -345,23 +381,22 @@ pub(crate) struct GrpcUplinkSource {
     api_token: String,
 }
 
-/// Production [`UplinkStream`]: wraps the tonic `Streaming<LogItem>`, skipping
-/// non-uplink items so callers only see parsed `up` events.
+/// Production [`UplinkStream`]: wraps the tonic `Streaming<LogItem>`, surfacing
+/// `up` / `ack` / `txack` items as [`DeviceEvent`]s and skipping everything
+/// else (join/error/status/...).
 struct GrpcUplinkStream {
     inner: tonic::Streaming<LogItem>,
 }
 
 #[async_trait::async_trait]
 impl UplinkStream for GrpcUplinkStream {
-    async fn next_event(&mut self) -> Result<Option<UplinkEvent>, OpcGwStreamError> {
+    async fn next_event(&mut self) -> Result<Option<DeviceEvent>, OpcGwStreamError> {
         loop {
             match self.inner.message().await {
-                Ok(Some(item)) => match parse_up_event(&item) {
-                    Some((event_time, object)) => {
-                        return Ok(Some(UplinkEvent { event_time, object }))
-                    }
-                    // Non-uplink LogItem (join/ack/error/...) or malformed —
-                    // skip and keep pumping.
+                Ok(Some(item)) => match parse_device_event(&item) {
+                    Some(event) => return Ok(Some(event)),
+                    // Unhandled LogItem kind (join/error/status/...) or a
+                    // malformed body — skip and keep pumping.
                     None => continue,
                 },
                 Ok(None) => return Ok(None),
@@ -480,6 +515,77 @@ fn parse_up_event(item: &LogItem) -> Option<(DateTime<Utc>, serde_json::Value)> 
         }
     };
     Some((event_time, object))
+}
+
+/// Dispatch one `LogItem` to a [`DeviceEvent`] by its `description`:
+/// `"up"` → [`DeviceEvent::Uplink`] (E-1), `"ack"` → [`DeviceEvent::Ack`] and
+/// `"txack"` → [`DeviceEvent::TxAck`] (E-3). Any other kind (join/error/
+/// status/...) or an unparseable body returns `None` (the stream skips it).
+fn parse_device_event(item: &LogItem) -> Option<DeviceEvent> {
+    match item.description.as_str() {
+        "up" => parse_up_event(item).map(|(event_time, object)| {
+            DeviceEvent::Uplink(UplinkEvent { event_time, object })
+        }),
+        "ack" => parse_ack_event(item).map(DeviceEvent::Ack),
+        "txack" => parse_txack_event(item).map(DeviceEvent::TxAck),
+        _ => None,
+    }
+}
+
+/// Body fields of a ChirpStack `ack` / `txack` event we need for E-3
+/// correlation. ChirpStack serialises the event body as JSON; field casing has
+/// varied across versions, so accept both `queue_item_id` (proto/snake_case)
+/// and `queueItemId` (protojson/camelCase) via serde aliases. Unknown fields
+/// are ignored.
+#[derive(serde::Deserialize)]
+struct AckEventBody {
+    #[serde(alias = "queueItemId")]
+    queue_item_id: Option<String>,
+    acknowledged: Option<bool>,
+}
+
+#[derive(serde::Deserialize)]
+struct TxAckEventBody {
+    #[serde(alias = "queueItemId")]
+    queue_item_id: Option<String>,
+}
+
+/// Parse an `ack` LogItem body into [`AckInfo`]. Returns `None` (drop) when the
+/// body is not JSON or carries no `queue_item_id` — without a correlation key
+/// the ack is useless, and the timeout sweep remains the safety net.
+fn parse_ack_event(item: &LogItem) -> Option<AckInfo> {
+    let body: AckEventBody = serde_json::from_str(&item.body)
+        .map_err(|_| {
+            warn!(
+                event = "command_ack_dropped",
+                reason = "unparseable_body",
+                body_len = item.body.len(),
+                "dropping ack event: LogItem body is not valid JSON"
+            );
+        })
+        .ok()?;
+    let queue_item_id = body.queue_item_id.filter(|s| !s.is_empty()).or_else(|| {
+        debug!(
+            event = "command_ack_dropped",
+            reason = "missing_queue_item_id",
+            "ack event has no queue_item_id; cannot correlate to a command"
+        );
+        None
+    })?;
+    Some(AckInfo {
+        queue_item_id,
+        // Absent `acknowledged` is treated as not-acknowledged (conservative:
+        // a confirmed downlink that did not produce acknowledged=true did not
+        // reach the device).
+        acknowledged: body.acknowledged.unwrap_or(false),
+    })
+}
+
+/// Parse a `txack` LogItem body into [`TxAckInfo`]. Diagnostic only.
+fn parse_txack_event(item: &LogItem) -> Option<TxAckInfo> {
+    let body: TxAckEventBody = serde_json::from_str(&item.body).ok()?;
+    let queue_item_id = body.queue_item_id.filter(|s| !s.is_empty())?;
+    Some(TxAckInfo { queue_item_id })
 }
 
 /// Build the tonic gRPC endpoint URL from the configured server address
@@ -702,6 +808,83 @@ fn ingest_event(
     }
 }
 
+/// Story E-3: correlate a downlink delivery `ack` to its queued command and
+/// transition its status. `acknowledged == true` → `Confirmed`; `false`
+/// (device NACK / max downlink retries) → `Failed`. An ack whose
+/// `queue_item_id` matches no command, or one for a command already in a
+/// terminal state, is a benign no-op (logged at debug) — replayed acks on
+/// stream reconnect and acks for commands we did not send must never error or
+/// regress state (idempotent, relying on the storage layer's
+/// `status IN ('Sent','Pending')` guard).
+fn handle_ack(backend: &Arc<dyn StorageBackend>, device_id: &str, ack: &AckInfo) {
+    let cmd = match backend.find_command_by_result_id(&ack.queue_item_id) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            debug!(
+                event = "command_ack_unmatched",
+                device_id = %device_id,
+                chirpstack_result_id = %ack.queue_item_id,
+                "ack for a queue_item_id with no matching command; ignoring"
+            );
+            return;
+        }
+        Err(e) => {
+            warn!(
+                event = "command_ack_lookup_failed",
+                device_id = %device_id,
+                chirpstack_result_id = %ack.queue_item_id,
+                error = %e,
+                "failed to look up command for ack; ignoring (timeout sweep remains the safety net)"
+            );
+            return;
+        }
+    };
+
+    if ack.acknowledged {
+        match backend.mark_command_confirmed(cmd.id) {
+            Ok(()) => {
+                // confirmed_at is set inside mark_command_confirmed; now() is a
+                // tight upper bound for it, so latency ≈ confirmed_at - sent_at.
+                let latency_ms = cmd.sent_at.map(|s| (Utc::now() - s).num_milliseconds());
+                info!(
+                    event = "command_confirmed",
+                    command_id = cmd.id,
+                    device_id = %cmd.device_id,
+                    command_name = %cmd.command_name,
+                    chirpstack_result_id = %ack.queue_item_id,
+                    latency_ms = ?latency_ms,
+                    "command delivery confirmed by device ack"
+                );
+            }
+            Err(e) => debug!(
+                event = "command_confirm_noop",
+                command_id = cmd.id,
+                error = %e,
+                "command already terminal or gone when ack arrived (idempotent no-op)"
+            ),
+        }
+    } else {
+        match backend
+            .mark_command_failed(cmd.id, "Device did not acknowledge confirmed downlink (NACK / max retries)")
+        {
+            Ok(()) => warn!(
+                event = "command_confirm_failed",
+                command_id = cmd.id,
+                device_id = %cmd.device_id,
+                command_name = %cmd.command_name,
+                chirpstack_result_id = %ack.queue_item_id,
+                "device did not acknowledge confirmed downlink; marked Failed"
+            ),
+            Err(e) => debug!(
+                event = "command_confirm_noop",
+                command_id = cmd.id,
+                error = %e,
+                "command already terminal or gone when NACK arrived (idempotent no-op)"
+            ),
+        }
+    }
+}
+
 /// Open the stream for one device and pump events into storage until the
 /// stream closes, errors, or `cancel` fires. After a successful connect, runs
 /// the timestamp-guarded backfill (AC#7) — connect-first ordering means no
@@ -751,7 +934,7 @@ async fn connect_and_stream(
             _ = cancel.cancelled() => return Ok(()),
             msg = stream.next_event() => {
                 match msg {
-                    Ok(Some(event)) => ingest_event(
+                    Ok(Some(DeviceEvent::Uplink(event))) => ingest_event(
                         device_id,
                         metrics,
                         &event,
@@ -759,6 +942,16 @@ async fn connect_and_stream(
                         seen,
                         warned,
                         events_seen,
+                    ),
+                    // Story E-3: downlink delivery confirmation rides the same
+                    // stream. An ack confirms (or NACK-fails) the queued
+                    // command; a txack is a transmit diagnostic only.
+                    Ok(Some(DeviceEvent::Ack(ack))) => handle_ack(backend, device_id, &ack),
+                    Ok(Some(DeviceEvent::TxAck(txack))) => debug!(
+                        event = "command_txack",
+                        device_id = %device_id,
+                        chirpstack_result_id = %txack.queue_item_id,
+                        "downlink transmitted by gateway (diagnostic; not a delivery confirmation)"
                     ),
                     Ok(None) => return Ok(()), // stream closed by server
                     Err(e) => return Err(e),
@@ -1096,7 +1289,10 @@ mod tests {
 
     /// One scripted stream step.
     enum ScriptItem {
+        /// An uplink (convenience: wrapped into `DeviceEvent::Uplink`).
         Event(UplinkEvent),
+        /// Any device event verbatim (E-3 ack/txack scripting).
+        Device(DeviceEvent),
         Error(&'static str),
     }
 
@@ -1112,10 +1308,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl UplinkStream for ScriptedStream {
-        async fn next_event(&mut self) -> Result<Option<UplinkEvent>, OpcGwStreamError> {
+        async fn next_event(&mut self) -> Result<Option<DeviceEvent>, OpcGwStreamError> {
             self.next_event_calls.fetch_add(1, Ordering::SeqCst);
             match self.items.pop_front() {
-                Some(ScriptItem::Event(e)) => Ok(Some(e)),
+                Some(ScriptItem::Event(e)) => Ok(Some(DeviceEvent::Uplink(e))),
+                Some(ScriptItem::Device(d)) => Ok(Some(d)),
                 Some(ScriptItem::Error(m)) => Err(OpcGwStreamError(m.to_string())),
                 None => std::future::pending().await,
             }
@@ -1451,6 +1648,185 @@ mod tests {
             DateTime::<Utc>::from_timestamp(fresh_ts, 0).unwrap()
         );
 
+        cancel.cancel();
+        task.await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Story E-3: command delivery confirmation (ack/txack) tests.
+    // -----------------------------------------------------------------------
+
+    use crate::chirpstack_internal_proto::api::LogItem as PbLogItem;
+    use crate::storage::{Command, CommandStatus};
+
+    /// Build a `LogItem` with the given description + JSON body (proto time set
+    /// to a fixed valid instant for `up` parsing; irrelevant for ack/txack).
+    fn log_item(description: &str, body: serde_json::Value) -> PbLogItem {
+        PbLogItem {
+            id: "log-1".to_string(),
+            time: Some(chirpstack_api::prost_types::Timestamp { seconds: 1_700_000_000, nanos: 0 }),
+            description: description.to_string(),
+            body: body.to_string(),
+            properties: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Enqueue a command and mark it Sent with `result_id`, returning its id.
+    fn sent_command(backend: &Arc<dyn StorageBackend>, result_id: &str) -> u64 {
+        let cmd = Command {
+            id: 0,
+            device_id: "dev1".to_string(),
+            metric_id: String::new(),
+            command_name: "valveCmd".to_string(),
+            parameters: serde_json::Value::Null,
+            enqueued_at: Utc::now(),
+            sent_at: None,
+            confirmed_at: None,
+            status: CommandStatus::Pending,
+            error_message: None,
+            command_hash: format!("hash-{result_id}"),
+            chirpstack_result_id: None,
+        };
+        let id = backend.enqueue_command(cmd).expect("enqueue");
+        backend.mark_command_sent(id, result_id).expect("mark sent");
+        id
+    }
+
+    #[test]
+    fn parse_device_event_dispatches_by_description() {
+        // ack (camelCase queueItemId, as ChirpStack protojson emits)
+        let ack = log_item("ack", serde_json::json!({"queueItemId": "qid-1", "acknowledged": true}));
+        assert!(matches!(parse_device_event(&ack), Some(DeviceEvent::Ack(a)) if a.queue_item_id == "qid-1" && a.acknowledged));
+        // ack snake_case alias
+        let ack2 = log_item("ack", serde_json::json!({"queue_item_id": "qid-2", "acknowledged": false}));
+        assert!(matches!(parse_device_event(&ack2), Some(DeviceEvent::Ack(a)) if a.queue_item_id == "qid-2" && !a.acknowledged));
+        // txack
+        let txack = log_item("txack", serde_json::json!({"queueItemId": "qid-3"}));
+        assert!(matches!(parse_device_event(&txack), Some(DeviceEvent::TxAck(t)) if t.queue_item_id == "qid-3"));
+        // unknown kind → skipped
+        assert!(parse_device_event(&log_item("join", serde_json::json!({}))).is_none());
+        // ack with no queue_item_id → dropped (no correlation key)
+        assert!(parse_device_event(&log_item("ack", serde_json::json!({"acknowledged": true}))).is_none());
+        // ack with malformed body → dropped, not a panic
+        let bad = PbLogItem {
+            id: "x".into(), time: None, description: "ack".into(),
+            body: "{not json".into(), properties: std::collections::HashMap::new(),
+        };
+        assert!(parse_device_event(&bad).is_none());
+    }
+
+    #[test]
+    fn ack_acknowledged_true_confirms_command() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let id = sent_command(&backend, "qid-confirm");
+        handle_ack(&backend, "dev1", &AckInfo { queue_item_id: "qid-confirm".into(), acknowledged: true });
+        let cmd = backend.find_command_by_result_id("qid-confirm").unwrap().unwrap();
+        assert_eq!(cmd.id, id);
+        assert_eq!(cmd.status, CommandStatus::Confirmed, "ack(true) must confirm");
+        assert!(cmd.confirmed_at.is_some(), "confirmed_at must be stamped");
+    }
+
+    #[test]
+    fn ack_acknowledged_false_fails_command() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        sent_command(&backend, "qid-nack");
+        handle_ack(&backend, "dev1", &AckInfo { queue_item_id: "qid-nack".into(), acknowledged: false });
+        let cmd = backend.find_command_by_result_id("qid-nack").unwrap().unwrap();
+        assert_eq!(cmd.status, CommandStatus::Failed, "NACK must fail the command");
+        assert!(cmd.error_message.is_some(), "Failed command must carry an error message");
+    }
+
+    #[test]
+    fn ack_unmatched_queue_item_id_is_ignored() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let id = sent_command(&backend, "qid-real");
+        // Ack for a DIFFERENT queue id: must not touch the real command, must not panic.
+        handle_ack(&backend, "dev1", &AckInfo { queue_item_id: "qid-ghost".into(), acknowledged: true });
+        let cmd = backend.find_command_by_result_id("qid-real").unwrap().unwrap();
+        assert_eq!(cmd.id, id);
+        assert_eq!(cmd.status, CommandStatus::Sent, "unmatched ack must leave the command Sent");
+    }
+
+    #[test]
+    fn duplicate_ack_is_idempotent_noop() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        sent_command(&backend, "qid-dup");
+        handle_ack(&backend, "dev1", &AckInfo { queue_item_id: "qid-dup".into(), acknowledged: true });
+        // ChirpStack replays events on reconnect — a second identical ack must
+        // be a benign no-op (still Confirmed, no panic, no regression).
+        handle_ack(&backend, "dev1", &AckInfo { queue_item_id: "qid-dup".into(), acknowledged: true });
+        let cmd = backend.find_command_by_result_id("qid-dup").unwrap().unwrap();
+        assert_eq!(cmd.status, CommandStatus::Confirmed);
+    }
+
+    /// AC#3 regression guard: a `txack` (gateway transmitted) must NOT confirm
+    /// the command — only an `ack` does. Drives the real stream pump.
+    #[tokio::test]
+    async fn txack_does_not_confirm_command() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        sent_command(&backend, "qid-tx");
+        let source = ScriptedSource::new(
+            vec![vec![ScriptItem::Device(DeviceEvent::TxAck(TxAckInfo {
+                queue_item_id: "qid-tx".to_string(),
+            }))]],
+            None,
+        );
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run_device_stream(
+            source.clone() as Arc<dyn UplinkSource>,
+            "dev1".to_string(),
+            valve_metrics(),
+            Arc::clone(&backend),
+            cancel.clone(),
+        ));
+        // Wait until the pump has consumed the txack (2nd next_event call:
+        // it issues call N+1 only after fully handling item N).
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while source.next_event_calls.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("txack was never consumed");
+        let cmd = backend.find_command_by_result_id("qid-tx").unwrap().unwrap();
+        assert_eq!(cmd.status, CommandStatus::Sent, "txack must not confirm");
+        cancel.cancel();
+        task.await.unwrap();
+    }
+
+    /// AC#2 end-to-end on the stream: an `ack` delivered live confirms the
+    /// queued command via the same consumer that ingests uplinks.
+    #[tokio::test]
+    async fn live_ack_on_stream_confirms_command() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        sent_command(&backend, "qid-live");
+        let source = ScriptedSource::new(
+            vec![vec![ScriptItem::Device(DeviceEvent::Ack(AckInfo {
+                queue_item_id: "qid-live".to_string(),
+                acknowledged: true,
+            }))]],
+            None,
+        );
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run_device_stream(
+            source.clone() as Arc<dyn UplinkSource>,
+            "dev1".to_string(),
+            valve_metrics(),
+            Arc::clone(&backend),
+            cancel.clone(),
+        ));
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Ok(Some(c)) = backend.find_command_by_result_id("qid-live") {
+                    if c.status == CommandStatus::Confirmed {
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("live ack never confirmed the command");
         cancel.cancel();
         task.await.unwrap();
     }

@@ -379,14 +379,41 @@ impl StorageBackend for InMemoryBackend {
         Ok(queue.iter().filter(|cmd| cmd.status == CommandStatus::Pending).count())
     }
 
-    fn mark_command_sent(&self, command_id: u64, chirpstack_result_id: &str) -> Result<(), OpcGwError> {
-        let mut queue = self.command_queue.lock()
-            .map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
+    // NOTE on the dual command stores (test-backend fidelity): SqliteBackend
+    // keeps ALL commands in one `command_queue` table, so the E-0 send path
+    // (`queue_command`/`get_pending_commands`/`update_command_status` over
+    // `DeviceCommand`) and the E-3 confirmation path
+    // (`mark_command_*`/`find_*` over the richer `Command`) operate on the
+    // SAME rows. The in-memory backend historically split them into two vecs
+    // (`commands: Vec<DeviceCommand>` + `command_queue: Vec<Command>`). To
+    // mirror the unified-table behaviour the SQLite backend gives production,
+    // the `mark_command_*` transitions below update BOTH vecs by id and
+    // succeed if EITHER held the command — so a command queued via the
+    // DeviceCommand path (E-0 `deliver_one`) and one enqueued via the Command
+    // path (E-3 confirmation tests) both transition correctly.
 
-        if let Some(cmd) = queue.iter_mut().find(|c| c.id == command_id) {
-            cmd.status = CommandStatus::Sent;
-            cmd.sent_at = Some(Utc::now());
-            cmd.chirpstack_result_id = Some(chirpstack_result_id.to_string());
+    fn mark_command_sent(&self, command_id: u64, chirpstack_result_id: &str) -> Result<(), OpcGwError> {
+        let mut found = false;
+        {
+            let mut queue = self.command_queue.lock()
+                .map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
+            if let Some(cmd) = queue.iter_mut().find(|c| c.id == command_id) {
+                cmd.status = CommandStatus::Sent;
+                cmd.sent_at = Some(Utc::now());
+                cmd.chirpstack_result_id = Some(chirpstack_result_id.to_string());
+                found = true;
+            }
+        }
+        {
+            let mut commands = self.commands.lock()
+                .map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
+            if let Some(cmd) = commands.iter_mut().find(|c| c.id == command_id) {
+                cmd.status = CommandStatus::Sent;
+                cmd.error_message = None;
+                found = true;
+            }
+        }
+        if found {
             Ok(())
         } else {
             Err(OpcGwError::Storage(format!("Command {} not found", command_id)))
@@ -394,29 +421,76 @@ impl StorageBackend for InMemoryBackend {
     }
 
     fn mark_command_confirmed(&self, command_id: u64) -> Result<(), OpcGwError> {
-        let mut queue = self.command_queue.lock()
-            .map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
-
-        if let Some(cmd) = queue.iter_mut().find(|c| c.id == command_id) {
-            cmd.status = CommandStatus::Confirmed;
-            cmd.confirmed_at = Some(Utc::now());
+        // Mirror SQLite's guarded UPDATE: only Sent/Pending → Confirmed; a
+        // command already in a terminal state is a no-op error (the E-3 ack
+        // handler treats this as benign / idempotent).
+        let mut found_non_terminal = false;
+        {
+            let mut queue = self.command_queue.lock()
+                .map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
+            if let Some(cmd) = queue.iter_mut()
+                .find(|c| c.id == command_id && matches!(c.status, CommandStatus::Sent | CommandStatus::Pending))
+            {
+                cmd.status = CommandStatus::Confirmed;
+                cmd.confirmed_at = Some(Utc::now());
+                found_non_terminal = true;
+            }
+        }
+        {
+            let mut commands = self.commands.lock()
+                .map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
+            if let Some(cmd) = commands.iter_mut()
+                .find(|c| c.id == command_id && matches!(c.status, CommandStatus::Sent | CommandStatus::Pending))
+            {
+                cmd.status = CommandStatus::Confirmed;
+                found_non_terminal = true;
+            }
+        }
+        if found_non_terminal {
             Ok(())
         } else {
-            Err(OpcGwError::Storage(format!("Command {} not found", command_id)))
+            Err(OpcGwError::Storage(format!("Command {} not found or already in terminal state", command_id)))
         }
     }
 
     fn mark_command_failed(&self, command_id: u64, error_message: &str) -> Result<(), OpcGwError> {
-        let mut queue = self.command_queue.lock()
-            .map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
-
-        if let Some(cmd) = queue.iter_mut().find(|c| c.id == command_id) {
-            cmd.status = CommandStatus::Failed;
-            cmd.error_message = Some(error_message.to_string());
+        let mut found_non_terminal = false;
+        {
+            let mut queue = self.command_queue.lock()
+                .map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
+            if let Some(cmd) = queue.iter_mut()
+                .find(|c| c.id == command_id && matches!(c.status, CommandStatus::Sent | CommandStatus::Pending))
+            {
+                cmd.status = CommandStatus::Failed;
+                cmd.error_message = Some(error_message.to_string());
+                found_non_terminal = true;
+            }
+        }
+        {
+            let mut commands = self.commands.lock()
+                .map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
+            if let Some(cmd) = commands.iter_mut()
+                .find(|c| c.id == command_id && matches!(c.status, CommandStatus::Sent | CommandStatus::Pending))
+            {
+                cmd.status = CommandStatus::Failed;
+                cmd.error_message = Some(error_message.to_string());
+                found_non_terminal = true;
+            }
+        }
+        if found_non_terminal {
             Ok(())
         } else {
-            Err(OpcGwError::Storage(format!("Command {} not found", command_id)))
+            Err(OpcGwError::Storage(format!("Command {} not found or already in terminal state", command_id)))
         }
+    }
+
+    fn find_command_by_result_id(&self, result_id: &str) -> Result<Option<Command>, OpcGwError> {
+        let queue = self.command_queue.lock()
+            .map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
+        Ok(queue
+            .iter()
+            .find(|c| c.chirpstack_result_id.as_deref() == Some(result_id))
+            .cloned())
     }
 
     fn find_pending_confirmations(&self) -> Result<Vec<Command>, OpcGwError> {

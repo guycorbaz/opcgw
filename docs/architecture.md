@@ -116,9 +116,16 @@ The in-memory snapshot (`Arc<watch::Sender<Arc<AppConfig>>>`) is rebuilt from SQ
 4. `store_metric()` converts ChirpStack metric values to typed `MetricValue` and writes to SQLite
 5. Server availability is checked via TCP connection before each gRPC call, with retry logic
 
-**Command processing:**
-- `process_command_queue()` drains commands from storage queue one by one
-- Each command is sent to ChirpStack via `enqueue_device_request_to_server()` (DeviceQueueItem gRPC)
+**Command processing (downlink path, Story E-0 + E-3):**
+- `process_command_queue()` drains the `DeviceCommand` queue (fed by the OPC UA `set_command` write path) one by one.
+- `deliver_one()` maps each command to a semantic object (class-bound, e.g. valve `1`→`{"command":"open"}`) or raw bytes, enqueues it via the `DownlinkSink` (`DeviceService.Enqueue`), and on success calls `mark_command_sent(id, result_id)` — persisting ChirpStack's returned **queue-item id** (`EnqueueDeviceQueueItemResponse.id`) as the command's `chirpstack_result_id`. This is the correlation key for delivery confirmation.
+
+**Command lifecycle:** `Pending → Sent → Confirmed | Failed`.
+- `Pending → Sent`: on successful enqueue (id captured).
+- `Sent → Confirmed`: **event-driven** (Story E-3). ChirpStack delivers the device's downlink ack as an `ack` event on the **same** `InternalService.StreamDeviceEvents` stream the uplink consumer (`chirpstack_events.rs`) already runs; `handle_ack()` correlates `queue_item_id == chirpstack_result_id` and confirms. There is no per-command ack-polling gRPC — the signal is the event.
+- `Sent → Failed`: a device NACK (`ack` with `acknowledged=false`), or the `CommandTimeoutHandler` sweep when no ack arrives within `[global].command_delivery_timeout_secs` (the terminal path for **unconfirmed** downlinks). `txack` (gateway transmitted) is diagnostic only and never confirms.
+- `CommandStatusPoller` no longer polls ChirpStack; it is a lightweight reconciliation/observability heartbeat over the confirmation backlog. All transitions are idempotent (storage guards `status IN ('Sent','Pending')`) so replayed ack events on stream reconnect cannot regress a terminal command.
+- Command status is exposed read-only on OPC UA via the `CommandStatusQuery` variable (recent commands + status + sent/confirmed timestamps as JSON).
 
 ### `chirpstack_events.rs` — Uplink Event Ingestion (Story E-1, #130)
 
@@ -130,6 +137,7 @@ The in-memory snapshot (`Arc<watch::Sender<Arc<AppConfig>>>`) is rebuilt from SQ
 3. On every (re)connect, `backfill_device()` fetches the device's newest recent event via the bounded `chirpstack_inventory::stream_recent_device_uplinks` fetch (never `GetMetrics`) and stores it under the `is_fresher` timestamp guard — a backfill can never overwrite a newer live value, and a value is present before the next live event.
 4. `map_uplink_to_writes()` (pure, testable) maps each configured `read_metric` whose `chirpstack_metric_name` is present in the decoded `object` to a `BatchMetricWrite` stamped with the device event time (`LogItem.time`) — the value verbatim, never aggregated.
 5. `poll_metrics()` **skips streamed devices** so the stream is the sole, authoritative writer for them. The OPC UA read path exposes `MetricValue.timestamp` as the DataValue `source_timestamp`; staleness quality is computed from real device-report age (per-device `stale_threshold_seconds` override, #132).
+6. **Shared with Story E-3:** the same `StreamDeviceEvents` consumer also dispatches `ack` / `txack` device events (not just `up`). `handle_ack()` correlates a downlink delivery ack to its queued command and advances the command lifecycle — so command delivery confirmation rides this one stream, with no second subscription (see "Command lifecycle" under `chirpstack.rs`). Valve-class devices are streamed, so valve command confirmation works out of the box; a command on a device that is not streamed relies on the timeout sweep.
 
 ### `storage/` — Storage Layer
 

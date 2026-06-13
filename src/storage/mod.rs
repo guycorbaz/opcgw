@@ -685,6 +685,23 @@ pub trait StorageBackend: Send + Sync {
     /// * `Err(OpcGwError)` - If database error occurs
     fn find_timed_out_commands(&self, ttl_secs: u32) -> Result<Vec<Command>, OpcGwError>;
 
+    /// Finds the command whose `chirpstack_result_id` (the queue-item UUID
+    /// returned by ChirpStack's `DeviceService.Enqueue` and stored by
+    /// [`StorageBackend::mark_command_sent`]) equals `result_id`.
+    ///
+    /// Used by the Story E-3 delivery-confirmation path to correlate a
+    /// ChirpStack `ack` / `txack` device event (whose `queue_item_id` matches)
+    /// back to the local command so its status can advance to
+    /// `Confirmed` / `Failed`.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(Command))` - the matching command
+    /// * `Ok(None)` - no command has that result id (an ack for a command we
+    ///   did not send, a replayed event after pruning, etc. — benign)
+    /// * `Err(OpcGwError)` - if a database error occurs
+    fn find_command_by_result_id(&self, result_id: &str) -> Result<Option<Command>, OpcGwError>;
+
     // ===== Gateway Health Metrics Operations =====
 
     /// Updates gateway health metrics (last poll timestamp, error count, ChirpStack availability).

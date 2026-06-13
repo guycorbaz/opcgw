@@ -159,7 +159,15 @@
             <para><emphasis>Command delivery</emphasis> — Send commands
             (downlinks) to devices through a queue that validates the
             parameters and tracks each command from pending, through sent,
-            to confirmed or failed.</para>
+            to confirmed or failed. For confirmed downlinks (for example a
+            valve), <emphasis>confirmed</emphasis> means the device
+            acknowledged receipt; opcgw learns this from ChirpStack's live
+            device-event stream. A command that is never acknowledged within
+            the configurable delivery timeout
+            (<literal>command_delivery_timeout_secs</literal>, default 60 s)
+            is marked failed. The current status of recent commands is
+            readable from the OPC UA <literal>CommandStatusQuery</literal>
+            variable.</para>
           </listitem>
           <listitem>
             <para><emphasis>OPC UA 1.04 server</emphasis> — Exposes every

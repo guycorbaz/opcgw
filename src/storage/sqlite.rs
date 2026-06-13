@@ -2226,6 +2226,31 @@ impl crate::storage::StorageBackend for SqliteBackend {
         Ok(commands)
     }
 
+    fn find_command_by_result_id(&self, result_id: &str) -> Result<Option<Command>, OpcGwError> {
+        let mut __op = StorageOpLog::start("find_command_by_result_id");
+        let conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, "Pool checkout timeout for find_command_by_result_id");
+                e
+            })?;
+
+        // Uses the same NULL-safe shared mapper (GH #134) as the other command
+        // readers so a legacy/partial row can never collapse the lookup.
+        let mut stmt = conn.prepare(
+            "SELECT id, device_id, command_name, parameters, status, enqueued_at, sent_at, confirmed_at, \
+             error_message, command_hash, chirpstack_result_id FROM command_queue \
+             WHERE chirpstack_result_id = ? LIMIT 1"
+        )
+            .map_err(|e| OpcGwError::Database(format!("Failed to prepare statement: {}", e)))?;
+
+        let command = stmt.query_row(params![result_id], Self::command_from_row)
+            .optional()
+            .map_err(|e| OpcGwError::Database(format!("Failed to query command by result id: {}", e)))?;
+
+        __op.ok();
+        Ok(command)
+    }
+
     fn update_gateway_status(
         &self,
         last_poll_timestamp: Option<DateTime<Utc>>,

@@ -2603,12 +2603,17 @@ pub(crate) enum DownlinkPayload {
 /// gRPC server. Production uses the [`ChirpstackPoller`] implementation.
 #[async_trait::async_trait]
 trait DownlinkSink: Send + Sync {
-    async fn enqueue_downlink(&self, item: DeviceQueueItem) -> Result<(), OpcGwError>;
+    /// Enqueue the downlink and return ChirpStack's queue-item id
+    /// (`EnqueueDeviceQueueItemResponse.id`, a UUID). The id is stored as the
+    /// command's `chirpstack_result_id` so the Story E-3 confirmation path can
+    /// correlate a later `ack`/`txack` device event (whose `queue_item_id`
+    /// matches) back to this command.
+    async fn enqueue_downlink(&self, item: DeviceQueueItem) -> Result<String, OpcGwError>;
 }
 
 #[async_trait::async_trait]
 impl DownlinkSink for ChirpstackPoller {
-    async fn enqueue_downlink(&self, item: DeviceQueueItem) -> Result<(), OpcGwError> {
+    async fn enqueue_downlink(&self, item: DeviceQueueItem) -> Result<String, OpcGwError> {
         trace!(queue_item = ?item, "Enqueue downlink to ChirpStack");
         let request = Request::new(EnqueueDeviceQueueItemRequest {
             queue_item: Some(item),
@@ -2621,7 +2626,11 @@ impl DownlinkSink for ChirpstackPoller {
             Ok(response) => {
                 let inner_response = response.into_inner();
                 trace!(response = ?inner_response, "Downlink enqueued");
-                Ok(())
+                // Capture the queue-item UUID (E-3 correlation key). It must
+                // not be empty in normal operation; if ChirpStack ever returns
+                // an empty id, confirmation correlation falls back to the
+                // timeout path for this command.
+                Ok(inner_response.id)
             }
             Err(e) => {
                 error!(error = %e, "Error enqueueing device request");
@@ -2669,17 +2678,21 @@ async fn deliver_one(
 
     let item = build_queue_item(&command.device_id, command.f_port, &downlink, confirmed);
     match sink.enqueue_downlink(item).await {
-        Ok(()) => {
+        Ok(result_id) => {
             debug!(
                 device_id = %command.device_id,
                 command_id = command.id,
                 f_port = command.f_port,
                 class = ?command_class,
+                chirpstack_result_id = %result_id,
                 "Command enqueued to ChirpStack"
             );
-            if let Err(e) =
-                backend.update_command_status(command.id, CommandStatus::Sent, None)
-            {
+            // Transition Pending → Sent AND persist the queue-item id so the
+            // E-3 confirmation path can correlate the device ack back to this
+            // command (`mark_command_sent` also stamps `sent_at`, which the
+            // timeout sweep keys on). Replaces the prior
+            // `update_command_status(.., Sent, None)` that dropped the id.
+            if let Err(e) = backend.mark_command_sent(command.id, &result_id) {
                 error!(error = %e, command_id = command.id, "Failed to mark command Sent");
             }
         }
@@ -2855,11 +2868,21 @@ pub fn print_device_list(list: &Vec<DeviceListDetail>) {
 // Story 3-3: Command Delivery Status Polling and Timeout Handler
 // ============================================================================
 
-/// CommandStatusPoller: Polls ChirpStack for command delivery confirmations
+/// CommandStatusPoller: delivery-confirmation **reconciliation / observability**
+/// sweep.
 ///
-/// Runs as a background task that periodically queries ChirpStack for command
-/// status updates. When confirmations are received, marks local commands as confirmed
-/// for end-to-end visibility into command delivery lifecycle.
+/// Since Story E-3, command delivery confirmation is **event-driven**: the
+/// device `ack` arrives on the `InternalService.StreamDeviceEvents` stream that
+/// [`crate::chirpstack_events`] consumes, which correlates it to the queued
+/// command and marks it `Confirmed`/`Failed` directly (see
+/// `chirpstack_events::handle_ack`). The companion [`CommandTimeoutHandler`]
+/// fails commands that are never acked within the TTL.
+///
+/// This poller therefore no longer polls ChirpStack (there is no per-command
+/// ack-polling gRPC; the signal is the event). It remains as a lightweight
+/// **observability heartbeat**: it periodically reports how many commands are
+/// still awaiting confirmation, so a backlog (e.g. a stalled event stream) is
+/// visible in the logs/metrics before the timeout sweep fails everything.
 pub struct CommandStatusPoller {
     /// Configuration for polling intervals and timeouts
     config: AppConfig,
@@ -2895,11 +2918,13 @@ impl CommandStatusPoller {
         })
     }
 
-    /// Main polling loop for command delivery confirmations.
+    /// Reconciliation / observability loop.
     ///
-    /// Periodically queries for pending confirmations and polls ChirpStack for updates.
-    /// When confirmations are received from ChirpStack, marks commands as confirmed
-    /// in the local storage for OPC UA visibility.
+    /// Periodically counts commands still awaiting confirmation and emits an
+    /// observability heartbeat. The actual `Sent → Confirmed/Failed` transitions
+    /// happen in the event-stream consumer ([`crate::chirpstack_events`]) and
+    /// the [`CommandTimeoutHandler`] — this loop performs no ChirpStack calls and
+    /// mutates no command state.
     ///
     /// # Returns
     ///
@@ -2909,20 +2934,20 @@ impl CommandStatusPoller {
             self.config.global.command_delivery_poll_interval_secs
         );
 
-        debug!(interval_s = poll_interval.as_secs(), "Starting CommandStatusPoller");
+        debug!(interval_s = poll_interval.as_secs(), "Starting CommandStatusPoller (confirmation reconciliation heartbeat)");
 
         loop {
-            // Find commands awaiting confirmation
+            // Observe the confirmation backlog. Confirmations are applied by the
+            // event stream; a persistently non-zero backlog here signals the
+            // stream may be stalled (commands will eventually time out).
             match self.storage.find_pending_confirmations() {
                 Ok(pending_commands) => {
                     if !pending_commands.is_empty() {
-                        debug!(count = pending_commands.len(), "Found pending command confirmations");
-
-                        // For each pending command, check ChirpStack status
-                        // (In a real implementation, would call ChirpStack API here)
-                        // For now, this is a placeholder for integration with ChirpStack
-                        // The actual ChirpStack API calls would happen here
-                        trace!(pending_count = pending_commands.len(), "Would poll ChirpStack for {} commands", pending_commands.len());
+                        debug!(
+                            event = "command_confirmation_backlog",
+                            count = pending_commands.len(),
+                            "commands awaiting delivery confirmation (applied via the event stream; timeout sweep is the safety net)"
+                        );
                     }
                 }
                 Err(e) => {
@@ -2930,7 +2955,7 @@ impl CommandStatusPoller {
                 }
             }
 
-            // Wait for next poll cycle or cancellation
+            // Wait for next cycle or cancellation
             tokio::select! {
                 _ = self.cancel_token.cancelled() => {
                     info!("CommandStatusPoller shutting down");
@@ -3004,19 +3029,27 @@ impl CommandTimeoutHandler {
             match self.storage.find_timed_out_commands(ttl_secs) {
                 Ok(timed_out_commands) => {
                     for cmd in timed_out_commands {
-                        debug!(
-                            command_id = cmd.id,
-                            device_id = %cmd.device_id,
-                            command_name = %cmd.command_name,
-                            "Command timed out, marking as failed"
-                        );
-
-                        if let Err(e) = self.storage.mark_command_failed(cmd.id, "Confirmation timeout") {
-                            error!(
-                                error = %e,
+                        let reason = format!("Confirmation timeout after {}s", ttl_secs);
+                        match self.storage.mark_command_failed(cmd.id, &reason) {
+                            Ok(()) => warn!(
+                                event = "command_timeout",
                                 command_id = cmd.id,
-                                "Failed to mark timed-out command as failed"
-                            );
+                                device_id = %cmd.device_id,
+                                command_name = %cmd.command_name,
+                                ttl_secs,
+                                "command not confirmed within timeout; marked Failed"
+                            ),
+                            // A confirm landing between the find and the mark
+                            // makes the row terminal — the guarded UPDATE then
+                            // affects 0 rows and returns Err. That is the
+                            // confirm/timeout race resolving in the confirm's
+                            // favour, not a real failure → debug, not error.
+                            Err(e) => debug!(
+                                event = "command_timeout_noop",
+                                command_id = cmd.id,
+                                error = %e,
+                                "timed-out command already terminal (confirmed/failed concurrently); no-op"
+                            ),
                         }
                     }
                 }
@@ -4266,12 +4299,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl DownlinkSink for MockSink {
-        async fn enqueue_downlink(&self, item: DeviceQueueItem) -> Result<(), OpcGwError> {
+        async fn enqueue_downlink(&self, item: DeviceQueueItem) -> Result<String, OpcGwError> {
             self.calls.lock().unwrap().push(item);
             if self.fail {
                 Err(OpcGwError::ChirpStack("mock enqueue failure".to_string()))
             } else {
-                Ok(())
+                // Stub queue-item id (E-3 correlation key). A fixed value is
+                // fine: deliver_one stores it via mark_command_sent and the
+                // SQLite round-trip test asserts it is persisted.
+                Ok("qid-mock-0001".to_string())
             }
         }
     }
@@ -4405,6 +4441,39 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(object_command_string(&calls[0]).as_deref(), Some("open"));
         assert!(calls[0].data.is_empty());
+    }
+
+    // ---- Story E-3 AC#1: enqueue id captured as chirpstack_result_id -------
+
+    /// `deliver_one` must capture ChirpStack's queue-item id (the MockSink's
+    /// stub) and persist it via `mark_command_sent`, so the E-3 confirmation
+    /// path can correlate a later ack. Uses `SqliteBackend` (the single unified
+    /// `command_queue` table) because `DeviceCommand` carries no result-id
+    /// field — this is the faithful round-trip. Regression guard: the old path
+    /// (`update_command_status(.., Sent, None)`) left `chirpstack_result_id`
+    /// NULL, so this assertion fails on the pre-E-3 code.
+    #[tokio::test]
+    async fn deliver_one_captures_result_id_sqlite() {
+        let path = format!("/tmp/opcgw_test_e3_deliver_{}.db", uuid::Uuid::new_v4());
+        let backend: Arc<dyn StorageBackend> =
+            Arc::new(crate::storage::SqliteBackend::new(&path).unwrap());
+        backend
+            .queue_command(device_command(0, "dev-A", 10, vec![1]))
+            .unwrap();
+        let cmd = backend.get_pending_commands().unwrap()[0].clone();
+        let sink = MockSink::new(false);
+
+        deliver_one(&sink, &backend, Some("valve"), true, &cmd).await;
+
+        let found = backend
+            .find_command_by_result_id("qid-mock-0001")
+            .unwrap()
+            .expect("deliver_one must persist the queue-item id as chirpstack_result_id");
+        assert_eq!(found.id, cmd.id);
+        assert_eq!(found.status, CommandStatus::Sent);
+        assert_eq!(found.chirpstack_result_id.as_deref(), Some("qid-mock-0001"));
+
+        let _ = std::fs::remove_file(&path);
     }
 
     // ---- AC#8(d): failure path marks Failed --------------------------------

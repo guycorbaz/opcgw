@@ -1166,21 +1166,15 @@ impl OpcUa {
             &command_folder,
         );
 
-        // Add callback for command status variable (Task 6)
-        // No lock needed - just return a static response
+        // Add callback for command status variable (Task 6; wired to real
+        // storage in Story E-3). Snapshots the most recent commands and their
+        // lifecycle status (Pending → Sent → Confirmed/Failed) as a JSON array
+        // so an OPC UA client can see whether a command it wrote actually
+        // reached the device. Read-only and side-effect-free.
+        let storage_clone = self.storage.clone();
         manager.inner().simple().add_read_callback(
             status_query_node.clone(),
-            move |_, _, _| {
-                let response = "Command status query endpoint - use OPC UA method calls for specific command".to_string();
-                Ok(DataValue {
-                    value: Some(Variant::String(response.into())),
-                    status: Some(opcua::types::StatusCode::Good.bits().into()),
-                    source_timestamp: Some(DateTime::now()),
-                    source_picoseconds: None,
-                    server_timestamp: Some(DateTime::now()),
-                    server_picoseconds: None,
-                })
-            },
+            move |_, _, _| Ok(Self::get_command_status_value(&storage_clone)),
         );
 
         // Add Gateway health metrics folder (Story 5-3)
@@ -1542,6 +1536,56 @@ impl OpcUa {
                 span.record("success", false);
                 Err(opcua::types::StatusCode::BadInternalError)
             }
+        }
+    }
+
+    /// Snapshot recent command lifecycle status as a JSON array for the
+    /// `CommandStatusQuery` OPC UA variable (Story E-3). Each entry exposes the
+    /// command id, device, name, status (`Pending`/`Sent`/`Confirmed`/`Failed`),
+    /// the sent/confirmed timestamps, and any error message — enough for a SCADA
+    /// client to see whether a command it wrote reached the device.
+    ///
+    /// Read-only and side-effect-free. On a storage error it returns an empty
+    /// array with `Good` status rather than failing the read (the query is a
+    /// best-effort convenience surface, not a critical data point); the error is
+    /// logged. Bounded to the most recent [`COMMAND_STATUS_MAX`] commands so the
+    /// returned string stays small.
+    fn get_command_status_value(storage: &Arc<dyn StorageBackend>) -> DataValue {
+        /// Cap on commands returned by the status query (newest first).
+        const COMMAND_STATUS_MAX: usize = 100;
+        let json = match storage.list_commands(&crate::storage::CommandFilter::default()) {
+            Ok(mut commands) => {
+                // Newest first by enqueued_at, then cap.
+                commands.sort_by_key(|c| std::cmp::Reverse(c.enqueued_at));
+                commands.truncate(COMMAND_STATUS_MAX);
+                let entries: Vec<serde_json::Value> = commands
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "id": c.id,
+                            "device_id": c.device_id,
+                            "command_name": c.command_name,
+                            "status": c.status.to_string(),
+                            "sent_at": c.sent_at.map(|t| t.to_rfc3339()),
+                            "confirmed_at": c.confirmed_at.map(|t| t.to_rfc3339()),
+                            "error_message": c.error_message,
+                        })
+                    })
+                    .collect();
+                serde_json::Value::Array(entries).to_string()
+            }
+            Err(e) => {
+                error!(error = %e, "CommandStatusQuery: failed to list commands; returning empty array");
+                "[]".to_string()
+            }
+        };
+        DataValue {
+            value: Some(Variant::String(json.into())),
+            status: Some(opcua::types::StatusCode::Good.bits().into()),
+            source_timestamp: Some(DateTime::now()),
+            source_picoseconds: None,
+            server_timestamp: Some(DateTime::now()),
+            server_picoseconds: None,
         }
     }
 
