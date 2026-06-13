@@ -485,12 +485,25 @@ impl StorageBackend for InMemoryBackend {
     }
 
     fn find_command_by_result_id(&self, result_id: &str) -> Result<Option<Command>, OpcGwError> {
+        // Empty id never correlates (mirror SqliteBackend; review iter-1).
+        if result_id.is_empty() {
+            return Ok(None);
+        }
         let queue = self.command_queue.lock()
             .map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
         Ok(queue
             .iter()
             .find(|c| c.chirpstack_result_id.as_deref() == Some(result_id))
             .cloned())
+    }
+
+    fn recent_commands(&self, limit: usize) -> Result<Vec<Command>, OpcGwError> {
+        let queue = self.command_queue.lock()
+            .map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
+        let mut result: Vec<Command> = queue.iter().cloned().collect();
+        result.sort_by_key(|c| std::cmp::Reverse(c.enqueued_at));
+        result.truncate(limit);
+        Ok(result)
     }
 
     fn find_pending_confirmations(&self) -> Result<Vec<Command>, OpcGwError> {

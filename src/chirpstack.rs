@@ -2687,6 +2687,17 @@ async fn deliver_one(
                 chirpstack_result_id = %result_id,
                 "Command enqueued to ChirpStack"
             );
+            // ChirpStack should always return a queue-item UUID; an empty id
+            // means delivery confirmation can't correlate (review iter-1) — the
+            // command is still marked Sent so the timeout sweep covers it.
+            if result_id.is_empty() {
+                warn!(
+                    event = "command_enqueue_no_result_id",
+                    command_id = command.id,
+                    device_id = %command.device_id,
+                    "ChirpStack returned an empty queue-item id; delivery confirmation will fall back to the timeout sweep"
+                );
+            }
             // Transition Pending → Sent AND persist the queue-item id so the
             // E-3 confirmation path can correlate the device ack back to this
             // command (`mark_command_sent` also stamps `sent_at`, which the

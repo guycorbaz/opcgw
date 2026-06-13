@@ -5016,6 +5016,12 @@ mod tests {
         ) -> Result<Option<crate::storage::Command>, OpcGwError> {
             panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
         }
+        fn recent_commands(
+            &self,
+            _limit: usize,
+        ) -> Result<Vec<crate::storage::Command>, OpcGwError> {
+            panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
+        }
         fn update_gateway_status(
             &self,
             _last_poll_timestamp: Option<chrono::DateTime<chrono::Utc>>,

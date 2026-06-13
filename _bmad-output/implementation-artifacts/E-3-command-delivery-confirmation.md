@@ -1,6 +1,6 @@
 # Story E.3: Command Delivery Confirmation
 
-Status: review
+Status: done
 
 <!-- Ultimate context engine analysis completed - comprehensive developer guide created (2026-06-13). Last story in Epic E; on done → epic-E-retrospective becomes mandatory (CLAUDE.md Epic Completion Requirements: run the security check before closing). -->
 
@@ -93,6 +93,28 @@ These three facts were verified against the current `main` and **change the shap
 
 - [x] **Task 7 — Docs sync (AC: 9)**
   - [x] `docs/logging.md` (command_confirmed / command_confirm_failed / command_timeout), `docs/architecture.md` (lifecycle + event-stream confirmation path), `docs/manual/opcgw-user-manual.xml` (operator-facing status + timeout knob; `xmllint --noout`), config reference for any knob change, README Planning + `sprint-status.yaml` → E-3 done / Epic E 4/4. SPDX headers on new files.
+
+## Review Findings (iter-1, 2026-06-13)
+
+Code review of `aa31e60` via 3 adversarial layers (Blind Hunter / Edge Case Hunter / Acceptance Auditor). **0 unresolved HIGH/MEDIUM after patches.** 6 patches applied, 1 deferred, 7 dismissed.
+
+- [x] [Review][Patch] **Missing `acknowledged` field actively marked a command Failed (HIGH, blind+edge)** — `parse_ack_event` used `unwrap_or(false)`, so an ack with no `acknowledged` flag took the NACK→`mark_command_failed` path, failing a possibly-delivered command. Fix: absent `acknowledged` now drops the ack (debug `command_ack_dropped reason=missing_acknowledged`) and lets the timeout sweep decide; only an explicit `false` is a NACK. +parse test. [src/chirpstack_events.rs]
+- [x] [Review][Patch] **`CommandStatusQuery` loaded the entire unbounded `command_queue` table (MEDIUM, blind+edge)** — the callback fetched ALL commands via `list_commands(default)` then sorted/truncated in memory; the table is never pruned → O(n) per OPC UA read. Fix: new `StorageBackend::recent_commands(limit)` bounds at the query layer (`ORDER BY enqueued_at DESC LIMIT`); `get_command_status_value` uses it. (Also fixes the legacy-NULL-`enqueued_at` nondeterministic sort — SQL orders on the raw column, NULLs last.) [src/storage/mod.rs, sqlite.rs, memory.rs, web/api.rs, opc_ua.rs]
+- [x] [Review][Patch] **No test for `get_command_status_value` (AC#6) though Task 6 checked (MEDIUM, auditor)** — added `get_command_status_value_returns_real_command_status` (empty→`[]`; enqueue→sent→confirmed→JSON with status/sent_at/confirmed_at; Good status). [src/opc_ua.rs]
+- [x] [Review][Patch] **Ack correlated on `queue_item_id` ignoring the available `device_id` (MEDIUM, blind)** — defence in depth: `handle_ack` now verifies the correlated command's `device_id` matches the stream's device; mismatch → warn `command_ack_device_mismatch` + skip. [src/chirpstack_events.rs]
+- [x] [Review][Patch] **Empty enqueue id latent mass-match hazard (MEDIUM→LOW, blind+edge)** — `find_command_by_result_id` now returns `None` for an empty arg in both backends; `deliver_one` warns `command_enqueue_no_result_id` on an empty id (command still Sent → timeout covers it). [src/storage/sqlite.rs, memory.rs, chirpstack.rs]
+- [x] [Review][Patch] **`latency_ms` could be negative (LOW, blind)** — clamped to ≥0 against clock skew. [src/chirpstack_events.rs]
+- [x] [Review][Defer] **In-memory `find_command_by_result_id` can't see E-0-deliver-path commands (test-fidelity)** — `DeviceCommand` (the `commands` vec) has no `result_id` field, so an in-memory command queued via the E-0 `queue_command` path then `mark_command_sent` stores the id only in the `command_queue` vec it isn't in. Production is SQLite (one unified table) so this is test-only; the faithful deliver→capture test (`deliver_one_captures_result_id_sqlite`) uses SqliteBackend. Deferred — unifying the in-memory dual-vec store is a larger refactor with no prod impact.
+- Dismissed (7): dual-vec divergence (ids are unique across both vecs via the shared counter — can't co-exist); `mark_command_sent` terminal guard (only ever called on Pending commands from `deliver_one`); `CommandStatusPoller` periodic scan (intended Task-4 repurpose, bounded by pending count); `find_command_by_result_id` LIMIT-1 uniqueness (queue_item_ids are ChirpStack UUIDs); `sent_at` not stamped on the `commands` DeviceCommand vec (no such field; test-only); `command_timeout` test string drift (test doesn't assert the message); non-streamed-device "Failed" ambiguity (documented intended timeout fallback).
+
+## Review Findings (iter-2, 2026-06-13)
+
+Mandatory re-review of iter-1's new code (the `recent_commands` method, the ack-drop change, device cross-check, empty guards) — 2 adversarial layers on the patch diff. **0 HIGH/MEDIUM regressions.** Blind Hunter verified every patch clean (empirically confirmed SQLite NULL-DESC ordering + LIMIT semantics). 1 patch applied (test), 1 dismissed.
+
+- [x] [Review][Patch] **`recent_commands` cap/ordering untested (LOW, edge ×2)** — the bounded behaviour (the whole point of the new method) and the SQLite path were unverified (the iter-1 OPC UA test only covered InMemory single-command + empty). Added `test_recent_commands_caps_and_orders_newest_first` (105 rows → cap 100, newest-first, oldest excluded, limit 0 → empty, limit > rows → all) on the SQLite backend. [src/storage/sqlite_tests.rs]
+- Dismissed (1): "legacy NULL-`enqueued_at` rows masquerade as newest" (MEDIUM, edge) — `get_command_status_value` does **not** serialize `enqueued_at` in its JSON output, and the SQL `ORDER BY enqueued_at DESC` correctly sorts NULLs last, so the `command_from_row` NULL→`Utc::now()` substitution has zero functional impact on either the ordering or the exposed data. Cross-backend NULL-row ordering parity (the LOW corollary) is likewise moot since post-#134 rows always carry `enqueued_at` and the value isn't exposed.
+
+**Loop termination (CLAUDE.md condition #2):** after iter-2, only LOW findings remained and all were patched or dismissed; 0 unresolved HIGH/MEDIUM. The iter-2 change was a **test-only** addition (no new production flow-control), so iter-3 is not mandated (cf. E-2a precedent). Final: `cargo test` 1674/0 across all suites + `cargo clippy --all-targets -- -D warnings` clean + `xmllint` clean. Story → done.
 
 ## Dev Notes
 

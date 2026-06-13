@@ -702,6 +702,19 @@ pub trait StorageBackend: Send + Sync {
     /// * `Err(OpcGwError)` - if a database error occurs
     fn find_command_by_result_id(&self, result_id: &str) -> Result<Option<Command>, OpcGwError>;
 
+    /// Returns the `limit` most-recent commands (by `enqueued_at`, newest
+    /// first), bounded at the query layer.
+    ///
+    /// Used by the OPC UA `CommandStatusQuery` read path (Story E-3): the
+    /// `command_queue` table is never pruned, so a full-table load on every
+    /// read would be O(n). This caps the work regardless of table size.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<Command>)` - up to `limit` newest commands (may be empty)
+    /// * `Err(OpcGwError)` - if a database error occurs
+    fn recent_commands(&self, limit: usize) -> Result<Vec<Command>, OpcGwError>;
+
     // ===== Gateway Health Metrics Operations =====
 
     /// Updates gateway health metrics (last poll timestamp, error count, ChirpStack availability).

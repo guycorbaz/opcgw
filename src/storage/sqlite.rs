@@ -2227,6 +2227,14 @@ impl crate::storage::StorageBackend for SqliteBackend {
     }
 
     fn find_command_by_result_id(&self, result_id: &str) -> Result<Option<Command>, OpcGwError> {
+        // An empty result id must never correlate (review iter-1): if ChirpStack
+        // ever returned an empty enqueue id, several commands could share
+        // `chirpstack_result_id = ''`, and a `LIMIT 1` lookup would pick an
+        // arbitrary one. Treat empty as "no match" (the parse layer already
+        // drops empty-id acks, so this is belt-and-suspenders).
+        if result_id.is_empty() {
+            return Ok(None);
+        }
         let mut __op = StorageOpLog::start("find_command_by_result_id");
         let conn = self.pool.checkout(Duration::from_secs(5))
             .map_err(|e| {
@@ -2249,6 +2257,33 @@ impl crate::storage::StorageBackend for SqliteBackend {
 
         __op.ok();
         Ok(command)
+    }
+
+    fn recent_commands(&self, limit: usize) -> Result<Vec<Command>, OpcGwError> {
+        let mut __op = StorageOpLog::start("recent_commands");
+        let conn = self.pool.checkout(Duration::from_secs(5))
+            .map_err(|e| {
+                trace!(error = %e, "Pool checkout timeout for recent_commands");
+                e
+            })?;
+
+        // Bounded at the query layer (NULL enqueued_at sorts last under DESC, so
+        // legacy pre-#134 rows don't masquerade as newest). NULL-safe shared
+        // mapper (GH #134).
+        let mut stmt = conn.prepare(
+            "SELECT id, device_id, command_name, parameters, status, enqueued_at, sent_at, confirmed_at, \
+             error_message, command_hash, chirpstack_result_id FROM command_queue \
+             ORDER BY enqueued_at DESC LIMIT ?"
+        )
+            .map_err(|e| OpcGwError::Database(format!("Failed to prepare statement: {}", e)))?;
+
+        let commands = stmt.query_map(params![limit as i64], Self::command_from_row)
+            .map_err(|e| OpcGwError::Database(format!("Failed to query recent commands: {}", e)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| OpcGwError::Database(format!("Failed to collect recent commands: {}", e)))?;
+
+        __op.ok();
+        Ok(commands)
     }
 
     fn update_gateway_status(

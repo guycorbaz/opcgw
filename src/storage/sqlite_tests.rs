@@ -329,6 +329,50 @@
         let _ = fs::remove_file(&path);
     }
 
+    /// E-3 review iter-2: `recent_commands(limit)` is bounded at the query
+    /// layer and returns the newest `limit` rows, newest-first by enqueued_at.
+    /// Exercises the SQLite path (the OPC UA CommandStatusQuery backing query)
+    /// with more rows than the cap.
+    #[test]
+    fn test_recent_commands_caps_and_orders_newest_first() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("backend");
+
+        // Insert 105 rows with strictly increasing enqueued_at.
+        {
+            let conn = backend.pool.checkout(Duration::from_secs(5)).expect("checkout");
+            let base = Utc::now() - chrono::Duration::seconds(1000);
+            for i in 0..105 {
+                let ts = (base + chrono::Duration::seconds(i)).to_rfc3339();
+                conn.execute(
+                    "INSERT INTO command_queue (device_id, command_name, payload, f_port, status, created_at, updated_at, enqueued_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    rusqlite::params![format!("dev{}", i), format!("cmd{}", i), vec![1u8], 10, "Pending", &ts, &ts, &ts],
+                ).expect("insert");
+            }
+        }
+
+        let recent = backend.recent_commands(100).expect("recent_commands");
+        assert_eq!(recent.len(), 100, "must cap at the requested limit");
+        // Newest first: row i=104 (latest enqueued_at) is first; the 5 oldest
+        // (i=0..4) are excluded by the cap.
+        assert_eq!(recent[0].command_name, "cmd104", "newest command first");
+        assert!(
+            recent.windows(2).all(|w| w[0].enqueued_at >= w[1].enqueued_at),
+            "results must be ordered newest-first by enqueued_at"
+        );
+        assert!(
+            !recent.iter().any(|c| c.command_name == "cmd0"),
+            "the oldest rows beyond the cap must be excluded"
+        );
+
+        // limit 0 → empty; limit > rows → all rows.
+        assert!(backend.recent_commands(0).expect("limit0").is_empty());
+        assert_eq!(backend.recent_commands(1000).expect("limit big").len(), 105);
+
+        let _ = fs::remove_file(&path);
+    }
+
     /// AC#5: a command whose sent_at is older than the TTL is found by the
     /// timeout sweep; once confirmed, it is no longer timeout-eligible (the
     /// confirm/timeout race resolves to a single terminal transition).

@@ -572,12 +572,26 @@ fn parse_ack_event(item: &LogItem) -> Option<AckInfo> {
         );
         None
     })?;
+    // An ABSENT `acknowledged` is indeterminate, not a NACK. Dropping the ack
+    // (and letting the timeout sweep decide) is the correct conservative
+    // direction: defaulting a missing flag to `false` would actively mark a
+    // possibly-delivered command Failed (review iter-1, blind+edge HIGH). Only
+    // an explicit `acknowledged=false` is a real NACK.
+    let acknowledged = match body.acknowledged {
+        Some(a) => a,
+        None => {
+            debug!(
+                event = "command_ack_dropped",
+                reason = "missing_acknowledged",
+                queue_item_id = %queue_item_id,
+                "ack event has no acknowledged flag; leaving the command to the timeout sweep"
+            );
+            return None;
+        }
+    };
     Some(AckInfo {
         queue_item_id,
-        // Absent `acknowledged` is treated as not-acknowledged (conservative:
-        // a confirmed downlink that did not produce acknowledged=true did not
-        // reach the device).
-        acknowledged: body.acknowledged.unwrap_or(false),
+        acknowledged,
     })
 }
 
@@ -840,12 +854,29 @@ fn handle_ack(backend: &Arc<dyn StorageBackend>, device_id: &str, ack: &AckInfo)
         }
     };
 
+    // Defence in depth (review iter-1): the ack arrives on THIS device's stream,
+    // so the correlated command must belong to it. queue_item_ids are ChirpStack
+    // UUIDs (globally unique), so a mismatch should be impossible — but if one
+    // ever occurs, never confirm another device's command.
+    if cmd.device_id != device_id {
+        warn!(
+            event = "command_ack_device_mismatch",
+            stream_device_id = %device_id,
+            command_device_id = %cmd.device_id,
+            chirpstack_result_id = %ack.queue_item_id,
+            "ack queue_item_id matched a command for a DIFFERENT device; ignoring"
+        );
+        return;
+    }
+
     if ack.acknowledged {
         match backend.mark_command_confirmed(cmd.id) {
             Ok(()) => {
                 // confirmed_at is set inside mark_command_confirmed; now() is a
                 // tight upper bound for it, so latency ≈ confirmed_at - sent_at.
-                let latency_ms = cmd.sent_at.map(|s| (Utc::now() - s).num_milliseconds());
+                // Clamp to ≥0 — a backwards clock or future-dated sent_at must
+                // not surface a negative latency in the audit log.
+                let latency_ms = cmd.sent_at.map(|s| (Utc::now() - s).num_milliseconds().max(0));
                 info!(
                     event = "command_confirmed",
                     command_id = cmd.id,
@@ -1707,6 +1738,9 @@ mod tests {
         assert!(parse_device_event(&log_item("join", serde_json::json!({}))).is_none());
         // ack with no queue_item_id → dropped (no correlation key)
         assert!(parse_device_event(&log_item("ack", serde_json::json!({"acknowledged": true}))).is_none());
+        // ack with queue_item_id but NO acknowledged flag → dropped (review
+        // iter-1: indeterminate, must not default to a NACK/Failed).
+        assert!(parse_device_event(&log_item("ack", serde_json::json!({"queueItemId": "qid-x"}))).is_none());
         // ack with malformed body → dropped, not a panic
         let bad = PbLogItem {
             id: "x".into(), time: None, description: "ack".into(),

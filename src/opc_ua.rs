@@ -1553,11 +1553,11 @@ impl OpcUa {
     fn get_command_status_value(storage: &Arc<dyn StorageBackend>) -> DataValue {
         /// Cap on commands returned by the status query (newest first).
         const COMMAND_STATUS_MAX: usize = 100;
-        let json = match storage.list_commands(&crate::storage::CommandFilter::default()) {
-            Ok(mut commands) => {
-                // Newest first by enqueued_at, then cap.
-                commands.sort_by_key(|c| std::cmp::Reverse(c.enqueued_at));
-                commands.truncate(COMMAND_STATUS_MAX);
+        // E-3 review: bound at the query layer — the `command_queue` table is
+        // never pruned, so loading it whole on every OPC UA read would be O(n).
+        let json = match storage.recent_commands(COMMAND_STATUS_MAX) {
+            Ok(commands) => {
+                // Storage already returned the newest COMMAND_STATUS_MAX, newest-first.
                 let entries: Vec<serde_json::Value> = commands
                     .iter()
                     .map(|c| {
@@ -3327,6 +3327,62 @@ mod tests {
             status,
             opcua::types::StatusCode::Good.bits().into(),
             "A-4 AC#5/AC#6: fresh non-legacy row must carry StatusCode::Good"
+        );
+    }
+
+    /// Story E-3 AC#6 (review iter-1: this test was missing): the
+    /// `CommandStatusQuery` read callback returns real command lifecycle status
+    /// from storage as a JSON array, and an empty store yields `[]`.
+    #[test]
+    fn get_command_status_value_returns_real_command_status() {
+        use crate::storage::{Command, CommandStatus};
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+
+        // No commands → empty JSON array, Good status, side-effect-free.
+        let empty = OpcUa::get_command_status_value(&backend);
+        let empty_json = match empty.value.expect("DataValue must carry a Variant") {
+            opcua::types::Variant::String(s) => s.to_string(),
+            v => panic!("expected String variant, got {:?}", v),
+        };
+        assert_eq!(empty_json, "[]", "no commands → empty JSON array");
+
+        // Enqueue → Sent → Confirmed, then read back.
+        let cmd = Command {
+            id: 0,
+            device_id: "dev9".to_string(),
+            metric_id: String::new(),
+            command_name: "valveCmd".to_string(),
+            parameters: serde_json::Value::Null,
+            enqueued_at: chrono::Utc::now(),
+            sent_at: None,
+            confirmed_at: None,
+            status: CommandStatus::Pending,
+            error_message: None,
+            command_hash: "h-cmdstatus".to_string(),
+            chirpstack_result_id: None,
+        };
+        let id = backend.enqueue_command(cmd).expect("enqueue");
+        backend.mark_command_sent(id, "qid-cs").expect("sent");
+        backend.mark_command_confirmed(id).expect("confirmed");
+
+        let dv = OpcUa::get_command_status_value(&backend);
+        let json_str = match dv.value.expect("DataValue must carry a Variant") {
+            opcua::types::Variant::String(s) => s.to_string(),
+            v => panic!("expected String variant, got {:?}", v),
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("callback must return valid JSON");
+        let arr = parsed.as_array().expect("JSON array");
+        assert_eq!(arr.len(), 1, "one command should be reported");
+        let entry = &arr[0];
+        assert_eq!(entry["device_id"], "dev9");
+        assert_eq!(entry["command_name"], "valveCmd");
+        assert_eq!(entry["status"], "Confirmed", "lifecycle status must be reflected");
+        assert!(entry["sent_at"].is_string(), "sent_at must be present");
+        assert!(entry["confirmed_at"].is_string(), "confirmed_at must be present");
+        assert_eq!(
+            dv.status.expect("status"),
+            opcua::types::StatusCode::Good.bits().into()
         );
     }
 }
