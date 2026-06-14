@@ -1463,3 +1463,106 @@ So that I know whether a command actually reached the device.
 - `CR-EPIC-C-MQTT` (MQTT real-time path) — Route B uses gRPC `StreamDeviceEvents` instead; MQTT stays deferred.
 - Modulating / proportional actuators (0–100% position) — the valve class is binary open/close for now; a `SetPosition` abstraction is deferred until a proportional device exists.
 - Encrypted-secrets-in-SQLite and other unrelated v2.x carry-forwards.
+
+## Epic F: Onboarding & Web UX for Public Release
+
+**Tracking:** GitHub issue [#140](https://github.com/guycorbaz/opcgw/issues/140). Literal name `Epic F` in `sprint-status.yaml`, continuing the lettered convention (A/B/C/D/E → F). Stories use sprint-status keys `F-0`..`F-4`. Absorbs CR [#138](https://github.com/guycorbaz/opcgw/issues/138) (uplink stream-set hot-reload — the root cause of "restart after every config change").
+
+**Why it exists:** opcgw is functionally complete (v2.2.0 stable, device-abstraction layer shipped) and the next step is to **announce it to the ChirpStack team**. Before that, the *first-touch* experience — configuration and the web UI, the two things a newcomer judges in the first five minutes — must be smooth. Three friction points today: **(a)** a newcomer must hand-edit `config.toml`/`.env` to supply ChirpStack address/token/tenant before the gateway will even boot — the first-run wizard (`/setup`) only collects the OPC UA password; **(b)** every config save triggers an immediate in-process supervisor restart (`singleton_config.rs` → `"restart_pending"`; the C-0 wizard pattern), so OPC UA clients and the poller are dropped on *each* edit — this is also #138's root cause; **(c)** the web UI is 8 separately hand-rolled vanilla pages (`static/*.html` + `*.js`, shared `dashboard.css`) with no unified nav/shell. This epic makes opcgw effortless to configure (browser-only, zero text-file editing) and pleasant to use, without weakening its lightweight, auditable, no-build-step deployment story.
+
+**Starting point (verified in code 2026-06-14):** config-in-database is *already* ~done from Epics C and D — migration `v009` put applications/devices/metrics/commands in SQLite; `v010` put the singleton `[global]`/`[chirpstack]`/`[opcua]`/`[web]` sections in SQLite; `config.toml` is already **bootstrap-seed-only** (read once on first boot, never mutated). The remaining work is therefore the **first-run experience** and the **apply model**, *not* the data model.
+
+**Locked design decisions (2026-06-14, via design dialogue — AskUserQuestion):**
+
+- **`.env` boundary (Guy's call):** the **opcgw web-UI login user/password** and the **log-file location** STAY in `.env` (infra-level access control + log path; deliberately kept out of the very UI they gate, and out of SQLite). Secrets (ChirpStack API token, OPC UA server password) stay in `config/secrets.toml` (chmod 0600). Logging configuration stays in `log4rs.yaml`. The first-run wizard does **not** touch any of these — it only captures ChirpStack connection + OPC UA.
+- **Apply model — staged config + explicit "Apply changes" (the load-bearing call):** rejected both extremes — *live hot-mutation* (too fragile: live OPC UA address-space mutation + live gRPC re-subscribe) and *per-save restart* (the current churn). Instead: config edits write to SQLite (already the authoritative store) **without restarting**; a **"pending changes" affordance** surfaces in the shell; an explicit **"Apply changes"** button triggers **one** graceful in-process **soft restart** (the existing `CancellationToken` supervisor restart) that reloads the full config (poller, OPC UA server, gRPC event stream). **The container is never restarted.** No draft/active dual-version schema — "pending" is simply "SQLite has been written since the running processes last loaded their snapshot." This collapses the hard live-mutation work, **auto-fixes #138** (the stream task is torn down and respawned → re-subscribes with the new device set, no bespoke re-subscribe logic), and **eliminates the restart-required allowlist** special-casing (every setting — including the inherently-disruptive OPC UA endpoint/port/security — applies uniformly on Apply). Honest trade-off: a soft restart briefly drops OPC UA sessions + the poller, but **once per batch, operator-initiated** when they choose — which is how SCADA operators expect to apply config.
+- **Web UI — vanilla + shell, no build step:** the no-`npm`, no-build, nothing-to-`install` nature is treated as an **asset** for an auditable industrial gateway shown to a network-server team, not a limitation to fix. Introduce one shared **nav/header/layout shell + component CSS** (responsive) and refactor the 8 existing pages onto it. **No SPA framework**, no build pipeline, no `node_modules`.
+- **First-run wizard — zero text-file editing:** extend `/setup` to capture **everything** needed for first boot (ChirpStack `server_address` / `tenant_id` / `api_token` + OPC UA), so an empty `config.toml`/`.env` boots clean entirely from the browser. Secrets → `secrets.toml` 0600, the rest → SQLite. Restart-on-submit is acceptable here — there are no connected clients at first boot, so the disruption is free.
+
+**FRs covered:** none from the original PRD (Epic F is a post-PRD addition driven by the 2026-06-14 pre-announcement readiness requirement; design captured here + in this session's design dialogue). Implicit functional contract per story below.
+
+**Sequencing:** **F-0 → F-1 → F-2 → F-3 → F-4.** F-0 is foundational — it changes the config *apply contract* that everything else relies on, and is the highest-risk story, so it lands first. F-1 (shell) underpins the visuals of F-2/F-3. F-1 and F-2 are fairly independent and could swap. F-3 (dashboard) and F-4 (export/import) sit on top of the shell. Per-story full Acceptance Criteria are drafted when `bmad-create-story F-N` is invoked.
+
+### Story F.0: Staged Config with Explicit "Apply Changes"
+
+As an **opcgw operator editing configuration from the web UI**,
+I want my edits to accumulate without restarting the gateway, and to apply them all at once with an explicit button,
+So that connected OPC UA clients and the poller aren't dropped on every individual save, and config never requires a container restart.
+
+**Scope summary (full ACs at `bmad-create-story F-0`):**
+
+- Config-write endpoints (singleton-config editor + inventory pickers) persist to SQLite **without** triggering a supervisor restart; the immediate `"restart_pending"` / `CancellationToken.cancel()` reaction is removed from the per-save path.
+- A **"pending changes"** signal: the gateway exposes whether SQLite has been written since the running processes last loaded their snapshot (no draft/active dual-version schema — derive it from a write-generation marker). Surface a banner/affordance in the shell (depends on F-1 for placement; ship a minimal indicator if F-1 not yet landed).
+- An **"Apply changes"** endpoint + button triggers **one** graceful in-process soft restart that reloads the full config; the container is never restarted.
+- Closes **#138**: the gRPC `StreamDeviceEvents` task is respawned on apply and re-subscribes with the current device set — no bespoke hot re-subscribe.
+- Restart-required allowlist special-casing is **removed** — all settings (incl. OPC UA endpoint/port/security) apply uniformly via Apply.
+- Tests: edits persist without restart; pending-changes marker flips on write and clears after apply; Apply reloads poller + OPC UA + stream; stream re-subscribes to a changed device set; soft restart never escalates to process exit.
+
+### Story F.1: Unified Web Shell (vanilla, no build step)
+
+As an **operator using the opcgw web UI**,
+I want a consistent navigation, header, and layout across all pages,
+So that the gateway feels like one cohesive application rather than 8 separate pages.
+
+**Scope summary (full ACs at `bmad-create-story F-1`):**
+
+- A shared nav/header/layout shell + component CSS (buttons, forms, tables, status badges, banners), responsive. No build step, no framework, no `node_modules`.
+- Refactor the 8 existing pages (`index`, `applications`, `devices-config`, `metrics`, `commands`, `singleton-config`, `inventory-drift`, plus `setup`) onto the shell without behavioural regression.
+- Hosts the F-0 "pending changes / Apply" affordance.
+- Tests / checks: each page renders on the shell; existing API interactions unchanged; basic responsive layout; no new runtime dependency added.
+
+### Story F.2: Zero-Touch First-Run Wizard
+
+As a **new operator installing opcgw**,
+I want to configure everything needed for first boot from the browser,
+So that I never have to hand-edit `config.toml` or `.env` to get a working gateway.
+
+**Scope summary (full ACs at `bmad-create-story F-2`):**
+
+- Extend `/setup` to capture ChirpStack `server_address` / `tenant_id` / `api_token` **and** OPC UA settings, so an empty `config.toml`/`.env` boots clean. Secrets → `secrets.toml` 0600; non-secret config → SQLite.
+- Does **not** touch web-UI login user/password or log-file location (those stay `.env`).
+- Restart-on-submit is acceptable (no connected clients at first boot) — reuses the existing wizard submit → graceful restart path.
+- Validation: refuse to complete with placeholder/empty ChirpStack credentials (mirrors the current startup guard); confirm connectivity where feasible.
+- Tests: wizard writes secrets to `secrets.toml` (0600) + config to SQLite; empty-bootstrap end-to-end boot; placeholder rejection; web-auth/log-path untouched.
+
+### Story F.3: Dashboard Landing Redesign
+
+As an **operator opening opcgw**,
+I want an at-a-glance view of gateway health on the landing page,
+So that I can immediately see whether everything is working.
+
+**Scope summary (full ACs at `bmad-create-story F-3`):**
+
+- Redesign the landing/dashboard on the F-1 shell: ChirpStack connection / poller status, device count, last-update / freshness, recent errors — sourced from existing storage + status surfaces (e.g. the `cp0` server-availability device, gateway-status tables).
+- No new aggregation in the gateway (consistent with the #130 no-aggregation rule) — display last-known values + status only.
+- Tests / checks: dashboard renders real status; degraded states (CS disconnected, stale devices) surface clearly.
+
+### Story F.4: Config Export / Import
+
+As an **operator**,
+I want to download my gateway configuration and restore it on another instance,
+So that I can back up, version, share, or reproduce a setup (useful for demos).
+
+**Scope summary (full ACs at `bmad-create-story F-4`):**
+
+- Export the gateway config (applications/devices/metrics/commands + singleton sections) to a file (TOML), **secrets excluded by default**.
+- Import on a fresh instance, with validation + the F-0 staged-apply flow (import = a batch of pending changes → Apply).
+- Tests: export round-trips through import to an equivalent config; secrets are excluded; malformed/partial import is rejected safely.
+
+### Epic F — Story Acceptance Criteria
+
+**Given** a fresh opcgw with an empty `config.toml`/`.env`,
+**When** an operator runs `docker compose up` and opens the browser,
+**Then** the first-run wizard (F-2) collects ChirpStack connection + OPC UA and the gateway boots fully configured **without editing any text file** (web-auth creds + log path remain `.env` by design).
+**And** subsequent config edits (F-0) accumulate as "pending changes" without disrupting connected OPC UA clients, and apply together via an explicit **"Apply changes"** soft restart that never restarts the container (closing #138).
+**And** every page presents a consistent shell with unified navigation (F-1), the landing page shows gateway health at a glance (F-3), and the operator can export/import a configuration (F-4).
+**And** none of this adds a build step, framework, or `node_modules` to the deployment.
+
+**Vision capture reference:** GitHub issue [#140](https://github.com/guycorbaz/opcgw/issues/140); the 2026-06-14 pre-announcement-readiness design dialogue (AskUserQuestion decisions: vanilla + shell; `.env` boundary for web-auth + log path; staged-config + explicit Apply soft-restart in place of live hot-mutation or per-save restart; zero-touch first-run wizard; config export/import).
+
+**Deferred / out-of-scope:**
+
+- Logging configuration in the DB/UI — `log4rs.yaml` stays file-based (Guy's call 2026-06-14).
+- Live, zero-disruption hot-mutation of devices/metrics without any soft restart — explicitly rejected in favour of the staged-apply soft-restart model; revisit only if operators report the brief apply-time blip is unacceptable.
+- SPA framework / build pipeline adoption — explicitly rejected to preserve the no-build, auditable deployment story.
+- Encrypted-secrets-in-SQLite and other unrelated v2.x carry-forwards.
