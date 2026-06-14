@@ -269,6 +269,34 @@ footer button:hover {
   border-bottom-color: #fbbf24;
 }
 
+/* Per-page title block. Story F-1 review (P1): the unified dark bar is the
+ * injected .app-shell; a page's own <header> is now an in-content title strip,
+ * NOT a second dark bar. Without these rules the generic `header {}` element
+ * rule above would paint .page-header dark too, stacking two dark bars. */
+.page-header {
+  background: transparent;
+  color: inherit;
+  padding: 1rem 1rem 0.25rem;
+}
+
+.page-header h1 {
+  margin: 0;
+  font-size: 1.4rem;
+}
+
+.page-header .subtitle {
+  color: #6b7280;
+  opacity: 1;
+}
+
+.page-header .header-controls {
+  color: #6b7280;
+}
+
+.page-header .header-controls a.back-link {
+  color: #3b82f6;
+}
+
 /* Shared component primitives (opt-in). */
 .btn {
   display: inline-block;
