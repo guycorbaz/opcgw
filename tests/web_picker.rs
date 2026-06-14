@@ -242,6 +242,9 @@ async fn spawn_fixture(seed_toml: &str) -> PickerFixture {
         secrets_path: dir.path().join("secrets.toml"),
         shutdown_token: CancellationToken::new(),
         inventory_cache: Arc::new(opcgw::chirpstack_inventory::InventoryCache::new(60)),
+        pending_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        applied_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        apply_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
     });
 
     let cancel = CancellationToken::new();

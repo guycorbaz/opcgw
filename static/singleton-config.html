@@ -4,14 +4,15 @@
   Copyright (c) [2024] Guy Corbaz
 
   Story D-1: Singleton configuration editor.
+  Story F-0: saves now STAGE to SQLite (no per-save restart).
 
   Edits the four singleton config sections ([global] / [chirpstack] /
   [opcua] / [web]) via GET + PUT /api/config/singleton. Secrets stay
   in config/secrets.toml; the UI shows them as read-only placeholders.
-  Every section save triggers a graceful supervisor restart via the
-  endpoint's `state.shutdown_token.cancel()` mechanism — the operator
-  sees a "restart pending" message and waits for the supervisor to
-  bring opcgw back up.
+  Each section save STAGES the change to SQLite; the shared "Apply
+  changes" bar (apply-bar.js) then performs ONE in-process soft restart
+  for the whole batch via POST /api/config/apply. The container is never
+  restarted.
 -->
 <html lang="en">
 <head>
@@ -47,18 +48,18 @@
     <p>
       Edit the gateway's <code>[global]</code> / <code>[chirpstack]</code> /
       <code>[opcua]</code> / <code>[web]</code> configuration sections.
-      <strong>Every save triggers a graceful supervisor restart</strong> —
-      the gateway will shut down cleanly and the supervisor
-      (Docker / systemd) will bring it back up. Secrets
-      (<code>api_token</code>, <code>user_password</code>) are read-only
-      here; rotate them via <code>config/secrets.toml</code> or
-      environment variables.
+      <strong>Saving stages your change</strong> — it is written to the
+      database but does not take effect until you click <em>Apply changes</em>
+      in the bar at the bottom of the page, which performs one in-process soft
+      restart for the whole batch (the container is never restarted). Secrets
+      (<code>api_token</code>, <code>user_password</code>) are read-only here;
+      rotate them via <code>config/secrets.toml</code> or environment variables.
     </p>
 
-    <div id="restart-notice" class="restart-notice">
-      <strong>Restart pending.</strong> The gateway is shutting down to
-      apply your changes. Wait for the supervisor (Docker / systemd) to
-      bring opcgw back up, then reload this page.
+    <div id="staged-notice" class="restart-notice">
+      <strong>Change staged.</strong> Saved to the database — not yet live.
+      Use the <em>Apply changes</em> bar at the bottom of the page to put all
+      staged edits into effect.
     </div>
 
     <div id="sections"></div>
@@ -66,20 +67,21 @@
 
   <div id="confirm-modal" class="modal-overlay">
     <div class="modal">
-      <h2>Confirm restart</h2>
+      <h2>Stage this change?</h2>
       <p>
-        Saving <code id="confirm-section">section</code> will restart
-        the opcgw gateway. The supervisor will bring it back up
-        automatically. Any active OPC UA sessions will be disconnected.
+        Saving <code id="confirm-section">section</code> stages it to the
+        database. It will not take effect until you click
+        <em>Apply changes</em> (one soft restart applies the whole batch).
       </p>
       <p>Continue?</p>
       <div class="modal-actions">
         <button id="confirm-cancel">Cancel</button>
-        <button id="confirm-ok">Save and restart</button>
+        <button id="confirm-ok">Stage change</button>
       </div>
     </div>
   </div>
 
   <script src="/singleton-config.js"></script>
+  <script src="/apply-bar.js"></script>
 </body>
 </html>

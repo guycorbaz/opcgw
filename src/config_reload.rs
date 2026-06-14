@@ -12,6 +12,21 @@
 //! `ReloadError`, and `classify_diff` were removed in C-6. Hot-reload
 //! is now SQLite-driven: web CRUD handlers call `notify_crud_write`
 //! after each successful write.
+//!
+//! # Story F-0 — dormant consumer path
+//!
+//! Under the staged-apply model the data-plane is respawned in-process on
+//! Apply (reading fresh config from SQLite) rather than live-mutated, so
+//! nothing subscribes to the watch channel to *react* to changes anymore.
+//! The CONSUMER functions here (`run_web_config_listener`,
+//! `run_opcua_config_listener`, and the `topology_*` / `*_equal` diff
+//! helpers) are therefore dead and retained only pending full removal
+//! (an F-0 follow-up). The PRODUCER side (`ConfigReloadHandle`,
+//! `notify_crud_write`, `seed_post_overlay`) is still used to keep the
+//! watch-channel snapshot fresh for within-session web reads (the CRUD
+//! duplicate-prevention pre-flight). `allow(dead_code)` covers the dormant
+//! consumer path during this transition.
+#![allow(dead_code)]
 
 use std::sync::Arc;
 

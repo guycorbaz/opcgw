@@ -304,7 +304,7 @@ pub async fn put_singleton_section(
         return internal_error("Failed to persist singleton section");
     }
 
-    // Success path: audit + restart trigger.
+    // Success path: audit + stage (Story F-0).
     info!(
         event = "singleton_config_updated",
         section = ?section,
@@ -313,19 +313,17 @@ pub async fn put_singleton_section(
         "PUT /api/config/singleton/{}: section persisted to SQLite",
         section
     );
-    info!(
-        event = "singleton_config_restart_required",
-        section = ?section,
-        auth_user = ?auth_user,
-        "PUT /api/config/singleton/{}: triggering graceful supervisor restart",
-        section
-    );
 
-    state.shutdown_token.cancel();
+    // Story F-0: the change is STAGED, not applied. Previously this handler
+    // called `state.shutdown_token.cancel()` to trigger a full container
+    // restart. Now it bumps the pending-changes marker; the operator applies
+    // all staged edits at once via `POST /api/config/apply`, which performs
+    // one in-process soft restart (no container restart).
+    state.stage_config_write("singleton_config");
 
     (
         StatusCode::ACCEPTED,
-        Json(json!({"status": "restart_pending"})),
+        Json(json!({"status": "staged", "pending_changes": true})),
     )
         .into_response()
 }

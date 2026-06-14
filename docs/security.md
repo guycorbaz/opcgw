@@ -104,9 +104,15 @@ The `SqliteSingletonProvider` reads the singleton snapshot from SQLite on EVERY 
 - **Malformed value JSON in a row** — the Provider skips that single row with a `config_provider_failed` warn carrying `section` + `key` + `error` fields, and continues processing the remaining rows. A corrupted singleton row does NOT brick the gateway.
 - **CHECK constraint violation** (unknown section name) — the schema CHECK constraint on `singleton_config.section` rejects writes to unknown sections, so this case is theoretically unreachable. The Provider does NOT crash if it occurs.
 
-### Restart-required vs. hot-reloadable knobs
+### Apply model and restart behaviour (Story F-0)
 
-Most singleton fields are restart-required (the `Arc<AppConfig>` snapshot is captured once at boot and threaded through subsystems). The D-1 PUT handler invokes `state.shutdown_token.cancel()` after a successful write to trigger graceful supervisor restart. Genuinely hot-reloadable knobs (e.g. `[chirpstack].polling_frequency`) continue to flow through `ConfigReloadHandle::notify_crud_write` for the `[[application]]` tree but the singleton-side hot-reload story is deferred to issue #113's live-borrow refactor.
+Story F-0 (2026-06-14) unified every configuration-write surface behind a **staged-apply** model. The D-1 PUT handler no longer invokes `state.shutdown_token.cancel()` to trigger a **container** restart; instead it **stages** the write to SQLite (`config_staged`) and the operator applies the whole batch with `POST /api/config/apply`. Security-relevant consequences:
+
+- **No more container restarts on a config edit.** Apply performs a single graceful **in-process** soft restart of the data-plane (poller, OPC UA server, gRPC event stream, command-timeout handler). The web server, its basic-auth middleware, and the SQLite pool persist across the soft restart. The Docker container is never restarted by an Apply, so the supervisor restart policy is reserved for genuine crashes / OS signals.
+- **OPC UA clients drop and reconnect once per applied batch.** The OPC UA server is torn down and rebuilt on the new address space during an Apply, so authenticated OPC UA sessions are dropped and must reconnect — once per Apply, not once per edit. This is the intended trade for batching: an operator making ten edits causes one client-visible disconnect, not ten.
+- **The Apply endpoint is basic-auth + CSRF protected** (the `config_apply` CSRF resource bucket; CSRF failures emit `config_apply_rejected reason="csrf"`). Only an authenticated, same-origin caller can trigger the soft restart.
+- **A bad staged config is non-disruptive.** The supervisor re-reads and validates the effective config from SQLite *before* tearing down the running data-plane. On a read/validation failure it logs `apply_failed` and the current data-plane keeps serving the previous config — a malformed staged edit cannot take down the gateway.
+- **Web-login credential rotation remains restart-required.** Because the web server (and its auth middleware) persists across the soft restart by design, rotating `[opcua].user_name` / the web password still requires a full process restart to take effect. Genuinely hot-reloadable knobs and the singleton-side live-reload story remain deferred to issue #113's live-borrow refactor; under F-0 they are simply applied via the soft restart instead.
 
 ### Threat model for first-run mode
 

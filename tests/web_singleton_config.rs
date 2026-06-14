@@ -77,6 +77,9 @@ struct Fixture {
     // state to verify writes actually persisted (closes the fake-
     // regression-guard finding-class on Test 4).
     sqlite_config: Arc<SqliteBackend>,
+    // Story F-0: expose AppState so tests can assert the staged-changes
+    // marker (`has_pending_changes`) after a PUT.
+    app_state: Arc<AppState>,
     _temp_dir: TempDir,
 }
 
@@ -210,6 +213,9 @@ async fn spawn_fixture() -> Fixture {
         secrets_path: std::path::PathBuf::from("/tmp/test-secrets.toml"),
         shutdown_token: shutdown_token.clone(),
         inventory_cache: std::sync::Arc::new(opcgw::chirpstack_inventory::InventoryCache::new(60)),
+        pending_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        applied_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        apply_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
     });
 
     let cancel = CancellationToken::new();
@@ -248,6 +254,7 @@ async fn spawn_fixture() -> Fixture {
         server_handle,
         shutdown_token,
         sqlite_config: app_state.sqlite_config.clone(),
+        app_state: app_state.clone(),
         _temp_dir: dir,
     }
 }
@@ -317,14 +324,15 @@ async fn d1_get_is_csrf_exempt() {
     fx.shutdown().await;
 }
 
-/// Test 4 — PUT /global with a valid payload returns 202, triggers
-/// shutdown, and **actually persists to SQLite** (I1-F4 iter-1: prior
+/// Test 4 — PUT /global with a valid payload returns 202, **stages** the
+/// change (Story F-0: bumps the pending-changes marker, does NOT restart
+/// anything), and **actually persists to SQLite** (I1-F4 iter-1: prior
 /// version was a fake regression guard that only checked HTTP status +
 /// shutdown + log strings; a broken `write_singleton_section` that
 /// returned `Ok(())` without writing would have passed).
 #[tokio::test]
 #[serial(captured_logs)]
-async fn d1_put_global_success_triggers_restart() {
+async fn d1_put_global_success_stages_change() {
     let fx = spawn_fixture().await;
     let auth = build_basic_auth(TEST_USER, TEST_PASSWORD);
     clear_captured_logs();
@@ -344,21 +352,23 @@ async fn d1_put_global_success_triggers_restart() {
         .expect("send");
     assert_eq!(r.status(), StatusCode::ACCEPTED);
     let resp: Value = r.json().await.expect("json");
-    assert_eq!(resp["status"], "restart_pending");
+    // Story F-0: a successful PUT STAGES the change — it no longer means
+    // "restart_pending" and must NOT cancel the shutdown token (which would
+    // tear down the process / restart the container under the old model).
+    assert_eq!(resp["status"], "staged");
+    assert_eq!(resp["pending_changes"], serde_json::json!(true));
 
-    // I1-F9 (iter-1): polling loop instead of fixed 50ms sleep. The
-    // PUT handler calls `state.shutdown_token.cancel()` synchronously
-    // before returning the response, so the token should already be
-    // cancelled when the HTTP response arrives — but a slow CI runner
-    // may not observe the bit-flip immediately. 1s timeout is well
-    // beyond the synchronous-cancel expectation.
-    let deadline = std::time::Instant::now() + Duration::from_secs(1);
-    while !fx.shutdown_token.is_cancelled() {
-        if std::time::Instant::now() >= deadline {
-            panic!("shutdown_token not cancelled within 1s of PUT response");
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    // The staged-changes marker flips on, and crucially the process-wide
+    // shutdown token is NOT cancelled — no in-process restart, no container
+    // restart. The operator applies the batch later via POST /api/config/apply.
+    assert!(
+        fx.app_state.has_pending_changes(),
+        "PUT must bump the pending-changes marker"
+    );
+    assert!(
+        !fx.shutdown_token.is_cancelled(),
+        "staged PUT must NOT cancel the shutdown token (Story F-0: no restart on save)"
+    );
 
     // I1-F4 (iter-1): SQLite round-trip — read the singleton_config
     // rows back via the backend exposed on the fixture, assert the
@@ -390,8 +400,8 @@ async fn d1_put_global_success_triggers_restart() {
         logs
     );
     assert!(
-        logs.contains("singleton_config_restart_required"),
-        "captured logs must contain singleton_config_restart_required; got:\n{}",
+        logs.contains("config_staged"),
+        "captured logs must contain config_staged (Story F-0 staged-write audit event); got:\n{}",
         logs
     );
     fx.shutdown().await;
@@ -531,6 +541,76 @@ async fn d1_put_requires_basic_auth() {
     fx.shutdown().await;
 }
 
+/// Story F-0 — `POST /api/config/apply` requires Basic-auth.
+#[tokio::test]
+#[serial(captured_logs)]
+async fn f0_apply_requires_basic_auth() {
+    let fx = spawn_fixture().await;
+    let r = reqwest::Client::new()
+        .post(fx.url("/api/config/apply"))
+        .header(header::ORIGIN, &fx.base_url)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    fx.shutdown().await;
+}
+
+/// Story F-0 — `POST /api/config/apply` requires CSRF (rejects cross-origin).
+#[tokio::test]
+#[serial(captured_logs)]
+async fn f0_apply_requires_csrf() {
+    let fx = spawn_fixture().await;
+    let auth = build_basic_auth(TEST_USER, TEST_PASSWORD);
+    let r = reqwest::Client::new()
+        .post(fx.url("/api/config/apply"))
+        .header(header::AUTHORIZATION, &auth)
+        .header(header::ORIGIN, "http://evil.example.com:1234")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    fx.shutdown().await;
+}
+
+/// Story F-0 — a valid `POST /api/config/apply` returns 202 and fires the
+/// supervisor's apply signal (a permit is stored, so a subsequent
+/// `notified()` resolves immediately — proving the supervisor would wake).
+#[tokio::test]
+#[serial(captured_logs)]
+async fn f0_apply_returns_202_and_fires_signal() {
+    let fx = spawn_fixture().await;
+    let auth = build_basic_auth(TEST_USER, TEST_PASSWORD);
+    let r = reqwest::Client::new()
+        .post(fx.url("/api/config/apply"))
+        .header(header::AUTHORIZATION, &auth)
+        .header(header::ORIGIN, &fx.base_url)
+        // CSRF requires the strict application/json Content-Type (same contract
+        // as every other config-write endpoint); the Apply button's JS fetch
+        // and the subprocess integration test both send it.
+        .header(header::CONTENT_TYPE, "application/json")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let resp: Value = r.json().await.expect("json");
+    assert_eq!(resp["status"], "apply_requested");
+
+    // The handler called `apply_signal.notify_one()`, which stores a permit
+    // when no waiter is parked. The supervisor's next `notified()` must then
+    // resolve immediately — assert that with a short timeout.
+    let notified = tokio::time::timeout(
+        Duration::from_secs(1),
+        fx.app_state.apply_signal.notified(),
+    )
+    .await;
+    assert!(
+        notified.is_ok(),
+        "apply endpoint must fire apply_signal so the supervisor wakes"
+    );
+    fx.shutdown().await;
+}
+
 /// Test 11 — Boot-time overlay: SQLite values override TOML/figment defaults.
 /// Unit-level test exercising `AppConfig::overlay_singletons_from_sqlite_rows`
 /// directly without spinning up an axum server.
@@ -571,12 +651,19 @@ fn d1_audit_event_names_documented_in_logging_md() {
         "config_get_singleton",
         "singleton_config_updated",
         "singleton_config_rejected",
-        "singleton_config_restart_required",
         // I2-F3 (iter-2): I1-F3 introduced `singleton_config_storage_error`
         // as the storage-fault event (split from `singleton_config_rejected`
         // which now stays scoped to client errors). Add to the grep
         // invariant so a future doc-deletion regression is caught.
         "singleton_config_storage_error",
+        // Story F-0: staged-apply audit taxonomy. `singleton_config_restart_required`
+        // was retired (the singleton PUT no longer restarts; it stages).
+        "config_staged",
+        "apply_invoked",
+        "apply_requested",
+        "apply_completed",
+        "apply_failed",
+        "config_apply_rejected",
     ] {
         assert!(
             doc.contains(ev),

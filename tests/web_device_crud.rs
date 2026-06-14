@@ -93,6 +93,9 @@ struct CrudFixture {
     // fire-and-forget; on listener panic the test process saw the
     // panic asynchronously with no linkage.
     listener_handle: tokio::task::JoinHandle<()>,
+    // Story F-0: expose AppState so a test can assert that a CRUD write
+    // stages a pending change (`has_pending_changes`) instead of applying live.
+    app_state: Arc<AppState>,
     _temp_dir: TempDir,
 }
 
@@ -299,6 +302,9 @@ async fn spawn_fixture(seed_toml: &str) -> CrudFixture {
         secrets_path: std::path::PathBuf::from("/tmp/test-secrets.toml"),
         shutdown_token: tokio_util::sync::CancellationToken::new(),
         inventory_cache: std::sync::Arc::new(opcgw::chirpstack_inventory::InventoryCache::new(60)),
+        pending_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        applied_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        apply_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
     });
 
     let cancel = CancellationToken::new();
@@ -349,6 +355,7 @@ async fn spawn_fixture(seed_toml: &str) -> CrudFixture {
         cancel,
         server_handle,
         listener_handle,
+        app_state: app_state.clone(),
         _temp_dir: dir,
     }
 }
@@ -543,6 +550,37 @@ async fn get_device_by_id_returns_full_metric_list() {
     assert_eq!(metrics[0]["metric_name"].as_str(), Some("temperature"));
     assert_eq!(metrics[0]["metric_type"].as_str(), Some("Float"));
     assert_eq!(metrics[0]["metric_unit"].as_str(), Some("C"));
+    fix.shutdown().await;
+}
+
+/// Story F-0 — creating a device STAGES the change: it bumps the
+/// pending-changes marker and does NOT apply live or restart. The operator
+/// applies the batch later via POST /api/config/apply.
+#[tokio::test]
+async fn post_device_stages_change_bumps_pending_marker() {
+    let fix = spawn_fixture(APP_TOML_TEMPLATE).await;
+    assert!(
+        !fix.app_state.has_pending_changes(),
+        "no pending changes before any write"
+    );
+    let client = reqwest::Client::new();
+    let origin = fix.base_url.clone();
+    let body = r#"{"device_id":"dev-staged","device_name":"Staged","read_metric_list":[]}"#;
+    let resp = json_request(
+        &client,
+        reqwest::Method::POST,
+        &fix.url("/api/applications/app-1/devices"),
+        Some(&origin),
+        Some(body),
+    )
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert!(
+        fix.app_state.has_pending_changes(),
+        "a CRUD write must stage a pending change (Story F-0)"
+    );
     fix.shutdown().await;
 }
 

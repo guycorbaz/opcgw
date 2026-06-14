@@ -215,6 +215,13 @@ pub(crate) fn csrf_event_resource_for_path(path: &str) -> &'static str {
     {
         return "singleton_config";
     }
+    // Story F-0: the "Apply changes" endpoint gets its own resource bucket
+    // so a CSRF rejection on POST /api/config/apply emits a literal
+    // `event="config_apply_rejected" reason="csrf"` and never collides with
+    // the singleton_config / application_crud grep contracts.
+    if path == "/api/config/apply" || path == "/api/config/apply/" {
+        return "config_apply";
+    }
     // Match the bare LIST/CREATE surface FIRST so POST /api/applications
     // (no application_id) emits `event="application_crud_rejected"` on
     // CSRF rejection — preserving Story 9-4's grep contract at the
@@ -414,6 +421,16 @@ pub async fn csrf_middleware(
                 origin = ?origin_str,
                 "CSRF rejected: missing or cross-origin Origin"
             ),
+            // Story F-0: literal arm for the Apply endpoint.
+            "config_apply" => warn!(
+                event = "config_apply_rejected",
+                reason = "csrf",
+                path = ?path,
+                method = %method,
+                source_ip = %addr.ip(),
+                origin = ?origin_str,
+                "CSRF rejected: missing or cross-origin Origin"
+            ),
             _ => warn!(
                 event = "crud_rejected",
                 reason = "csrf",
@@ -486,6 +503,15 @@ pub async fn csrf_middleware(
             // I1-F5: `?`-Debug on operator-controlled `path`.
             "singleton_config" => warn!(
                 event = "singleton_config_rejected",
+                reason = "csrf",
+                path = ?path,
+                method = %method,
+                source_ip = %addr.ip(),
+                "CSRF rejected: Content-Type is not application/json"
+            ),
+            // Story F-0: same pattern for the Apply endpoint.
+            "config_apply" => warn!(
+                event = "config_apply_rejected",
                 reason = "csrf",
                 path = ?path,
                 method = %method,

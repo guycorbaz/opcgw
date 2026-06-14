@@ -1,6 +1,6 @@
 # Story F.0: Staged Config with Explicit "Apply Changes"
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -53,42 +53,49 @@ This is the **foundational** story of Epic F ([#140](https://github.com/guycorba
 
 ## Tasks / Subtasks
 
-- [ ] **Task 1 — In-process data-plane restart supervisor in `src/main.rs`** (AC: 1, 2, 7)
-  - [ ] Introduce a per-cycle `restart_token: CancellationToken` distinct from the process-wide `cancel_token` (`:549`). The data-plane tasks observe a `tokio::select!` over **both** (`restart_token.cancelled()` → cycle; `cancel_token.cancelled()` → real shutdown).
-  - [ ] Wrap the data-plane construction + spawn block (config re-read at `~:738`; poller build `~:953`; `OpcUa::build`/`run_handles` `~:1012-1078`; events `~:1126`; timeout `~:1104`; the restore-barrier ordering at `~:1067-1077`) in a **restart loop**. Each iteration: re-read config from SQLite, build a **fresh** `Barrier::new(2)`, spawn in the deadlock-safe order, then await the select.
-  - [ ] Keep the **web server**, its `AppState`, and the **connection pool** OUTSIDE the loop (constructed once; survive every cycle). The web server's `tokio::select!` continues to observe only `cancel_token` (real shutdown).
-  - [ ] On `restart_token` fire: cancel data-plane → await all data-plane handles (reuse the existing asymmetric join shape at `:1450-1490`, but bounded + then `continue` the loop) → mint a fresh `restart_token` → loop. On `cancel_token` fire: break loop → `pool.close()` → return.
-  - [ ] **Do NOT** call `pool.close()` between cycles. Do NOT re-run schema migration between cycles (migration is boot-once).
+- [x] **Task 1 — In-process data-plane restart supervisor in `src/main.rs`** (AC: 1, 2, 7) — DONE
+  - [x] Per-cycle `restart_token = cancel_token.child_token()`; data-plane tasks observe it (real SIGINT/SIGTERM cancels the parent → child cancels too; Apply cancels the child directly).
+  - [x] Data-plane construction + spawn extracted into `spawn_data_plane()`; the `'supervisor` loop builds a **fresh** `Barrier::new(2)` per cycle and spawns in the deadlock-safe order (poller before `restore_barrier.wait()`, OPC UA after) — preserved every cycle.
+  - [x] Web server + `AppState` + connection pool kept OUTSIDE the loop (web server moved above the loop; `web_app_state` clone held for snapshot refresh). Web `tokio::select!` still observes only `cancel_token`.
+  - [x] On Apply: re-read config → `restart_token.cancel()` → `join_data_plane()` (bounded 10 s) → `continue 'supervisor`. On SIGINT/SIGTERM: `cancel_token.cancel()` → join → break → `pool.close()` → return. Pool NOT closed between cycles; migrations stay boot-once.
+  - **Verified:** `cargo build` clean; `tests/main_startup_no_deadlock.rs` (both tests) pass in 0.63 s — boot path + deadlock-safe ordering intact through the refactor.
 
-- [ ] **Task 2 — Re-read configuration from SQLite each cycle** (AC: 1, 6)
-  - [ ] Reuse `AppConfig::from_path_with_sqlite(...)` (the boot path at `src/main.rs:738`) inside the loop so new singleton values + the new device set are picked up. (Secrets still come from `secrets.toml`/env via the figment stack — unchanged.)
-  - [ ] Confirm the gRPC event-stream scope is recomputed from the freshly-read config each cycle (`streamed_devices(&config)` in `src/chirpstack_events.rs`) — this is what closes #138.
+- [x] **Task 2 — Re-read configuration from SQLite each cycle** (AC: 1, 6) — DONE
+  - [x] New `reload_effective_config()` helper mirrors the boot effective-config load (`from_path_with_sqlite` singleton overlay + SQLite `application_list` fold-in). Called on Apply **before** teardown (bad read → non-disruptive `apply_failed`, current data-plane keeps running).
+  - [x] The gRPC event-stream scope is recomputed because `spawn_data_plane` passes the freshly-read `config` to `run_event_ingestion` each cycle (`streamed_devices(&config)`) — the #138 fix mechanism (asserted by the Task 8 test).
+  - **Note:** confirmed the in-memory `storage` Mutex is **vestigial** (never passed to poller/OPC UA — they read SQLite directly), so the loop does NOT rebuild storage; SQLite persistence carries values across the soft restart.
 
-- [ ] **Task 3 — Pending-changes marker** (AC: 4)
-  - [ ] Add a monotonic generation counter to shared web state (e.g. `AtomicU64` on `AppState` / a small shared struct in `src/web/mod.rs`) plus a "last-applied" snapshot. `pending = current > applied`.
-  - [ ] Bump the counter in every config-write endpoint after a successful SQLite write (Tasks 4 + 5). Reset `applied = current` after a successful Apply (Task 6).
+- [x] **Task 3 — Pending-changes marker** (AC: 4) — DONE
+  - [x] `AppState` gains `pending_gen` / `applied_gen` (`Arc<AtomicU64>`) + `apply_signal` (`Arc<Notify>`), constructed boot-once in `main.rs` and shared with the supervisor; `stage_config_write()` + `has_pending_changes()` helpers added. Supervisor stores `pending_gen → applied_gen` after each (re)spawn.
+  - [x] Counter bumped in every config-write endpoint after a successful SQLite write (Tasks 4 + 5).
 
-- [ ] **Task 4 — Stage the singleton editor** (AC: 3, 4)
-  - [ ] In `src/web/singleton_config.rs`, remove `state.shutdown_token.cancel()` (`:324`) and the `"restart_pending"` semantics; after the SQLite `write_singleton_section`, bump the pending-gen and return a "staged" response. Emit `config_staged`.
+- [x] **Task 4 — Stage the singleton editor** (AC: 3, 4) — DONE
+  - [x] `src/web/singleton_config.rs:~322` now calls `state.stage_config_write("singleton_config")` and returns `{"status":"staged","pending_changes":true}` (202); the `state.shutdown_token.cancel()` call + `"restart_pending"` semantics + `singleton_config_restart_required` event are removed. Emits `config_staged`.
 
-- [ ] **Task 5 — Stage the CRUD handlers** (AC: 3, 4)
-  - [ ] In `src/web/api.rs`, in every application/device/metric/command create/update/delete handler, remove the `reload_handle.notify_crud_write(...)` live-apply call; keep the SQLite write + the C-3 duplicate-prevention pre-flight + inventory-cache invalidation. Bump the pending-gen; emit `config_staged`.
+- [x] **Task 5 — Stage the CRUD handlers** (AC: 3, 4) — DONE (with a documented deviation)
+  - [x] In `src/web/api.rs`, every CRUD handler now calls `state.stage_config_write("crud")` after the SQLite write (9 handlers: ~1476/1683/1810/2296/2667/2788/3320/3665/3771). C-3 dup-prevention pre-flight + inventory-cache invalidation kept.
+  - **Deviation (intentional, documented):** the `notify_crud_write(...)` call was **kept** rather than deleted. It is now a no-op in practice — ALL watch-channel CONSUMERS are dormant (poller built with `config_rx = None` at `spawn_data_plane`; OPC UA 9-8 listener not spawned; `web_config_listener_handle = None`), so it never applies live (AC#3 intent satisfied). The producer is retained only to keep the within-session dup-prevention snapshot fresh; full removal is the F-0-FOLLOWUP. Rationale in `src/config_reload.rs` header doc.
 
-- [ ] **Task 6 — Apply endpoint + web→supervisor wiring** (AC: 1, 5)
-  - [ ] Add `POST /api/config/apply` (Basic auth + CSRF; add a `config_apply` CSRF resource bucket mirroring `singleton_config`). Handler signals the supervisor to cycle (e.g. fire the shared `restart_token`, or send on an `mpsc`/`Notify` the supervisor awaits), emits `apply_requested`, resets the applied-gen on success, returns the underway/awaited result. Emit `apply_completed` / `apply_failed`.
-  - [ ] Expose pending status — extend `GET /api/status` (`src/web/api.rs`) with a `pending_changes: bool` (+ optional count) field, or add `GET /api/config/pending`. Prefer extending `/api/status` (the dashboard already polls it).
+- [x] **Task 6 — Apply endpoint + web→supervisor wiring** (AC: 1, 5) — DONE
+  - [x] `POST /api/config/apply` in new module `src/web/apply.rs` (Basic auth + CSRF; `config_apply` CSRF resource bucket added in `src/web/csrf.rs`, emits `config_apply_rejected`). Handler fires `state.apply_signal.notify_one()`, emits `apply_invoked`, returns `202 {"status":"apply_requested"}`. The supervisor (`main.rs`) awaits `apply_signal.notified()`, re-reads config, cancels `restart_token`, joins, respawns; emits `apply_requested`/`apply_completed`/`apply_failed`.
+  - [x] `GET /api/status` extended with `pending_changes: bool` (`src/web/api.rs:~58,228`).
 
-- [ ] **Task 7 — Dormant live-reload path** (AC: 9)
-  - [ ] With Task 5 removing the only `notify_crud_write` senders, the watch-channel consumers (`run_web_config_listener`, `run_opcua_config_listener` / `apply_diff_to_address_space`, the poller `config_rx` pickup) receive no sends and idle. Leave the modules in place; add a short doc-comment noting they are superseded by the F-0 apply model. **Do not rip out 9-7/9-8 in F-0** — record "retire watch-channel live-reload + 9-8 live mutation" in `deferred-work.md` as an F-0-FOLLOWUP.
+- [x] **Task 7 — Dormant live-reload path** (AC: 9) — DONE
+  - [x] `src/config_reload.rs` header documents the consumer path as dormant under F-0 (`#![allow(dead_code)]` added). F-0-FOLLOWUP **recorded in `deferred-work.md`** (`## Deferred from: Story F-0 … (2026-06-14)` — full watch-plumbing removal + vestigial `storage` Mutex retirement).
 
-- [ ] **Task 8 — Tests** (AC: 2, 6, 8)
-  - [ ] New integration test (subprocess pattern from `tests/main_startup_no_deadlock.rs`): boot binary → POST `/api/config/apply` → assert OPC UA port rebinds within 15 s, same PID, second Apply succeeds.
-  - [ ] Integration test: stage a streamed device via CRUD (no live effect) → Apply → assert the event stream now covers it (closes #138). 
-  - [ ] Unit/integration: singleton PUT + a CRUD write each bump pending-gen and do NOT apply live / do NOT cancel a token; Apply resets the marker; `/api/status` (or `/api/config/pending`) reports the marker; CSRF/auth on the apply endpoint.
-  - [ ] Confirm `tests/main_startup_no_deadlock.rs` and the full suite stay green; clippy `-D warnings` clean.
+- [x] **Task 8 — Tests** (AC: 2, 6, 8) — DONE; full-suite + clippy green
+  - [x] `tests/main_apply_restart.rs` — subprocess: boot → POST apply → OPC UA rebinds, same PID, 2nd apply succeeds. **PASSES (20.8s).** `main_startup_no_deadlock.rs` still green (2 tests, 0.31s).
+  - [x] **#138 re-scope integration test — `tests/main_138_rescope.rs` WRITTEN + PASSES (10.4s).** Subprocess boot with `stream_all_devices=false` + a non-valve device → asserts `uplink_ingestion_idle` and NO `uplink_ingestion_start` at boot; stages `PUT /api/config/singleton/chirpstack {"stream_all_devices":true}` via the real staging endpoint; `POST /api/config/apply`; asserts `apply_completed` + `uplink_ingestion_start` appear post-apply and the PID is unchanged. gRPC points at a dead addr — the assertion is on the scope-log line (emitted before any stream connect), not a live stream.
+  - [x] Unit/integration (in-process): added to `tests/web_singleton_config.rs` — Test 4 rewritten to stage; new `f0_apply_requires_basic_auth` (401), `f0_apply_requires_csrf` (403 cross-origin), `f0_apply_returns_202_and_fires_signal` (202 + `apply_signal` permit). **Fix applied this session: the 202 test now sends `Content-Type: application/json` (CSRF requires it — the subprocess test and the JS client both send it); without it the request was a 415.** Test 12 doc-sync list updated. `tests/web_device_crud.rs` — new staging test. **All ~16 web_*.rs fixtures got the 3 new AppState fields.**
+  - [x] **RAN GREEN:** full `cargo test` (0 failed) + `cargo clippy --all-targets -- -D warnings` (clean), `TMPDIR=/home/gcorbaz/.cache/cargo-tmp`.
 
-- [ ] **Task 9 — Docs sync** (AC: 9)
-  - [ ] `docs/architecture.md` (apply model + in-process restart supervisor; the three persistence surfaces unchanged), `docs/security.md` (singleton editor no longer container-restarts; Apply soft-restart drops/reaccepts OPC UA clients once per batch), `docs/logging.md` (`config_staged`, `apply_requested`, `apply_completed`, `apply_failed`), DocBook user manual (operator: edit → pending banner → Apply), `README.md` (Planning row / behaviour note). Reference [#140](https://github.com/guycorbaz/opcgw/issues/140) + closes [#138](https://github.com/guycorbaz/opcgw/issues/138).
+- [x] **Task 9 — Docs sync** (AC: 9) — DONE
+  - [x] `docs/logging.md` — retired `singleton_config_restart_required`; added the 6-event staged-apply taxonomy (`config_staged`/`apply_invoked`/`apply_requested`/`apply_completed`/`apply_failed`/`config_apply_rejected`) to the event table + a Story F-0 entry in Related stories. (Unblocks Test 12.)
+  - [x] `docs/architecture.md` — apply-model note on the snapshot section + new "In-process data-plane restart supervisor (Story F-0)" subsection (spawn ordering preserved every cycle; #138 re-scope mechanism).
+  - [x] `docs/security.md` — replaced "restart-required vs hot-reloadable" with "Apply model and restart behaviour (Story F-0)": no container restart, OPC-UA clients reconnect once/batch, Apply is auth+CSRF, bad config non-disruptive, web-login rotation still restart-required.
+  - [x] DocBook user manual — "When changes take effect" rewritten to the staged → Apply soft-restart operator flow. `xmllint --noout` clean.
+  - [x] `README.md` — Epic F planning row flipped to in-progress with the F-0 implementation-complete summary (closes #138; refs #140).
+  - [x] Minimal web UI affordance (Dev Notes "Web UI minimal in F-0"): NEW `static/apply-bar.js` (self-contained pending banner polling `/api/status` + Apply button POSTing `/api/config/apply`), included on `applications`/`devices-config`/`metrics`/`commands`/`singleton-config`. `singleton-config.{html,js}` copy + 202 handling updated from "restart" to "staged".
 
 ## Dev Notes
 
@@ -155,10 +162,46 @@ F-0 is primarily backend. A **minimal** "pending changes / Apply" affordance is 
 
 ### Agent Model Used
 
-(to be filled by the dev agent)
+claude-opus-4-8[1m] (bmad-dev-story)
 
 ### Debug Log References
 
+- `cargo build` clean after the supervisor refactor (only dead-code warnings for the not-yet-wired `stage_config_write`/`has_pending_changes`/`pending_gen`).
+- `cargo test --test main_startup_no_deadlock` → 2 passed (0.63 s): boot path + 2026-05-20 deadlock-safe spawn ordering verified through the refactor.
+
 ### Completion Notes List
 
+- **Phase 1–2 done (the high-risk core):** built the in-process restart supervisor. `main.rs` now: boot-once setup → spawn persistent web server (moved above the loop) → `'supervisor` loop { refresh web snapshot; fresh `child_token` + `Barrier`; `spawn_data_plane()`; `applied_gen = pending_gen`; select(SIGINT/SIGTERM → exit | apply_signal → re-read config, cancel child, `join_data_plane`, respawn) } → await web → `pool.close()`. New helpers: `DataPlaneHandles`, `spawn_data_plane()`, `join_data_plane()`, `reload_effective_config()`. The container is never restarted; `cancel_token` remains the only real-exit path.
+- Discovered + recorded: the in-memory `storage` Mutex is vestigial (data-plane reads SQLite directly), simplifying the loop. Web-login credential rotation stays restart-required (web server persists across the soft restart) — to be documented in Task 9.
+- **Implementation complete (2026-06-14, all 9 tasks):** Tasks 8 + 9 finished this session. Added the #138 re-scope subprocess test (`tests/main_138_rescope.rs`, passes); fixed the in-process `f0_apply_returns_202_and_fires_signal` test (missing `Content-Type: application/json` → CSRF 415); documented the full staged-apply audit taxonomy across `docs/logging.md` / `architecture.md` / `security.md` / DocBook manual / `README.md`; recorded the F-0-FOLLOWUP in `deferred-work.md`; built the minimal `apply-bar.js` pending/Apply affordance and re-pointed the singleton editor copy from "restart" to "staged". **Gates green: full `cargo test` 0-fail, `cargo clippy --all-targets -- -D warnings` clean, `xmllint --noout` clean.** Status flipped `in-progress` → `review`. NEXT: `bmad-code-review F-0` (foundational/highest-risk — `main.rs` deadlock zone; iter-N+1 mandatory).
+
 ### File List
+
+**Implementation (pre-existing this story):**
+
+- `src/main.rs` — supervisor loop + `spawn_data_plane`/`join_data_plane`/`reload_effective_config` helpers; removed boot-once `restore_barrier`; data-plane block extracted; web server moved above the loop; `pending_gen`/`applied_gen`/`apply_signal` created boot-once; poller built with `config_rx = None`; 9-8 OPC UA listener + web-config listener no longer spawned (handle = `None`).
+- `src/web/mod.rs` — `AppState`: `pending_gen` / `applied_gen` / `apply_signal` fields + `stage_config_write()` / `has_pending_changes()`; `pub mod apply`; `/api/config/apply` route.
+- `src/web/apply.rs` — NEW: `api_config_apply` handler (fires `apply_signal`, 202, `apply_invoked`).
+- `src/web/singleton_config.rs` — PUT stages instead of restarting (Task 4).
+- `src/web/api.rs` — CRUD handlers call `stage_config_write("crud")`; `/api/status` gains `pending_changes`.
+- `src/web/csrf.rs` — `config_apply` CSRF resource bucket + reject arm.
+- `src/config_reload.rs` — header doc: consumer path dormant under F-0; `#![allow(dead_code)]`.
+- `tests/main_apply_restart.rs` — NEW: subprocess apply-cycle test (PASSES).
+- `tests/web_singleton_config.rs` — Test 4 rewritten + 3 new apply tests + Test 12 doc-sync list updated + fixture exposes `app_state`.
+- `tests/web_device_crud.rs` — new staging test + fixture exposes `app_state`.
+- `tests/web_*.rs` (≈14 files) — fixtures updated with the 3 new `AppState` fields.
+
+**Added to complete the story (2026-06-14):**
+
+- `tests/main_138_rescope.rs` — NEW: #138 stream re-scope subprocess test (idle-at-boot → stage `stream_all_devices=true` → Apply → `uplink_ingestion_start`; PASSES).
+- `tests/web_singleton_config.rs` — `f0_apply_returns_202_and_fires_signal` fixed to send `Content-Type: application/json`.
+- `static/apply-bar.js` — NEW: minimal pending-changes banner + "Apply changes" button (polls `/api/status`, POSTs `/api/config/apply`).
+- `static/applications.html`, `static/devices-config.html`, `static/metrics.html`, `static/commands.html` — include `apply-bar.js`.
+- `static/singleton-config.html`, `static/singleton-config.js` — copy + 202 handling re-pointed from "restart" to "staged"; include `apply-bar.js`.
+- `docs/logging.md`, `docs/architecture.md`, `docs/security.md`, `docs/manual/opcgw-user-manual.xml`, `README.md` — staged-apply model documented (Task 9).
+- `_bmad-output/implementation-artifacts/deferred-work.md` — F-0-FOLLOWUP entries.
+
+### NEXT (story now `review`)
+
+1. `bmad-code-review F-0` on a different LLM (foundational/highest-risk story — `main.rs:~1067-1077` deadlock zone; iter-N+1 mandatory per CLAUDE.md doctrine).
+2. Implementation-Complete commit lands BEFORE any review-fix commit (BMad discipline). Closes #138; refs #140.

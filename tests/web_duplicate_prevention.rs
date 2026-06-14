@@ -287,6 +287,9 @@ async fn spawn_fixture(seed_toml: &str) -> CrudFixture {
         secrets_path: std::path::PathBuf::from("/tmp/test-secrets.toml"),
         shutdown_token: tokio_util::sync::CancellationToken::new(),
         inventory_cache: std::sync::Arc::new(opcgw::chirpstack_inventory::InventoryCache::new(60)),
+        pending_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        applied_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        apply_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
     });
 
     let cancel = CancellationToken::new();

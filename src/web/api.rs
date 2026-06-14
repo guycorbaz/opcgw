@@ -51,6 +51,11 @@ pub struct StatusResponse {
     pub application_count: usize,
     pub device_count: usize,
     pub uptime_secs: u64,
+    /// Story F-0: `true` when configuration edits have been staged to
+    /// SQLite that the running data-plane has not yet loaded — i.e. the
+    /// operator should click "Apply changes" (`POST /api/config/apply`).
+    /// Clears once the soft restart respawns the data-plane.
+    pub pending_changes: bool,
 }
 
 /// Generic error body. The `error` field is intentionally a fixed
@@ -220,6 +225,7 @@ pub async fn api_status(
         application_count: snapshot.application_count,
         device_count: snapshot.device_count,
         uptime_secs,
+        pending_changes: state.has_pending_changes(),
     }))
 }
 
@@ -1463,6 +1469,11 @@ pub async fn create_application(
             internal_error_response()
         })?;
     state.config_reload.notify_crud_write(all_apps).await;
+    // Story F-0: refresh the in-memory watch channel above so within-session
+    // reads (duplicate pre-flight) stay accurate, but the change is STAGED —
+    // it does not reach the running data-plane until the operator clicks
+    // Apply. Bump the pending-changes marker.
+    state.stage_config_write("crud");
 
     let tenant_id = state
         .config_reload
@@ -1665,6 +1676,11 @@ pub async fn update_application(
             internal_error_response()
         })?;
     state.config_reload.notify_crud_write(all_apps).await;
+    // Story F-0: refresh the in-memory watch channel above so within-session
+    // reads (duplicate pre-flight) stay accurate, but the change is STAGED —
+    // it does not reach the running data-plane until the operator clicks
+    // Apply. Bump the pending-changes marker.
+    state.stage_config_write("crud");
 
     let tenant_id = state
         .config_reload
@@ -1787,6 +1803,11 @@ pub async fn delete_application(
             internal_error_response()
         })?;
     state.config_reload.notify_crud_write(all_apps).await;
+    // Story F-0: refresh the in-memory watch channel above so within-session
+    // reads (duplicate pre-flight) stay accurate, but the change is STAGED —
+    // it does not reach the running data-plane until the operator clicks
+    // Apply. Bump the pending-changes marker.
+    state.stage_config_write("crud");
 
     let tenant_id = state
         .config_reload
@@ -2268,6 +2289,11 @@ pub async fn create_device(
             internal_error_response()
         })?;
     state.config_reload.notify_crud_write(all_apps).await;
+    // Story F-0: refresh the in-memory watch channel above so within-session
+    // reads (duplicate pre-flight) stay accurate, but the change is STAGED —
+    // it does not reach the running data-plane until the operator clicks
+    // Apply. Bump the pending-changes marker.
+    state.stage_config_write("crud");
 
     let tenant_id = state
         .config_reload
@@ -2634,6 +2660,11 @@ pub async fn update_device(
             internal_error_response()
         })?;
     state.config_reload.notify_crud_write(all_apps).await;
+    // Story F-0: refresh the in-memory watch channel above so within-session
+    // reads (duplicate pre-flight) stay accurate, but the change is STAGED —
+    // it does not reach the running data-plane until the operator clicks
+    // Apply. Bump the pending-changes marker.
+    state.stage_config_write("crud");
 
     let tenant_id = state
         .config_reload
@@ -2750,6 +2781,11 @@ pub async fn delete_device(
         .load_all_applications_config()
         .map_err(|e| sqlite_crud_error(e, "device", "delete_device", &addr))?;
     state.config_reload.notify_crud_write(all_apps).await;
+    // Story F-0: refresh the in-memory watch channel above so within-session
+    // reads (duplicate pre-flight) stay accurate, but the change is STAGED —
+    // it does not reach the running data-plane until the operator clicks
+    // Apply. Bump the pending-changes marker.
+    state.stage_config_write("crud");
 
     let tenant_id = state.config_reload.subscribe().borrow().chirpstack.tenant_id.clone();
     state.inventory_cache.invalidate_devices(&tenant_id, &application_id).await;
@@ -3277,6 +3313,11 @@ pub async fn create_command(
         .load_all_applications_config()
         .map_err(|e| sqlite_crud_error(e, "command", "create_command", &addr))?;
     state.config_reload.notify_crud_write(all_apps).await;
+    // Story F-0: refresh the in-memory watch channel above so within-session
+    // reads (duplicate pre-flight) stay accurate, but the change is STAGED —
+    // it does not reach the running data-plane until the operator clicks
+    // Apply. Bump the pending-changes marker.
+    state.stage_config_write("crud");
 
     info!(
         event = "command_created",
@@ -3617,6 +3658,11 @@ pub async fn update_command(
         .load_all_applications_config()
         .map_err(|e| sqlite_crud_error(e, "command", "update_command", &addr))?;
     state.config_reload.notify_crud_write(all_apps).await;
+    // Story F-0: refresh the in-memory watch channel above so within-session
+    // reads (duplicate pre-flight) stay accurate, but the change is STAGED —
+    // it does not reach the running data-plane until the operator clicks
+    // Apply. Bump the pending-changes marker.
+    state.stage_config_write("crud");
 
     info!(
         event = "command_updated",
@@ -3718,6 +3764,11 @@ pub async fn delete_command(
         .load_all_applications_config()
         .map_err(|e| sqlite_crud_error(e, "command", "delete_command", &addr))?;
     state.config_reload.notify_crud_write(all_apps).await;
+    // Story F-0: refresh the in-memory watch channel above so within-session
+    // reads (duplicate pre-flight) stay accurate, but the change is STAGED —
+    // it does not reach the running data-plane until the operator clicks
+    // Apply. Bump the pending-changes marker.
+    state.stage_config_write("crud");
 
     info!(
         event = "command_deleted",
@@ -4846,6 +4897,9 @@ mod tests {
             secrets_path: std::path::PathBuf::from("/tmp/test-secrets.toml"),
             shutdown_token: tokio_util::sync::CancellationToken::new(),
             inventory_cache: std::sync::Arc::new(crate::chirpstack_inventory::InventoryCache::new(60)),
+            pending_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            applied_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            apply_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
         });
         // Keep the tempdir alive for the AppState's lifetime by
         // leaking it — tests are short-lived processes.
@@ -5124,6 +5178,7 @@ mod tests {
             application_count: 0,
             device_count: 0,
             uptime_secs: 0,
+            pending_changes: false,
         };
         let json = serde_json::to_value(&response).expect("serialise StatusResponse");
         assert!(json["last_poll_time"].is_null());
@@ -5175,6 +5230,9 @@ mod tests {
             secrets_path: std::path::PathBuf::from("/tmp/test-secrets.toml"),
             shutdown_token: tokio_util::sync::CancellationToken::new(),
             inventory_cache: std::sync::Arc::new(crate::chirpstack_inventory::InventoryCache::new(60)),
+            pending_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            applied_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            apply_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
         });
         // Keep the tempdir alive for the AppState's lifetime by
         // leaking it — tests are short-lived processes.

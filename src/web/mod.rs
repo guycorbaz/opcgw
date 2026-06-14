@@ -32,6 +32,8 @@
 //! `src/main.rs`.
 
 pub mod api;
+/// Story F-0: `POST /api/config/apply` — in-process soft-restart trigger.
+pub mod apply;
 pub mod auth;
 pub mod csrf;
 /// Story C-4: `/api/inventory/drift` handler + 4-class diff computation.
@@ -351,6 +353,61 @@ pub struct AppState {
     /// Shared with the CRUD handlers in `src/web/api.rs` so they can call
     /// `invalidate_applications` / `invalidate_devices` on success.
     pub inventory_cache: crate::chirpstack_inventory::SharedInventoryCache,
+    /// Story F-0: monotonic write-generation counter. Every config-write
+    /// endpoint (singleton-config PUT + all application/device/metric/command
+    /// CRUD handlers) calls [`AppState::stage_config_write`] after a
+    /// successful SQLite write, which bumps this counter. The gateway has
+    /// "pending changes" whenever `pending_gen > applied_gen`. No
+    /// draft/active dual-version schema: SQLite stays the single
+    /// authoritative store; this counter is purely an in-memory
+    /// "changed since last apply" signal (resets implicitly on a real
+    /// process restart, which always applies). `Arc` so the in-process
+    /// restart supervisor in `main.rs` can read it after a soft restart.
+    pub pending_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Story F-0: the generation that was live the last time the data-plane
+    /// was (re)spawned. The in-process restart supervisor in `main.rs`
+    /// stores `pending_gen` into this after every successful (re)spawn, so
+    /// `pending_gen > applied_gen` means "edits staged since the running
+    /// poller / OPC UA server / event stream last loaded their config".
+    pub applied_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Story F-0: apply signal. `POST /api/config/apply` fires
+    /// `notify_one()`; the in-process restart supervisor in `main.rs`
+    /// awaits `notified()` alongside the process-wide shutdown token and,
+    /// on wake, performs one graceful **in-process** soft restart of the
+    /// data-plane (poller, OPC UA server, gRPC event stream,
+    /// command-timeout handler) that re-reads the full config from SQLite.
+    /// The Docker container is never restarted. Distinct from
+    /// [`AppState::shutdown_token`] (SIGINT/SIGTERM → real process exit).
+    pub apply_signal: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl AppState {
+    /// Story F-0: record a staged configuration write. Called by every
+    /// config-write endpoint after the SQLite write succeeds. Bumps the
+    /// pending-generation counter (so the gateway reports pending changes)
+    /// and emits the `config_staged` audit event. Does NOT apply the
+    /// change live and does NOT restart anything — the operator applies the
+    /// whole batch via `POST /api/config/apply`.
+    pub fn stage_config_write(&self, surface: &'static str) {
+        let gen = self
+            .pending_gen
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        tracing::info!(
+            event = "config_staged",
+            surface = surface,
+            pending_generation = gen,
+            "Configuration change staged to SQLite; pending until operator clicks Apply"
+        );
+    }
+
+    /// Story F-0: true when there are configuration edits staged in SQLite
+    /// that the running data-plane has not yet loaded (i.e. an Apply is
+    /// pending). Read by `GET /api/status`.
+    pub fn has_pending_changes(&self) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.pending_gen.load(Relaxed) > self.applied_gen.load(Relaxed)
+    }
 }
 
 /// Story 9-7 Task 4 — extracted from the inline clamp at
@@ -584,6 +641,11 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
             "/api/config/singleton/{section}",
             axum::routing::put(singleton_config::put_singleton_section)
                 .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
+        )
+        // Story F-0: explicit "Apply changes" → in-process soft restart.
+        .route(
+            "/api/config/apply",
+            axum::routing::post(apply::api_config_apply),
         )
         // Epic C C-0 (2026-05-21): wizard routes. Reachable BEFORE
         // auth+CSRF when `AppState.is_first_run = true` (the basic-auth
@@ -1129,6 +1191,9 @@ mod tests {
             secrets_path: PathBuf::from("/tmp/test-secrets.toml"),
             shutdown_token: tokio_util::sync::CancellationToken::new(),
             inventory_cache: std::sync::Arc::new(crate::chirpstack_inventory::InventoryCache::new(60)),
+            pending_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            applied_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            apply_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
         });
         let dir = PathBuf::from("static");
         let _router: Router = build_router(app_state, dir);

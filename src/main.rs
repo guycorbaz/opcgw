@@ -277,26 +277,217 @@ struct Args {
     debug: u8,
 }
 
-/// Main entry point for the ChirpStack to OPC UA Gateway
+/// Story F-0: JoinHandles for the data-plane tasks that are torn down and
+/// respawned in-process on each "Apply changes" soft restart. The web
+/// server and connection pool are deliberately NOT here — they live for the
+/// whole process lifetime (the web server initiates the restart, so it must
+/// survive it; the pool's lifecycle is process-level).
+struct DataPlaneHandles {
+    chirpstack: tokio::task::JoinHandle<()>,
+    opcua: tokio::task::JoinHandle<()>,
+    cmd_status: tokio::task::JoinHandle<()>,
+    cmd_timeout: tokio::task::JoinHandle<()>,
+    events: tokio::task::JoinHandle<()>,
+}
+
+/// Story F-0: re-read the effective configuration from SQLite for an
+/// "Apply changes" soft restart. Mirrors the boot-time effective-config
+/// load — `from_path_with_sqlite` applies the singleton overlay
+/// (`[global]/[chirpstack]/[opcua]/[web]`), then the SQLite
+/// `application_list` is folded in (authoritative across restart, #123).
+/// Returns the previous config's error as a String so the caller can emit
+/// `apply_failed` and keep the current data-plane running (the read happens
+/// BEFORE the old data-plane is torn down, so a bad read is non-disruptive).
+fn reload_effective_config(
+    config_path: &str,
+    sqlite_backend: &crate::storage::SqliteBackend,
+) -> Result<Arc<AppConfig>, String> {
+    let mut cfg = AppConfig::from_path_with_sqlite(
+        config_path,
+        std::sync::Arc::new(sqlite_backend.clone()),
+    )
+    .map_err(|e| e.to_string())?;
+    match sqlite_backend.load_all_applications_config() {
+        Ok(apps) if !apps.is_empty() => cfg.application_list = apps,
+        Ok(_) => {}
+        Err(e) => return Err(format!("load_all_applications_config failed: {e}")),
+    }
+    Ok(Arc::new(cfg))
+}
+
+/// Story F-0: build and spawn one generation of the data-plane (ChirpStack
+/// poller, OPC UA server, command-status poller, command-timeout handler,
+/// uplink event-ingestion task, OPC UA config-listener) against `config`.
 ///
-/// This function:
-/// 1. Parses command line arguments
-/// 2. Initializes logging configuration
-/// 3. Loads application configuration
-/// 4. Creates shared storage for data exchange
-/// 5. Starts ChirpStack poller and OPC UA server in separate tasks
-/// 6. Waits for both tasks to complete
+/// All tasks observe `restart_token` (a per-cycle `cancel_token.child_token()`)
+/// so a real SIGINT/SIGTERM (which cancels the parent) AND an Apply (which
+/// cancels this child) both stop them. The OPC UA server fully releases its
+/// listening socket when its task ends, so the next cycle can rebind.
 ///
-/// # Returns
+/// **Deadlock-safety invariant (2026-05-20 incident):** the ChirpStack
+/// poller MUST be spawned BEFORE `restore_barrier.wait()`, and the OPC UA
+/// server AFTER it. This ordering is preserved on every cycle. See
+/// `tests/main_startup_no_deadlock.rs`.
+async fn spawn_data_plane(
+    config: &Arc<AppConfig>,
+    pool: &Arc<ConnectionPool>,
+    restart_token: &CancellationToken,
+    restore_barrier: &Arc<Barrier>,
+    is_first_run: bool,
+) -> Result<DataPlaneHandles, Box<dyn std::error::Error>> {
+    // ChirpStack poller — independent SQLite backend per task (Story 4-1).
+    //
+    // Story F-0: the poller takes NO config-reload subscription (`None`).
+    // Under the staged-apply model the data-plane never live-reloads; every
+    // configuration change — singleton knobs, the device set, polling
+    // frequency — takes effect only when the supervisor respawns this whole
+    // data-plane on Apply (reading the fresh config from SQLite). This is
+    // also what re-scopes the gRPC event stream and closes #138.
+    let poller_backend: Arc<dyn crate::storage::StorageBackend> =
+        Arc::new(crate::storage::SqliteBackend::with_pool(pool.clone())?);
+    let mut chirpstack_poller = ChirpstackPoller::new_with_reload(
+        config,
+        poller_backend,
+        restart_token.clone(),
+        Arc::clone(restore_barrier),
+        None,
+    )
+    .await?;
+
+    // OPC UA server — independent SQLite backend (Story 5-1); built via the
+    // Story 9-0 split form (`build` + `run_handles`).
+    //
+    // Story F-0: the Story 9-8 OPC UA config-listener (live address-space
+    // mutation on watch-channel changes) is intentionally NOT spawned. Live
+    // mutation is exactly the behaviour staged-apply replaces — the address
+    // space is rebuilt from scratch each cycle via `OpcUa::new` against the
+    // freshly-read config. `run_opcua_config_listener` is left in the tree
+    // (dormant) for now; full removal is an F-0 follow-up.
+    let opcua_backend: Arc<dyn crate::storage::StorageBackend> =
+        Arc::new(crate::storage::SqliteBackend::with_pool(pool.clone())?);
+    if is_first_run {
+        info!(
+            event = "opcua_first_run_mode",
+            "OPC UA server starting in first-run mode: all auth attempts will be rejected \
+             until the operator completes the /setup wizard and applies the new password."
+        );
+    }
+    let opc_ua = OpcUa::new(config, opcua_backend, restart_token.clone());
+    let run_handles = opc_ua.build().await?;
+
+    // Spawn the poller FIRST so it reaches its own `barrier.wait()`; then
+    // release the barrier; then spawn the OPC UA server. (2026-05-20
+    // deadlock-fix ordering — preserved every cycle.)
+    let chirpstack = tokio::spawn(async move {
+        if let Err(e) = chirpstack_poller.run().await {
+            error!(error = ?e, "ChirpStack poller error");
+        }
+    });
+    info!("Data-plane: metric restore complete; signaling poller to start");
+    restore_barrier.wait();
+    let opcua = tokio::spawn(async move {
+        if let Err(e) = OpcUa::run_handles(run_handles).await {
+            error!(error = ?e, "OPC UA server error");
+        }
+    });
+
+    // Command-status poller (Task 3-3).
+    let cmd_status = {
+        let pool_poller = pool.clone();
+        let cancel_poller = restart_token.clone();
+        let config_poller = config.clone();
+        tokio::spawn(async move {
+            let backend = Arc::new(
+                storage::SqliteBackend::with_pool(pool_poller)
+                    .expect("Failed to create SqliteBackend for poller"),
+            );
+            match chirpstack::CommandStatusPoller::new(&config_poller, backend, cancel_poller) {
+                Ok(mut cmd_poller) => {
+                    if let Err(e) = cmd_poller.run().await {
+                        error!(error = ?e, "CommandStatusPoller error");
+                    }
+                }
+                Err(e) => error!(error = ?e, "Failed to create CommandStatusPoller"),
+            }
+        })
+    };
+
+    // Command-timeout handler (Task 3-3).
+    let cmd_timeout = {
+        let pool_timeout = pool.clone();
+        let cancel_timeout = restart_token.clone();
+        let config_timeout = config.clone();
+        tokio::spawn(async move {
+            let backend = Arc::new(
+                storage::SqliteBackend::with_pool(pool_timeout)
+                    .expect("Failed to create SqliteBackend for timeout handler"),
+            );
+            match chirpstack::CommandTimeoutHandler::new(&config_timeout, backend, cancel_timeout) {
+                Ok(mut cmd_timeout) => {
+                    if let Err(e) = cmd_timeout.run().await {
+                        error!(error = ?e, "CommandTimeoutHandler error");
+                    }
+                }
+                Err(e) => error!(error = ?e, "Failed to create CommandTimeoutHandler"),
+            }
+        })
+    };
+
+    // Uplink event-ingestion (Story E-1). Re-reading `config` each cycle is
+    // what re-scopes the gRPC StreamDeviceEvents device set on Apply — this
+    // is the mechanism that closes #138.
+    let events = {
+        let pool_events = pool.clone();
+        let cancel_events = restart_token.clone();
+        let config_events = config.clone();
+        tokio::spawn(async move {
+            let backend: Arc<dyn storage::StorageBackend> = Arc::new(
+                storage::SqliteBackend::with_pool(pool_events)
+                    .expect("Failed to create SqliteBackend for uplink event ingestion"),
+            );
+            chirpstack_events::run_event_ingestion(config_events, backend, cancel_events).await;
+        })
+    };
+
+    Ok(DataPlaneHandles {
+        chirpstack,
+        opcua,
+        cmd_status,
+        cmd_timeout,
+        events,
+    })
+}
+
+/// Story F-0: tear down one data-plane generation, bounded by a 10 s
+/// timeout. Awaits all task handles so the OPC UA listening socket is fully
+/// released before the next cycle rebinds. Mirrors the asymmetric join shape
+/// of the original shutdown path (try_join the core tasks; await the
+/// listener separately).
+async fn join_data_plane(handles: DataPlaneHandles) {
+    let DataPlaneHandles {
+        chirpstack,
+        opcua,
+        cmd_status,
+        cmd_timeout,
+        events,
+    } = handles;
+    match tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::try_join!(chirpstack, opcua, cmd_status, cmd_timeout, events)
+    })
+    .await
+    {
+        Ok(Ok(_)) => info!("Data-plane tasks shut down cleanly"),
+        Ok(Err(e)) => error!(error = %e, "Data-plane task error during teardown"),
+        Err(_) => error!("Data-plane teardown timed out after 10 seconds"),
+    }
+}
+
+/// Main entry point for the ChirpStack to OPC UA Gateway.
 ///
-/// Returns `Ok(())` on successful completion, or an error if any component fails to initialize.
-///
-/// # Panics
-///
-/// This function will panic if:
-/// - The configuration cannot be loaded
-/// - The ChirpStack poller cannot be created
-/// - The logger cannot be initialized
+/// Boot-once setup (logging, config, pool, migrations) → spawn the
+/// persistent embedded web server → run the Story F-0 in-process restart
+/// supervisor loop (the data-plane is respawned in-process on Apply) →
+/// graceful shutdown on SIGINT/SIGTERM.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Story D-2 (AC#5 / Task 3.3): process-global once-per-boot guard
@@ -548,6 +739,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create cancellation token for graceful shutdown
     let cancel_token = CancellationToken::new();
 
+    // Story F-0: in-process soft-restart plumbing. These are created
+    // boot-once and shared between the web AppState (which bumps
+    // `pending_gen` on every staged config write and fires `apply_signal`
+    // from `POST /api/config/apply`) and the in-process restart supervisor
+    // below (which awaits `apply_signal`, re-reads config from SQLite,
+    // respawns the data-plane, and stores `pending_gen` into `applied_gen`
+    // after each successful (re)spawn). The Docker container is never
+    // restarted; `cancel_token` (SIGINT/SIGTERM) remains the ONLY path to a
+    // real process exit.
+    let pending_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let applied_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let apply_signal = Arc::new(tokio::sync::Notify::new());
+
     // Story C-6: build the configuration-reload handle so every
     // subsystem we spawn below can subscribe to its watch channel.
     // The handle owns the `tokio::sync::watch::Sender<Arc<AppConfig>>`
@@ -587,8 +791,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create shared storage for ChirpStack poller and OPC UA server threads
     let storage = Arc::new(Mutex::new(Storage::new(&application_config)));
 
-    // Create barrier for synchronizing restore completion (Task 11)
-    let restore_barrier = Arc::new(Barrier::new(2));
+    // Story F-0: the restore barrier is now created fresh PER soft-restart
+    // cycle inside `spawn_data_plane` (`std::sync::Barrier` is single-use),
+    // so there is no boot-once barrier here anymore.
 
     // Restore metrics from database on startup (Story 2-4a)
     let sqlite_backend = crate::storage::SqliteBackend::with_pool(pool.clone())
@@ -934,203 +1139,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Create SQLite backend for ChirpStack poller (Story 4-1: independent backend per task)
-    let poller_backend: Arc<dyn crate::storage::StorageBackend> = match crate::storage::SqliteBackend::with_pool(pool.clone()) {
-        Ok(backend) => Arc::new(backend),
-        Err(e) => {
-            error!(error = %e, "Failed to create SQLite backend for ChirpStack poller");
-            return Err(e.into());
-        }
-    };
-
-    // Create chirpstack poller with restore barrier.
-    //
-    // Story 9-7: subscribe the poller to the reload channel so its
-    // outer-loop `tokio::select!` arm picks up new `polling_frequency`,
-    // `retry`, `delay` (and any other hot-reload-safe knob) at the
-    // next cycle boundary. Story 4-4's recovery loop reads
-    // `retry`/`delay` at loop entry — no 4-4 code change needed.
-    let mut chirpstack_poller =
-        match ChirpstackPoller::new_with_reload(
-            &application_config,
-            poller_backend,
-            cancel_token.clone(),
-            Arc::clone(&restore_barrier),
-            Some(reload_handle.subscribe()),
-        )
-            .await
-        {
-            Ok(poller) => poller,
-            Err(e) => {
-                error!(error = %e, "Failed to create chirpstack poller");
-                return Err(e.into());
-            }
-        };
-
-    // Create SQLite backend for OPC UA server (Story 5-1: independent backend per task)
-    let opcua_backend: Arc<dyn crate::storage::StorageBackend> = match crate::storage::SqliteBackend::with_pool(pool.clone()) {
-        Ok(backend) => Arc::new(backend),
-        Err(e) => {
-            error!(error = %e, "Failed to create SQLite backend for OPC UA server");
-            return Err(e.into());
-        }
-    };
-
-    // Create OPC UA server.
-    //
-    // Story 9-7 (AC#8 invariant): use the Story 9-0 split form
-    // (`build` + `run_handles`) so we can spawn the OPC UA
-    // config-listener task between them. The listener clones
-    // `RunHandles.manager` (already pub at `src/opc_ua.rs:103`) for
-    // future Story 9-8 integration; v1 only logs the topology diff.
-    // The legacy `OpcUa::run` wrapper does NOT expose `RunHandles`,
-    // so we build first, spawn the listener, then drive the server
-    // via `OpcUa::run_handles`.
-    //
-    // Epic C C-0 (2026-05-21): if the gateway is in first-run mode,
-    // emit a single audit event signalling the OPC UA server will
-    // start with reject-all auth. The existing `OpcgwAuthManager`
-    // (`src/opc_ua_auth.rs:96`) handles empty credentials by setting
-    // `is_configured = false`, which causes the auth path to reject
-    // every username-token connection attempt — that's the AC#6
-    // option-(b) "reject-all" behaviour without needing invasive
-    // async-opcua changes. The OPC UA server still binds on its
-    // configured port so external uptime probes can confirm the
-    // gateway is alive while the operator completes the web wizard.
-    // Iter-2 P1: use the cached `is_first_run` from the top of main()
-    // rather than re-invoking `is_first_run()` here. See the capture
-    // site for the race-window rationale.
-    if is_first_run {
-        info!(
-            event = "opcua_first_run_mode",
-            "OPC UA server starting in first-run mode: all auth attempts will be rejected \
-             until the operator completes the /setup wizard and opcgw restarts with the \
-             newly-persisted password."
-        );
-    }
-    let opc_ua = OpcUa::new(&application_config, opcua_backend, cancel_token.clone());
-    let run_handles = match opc_ua.build().await {
-        Ok(handles) => handles,
-        Err(e) => {
-            error!(error = %e, "OPC UA build error");
-            return Err(e.into());
-        }
-    };
-    let opcua_listener_handle = {
-        // Story 9-8: clone handles for the runtime address-space
-        // mutation apply path. All Arc-backed; clone is cheap.
-        let manager = run_handles.manager.clone();
-        let subscriptions = run_handles.server_handle.subscriptions().clone();
-        let storage_for_listener = run_handles.storage.clone();
-        let last_status_for_listener = run_handles.last_status.clone();
-        let node_to_metric_for_listener = run_handles.node_to_metric.clone();
-        let ns = run_handles
-            .server_handle
-            .get_namespace_index(crate::utils::OPCUA_NAMESPACE_URI)
-            .ok_or_else(|| {
-                error!("Failed to get OPC UA namespace index for hot-reload listener");
-                crate::utils::OpcGwError::OpcUa(
-                    "Failed to get OPC UA namespace for listener".to_string(),
-                )
-            })?;
-        let rx = reload_handle.subscribe();
-        let cancel = cancel_token.clone();
-        let initial = application_config.clone();
-        tokio::spawn(async move {
-            crate::config_reload::run_opcua_config_listener(
-                manager,
-                subscriptions,
-                storage_for_listener,
-                last_status_for_listener,
-                node_to_metric_for_listener,
-                ns,
-                initial,
-                rx,
-                cancel,
-            )
-            .await;
-        })
-    };
-
-    // Spawn the ChirpStack poller FIRST so it can reach its own
-    // `barrier.wait()` (inside `ChirpstackPoller::run()` at
-    // `src/chirpstack.rs::run`). The `restore_barrier` is constructed with
-    // `Barrier::new(2)` and synchronises this main task with the poller
-    // task. Calling `restore_barrier.wait()` here BEFORE the poller is
-    // spawned deadlocks main forever — there is no other participant for
-    // the barrier to release against. (Pre-fix: this exact ordering bug
-    // surfaced via the v2.0 GA end-to-end test on 2026-05-20; main blocked
-    // here forever, the OPC UA server task at line 749 was never spawned,
-    // and the gateway accepted zero OPC UA client connections despite the
-    // session-count gauge — spawned earlier inside `OpcUa::build()` —
-    // continuing to fire and misleading every CI smoke test.)
-    let chirpstack_handle = tokio::spawn(async move {
-        if let Err(e) = chirpstack_poller.run().await {
-            error!(error = ?e, "ChirpStack poller error");
-        }
-    });
-
-    // Signal poller that restore is complete (Task 11)
-    info!("Metric restore phase complete; signaling poller to start");
-    restore_barrier.wait();
-
-    let opcua_handle = tokio::spawn(async move {
-        if let Err(e) = OpcUa::run_handles(run_handles).await {
-            error!(error = ?e, "OPC UA server error");
-        }
-    });
-
-    // Spawn command status poller task (Task 3-3 Task 5)
-    let pool_poller = pool.clone();
-    let cancel_poller = cancel_token.clone();
-    let config_poller = application_config.clone();
-    let poller_handle = tokio::spawn(async move {
-        let backend = Arc::new(storage::SqliteBackend::with_pool(pool_poller)
-            .expect("Failed to create SqliteBackend for poller"));
-        match chirpstack::CommandStatusPoller::new(&config_poller, backend, cancel_poller) {
-            Ok(mut cmd_poller) => {
-                if let Err(e) = cmd_poller.run().await {
-                    error!(error = ?e, "CommandStatusPoller error");
-                }
-            }
-            Err(e) => error!(error = ?e, "Failed to create CommandStatusPoller"),
-        }
-    });
-
-    // Spawn command timeout handler task (Task 3-3 Task 5)
-    let pool_timeout = pool.clone();
-    let cancel_timeout = cancel_token.clone();
-    let config_timeout = application_config.clone();
-    let timeout_handle = tokio::spawn(async move {
-        let backend = Arc::new(storage::SqliteBackend::with_pool(pool_timeout)
-            .expect("Failed to create SqliteBackend for timeout handler"));
-        match chirpstack::CommandTimeoutHandler::new(&config_timeout, backend, cancel_timeout) {
-            Ok(mut cmd_timeout) => {
-                if let Err(e) = cmd_timeout.run().await {
-                    error!(error = ?e, "CommandTimeoutHandler error");
-                }
-            }
-            Err(e) => error!(error = ?e, "Failed to create CommandTimeoutHandler"),
-        }
-    });
-
-    // Story E-1 (E-1a): spawn the uplink-event ingestion task. It consumes
-    // ChirpStack's decoded uplink events (InternalService.StreamDeviceEvents)
-    // for valve-class devices and writes their last-known values stamped with
-    // the device's source timestamp — no aggregation (#130). Independent
-    // SQLite backend per task (Story 5-1 pattern). Idle (cancellation-only) if
-    // no valve-class device is configured.
-    let pool_events = pool.clone();
-    let cancel_events = cancel_token.clone();
-    let config_events = application_config.clone();
-    let events_handle = tokio::spawn(async move {
-        let backend: Arc<dyn storage::StorageBackend> = Arc::new(
-            storage::SqliteBackend::with_pool(pool_events)
-                .expect("Failed to create SqliteBackend for uplink event ingestion"),
-        );
-        chirpstack_events::run_event_ingestion(config_events, backend, cancel_events).await;
-    });
-
     // Story 9-1: start the embedded Axum web server when [web].enabled.
     // Defaults to `false` so existing operators upgrading from Phase A
     // don't get a surprise new listening port. The server shares the
@@ -1153,7 +1161,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Iter-1 review P8: capture the web-config-listener handle alongside
     // the web-server handle so the shutdown path can await both, matching
     // the OPC UA listener join pattern.
-    let mut web_config_listener_handle: Option<tokio::task::JoinHandle<()>> = None;
+    // Story F-0: the web-config-listener is no longer spawned (the restart
+    // supervisor owns dashboard-snapshot refresh), so this stays `None`.
+    let web_config_listener_handle: Option<tokio::task::JoinHandle<()>> = None;
+    // Story F-0: hold a clone of the web AppState so the in-process restart
+    // supervisor below can refresh the dashboard snapshot after an Apply
+    // (the web server stays up across soft restarts; only the data-plane
+    // cycles). `None` when [web].enabled = false.
+    let mut web_app_state: Option<std::sync::Arc<web::AppState>> = None;
     let web_handle: Option<tokio::task::JoinHandle<()>> = if web_enabled {
         let port = application_config
             .web
@@ -1365,7 +1380,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     application_config.chirpstack.inventory_cache_ttl_seconds,
                 ),
             ),
+            // Story F-0: share the soft-restart plumbing with the supervisor.
+            pending_gen: pending_gen.clone(),
+            applied_gen: applied_gen.clone(),
+            apply_signal: apply_signal.clone(),
         });
+
+        // Story F-0: keep a handle to AppState so the supervisor loop can
+        // refresh the dashboard snapshot from the freshly-applied config.
+        web_app_state = Some(app_state.clone());
 
         // Bind synchronously; fail-fast on bind failure.
         let listener = match web::bind(addr).await {
@@ -1376,23 +1399,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        // Story 9-7 (Task 4): spawn the web-config-listener task that
-        // refreshes `app_state.dashboard_snapshot` and
-        // `app_state.stale_threshold_secs` on every SIGHUP-triggered
-        // reload. Lives outside the web::run task so the listener can
-        // outlive a hypothetical web-server restart (not used in v1
-        // but cheap insurance).
-        let web_listener_state = app_state.clone();
-        let web_listener_rx = reload_handle.subscribe();
-        let web_listener_cancel = cancel_token.clone();
-        web_config_listener_handle = Some(tokio::spawn(async move {
-            crate::config_reload::run_web_config_listener(
-                web_listener_state,
-                web_listener_rx,
-                web_listener_cancel,
-            )
-            .await;
-        }));
+        // Story F-0: the web-config-listener (Story 9-7) is NOT spawned.
+        // Under staged-apply the dashboard snapshot must reflect the
+        // APPLIED topology, not pending staged edits — so the restart
+        // supervisor in `main.rs` is the sole writer of
+        // `app_state.dashboard_snapshot` / `stale_threshold_secs`,
+        // refreshing them from the freshly-read config at the start of
+        // each data-plane cycle. `web_config_listener_handle` stays `None`.
 
         // Build the router and spawn the serve task on the bound listener.
         // `static_dir` was captured into AppState above (iter-1 H5 fix);
@@ -1413,80 +1426,132 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // Wait for shutdown signal (SIGINT or SIGTERM)
+    // ---- Story F-0: in-process restart supervisor ----
+    //
+    // The data-plane (poller, OPC UA server, command-status poller,
+    // command-timeout handler, uplink event-ingestion) runs inside this
+    // loop. The embedded web server (spawned above) and the SQLite
+    // connection pool live for the WHOLE process and are NOT cycled — the
+    // web server initiates the restart, so it must survive it.
+    //
+    // Each generation runs under a fresh `restart_token =
+    // cancel_token.child_token()`. Two events end a generation:
+    //   * SIGINT/SIGTERM cancels `cancel_token` (→ the child cancels too):
+    //     tear the data-plane down and exit the process — the ONLY real exit.
+    //   * `POST /api/config/apply` fires `apply_signal`: re-read config from
+    //     SQLite, cancel `restart_token`, tear the data-plane down, and
+    //     respawn it in-process. The Docker container is never restarted.
+    //
+    // The config re-read happens BEFORE teardown, so a bad read leaves the
+    // current generation running (a non-disruptive `apply_failed`).
     let mut sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("Received SIGINT, shutting down");
+    let mut cycle_config = application_config.clone();
+    'supervisor: loop {
+        // Refresh the web dashboard snapshot + stale threshold from the
+        // config this generation will run, so the web UI reflects the
+        // applied topology (the web server is not cycled).
+        if let Some(state) = &web_app_state {
+            let snap = std::sync::Arc::new(web::DashboardConfigSnapshot::from_config(&cycle_config));
+            if let Ok(mut guard) = state.dashboard_snapshot.write() {
+                *guard = snap;
+            }
+            let configured = cycle_config
+                .opcua
+                .stale_threshold_seconds
+                .unwrap_or(crate::web::api::DEFAULT_STALE_THRESHOLD_SECS);
+            let (clamped, _) = crate::web::clamp_stale_threshold(configured);
+            state
+                .stale_threshold_secs
+                .store(clamped, std::sync::atomic::Ordering::Relaxed);
         }
-        _ = sigterm.recv() => {
-            info!("Received SIGTERM, shutting down");
+
+        // Spawn this generation under a fresh child token + single-use barrier.
+        let restart_token = cancel_token.child_token();
+        let restore_barrier = Arc::new(Barrier::new(2));
+        let handles = match spawn_data_plane(
+            &cycle_config,
+            &pool,
+            &restart_token,
+            &restore_barrier,
+            is_first_run,
+        )
+        .await
+        {
+            Ok(h) => h,
+            Err(e) => {
+                error!(error = %e, "Failed to spawn data-plane — aborting");
+                cancel_token.cancel();
+                break 'supervisor;
+            }
+        };
+
+        // The running data-plane now reflects every staged write up to now.
+        applied_gen.store(
+            pending_gen.load(std::sync::atomic::Ordering::Relaxed),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+        // Wait for a reason to end this generation.
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received SIGINT, shutting down");
+                    cancel_token.cancel();
+                    join_data_plane(handles).await;
+                    break 'supervisor;
+                }
+                _ = sigterm.recv() => {
+                    info!("Received SIGTERM, shutting down");
+                    cancel_token.cancel();
+                    join_data_plane(handles).await;
+                    break 'supervisor;
+                }
+                _ = apply_signal.notified() => {
+                    // Re-read BEFORE teardown so a bad config is non-disruptive.
+                    match reload_effective_config(&config_path, &sqlite_backend) {
+                        Ok(new_config) => {
+                            info!(
+                                event = "apply_requested",
+                                applications = new_config.application_list.len(),
+                                "Apply: re-read config from SQLite; soft-restarting data-plane in-process"
+                            );
+                            restart_token.cancel();
+                            join_data_plane(handles).await;
+                            cycle_config = new_config;
+                            info!(
+                                event = "apply_completed",
+                                "Apply: data-plane respawned in-process with the new configuration"
+                            );
+                            continue 'supervisor;
+                        }
+                        Err(e) => {
+                            warn!(
+                                event = "apply_failed",
+                                error = %e,
+                                "Apply: failed to re-read configuration from SQLite; \
+                                 keeping the current data-plane running"
+                            );
+                            // Keep serving; wait for the next signal.
+                        }
+                    }
+                }
+            }
         }
     }
 
-    // Cancel the token to signal all tasks to stop
-    cancel_token.cancel();
-
-    // Wait for tasks to finish gracefully (with timeout). The web
-    // handle is `Option<JoinHandle>` because the server may not
-    // have been started; await it conditionally so the regular
-    // join path is unchanged when [web].enabled = false.
-    //
-    // **D4 resolution (review iter-1, 2026-05-02):** the shutdown
-    // shape here is INTENTIONALLY asymmetric. `try_join!` covers the
-    // four core tasks that are always running; the web handle joins
-    // separately afterward because it's `Option<JoinHandle>`
-    // (`None` when `[web].enabled = false`). If `try_join!`
-    // short-circuits on a task error, sibling join futures inside
-    // it are abandoned — the outer 10 s `tokio::time::timeout` is
-    // the safety net that bounds total shutdown latency. The web
-    // server's own per-surface 5 s graceful-shutdown budget (in
-    // `web::run`) caps the slow-loris vector independently.
-    // Cancellation still fans out to all five surfaces via the
-    // shared `CancellationToken` — only the join sequencing is
-    // asymmetric.
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        async {
-            let core =
-                tokio::try_join!(chirpstack_handle, opcua_handle, poller_handle, timeout_handle);
-            if let Some(web_h) = web_handle {
-                if let Err(e) = web_h.await {
-                    error!(error = %e, "Web server task error during shutdown");
-                }
-            }
-            // Join the OPC UA config-listener task asymmetrically
-            // (same shape as the web handle — not part of the core
-            // try_join because it is not load-bearing for the data
-            // plane). Observes `cancel_token.cancelled()` and exits
-            // promptly; error path is best-effort logged.
-            if let Err(e) = opcua_listener_handle.await {
-                error!(error = %e, "OPC UA config-listener task error during shutdown");
-            }
-            // Story E-1 (E-1a): join the uplink event-ingestion task. Observes
-            // `cancel_token.cancelled()` and exits promptly; not load-bearing
-            // for the data plane, so joined asymmetrically like the listeners.
-            if let Err(e) = events_handle.await {
-                error!(error = %e, "Uplink event-ingestion task error during shutdown");
-            }
-            // Iter-1 review P8: web config-listener was previously
-            // dropped without being awaited. Surface any panic via
-            // the same join-error channel as its sister listeners.
-            if let Some(h) = web_config_listener_handle {
-                if let Err(e) = h.await {
-                    error!(error = %e, "Web config-listener task error during shutdown");
-                }
-            }
-            core
-        },
-    )
-    .await
-    {
-        Ok(Ok(_)) => info!("All tasks shut down cleanly"),
-        Ok(Err(e)) => error!(error = %e, "Task error during shutdown"),
-        Err(_) => error!("Shutdown timed out after 10 seconds, forcing exit"),
+    // Process is exiting (SIGINT/SIGTERM). The web server + its config
+    // listener observe `cancel_token` directly; await them now.
+    if let Some(web_h) = web_handle {
+        if let Err(e) = web_h.await {
+            error!(error = %e, "Web server task error during shutdown");
+        }
+    }
+    if let Some(h) = web_config_listener_handle {
+        if let Err(e) = h.await {
+            error!(error = %e, "Web config-listener task error during shutdown");
+        }
     }
 
     // Close connection pool (ensure all connections flushed/closed)

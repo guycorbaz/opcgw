@@ -1452,12 +1452,32 @@ auth_realm = "opcgw"
           </varlistentry>
         </variablelist>
 
-        <para><emphasis>When changes take effect.</emphasis> Editing the
-        application tree (applications, devices, metrics, commands) and
-        the ChirpStack polling cadence through the web UI takes effect
-        live, without a restart. Changes to network bindings, ports, PKI
-        paths, OPC UA session limits, and login credentials require a
-        restart to take effect — restart opcgw after saving those.</para>
+        <para><emphasis>When changes take effect — staged edits and
+        Apply.</emphasis> Every configuration edit you make through the web UI
+        — the application tree (applications, devices, metrics, commands)
+        <emphasis>and</emphasis> the singleton
+        <literal>[global]</literal> / <literal>[chirpstack]</literal> /
+        <literal>[opcua]</literal> / <literal>[web]</literal> sections — is
+        <emphasis>staged</emphasis>: it is saved to the database but does not
+        change the running gateway yet. A yellow <quote>Unapplied
+        configuration changes</quote> bar appears at the bottom of the page
+        whenever you have staged edits. When you are done editing, click
+        <emphasis>Apply changes</emphasis> in that bar. The gateway then
+        performs a single graceful <emphasis>in-process soft restart</emphasis>
+        that re-reads the whole configuration from the database and brings the
+        data-plane (ChirpStack poller, OPC UA server, uplink event stream,
+        command handling) back up on the new settings. The Docker container is
+        <emphasis>never</emphasis> restarted by Apply; OPC UA clients briefly
+        disconnect and reconnect once per Apply. Because Apply re-reads
+        everything, <emphasis>all</emphasis> settings now take effect this way
+        — including the network bindings, ports, PKI paths, and OPC UA session
+        limits that previously required a manual restart. The one exception is
+        the web-login credentials (the web server itself survives the soft
+        restart, so rotating <literal>user_name</literal> /
+        <literal>user_password</literal> still needs a full process restart). A
+        staged change that fails to load on Apply is non-disruptive: the
+        gateway keeps running the previous configuration and logs
+        <literal>apply_failed</literal>.</para>
 
         <warning>
           <title>Web UI is HTTP-only — TLS via reverse proxy</title>

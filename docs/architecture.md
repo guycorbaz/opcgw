@@ -87,6 +87,17 @@ SQLite is the **single authoritative store** for all opcgw state:
 
 The in-memory snapshot (`Arc<watch::Sender<Arc<AppConfig>>>`) is rebuilt from SQLite after every CRUD write via `ConfigReloadHandle::notify_crud_write`. Subscribers (OPC UA address-space builder, ChirpStack poller, web dashboard) receive the new snapshot through the watch channel.
 
+> **Apply model (Story F-0, 2026-06-14).** The live `notify_crud_write` rebuild above is **dormant** under the F-0 staged-apply model. Every config-write surface — the singleton-config editor *and* the application/device/metric/command CRUD handlers — now **stages** to SQLite (`AppState::stage_config_write` bumps a `pending_gen` counter and emits `config_staged`) without mutating the running gateway. `GET /api/status` reports `pending_changes: true` until the operator applies. A single `POST /api/config/apply` wakes the in-process restart supervisor (see below), which re-reads the effective config from SQLite and soft-restarts the data-plane once for the whole batch. The legacy live-reload path is kept compiled-but-idle in F-0; its full removal is an F-0 follow-up.
+
+### In-process data-plane restart supervisor (Story F-0)
+
+`main.rs` runs a `'supervisor` loop that owns the data-plane lifecycle. The web server, `AppState`, and the SQLite connection pool are constructed **once, outside** the loop. Each loop iteration calls `spawn_data_plane()` to build a fresh `Barrier::new(2)` and spawn the poller, OPC UA server, gRPC event-ingestion task, and command-timeout handler — preserving the deadlock-safe spawn order (poller **before** `restore_barrier.wait()`, OPC UA server **after**) on **every** cycle. The loop then `select!`s on three signals:
+
+- **SIGINT / SIGTERM** → cancel the parent token, join the data-plane (bounded), close the pool, exit the process (the only path that exits — and only on a real OS signal).
+- **`apply_signal`** (fired by `POST /api/config/apply`) → re-read the effective config from SQLite *first* (a bad read is non-disruptive: log `apply_failed` and keep the current data-plane running), then cancel the per-cycle `restart_token`, join the data-plane (bounded 10 s), and `continue` the loop to respawn with the new config. Emits `apply_requested` → `apply_completed`.
+
+Because `spawn_data_plane()` recomputes `streamed_devices(&config)` from the freshly-read config each cycle, the gRPC uplink-stream **scope** is re-derived on every Apply — this is the mechanism that closes CR #138 (the stream scope is no longer frozen at boot). The Docker container is never restarted; OPC UA clients disconnect and reconnect once per applied batch.
+
 ## Module Breakdown
 
 ### `main.rs` — Entry Point

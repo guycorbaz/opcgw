@@ -72,6 +72,9 @@ fn build_test_app_state() -> (Arc<AppState>, TempDir) {
         secrets_path: dir.path().join("secrets.toml"),
         shutdown_token: CancellationToken::new(),
         inventory_cache: Arc::new(InventoryCache::new(60)),
+        pending_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        applied_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        apply_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
     });
     (app_state, dir)
 }

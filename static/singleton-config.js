@@ -3,7 +3,9 @@
 //
 // Story D-1: client-side controller for the singleton-config editor.
 // Fetches the snapshot on load, renders 4 collapsible sections,
-// per-section save with confirmation modal + supervisor-restart UX.
+// per-section save with confirmation modal.
+// Story F-0: a save STAGES the change (HTTP 202 "staged"); the shared
+// apply-bar.js drives the explicit "Apply changes" soft restart.
 
 (function () {
   'use strict';
@@ -188,9 +190,12 @@
         credentials: 'include',
       });
       if (r.status === 202) {
-        document.getElementById('restart-notice').classList.add('visible');
-        // Disable all save buttons after triggering restart.
-        document.querySelectorAll('.actions button').forEach(b => b.disabled = true);
+        // Story F-0: the write is STAGED, not applied. Surface the staged
+        // notice and let the operator keep editing; the shared apply-bar
+        // (apply-bar.js) polls /api/status and shows the "Apply changes"
+        // button once pending changes exist.
+        const notice = document.getElementById('staged-notice');
+        if (notice) notice.classList.add('visible');
         return;
       }
       let msg;
