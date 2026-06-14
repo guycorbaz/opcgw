@@ -580,6 +580,9 @@ async fn f0_apply_requires_csrf() {
 #[serial(captured_logs)]
 async fn f0_apply_returns_202_and_fires_signal() {
     let fx = spawn_fixture().await;
+    // Story F-0 review (P4): Apply only restarts when there ARE staged
+    // changes. Stage one so this exercises the 202 path.
+    fx.app_state.stage_config_write("review_test");
     let auth = build_basic_auth(TEST_USER, TEST_PASSWORD);
     let r = reqwest::Client::new()
         .post(fx.url("/api/config/apply"))
@@ -607,6 +610,42 @@ async fn f0_apply_returns_202_and_fires_signal() {
     assert!(
         notified.is_ok(),
         "apply endpoint must fire apply_signal so the supervisor wakes"
+    );
+    fx.shutdown().await;
+}
+
+/// Story F-0 review (P4) — `POST /api/config/apply` with NO pending changes
+/// returns `200 {"status":"no_pending_changes"}` and does NOT fire the apply
+/// signal (avoids a gratuitous soft restart / OPC UA client disconnect on a
+/// duplicate or stale POST).
+#[tokio::test]
+#[serial(captured_logs)]
+async fn f0_apply_with_no_pending_changes_is_noop() {
+    let fx = spawn_fixture().await;
+    // Fresh fixture: pending_gen == applied_gen == 0 → nothing staged.
+    assert!(!fx.app_state.has_pending_changes());
+    let auth = build_basic_auth(TEST_USER, TEST_PASSWORD);
+    let r = reqwest::Client::new()
+        .post(fx.url("/api/config/apply"))
+        .header(header::AUTHORIZATION, &auth)
+        .header(header::ORIGIN, &fx.base_url)
+        .header(header::CONTENT_TYPE, "application/json")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(r.status(), StatusCode::OK);
+    let resp: Value = r.json().await.expect("json");
+    assert_eq!(resp["status"], "no_pending_changes");
+
+    // The signal must NOT have been fired: a `notified()` should time out.
+    let notified = tokio::time::timeout(
+        Duration::from_millis(300),
+        fx.app_state.apply_signal.notified(),
+    )
+    .await;
+    assert!(
+        notified.is_err(),
+        "apply with no pending changes must NOT fire apply_signal (no restart)"
     );
     fx.shutdown().await;
 }

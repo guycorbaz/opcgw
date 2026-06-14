@@ -312,6 +312,14 @@ fn reload_effective_config(
         Ok(_) => {}
         Err(e) => return Err(format!("load_all_applications_config failed: {e}")),
     }
+    // Story F-0 review (P3): validate the MERGED config (singleton overlay +
+    // SQLite application tree) before returning. `from_path_with_sqlite`
+    // validates the figment layer, but `application_list` is OVERWRITTEN
+    // afterwards, so a staged CRUD edit that violates a cross-field invariant
+    // must be caught HERE — before the supervisor tears down the running
+    // data-plane — so a semantically-invalid staged config is a non-disruptive
+    // `apply_failed` rather than a respawn against bad state.
+    cfg.validate().map_err(|e| e.to_string())?;
     Ok(Arc::new(cfg))
 }
 
@@ -471,14 +479,36 @@ async fn join_data_plane(handles: DataPlaneHandles) {
         cmd_timeout,
         events,
     } = handles;
-    match tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        tokio::try_join!(chirpstack, opcua, cmd_status, cmd_timeout, events)
+    let tasks: [tokio::task::JoinHandle<()>; 5] =
+        [chirpstack, opcua, cmd_status, cmd_timeout, events];
+    // Story F-0 review (D1): hold abort handles so that, if the bounded join
+    // times out, we can FORCE-cancel any straggler. Dropping a `JoinHandle`
+    // does NOT abort its task in tokio, so without this an unresponsive OPC UA
+    // listener or gRPC device-stream could outlive the cycle (detached) and
+    // block the next rebind / double-write SQLite. The caller has already
+    // cancelled `restart_token`; this is the backstop for a task that fails to
+    // observe it within the bound.
+    let aborts: Vec<tokio::task::AbortHandle> = tasks.iter().map(|h| h.abort_handle()).collect();
+    match tokio::time::timeout(std::time::Duration::from_secs(10), async move {
+        for h in tasks {
+            // A cancelled task may resolve to `Err(JoinError::cancelled)` —
+            // expected during teardown — so the result is intentionally
+            // ignored; the point is to await full release of its listening
+            // socket / SQLite connections before the next cycle rebinds.
+            let _ = h.await;
+        }
     })
     .await
     {
-        Ok(Ok(_)) => info!("Data-plane tasks shut down cleanly"),
-        Ok(Err(e)) => error!(error = %e, "Data-plane task error during teardown"),
-        Err(_) => error!("Data-plane teardown timed out after 10 seconds"),
+        Ok(()) => info!("Data-plane tasks shut down cleanly"),
+        Err(_) => {
+            error!(
+                "Data-plane teardown timed out after 10 seconds; aborting straggler tasks to release sockets"
+            );
+            for a in aborts {
+                a.abort();
+            }
+        }
     }
 }
 
@@ -1448,6 +1478,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     let mut cycle_config = application_config.clone();
+    // Story F-0 review (P2): the last config that successfully started the
+    // data-plane. If an Apply respawn fails at BUILD time (after the old
+    // generation was already torn down), we revert to this and respawn it
+    // instead of exiting the process — which Docker's `restart: always` would
+    // turn into a container restart (and, since boot reloads the same staged
+    // config from SQLite, a crash loop). Staged-apply promises that never
+    // happens.
+    let mut last_good_config: Option<Arc<AppConfig>> = None;
+    // Story F-0 review (P1): the pending-generation value the NEXT successful
+    // spawn will publish into `applied_gen`. Captured at config-READ time (not
+    // after the respawn completes) so an edit staged DURING an Apply is never
+    // falsely marked applied. Boot publishes whatever is staged at boot.
+    let mut next_applied = pending_gen.load(std::sync::atomic::Ordering::Acquire);
+    // Whether the upcoming spawn is the completion of an operator Apply (drives
+    // the `apply_completed` audit event, which must fire AFTER the respawn —
+    // review P6).
+    let mut announce_apply_completed = false;
     'supervisor: loop {
         // Refresh the web dashboard snapshot + stale threshold from the
         // config this generation will run, so the web UI reflects the
@@ -1479,23 +1526,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await
         {
-            Ok(h) => h,
-            Err(e) => {
-                error!(error = %e, "Failed to spawn data-plane — aborting");
-                cancel_token.cancel();
-                break 'supervisor;
+            Ok(h) => {
+                last_good_config = Some(cycle_config.clone());
+                // The running data-plane now reflects every staged write up to
+                // the generation captured at the last config read (review P1).
+                applied_gen.store(next_applied, std::sync::atomic::Ordering::Release);
+                // `mem::take` reads-and-clears so the flag is always consumed
+                // (no dead store on the apply→revert path). Emit `apply_completed`
+                // only AFTER the respawn actually succeeds (review P6).
+                if std::mem::take(&mut announce_apply_completed) {
+                    info!(
+                        event = "apply_completed",
+                        "Apply: data-plane respawned in-process with the new configuration"
+                    );
+                }
+                h
             }
+            Err(e) => match &last_good_config {
+                // Build-time failure on an Apply respawn: the previous
+                // generation is already gone, so revert to the last config
+                // that worked and respawn IT (review P2). The reverted config
+                // does NOT include the failed staged edit, so `next_applied`
+                // rolls back to the last published value and `pending_changes`
+                // correctly stays true.
+                Some(prev) if !Arc::ptr_eq(prev, &cycle_config) => {
+                    // Consume the in-flight "completing" intent: a failed apply
+                    // must NOT announce completion for the reverted config.
+                    let was_completing = std::mem::take(&mut announce_apply_completed);
+                    warn!(
+                        event = "apply_failed",
+                        error = %e,
+                        was_completing = was_completing,
+                        "Apply: new configuration failed to start the data-plane; \
+                         reverting to the last applied configuration"
+                    );
+                    crate::web::apply::mark_apply_failed();
+                    cycle_config = prev.clone();
+                    next_applied = applied_gen.load(std::sync::atomic::Ordering::Acquire);
+                    continue 'supervisor;
+                }
+                // Boot-time failure (nothing good yet) OR the revert itself
+                // failed: nothing to fall back to — exit.
+                _ => {
+                    error!(error = %e, "Failed to spawn data-plane — aborting");
+                    cancel_token.cancel();
+                    break 'supervisor;
+                }
+            },
         };
-
-        // The running data-plane now reflects every staged write up to now.
-        applied_gen.store(
-            pending_gen.load(std::sync::atomic::Ordering::Relaxed),
-            std::sync::atomic::Ordering::Relaxed,
-        );
 
         // Wait for a reason to end this generation.
         loop {
             tokio::select! {
+                // Bias toward shutdown so a stored apply permit cannot win one
+                // extra restart while a SIGINT/SIGTERM is also ready (review P5).
+                biased;
                 _ = tokio::signal::ctrl_c() => {
                     info!("Received SIGINT, shutting down");
                     cancel_token.cancel();
@@ -1509,7 +1594,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     break 'supervisor;
                 }
                 _ = apply_signal.notified() => {
-                    // Re-read BEFORE teardown so a bad config is non-disruptive.
+                    // Capture the target generation BEFORE reading config, so an
+                    // edit staged after this point keeps `pending_changes` true
+                    // (review P1). Re-read + validate BEFORE teardown so a bad
+                    // config is non-disruptive.
+                    let target = pending_gen.load(std::sync::atomic::Ordering::Acquire);
                     match reload_effective_config(&config_path, &sqlite_backend) {
                         Ok(new_config) => {
                             info!(
@@ -1520,19 +1609,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             restart_token.cancel();
                             join_data_plane(handles).await;
                             cycle_config = new_config;
-                            info!(
-                                event = "apply_completed",
-                                "Apply: data-plane respawned in-process with the new configuration"
-                            );
+                            next_applied = target;
+                            announce_apply_completed = true;
                             continue 'supervisor;
                         }
                         Err(e) => {
                             warn!(
                                 event = "apply_failed",
                                 error = %e,
-                                "Apply: failed to re-read configuration from SQLite; \
+                                "Apply: failed to load configuration from SQLite; \
                                  keeping the current data-plane running"
                             );
+                            crate::web::apply::mark_apply_failed();
                             // Keep serving; wait for the next signal.
                         }
                     }

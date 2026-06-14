@@ -1,6 +1,6 @@
 # Story F.0: Staged Config with Explicit "Apply Changes"
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -201,7 +201,43 @@ claude-opus-4-8[1m] (bmad-dev-story)
 - `docs/logging.md`, `docs/architecture.md`, `docs/security.md`, `docs/manual/opcgw-user-manual.xml`, `README.md` — staged-apply model documented (Task 9).
 - `_bmad-output/implementation-artifacts/deferred-work.md` — F-0-FOLLOWUP entries.
 
-### NEXT (story now `review`)
+### NEXT (story now `done`)
 
-1. `bmad-code-review F-0` on a different LLM (foundational/highest-risk story — `main.rs:~1067-1077` deadlock zone; iter-N+1 mandatory per CLAUDE.md doctrine).
-2. Implementation-Complete commit lands BEFORE any review-fix commit (BMad discipline). Closes #138; refs #140.
+Code review complete (iter-1 + mandatory iter-2, both 0 HIGH/0 MEDIUM at termination). Review-fixes commit lands AFTER the Implementation-Complete commit (`1e81527`). Closes #138; refs #140. Epic F continues with **F-1** (unified web shell) — Epic F retrospective is required only once F-0..F-4 are all `done`.
+
+### Review Findings (iter-1, 2026-06-14 — Blind Hunter + Edge Case Hunter + Acceptance Auditor)
+
+Counts: 2 decision-needed, 6 patch, 2 defer (LOW), 4 dismissed. Convergence: P1 and P2 were each independently raised by 2+ layers. **All decision-needed + patch items RESOLVED (fixed) this iteration.**
+
+**decision-needed (both resolved → patch now, per Guy):**
+
+- [x] [Review][Decision→Patch] **(MED) `join_data_plane` 10 s timeout detaches data-plane tasks** — FIXED (D1): `join_data_plane` now collects `abort_handle()`s and force-aborts stragglers on the 10 s timeout so a detached OPC UA listener / gRPC stream cannot outlive the cycle. [src/main.rs `join_data_plane`]
+- [x] [Review][Decision→Patch] **(MED) `apply_failed` is invisible to the operator** — FIXED (D2): process-global `LAST_APPLY_FAILED` flag; supervisor calls `mark_apply_failed()`; `GET /api/status` exposes `apply_failed`; `apply-bar.js` surfaces the failure instead of hanging. [src/web/apply.rs, src/web/api.rs, static/apply-bar.js]
+
+**patch (all applied):**
+
+- [x] [Review][Patch] (HIGH) `applied_gen` lost-update race — FIXED: `target = pending_gen.load(Acquire)` captured BEFORE the config re-read, carried as `next_applied`, stored into `applied_gen` only on spawn success. [src/main.rs supervisor loop]
+- [x] [Review][Patch] (HIGH) build-time respawn failure exits the process — FIXED (P2): `last_good_config` tracked; on an Apply respawn build failure the supervisor reverts to the last-good config and respawns it; exits only on boot failure or if the revert config itself fails (`Arc::ptr_eq` guard — iter-2 verified terminating). [src/main.rs]
+- [x] [Review][Patch] (MED) `reload_effective_config` now calls `cfg.validate()` on the merged config before returning Ok. [src/main.rs::reload_effective_config]
+- [x] [Review][Patch] (MED) Apply with no pending changes returns `200 no_pending_changes` and does not fire the signal (no gratuitous restart). [src/web/apply.rs]
+- [x] [Review][Patch] (LOW) `biased;` added to the supervisor `select!` (shutdown wins over a stored apply permit). [src/main.rs]
+- [x] [Review][Patch] (LOW) `apply_completed` now emitted AFTER a successful respawn via `mem::take(&mut announce_apply_completed)`. [src/main.rs]
+- [x] [Review][Patch] (tests) added `f0_apply_with_no_pending_changes_is_noop` + `apply_failed_flag_roundtrips`; `main_apply_restart.rs` now stages before each apply. (P2-revert / P1-race subprocess coverage deferred — see deferred-work.md.) [tests/]
+
+**defer (LOW, pre-existing / minor):**
+
+- [x] [Review][Defer] (LOW) `restore_barrier.wait()` blocks an async worker thread each cycle (pre-existing boot pattern, now per-Apply) [src/main.rs] — deferred
+- [x] [Review][Defer] (LOW) `ctrl_c()` re-registered each inner-loop iteration vs `sigterm` created once (asymmetric; Unix ctrl_c idempotent so benign) [src/main.rs] — deferred
+
+**dismissed (4):** retained `notify_crud_write` no-op (documented, F-0-FOLLOWUP exists); `f0_apply_returns_202` "self-fulfilling" (covered by subprocess test); AC#3 literal "remove" deviation (intent met, documented); web-login rotation restart-required (documented carve-out).
+
+### Review Findings (iter-2, 2026-06-14 — re-review of the iter-1 patch round)
+
+Mandatory iter-N+1 per CLAUDE.md (the patches added brand-new control flow — P1 snapshot + P2 revert — in the `main.rs` deadlock zone). **Counts: 0 HIGH, 0 MEDIUM, 4 LOW. Verdict: iter-1 fixes correct; no iter-3 required.** The `Arc::ptr_eq` revert-termination guard was formally verified (provably terminating: `Arc::clone` shares the allocation, `last_good_config` updates only on spawn success). All four hunted regression classes (P2 termination, P1 marker correctness, P6 `mem::take`, D1 abort-after-move) sound.
+
+- [x] (LOW, F1) `apply_requested` with no paired `apply_completed` on a reverted apply — disambiguated by the `was_completing` field; documented in `docs/logging.md` `apply_failed` row.
+- [x] (LOW, F2) P3 `cfg.validate()` can refuse an Apply if a pre-existing invariant is now violated — intended non-disruptive behaviour (running gateway unaffected); accepted.
+- [x] (LOW, F3) No automated coverage of the P2 revert / P1 race paths — recorded in `deferred-work.md` as a test-harness improvement (needs a config-fault-injection seam; the bind happens in `run_handles`, not `build`, so a port conflict is not a `spawn_data_plane` Err today).
+- [x] (LOW, F4) `LAST_APPLY_FAILED` process-global — safe in prod (one supervisor/process; subprocess-isolated tests); unit test `#[serial]`. Accepted.
+
+**Loop termination:** only LOW findings remain; fresh `cargo test` (0 failed) + `cargo clippy --all-targets -- -D warnings` (clean) + `xmllint` (clean). Story → `done`.

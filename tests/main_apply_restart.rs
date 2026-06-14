@@ -138,6 +138,36 @@ fn post_apply(web_port: u16) -> std::io::Result<String> {
     Ok(resp.lines().next().unwrap_or("").to_string())
 }
 
+/// Stage a (benign) singleton config change so a subsequent Apply has
+/// something pending to apply (Story F-0 review P4: Apply with no pending
+/// changes is a no-op). PUTs `{"debug": false}` to the `[global]` section —
+/// re-writing the same value still stages a pending change. Returns the
+/// status line (expects "... 202 Accepted").
+fn stage_singleton_change(web_port: u16) -> std::io::Result<String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", web_port))?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let auth = base64(b"opcua-user:test_password_placeholder");
+    let body = r#"{"debug": false}"#;
+    let req = format!(
+        "PUT /api/config/singleton/global HTTP/1.1\r\n\
+         Host: 127.0.0.1:{port}\r\n\
+         Authorization: Basic {auth}\r\n\
+         Origin: http://127.0.0.1:{port}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {len}\r\n\
+         Connection: close\r\n\r\n\
+         {body}",
+        port = web_port,
+        auth = auth,
+        len = body.len(),
+        body = body,
+    );
+    stream.write_all(req.as_bytes())?;
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp)?;
+    Ok(resp.lines().next().unwrap_or("").to_string())
+}
+
 /// Kill-on-drop wrapper so a panicking assertion never leaks a gateway
 /// process (a leaked process holds the OPC UA + web ports and breaks every
 /// subsequent run with `Address already in use`).
@@ -213,6 +243,12 @@ fn apply_soft_restarts_data_plane_in_process_and_is_reentrant() {
     let pid_before = child.id();
 
     // ---- First Apply ----
+    // Stage a change first (review P4: Apply with no pending changes is a no-op).
+    let stage1 = stage_singleton_change(web_port).expect("stage singleton change (1)");
+    assert!(
+        stage1.contains("202"),
+        "staging a singleton change did not return 202: {stage1:?}"
+    );
     let status = post_apply(web_port).expect("POST /api/config/apply (1)");
     assert!(
         status.contains("202"),
@@ -241,6 +277,11 @@ fn apply_soft_restarts_data_plane_in_process_and_is_reentrant() {
     );
 
     // ---- Second Apply (re-entrancy) ----
+    let stage2 = stage_singleton_change(web_port).expect("stage singleton change (2)");
+    assert!(
+        stage2.contains("202"),
+        "staging a singleton change (2) did not return 202: {stage2:?}"
+    );
     let status2 = post_apply(web_port).expect("POST /api/config/apply (2)");
     assert!(status2.contains("202"), "second apply did not return 202: {status2:?}");
     let deadline = Instant::now() + Duration::from_secs(15);

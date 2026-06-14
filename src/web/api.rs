@@ -56,6 +56,12 @@ pub struct StatusResponse {
     /// operator should click "Apply changes" (`POST /api/config/apply`).
     /// Clears once the soft restart respawns the data-plane.
     pub pending_changes: bool,
+    /// Story F-0 review (D2): `true` when the most recent Apply FAILED (a bad
+    /// staged config that could not be re-read/validated, or that failed to
+    /// start the data-plane and was reverted). Lets the web UI distinguish a
+    /// failed Apply from a pending or in-progress one. Cleared when a fresh
+    /// Apply is invoked or completes.
+    pub apply_failed: bool,
 }
 
 /// Generic error body. The `error` field is intentionally a fixed
@@ -226,6 +232,7 @@ pub async fn api_status(
         device_count: snapshot.device_count,
         uptime_secs,
         pending_changes: state.has_pending_changes(),
+        apply_failed: crate::web::apply::apply_failed_flag(),
     }))
 }
 
@@ -5179,6 +5186,7 @@ mod tests {
             device_count: 0,
             uptime_secs: 0,
             pending_changes: false,
+            apply_failed: false,
         };
         let json = serde_json::to_value(&response).expect("serialise StatusResponse");
         assert!(json["last_poll_time"].is_null());

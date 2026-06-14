@@ -84,6 +84,18 @@
       if (!r.ok) return;
       const s = await r.json();
       show(!!s.pending_changes);
+      // Surface a prior failed Apply even if this tab did not initiate it
+      // (the failure leaves pending_changes true, so the bar is visible).
+      if (s.pending_changes && s.apply_failed) {
+        const msg = document.getElementById('apply-bar-msg');
+        if (msg) {
+          msg.innerHTML =
+            '<strong>Last Apply failed.</strong> The staged configuration ' +
+            'could not be applied; the gateway is still running the previous ' +
+            'configuration. Check the gateway logs (<code>event=apply_failed</code>), ' +
+            'fix the staged change, then click <em>Apply changes</em> again.';
+        }
+      }
     } catch (_) {
       // Network blip — leave the bar in its current state; next tick retries.
     }
@@ -143,6 +155,21 @@
         const r = await fetch('/api/status', { credentials: 'include' });
         if (r.ok) {
           const s = await r.json();
+          // Failure: the supervisor could not apply the staged config and
+          // kept the previous one running. pending_changes stays true, so
+          // detect the explicit apply_failed flag and surface it instead of
+          // hanging until the timeout (review D2).
+          if (s.apply_failed) {
+            applying = false;
+            btn.disabled = false;
+            bar.classList.remove('applying');
+            msg.innerHTML =
+              '<strong>Apply failed.</strong> The staged configuration could not ' +
+              'be applied; the gateway is still running the previous configuration. ' +
+              'Check the gateway logs (<code>event=apply_failed</code>), fix the ' +
+              'staged change, then click <em>Apply changes</em> again.';
+            return;
+          }
           if (!s.pending_changes) {
             applying = false;
             btn.disabled = false;
