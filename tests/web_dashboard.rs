@@ -132,6 +132,8 @@ async fn build_production_static_dir() -> TempDir {
         "dashboard.js",
         "metrics.html",
         "metrics.js",
+        // Story F-1: the unified web-shell component, included by every page.
+        "shell.js",
     ] {
         let body = tokio::fs::read(src.join(name))
             .await
@@ -1033,6 +1035,88 @@ async fn metrics_html_contains_viewport_meta_and_grid_markup() {
         body.contains("src=\"/metrics.js\""),
         "metrics.html must reference /metrics.js"
     );
+
+    cancel.cancel();
+    handle
+        .await
+        .expect("web::run task panicked or was cancelled abnormally");
+}
+
+/// Story F-1: the unified web shell. `shell.js` is served through the auth
+/// middleware and defines the single nav (the per-page <nav> duplication was
+/// removed); the operator pages include it. We don't execute the JS (no
+/// headless browser) — we pin that the shared component exists, is reachable,
+/// owns the nav definition, and is referenced by the pages.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn shell_js_is_served_and_owns_the_nav() {
+    init_test_subscriber();
+
+    let (addr, cancel, handle, _static_tmp) = spawn_test_server(DashboardConfigSnapshot {
+        application_count: 0,
+        device_count: 0,
+        applications: vec![],
+    })
+    .await;
+
+    let client = common::build_http_client(Duration::from_secs(5));
+
+    // shell.js is served (auth'd) and contains the shared nav definition +
+    // the component marker the CSS targets.
+    let resp = client
+        .get(format!("http://{addr}/shell.js"))
+        .header(
+            header::AUTHORIZATION,
+            build_basic_auth(TEST_USER, TEST_PASSWORD),
+        )
+        .send()
+        .await
+        .expect("GET /shell.js (auth'd)");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let shell = resp.text().await.expect("shell.js body");
+    assert!(
+        shell.contains("app-shell"),
+        "shell.js must build the .app-shell component"
+    );
+    for label in [
+        "Dashboard",
+        "Applications",
+        "Devices configuration",
+        "Live Metrics",
+        "Commands",
+        "Inventory drift",
+        "Singleton config",
+    ] {
+        assert!(
+            shell.contains(label),
+            "shell.js nav definition must include the {label:?} entry"
+        );
+    }
+
+    // The pages include the shell and no longer hard-code a <nav> (Story F-1
+    // AC#3/#7). Check index.html and metrics.html (the two pages copied into
+    // the test static dir).
+    for page in ["/index.html", "/metrics.html"] {
+        let r = client
+            .get(format!("http://{addr}{page}"))
+            .header(
+                header::AUTHORIZATION,
+                build_basic_auth(TEST_USER, TEST_PASSWORD),
+            )
+            .send()
+            .await
+            .unwrap_or_else(|_| panic!("GET {page} (auth'd)"));
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = r.text().await.expect("page body");
+        assert!(
+            body.contains("src=\"/shell.js\""),
+            "{page} must include the unified shell (src=\"/shell.js\")"
+        );
+        assert!(
+            !body.contains("<nav"),
+            "{page} must NOT hard-code a <nav> — the shell injects it (Story F-1 AC#7)"
+        );
+    }
 
     cancel.cancel();
     handle

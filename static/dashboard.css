@@ -214,6 +214,173 @@ footer button:hover {
 }
 
 /* ============================================================
+ * Story F-1 — Unified web shell (shared nav/header) + component
+ * primitives. The header bar is injected by static/shell.js on every
+ * operator page; the per-page hand-written <nav> was removed. The
+ * component classes below (.btn, .status-badge, .banner) are shared
+ * primitives pages can adopt for a consistent look.
+ * ============================================================ */
+
+.app-shell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem 1.1rem;
+  padding: 0.85rem 1rem;
+  background: #1f2937;
+  color: #f9fafb;
+}
+
+.app-shell__brand {
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #f9fafb;
+  text-decoration: none;
+}
+
+.app-shell__brand:visited {
+  color: #f9fafb;
+}
+
+.app-shell__nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.9rem;
+  font-size: 0.9rem;
+}
+
+.app-shell__nav a,
+.app-shell__nav a:visited {
+  color: #f9fafb;
+  text-decoration: none;
+  padding: 0.1rem 0;
+  border-bottom: 2px solid transparent;
+}
+
+.app-shell__nav a:hover {
+  color: #ffffff;
+  border-bottom-color: #6b7280;
+}
+
+.app-shell__nav a.is-active {
+  color: #fbbf24;
+  font-weight: 600;
+  border-bottom-color: #fbbf24;
+}
+
+/* Shared component primitives (opt-in). */
+.btn {
+  display: inline-block;
+  padding: 0.4rem 0.9rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #1a1a1a;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.9rem;
+}
+
+.btn:hover {
+  background: #f3f4f6;
+}
+
+.btn-primary {
+  background: #2563eb;
+  border-color: #1d4ed8;
+  color: #ffffff;
+}
+
+.btn-primary:hover {
+  background: #1d4ed8;
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 0.1rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: #e5e7eb;
+  color: #4b5563;
+}
+
+.status-badge.is-ok {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.status-badge.is-warn {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.status-badge.is-error {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.banner {
+  margin: 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #f3f4f6;
+}
+
+.banner.is-warn {
+  background: #fff3cd;
+  border-color: #ffc107;
+}
+
+.banner.is-error {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #991b1b;
+}
+
+@media (prefers-color-scheme: dark) {
+  .btn {
+    background: #1e293b;
+    border-color: #475569;
+    color: #f3f4f6;
+  }
+  .btn:hover {
+    background: #334155;
+  }
+  .status-badge {
+    background: #334155;
+    color: #cbd5e1;
+  }
+  .status-badge.is-ok {
+    background: #064e3b;
+    color: #a7f3d0;
+  }
+  .status-badge.is-warn {
+    background: #78350f;
+    color: #fde68a;
+  }
+  .status-badge.is-error {
+    background: #7f1d1d;
+    color: #fecaca;
+  }
+  .banner {
+    background: #1e293b;
+    border-color: #475569;
+  }
+  .banner.is-warn {
+    background: #422006;
+    border-color: #a16207;
+  }
+  .banner.is-error {
+    background: #450a0a;
+    border-color: #7f1d1d;
+    color: #fecaca;
+  }
+}
+
+/* ============================================================
  * Story 9-3 (FR37) — Live metric values grid (metrics.html).
  *
  * Scoped to `.metrics-grid-container` so the dashboard tile styles

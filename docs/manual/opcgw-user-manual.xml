@@ -1384,6 +1384,15 @@ find ./pki/private -type f -name '*.pem' -exec chmod 600 {} +    # no-op on fres
         <literal>user_password</literal>); one rotation step covers both
         surfaces.</para>
 
+        <para>All configuration and monitoring pages share a single
+        <emphasis>navigation bar</emphasis> across the top of the window
+        (Dashboard, Applications, Devices configuration, Live Metrics,
+        Commands, Inventory drift, Singleton config), so the web UI behaves as
+        one cohesive application. The current page is highlighted in the bar.
+        The web UI is built from plain HTML/CSS/JavaScript with no build step
+        or external framework — a deliberate choice that keeps the gateway
+        lightweight and auditable.</para>
+
         <programlisting language="ini">[web]
 # Master switch — default false.
 # Override: OPCGW_WEB__ENABLED=true

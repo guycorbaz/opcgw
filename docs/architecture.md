@@ -244,6 +244,8 @@ Objects/
 - `drift.rs` — Inventory drift computation (Story C-4)
 - `mod.rs` — `AppState`, route wiring, embedded static files
 
+**Static web UI (Story F-1):** the operator pages under `static/` (`index`, `applications`, `devices-config`, `metrics`, `commands`, `singleton-config`, `inventory-drift`, `devices`) share a **unified nav/header shell** injected at runtime by `static/shell.js` — a vanilla, self-contained component (the same pattern as `static/apply-bar.js`, Story F-0) that owns the single nav definition and derives the active link from `location.pathname`. Component styles live in `static/dashboard.css` (the `.app-shell` section + shared `.btn` / `.status-badge` / `.banner` primitives). The first-run wizard (`setup.html`) is intentionally excluded from the nav shell (the other pages are gated during first-run). **No build step, no framework, no `node_modules`** — static assets served verbatim by `ServeDir`.
+
 **CRUD write path (post-C-6):**
 ```
 POST /api/applications/:id/devices
