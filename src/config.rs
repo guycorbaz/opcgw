@@ -1439,8 +1439,15 @@ impl AppConfig {
         } else if self
             .chirpstack
             .api_token
-            .starts_with(crate::utils::PLACEHOLDER_PREFIX)
+            .contains(crate::utils::PLACEHOLDER_PREFIX)
         {
+            // `contains` (not `starts_with`): the singleton migration's Guard 3
+            // defers on `contains(PLACEHOLDER_MARKER)`, so a token carrying the
+            // placeholder fragment mid-string (e.g. via an env-var) would pass a
+            // `starts_with` check yet permanently block the migration. Rejecting
+            // `contains` of the prefix here keeps boot validation consistent with
+            // the migration guard (code review iter-2 H1).
+            //
             // A placeholder token can only be present when no real source
             // (env-var or secrets.toml) supplied one — i.e. genuinely
             // first-run. Accept it so the seed `config.toml` boots into the
@@ -1934,10 +1941,14 @@ impl AppConfig {
         } else if self
             .opcua
             .user_password
-            .starts_with(crate::utils::PLACEHOLDER_PREFIX)
+            .contains(crate::utils::PLACEHOLDER_PREFIX)
         {
+            // `contains` (not `starts_with`): keep consistent with the singleton
+            // migration's Guard 3 (`contains(PLACEHOLDER_MARKER)`) so a password
+            // carrying the placeholder fragment can't slip through and block the
+            // migration (code review iter-2 H1).
             errors.push(format!(
-                "opcua.user_password: placeholder value detected (starts with \"{}\"). \
+                "opcua.user_password: placeholder value detected (contains \"{}\"). \
                  Set OPCGW_OPCUA__USER_PASSWORD to inject the real secret. \
                  See docs/security.md.",
                 crate::utils::PLACEHOLDER_PREFIX
@@ -3253,6 +3264,30 @@ mod tests {
                 msg.contains("OPCGW_CHIRPSTACK__API_TOKEN env-var"),
                 "expected env-var error, got: {}",
                 msg,
+            );
+        });
+    }
+
+    /// Code review iter-2 H1: boot validation rejects an api_token carrying the
+    /// placeholder fragment MID-STRING (not just as a prefix), keeping it
+    /// consistent with the singleton migration's `contains(PLACEHOLDER_MARKER)`
+    /// Guard 3 so such a token can never reach (and jam) the migration.
+    #[test]
+    #[serial_test::serial]
+    fn test_validate_rejects_mid_string_placeholder_api_token() {
+        temp_env::with_var("OPCGW_CHIRPSTACK__API_TOKEN", None::<&str>, || {
+            let mut config = get_config();
+            // Non-empty, does NOT start with the prefix → not first-run → the
+            // full placeholder rule applies and must fire on `contains`.
+            config.chirpstack.api_token =
+                format!("real-looking-{}OPCGW_-tail", crate::utils::PLACEHOLDER_PREFIX);
+            let err = config
+                .validate()
+                .expect_err("mid-string placeholder api_token must be rejected");
+            assert!(
+                err.to_string().contains("api_token"),
+                "expected api_token placeholder error, got: {}",
+                err,
             );
         });
     }

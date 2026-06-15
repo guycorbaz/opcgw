@@ -310,27 +310,56 @@ async fn wizard_post_persists_secrets_and_chirpstack_and_signals_shutdown() {
     assert_eq!(mode, 0o600, "secrets.toml must be chmod 0600");
 
     // Story F-2: non-secret ChirpStack fields go to SQLite; the SECRET
-    // api_token must NOT appear there.
+    // api_token must NOT appear there. Values are stored JSON-encoded.
     let rows = sqlite.load_singleton_config().expect("load singleton config");
-    let has = |section: &str, key: &str, want: &str| {
-        rows.iter().any(|(s, k, v)| {
-            s == section && k == key && v.contains(want)
-        })
+    let exact = |section: &str, key: &str, json_value: &str| {
+        rows.iter()
+            .any(|(s, k, v)| s == section && k == key && v == json_value)
     };
     assert!(
-        has("chirpstack", "server_address", "chirpstack:8080"),
-        "SQLite must hold the wizard server_address, rows: {:?}",
+        exact("chirpstack", "server_address", "\"http://chirpstack:8080\""),
+        "SQLite must hold the wizard server_address (exact JSON), rows: {:?}",
         rows
     );
     assert!(
-        has("chirpstack", "tenant_id", "11111111"),
-        "SQLite must hold the wizard tenant_id, rows: {:?}",
+        exact(
+            "chirpstack",
+            "tenant_id",
+            "\"11111111-1111-1111-1111-111111111111\""
+        ),
+        "SQLite must hold the wizard tenant_id (exact JSON), rows: {:?}",
         rows
     );
     assert!(
         !rows.iter().any(|(_, k, _)| k == "api_token"),
         "the secret api_token must NEVER be written to SQLite, rows: {:?}",
         rows
+    );
+    assert!(
+        !rows.iter().any(|(_, k, _)| k == "user_password"),
+        "the secret user_password must NEVER be written to SQLite, rows: {:?}",
+        rows
+    );
+
+    // Code review iter-1 HIGH regression guard: the wizard runs the FULL D-0
+    // singleton migration, so SQLite must hold ALL non-secret sections (not
+    // just chirpstack) AND the d0-migration-done flag must be set. A partial
+    // `write_singleton_section("chirpstack", ...)` would leave global/opcua/web
+    // unmigrated and the flag unset, which on the next boot would trip Guard 2
+    // and permanently block the full migration.
+    let sections: std::collections::HashSet<&str> =
+        rows.iter().map(|(s, _, _)| s.as_str()).collect();
+    for required in ["global", "chirpstack", "opcua", "web"] {
+        assert!(
+            sections.contains(required),
+            "full migration must populate the '{}' section, sections: {:?}",
+            required,
+            sections
+        );
+    }
+    assert!(
+        sqlite.is_d0_migration_done().expect("read d0 flag"),
+        "the d0-migration-done flag must be set after a successful wizard submit"
     );
 
     // Verify the shutdown token was signalled.

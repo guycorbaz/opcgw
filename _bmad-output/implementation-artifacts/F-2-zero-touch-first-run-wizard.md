@@ -1,6 +1,6 @@
 # Story F.2: Zero-Touch First-Run Wizard
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -206,3 +206,27 @@ claude-opus-4-8[1m] (Opus 4.8, 1M context)
 - `README.md` — first-run section + Planning row F-2 → done.
 - `.env.example` — secrets now optional / wizard-collected.
 - `_bmad-output/implementation-artifacts/F-2-zero-touch-first-run-wizard.md` — this story; `sprint-status.yaml` status.
+
+## Senior Developer Review (AI)
+
+**Reviewed:** 2026-06-15 · **Method:** 3 parallel adversarial layers (Blind Hunter / Edge Case Hunter / Acceptance Auditor) on a different model than the implementer · **Iterations:** 2 patch rounds + iter-3 verification · **Outcome:** APPROVED — loop terminated, only LOW findings remain.
+
+### Iteration 1 — 1 HIGH (converged across all 3 layers) + LOWs
+- **HIGH (FIXED): partial SQLite write poisoned the D-0 singleton migration.** The wizard's `write_singleton_section("chirpstack", [server_address, tenant_id])` left `singleton_config` non-empty WITHOUT the `d0_migration_done` flag → next boot, migration Guard 2 (`count_singleton_config() > 0`) back-fills the flag and short-circuits to `AlreadyMigrated`, so `global`/`opcua`/`web` (+ remaining chirpstack keys) NEVER migrate, with no boot able to self-heal (Epic D "SQLite authoritative" model silently defeated). **Fix:** run the FULL `migrate_singleton_toml_to_sqlite(&candidate, …)` (writes all non-secret sections + the done-flag atomically) instead of a partial write; reorder to **secrets-file-first, migration-second** so a secrets-ok+migration-fail leaves an empty table → in-process retry re-runs cleanly. Regression guard added (`wizard_post_persists_…`: asserts all 4 sections present + `is_d0_migration_done()`).
+- LOW (FIXED): control-char rejection added to `server_address`/`tenant_id`; placeholder check on `tenant_id`; `.env.example` web-login/secret contradiction clarified; weak `contains` test assertion tightened to exact JSON.
+- Dismissed: candidate-validate-gates-whole-config (Edge) — the running config already passed identical `validate()` at boot, so non-cred fields can't newly fail.
+
+### Iteration 2 (mandatory — iter-1 introduced new flow) — 1 HIGH + fallout
+- **HIGH (FIXED): prefix-vs-marker asymmetry.** Validators rejected `starts_with(PLACEHOLDER_PREFIX="REPLACE_ME_WITH_")` but migration Guard 3 defers on `contains(PLACEHOLDER_MARKER="REPLACE_ME_WITH_OPCGW_")`. A secret like `abc-REPLACE_ME_WITH_OPCGW_-xyz` passed validation but trip­ped Guard 3 → wizard 500s forever + migration permanently blocked. **Fix:** all secret placeholder checks (wizard `validate_chirpstack`/`validate_password` + boot `AppConfig::validate` for api_token + user_password) now reject `contains(PLACEHOLDER_PREFIX)` — a strict superset of the migration's guard, so a validated secret can never trip Guard 3. Unit tests pin the mid-string case at both the wizard and boot layers. First-run carve-out preserved (`cs_first_run` / `is_first_run` still key on `starts_with`, so the seed placeholder still boots into the wizard).
+- MED/LOW (FIXED): migration-failure outcomes now get honest per-outcome `reason`s (`already_configured`/`config_invalid`/`sqlite_write_failed`) instead of a blanket `sqlite_write_failed`; `outcome` kept low-cardinality with the DB error logged separately; secrets-write-failure event renamed `setup_password_persistence_failed` → `setup_persistence_failed` (uniform `setup_*` family). Blind "candidate lacks merged secrets" was a false alarm (candidate overlays the validated secrets before the migration).
+
+### Iteration 3 — verification: CLEAN
+Confirmed `contains(PREFIX) ⊇ contains(MARKER)` fully closes the gap; the `starts_with`→`contains` change does not break the first-run carve-out (seed placeholder still accepted); no false-positive on realistic secrets (JWTs/passwords don't embed "REPLACE_ME_WITH_"); outcome match exhaustive, no panic; tests are not fake-guards. Loop terminates.
+
+### Accepted / deferred (LOW — see deferred-work.md)
+- Env-var-supplied secret silently overridden by a wizard value in a mixed env+wizard config (niche, no breakage/security/data-loss) — downgraded LOW, **flagged to Guy for explicit accept**.
+- api_token 2048-char bound (deliberate, JWTs) + 4 KiB body-limit pre-emption — accepted.
+- Audit-event rename (pre-announcement, documented) — accepted.
+
+### Gates (final)
+`cargo test` exit 0 · `cargo clippy --all-targets -- -D warnings` clean · `xmllint` clean · `node --check` OK. config 109/0, web::setup 25/0, web::csrf 16/0, tests/web_setup_wizard 15/0.

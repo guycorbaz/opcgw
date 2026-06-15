@@ -294,7 +294,10 @@ fn validate_password(req: &SetupRequest) -> Option<&'static str> {
     if req.password.trim().is_empty() {
         return Some("whitespace_only");
     }
-    if req.password.starts_with(PLACEHOLDER_PREFIX) {
+    // `contains` (not `starts_with`): the OPC UA password is also gated by the
+    // migration's Guard 3 (`contains(PLACEHOLDER_MARKER)`), so reject any
+    // placeholder fragment anywhere in the value (code review iter-2 H1).
+    if req.password.contains(PLACEHOLDER_PREFIX) {
         return Some("placeholder_prefix");
     }
     // Iter-1 code review EH-H1 + Blind M5 fix: reject mid-string ASCII
@@ -337,12 +340,21 @@ fn validate_password(req: &SetupRequest) -> Option<&'static str> {
 /// next boot would reject. One-at-a-time semantics like
 /// [`validate_password`]; returns the first violation's `reason` code.
 fn validate_chirpstack(req: &SetupRequest) -> Option<&'static str> {
+    // Mid-string ASCII control chars (U+0000..=U+001F + U+007F DEL) are
+    // rejected on every field — they're almost always paste errors and would
+    // round-trip opaquely into the gRPC endpoint/tenant strings (code review
+    // iter-1: parity with the api_token control-char check).
+    let has_control = |s: &str| s.chars().any(|c| (c as u32) < 0x20 || c == '\u{7F}');
+
     // server_address
     if req.server_address.is_empty() {
         return Some("server_address_empty");
     }
     if req.server_address.trim() != req.server_address {
         return Some("server_address_whitespace");
+    }
+    if has_control(&req.server_address) {
+        return Some("server_address_control_char");
     }
     if !req.server_address.starts_with("http://") && !req.server_address.starts_with("https://") {
         return Some("server_address_scheme");
@@ -357,6 +369,17 @@ fn validate_chirpstack(req: &SetupRequest) -> Option<&'static str> {
     if req.tenant_id.trim() != req.tenant_id {
         return Some("tenant_id_whitespace");
     }
+    if has_control(&req.tenant_id) {
+        return Some("tenant_id_control_char");
+    }
+    // `contains` (not `starts_with`): the singleton migration's Guard 3 defers
+    // on `contains(PLACEHOLDER_MARKER)` (a superset string of PLACEHOLDER_PREFIX),
+    // so a value with the placeholder fragment mid-string would slip past a
+    // `starts_with` check here yet jam the migration. Rejecting `contains` of
+    // the (shorter) prefix closes that asymmetry (code review iter-2 H1).
+    if req.tenant_id.contains(PLACEHOLDER_PREFIX) {
+        return Some("tenant_id_placeholder");
+    }
     if req.tenant_id.chars().count() > 128 {
         return Some("tenant_id_too_long");
     }
@@ -368,7 +391,11 @@ fn validate_chirpstack(req: &SetupRequest) -> Option<&'static str> {
     if req.api_token.trim() != req.api_token {
         return Some("api_token_whitespace");
     }
-    if req.api_token.starts_with(PLACEHOLDER_PREFIX) {
+    // `contains` (not `starts_with`) — see the tenant_id note above; for the
+    // api_token this is load-bearing: the migration's Guard 3 would otherwise
+    // defer indefinitely on a marker-containing token, permanently blocking the
+    // singleton migration AND dead-ending the wizard (code review iter-2 H1).
+    if req.api_token.contains(PLACEHOLDER_PREFIX) {
         return Some("api_token_placeholder");
     }
     if req.api_token.chars().any(|c| (c as u32) < 0x20 || c == '\u{7F}') {
@@ -581,12 +608,15 @@ pub async fn setup_post(
             .into_response();
     }
 
-    // Story F-2: belt-and-braces — overlay the submitted values onto the
-    // current config snapshot and run the full `AppConfig::validate` so the
-    // wizard can never persist a combination the next boot would reject.
-    // (The per-field validators above give precise reason codes; this catches
-    // any cross-field invariant.)
-    {
+    // Story F-2: overlay the submitted values onto the current config
+    // snapshot to build the `candidate` config. This serves two purposes:
+    // (1) belt-and-braces — run the full `AppConfig::validate` so the wizard
+    // can never persist a combination the next boot would reject (the
+    // per-field validators above give precise reason codes; this catches any
+    // cross-field invariant); (2) it is the config the singleton migration
+    // below persists into SQLite, so SQLite ends up with the operator's
+    // ChirpStack connection (not the seed `config.toml` values).
+    let candidate: crate::config::AppConfig = {
         let current_arc = state.config_reload.subscribe().borrow().clone();
         let mut candidate: crate::config::AppConfig = (*current_arc).clone();
         candidate.chirpstack.server_address = req.server_address.clone();
@@ -610,7 +640,8 @@ pub async fn setup_post(
             )
                 .into_response();
         }
-    }
+        candidate
+    };
 
     // Iter-2 P5: race-free first-run-mode flip. compare_exchange
     // atomically transitions the gateway from first-run to post-first-
@@ -653,179 +684,165 @@ pub async fn setup_post(
             .into_response();
     }
 
-    // Story F-2: persist the NON-SECRET ChirpStack connection fields to the
-    // SQLite singleton store FIRST. In first-run mode the singleton_config
-    // table is empty (migration is deferred while secrets are placeholders —
-    // see migrate_singleton_config.rs), so the section-replace semantics of
-    // `write_singleton_section` wipe nothing; the remaining ChirpStack knobs
-    // (polling_frequency, retry, …) flow from config.toml on the next boot
-    // and the full singleton migration captures the merged set then. Secrets
-    // are NEVER written here — only to secrets.toml below.
-    let chirpstack_fields: Vec<(String, String)> = vec![
-        (
-            "server_address".to_string(),
-            serde_json::to_string(&req.server_address).unwrap_or_default(),
-        ),
-        (
-            "tenant_id".to_string(),
-            serde_json::to_string(&req.tenant_id).unwrap_or_default(),
-        ),
-    ];
-    if let Err(e) = state
-        .sqlite_config
-        .write_singleton_section("chirpstack", &chirpstack_fields)
-    {
-        // Revert the flip so the operator can retry; do NOT restart.
+    // ───────────────────────────────────────────────────────────────────
+    // Story F-2 — two-store persistence (secrets.toml + SQLite). There is no
+    // transaction across the two stores, so ORDER matters for recoverability:
+    // write the secrets file FIRST, then run the SQLite migration. Rationale:
+    // the migration is a single atomic transaction (all sections + the
+    // `d0_migration_done` flag, or nothing — see migrate_singleton_config.rs),
+    // so if secrets succeed and the migration then fails, the migration rolled
+    // back to an EMPTY singleton table with NO done-flag → an in-process retry
+    // re-runs cleanly. Were the order reversed, a successful migration sets the
+    // done-flag, and a subsequent secrets failure would make every retry's
+    // migration short-circuit to `AlreadyMigrated` (Guard 1) — a dead-end.
+    //
+    // On ANY failure we revert `is_first_run` to true and do NOT cancel
+    // `shutdown_token`, so the gateway keeps running in first-run mode and the
+    // operator can retry (the revert is unconditional — we won the prior
+    // compare_exchange, so we are the only writer).
+    let secrets_filename = state
+        .secrets_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("secrets.toml");
+
+    // === Step 1: write BOTH secrets to secrets.toml (atomic single-file). ===
+    let secrets = SecretsToWrite {
+        chirpstack_api_token: &req.api_token,
+        opcua_password: &req.password,
+    };
+    if let Err(e) = write_secrets_toml(&state.secrets_path, &secrets) {
         state.is_first_run.store(true, Ordering::SeqCst);
+        // Iter-2 P7: categorised reason (readonly_filesystem / disk_full /
+        // permission_denied / parent_directory_missing / io_error).
+        let reason = e.reason_code();
         warn!(
+            // Story F-2 (iter-2): uniform `setup_persistence_failed` across both
+            // the secrets-write and SQLite-migration failure paths (the legacy
+            // `setup_password_persistence_failed` name is retired alongside
+            // `setup_password_accepted`); `reason` distinguishes the cause.
             event = "setup_persistence_failed",
-            reason = "sqlite_write_failed",
+            reason = reason,
             source_ip = %addr.ip(),
-            error = ?e,
-            "setup_post: failed to write ChirpStack connection to SQLite; \
-             is_first_run reverted for operator retry"
+            error = %e,
+            secrets_filename = secrets_filename,
+            "setup_post: failed to write secrets file; \
+             is_first_run reverted to true for operator retry"
         );
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(SetupPasswordError {
                 error: "persistence_failed",
-                reason: "sqlite_write_failed",
+                reason,
             }),
         )
             .into_response();
     }
 
-    // Persist the secrets (ChirpStack token + OPC UA password) to
-    // secrets.toml. The path is derived from the gateway's config_dir which
-    // is captured into AppState at boot.
-    let secrets = SecretsToWrite {
-        chirpstack_api_token: &req.api_token,
-        opcua_password: &req.password,
+    // === Step 2: persist the NON-SECRET singleton config to SQLite by running
+    // the FULL D-0 singleton migration against `candidate` (which carries the
+    // operator's ChirpStack connection). Secrets are skipped by the migration's
+    // secret skip-list — they live only in secrets.toml (written above). ===
+    //
+    // Code review iter-1 HIGH: a partial `write_singleton_section("chirpstack",
+    // [server_address, tenant_id])` would leave the `singleton_config` table
+    // non-empty WITHOUT the `d0_migration_done` flag. On the next boot the
+    // migration's Guard 2 (`count_singleton_config() > 0`) back-fills the
+    // done-flag and short-circuits to `AlreadyMigrated`, so the global/opcua/web
+    // sections (and the remaining chirpstack knobs) would NEVER migrate into
+    // SQLite — silently defeating the Epic D "SQLite is authoritative" model,
+    // with no boot able to self-heal it. Running the FULL migration here writes
+    // every non-secret section + sets the done-flag, so the next boot's Guard 1
+    // correctly sees `AlreadyMigrated` with the complete set present. In
+    // first-run mode the table is empty (boot-time migration deferred while
+    // secrets were placeholders) and `candidate` carries real secrets, so the
+    // migration runs cleanly and returns `Migrated`. Any other outcome is
+    // abnormal for a first-run submit → revert and surface a 500 so the operator
+    // can retry / investigate.
+    use crate::storage::migrate_singleton_config::{
+        migrate_singleton_toml_to_sqlite, SingletonMigrationOutcome,
     };
-    match write_secrets_toml(&state.secrets_path, &secrets) {
-        Ok(()) => {
-            // Iter-1 code review M2 fix: log the FILENAME only, not
-            // the full path. Full deployment path is sensitive
-            // topology info that would defeat the file's 0600 mode
-            // protection if logs are read by a broader audience than
-            // file-system access.
-            let secrets_filename = state
-                .secrets_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("secrets.toml");
-            // Story F-2: broadened acceptance event. The wizard now
-            // persists the ChirpStack connection (to SQLite) + both secrets
-            // (to secrets.toml), so the event records the full first-run
-            // completion. The legacy `setup_password_accepted` name is
-            // retired in favour of `setup_accepted`; operators grepping the
-            // audit stream for first-run completion should watch the
-            // `config_reload` event below (stable across C-0 → F-2).
-            info!(
-                event = "setup_accepted",
-                source_ip = %addr.ip(),
-                secrets_filename = secrets_filename,
-                "setup_post: ChirpStack connection persisted to SQLite and \
-                 secrets persisted to secrets file; gateway will shut down \
-                 for restart"
-            );
-
-            // Iter-1 Auditor AC#11 patch: emit the config-reload audit
-            // event with `trigger="first_run_wizard"` so the AC#18
-            // grep contract is preserved (operators watching
-            // `event="config_reload"` see the first-run completion in
-            // their audit stream). The actual reload happens via the
-            // restart path, not the in-place primitive — the event
-            // captures the operational intent for forensic clarity.
-            info!(
-                event = "config_reload",
-                trigger = "first_run_wizard",
-                source_ip = %addr.ip(),
-                "setup_post: first-run wizard completed; \
-                 gateway restart will apply the new ChirpStack connection \
-                 and secrets"
-            );
-
-            // Iter-1 code review M7 fix: build the response BEFORE
-            // signalling shutdown. Pre-fix, `state.shutdown_token
-            // .cancel()` was called BEFORE the response was
-            // constructed; the web server task listens on the cancel
-            // token in `tokio::select!` and could win the race,
-            // exiting before the response was flushed to the client.
-            // Building the response first lets axum's graceful-
-            // shutdown ensure in-flight responses complete before the
-            // listener stops accepting new connections.
-            let response = (
-                StatusCode::OK,
-                Json(SetupPasswordSuccess {
-                    status: "password_set_restarting",
-                    restarting_in_seconds: 5,
-                }),
-            )
-                .into_response();
-
-            // Trigger graceful shutdown so the supervisor restarts the
-            // gateway. The supervisor (Docker restart policy / systemd
-            // Restart=on-failure) reboots; the figment provider stack
-            // picks up secrets.toml on the next boot.
-            state.shutdown_token.cancel();
-
-            response
-        }
-        Err(e) => {
-            // Iter-3 P2: revert the compare_exchange flip on write
-            // failure so the operator can retry after fixing the
-            // underlying cause (chmod, mount rw, free disk). Pre-fix
-            // (iter-2 P5), `is_first_run` stayed `false` after a
-            // failed write — the operator's retry hit the 410 Gone
-            // path and got locked out without a process restart, but
-            // the JS UI re-enabled the submit button so the operator
-            // could click again and again. Reverting closes that
-            // dead-end. The race-free guarantee is preserved: the
-            // next legitimate retry goes back through compare_exchange
-            // and either wins (proceeds to write) or loses (gets 409
-            // Conflict because a concurrent retry won).
-            //
-            // Ordering: revert BEFORE emitting the audit event so the
-            // event accurately reflects the post-revert state. The
-            // `store(true, SeqCst)` is unconditional because we won
-            // the prior compare_exchange — we're the only writer.
-            state.is_first_run.store(true, std::sync::atomic::Ordering::SeqCst);
-
-            // Iter-1 M2: same filename-only redaction as the success
-            // path above.
-            let secrets_filename = state
-                .secrets_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("secrets.toml");
-            // Iter-2 P7: surface the categorised reason in BOTH the
-            // audit event and the JSON response so the operator can
-            // tell `readonly_filesystem` (mount rw) apart from
-            // `disk_full` (free space) apart from `permission_denied`
-            // (chmod / chown) apart from `parent_directory_missing`
-            // (Docker volume not mounted). Pre-fix every io error
-            // collapsed to `reason="io_error"`.
-            let reason = e.reason_code();
-            warn!(
-                event = "setup_password_persistence_failed",
-                reason = reason,
-                source_ip = %addr.ip(),
-                error = %e,
-                secrets_filename = secrets_filename,
-                "setup_post: failed to write secrets file; \
-                 is_first_run reverted to true for operator retry"
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(SetupPasswordError {
-                    error: "persistence_failed",
-                    reason,
-                }),
-            )
-                .into_response()
-        }
+    let migration_result =
+        migrate_singleton_toml_to_sqlite(&candidate, &state.sqlite_config);
+    if !matches!(migration_result, Ok(SingletonMigrationOutcome::Migrated(_))) {
+        state.is_first_run.store(true, Ordering::SeqCst);
+        // Honest per-outcome classification (code review iter-2 M1/M2/L1):
+        // surface a distinct `reason` instead of collapsing every non-Migrated
+        // outcome to "sqlite_write_failed", keep `outcome` a low-cardinality
+        // stable token, and log the DB error separately. After the iter-2 H1
+        // fix the placeholder-skip variant is unreachable from a validated
+        // submit, and AlreadyMigrated only arises if the singleton table was
+        // pre-populated (abnormal in first-run) — both still revert + 500 so a
+        // dirty state never silently completes setup, but with an accurate
+        // reason rather than a misleading write-failure label.
+        let (reason, outcome, err_detail): (&'static str, &'static str, Option<String>) =
+            match &migration_result {
+                // Excluded by the outer guard; mapped only for exhaustiveness.
+                Ok(SingletonMigrationOutcome::Migrated(_)) => ("sqlite_write_failed", "migrated", None),
+                Ok(SingletonMigrationOutcome::AlreadyMigrated) => {
+                    ("already_configured", "already_migrated", None)
+                }
+                Ok(SingletonMigrationOutcome::SkippedEmptyOrPlaceholder) => {
+                    ("config_invalid", "skipped_empty_or_placeholder", None)
+                }
+                Err(e) => ("sqlite_write_failed", "error", Some(e.to_string())),
+            };
+        warn!(
+            event = "setup_persistence_failed",
+            reason = reason,
+            outcome = outcome,
+            source_ip = %addr.ip(),
+            error = err_detail.as_deref().unwrap_or(""),
+            "setup_post: singleton config migration did not complete cleanly; \
+             is_first_run reverted for operator retry (secrets.toml was written; \
+             an in-process retry re-runs a rolled-back migration cleanly)"
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(SetupPasswordError {
+                error: "persistence_failed",
+                reason,
+            }),
+        )
+            .into_response();
     }
+
+    // === Step 3: success — audit, build response, then signal restart. ===
+    //
+    // Story F-2: broadened acceptance event. The wizard persisted both secrets
+    // (secrets.toml) + the non-secret ChirpStack connection (SQLite). The legacy
+    // `setup_password_accepted` name is retired in favour of `setup_accepted`;
+    // operators grepping for first-run completion should watch `config_reload`
+    // (stable across C-0 → F-2).
+    info!(
+        event = "setup_accepted",
+        source_ip = %addr.ip(),
+        secrets_filename = secrets_filename,
+        "setup_post: secrets persisted to secrets file and ChirpStack \
+         connection migrated to SQLite; gateway will shut down for restart"
+    );
+    // Iter-1 Auditor AC#11 patch: emit the config-reload audit event with
+    // `trigger="first_run_wizard"` so the grep contract is preserved.
+    info!(
+        event = "config_reload",
+        trigger = "first_run_wizard",
+        source_ip = %addr.ip(),
+        "setup_post: first-run wizard completed; \
+         gateway restart will apply the new ChirpStack connection and secrets"
+    );
+    // Iter-1 code review M7 fix: build the response BEFORE signalling shutdown
+    // so axum's graceful-shutdown flushes the in-flight response before the
+    // listener stops accepting connections.
+    let response = (
+        StatusCode::OK,
+        Json(SetupPasswordSuccess {
+            status: "password_set_restarting",
+            restarting_in_seconds: 5,
+        }),
+    )
+        .into_response();
+    state.shutdown_token.cancel();
+    response
 }
 
 /// Iter-2 P7: categorised failure modes for `write_secrets_toml`.
@@ -1263,6 +1280,61 @@ mod tests {
         assert_eq!(
             validate_chirpstack(&cs_req("http://x:8080", "", "tok")),
             Some("tenant_id_empty")
+        );
+    }
+
+    /// Code review iter-2 H1: a secret carrying the placeholder fragment
+    /// MID-STRING (not just as a prefix) must be rejected, because the
+    /// singleton migration's Guard 3 defers on `contains(PLACEHOLDER_MARKER)`
+    /// and a deferred migration would dead-end the wizard. The validators use
+    /// `contains(PLACEHOLDER_PREFIX)`, a superset of the migration's guard.
+    #[test]
+    fn validators_reject_mid_string_placeholder_fragment() {
+        let embedded = format!("abc-{}OPCGW_-xyz", PLACEHOLDER_PREFIX);
+        assert!(
+            !embedded.starts_with(PLACEHOLDER_PREFIX),
+            "test fixture must NOT start with the prefix (that's the whole point)"
+        );
+        // api_token
+        assert_eq!(
+            validate_chirpstack(&cs_req("http://x:8080", "t", &embedded)),
+            Some("api_token_placeholder")
+        );
+        // tenant_id
+        assert_eq!(
+            validate_chirpstack(&cs_req("http://x:8080", &embedded, "tok")),
+            Some("tenant_id_placeholder")
+        );
+        // OPC UA password
+        let req = SetupRequest {
+            server_address: "http://x:8080".to_string(),
+            tenant_id: "t".to_string(),
+            api_token: "tok".to_string(),
+            password: embedded.clone(),
+            password_confirm: embedded,
+        };
+        assert_eq!(validate_password(&req), Some("placeholder_prefix"));
+    }
+
+    /// Code review iter-1 LOW: control chars rejected on server_address +
+    /// tenant_id (parity with api_token), and a placeholder tenant rejected.
+    #[test]
+    fn validate_chirpstack_rejects_control_chars_and_placeholder_tenant() {
+        assert_eq!(
+            validate_chirpstack(&cs_req("http://ho\u{08}st:8080", "t", "tok")),
+            Some("server_address_control_char")
+        );
+        assert_eq!(
+            validate_chirpstack(&cs_req("http://x:8080", "ab\u{7F}cd", "tok")),
+            Some("tenant_id_control_char")
+        );
+        assert_eq!(
+            validate_chirpstack(&cs_req(
+                "http://x:8080",
+                &format!("{}TENANT", PLACEHOLDER_PREFIX),
+                "tok"
+            )),
+            Some("tenant_id_placeholder")
         );
     }
 
