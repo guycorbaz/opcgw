@@ -39,15 +39,24 @@
     font-weight: bold;
     font-size: 0.95rem;
   }
-  .wizard input[type="password"] {
+  .wizard input[type="password"],
+  .wizard input[type="text"] {
     padding: 0.5rem;
     font-size: 1rem;
     border: 1px solid #ccc;
     border-radius: 3px;
   }
-  .wizard input[type="password"]:focus {
+  .wizard input[type="password"]:focus,
+  .wizard input[type="text"]:focus {
     outline: 2px solid #2980b9;
     outline-offset: -1px;
+  }
+  .wizard h2 {
+    font-size: 1.05rem;
+    color: #2c3e50;
+    margin: 1.5rem 0 0.75rem;
+    border-top: 1px solid #eee;
+    padding-top: 1rem;
   }
   .wizard .hint {
     font-size: 0.85rem;
@@ -92,24 +101,46 @@
 <section class="wizard">
   <h1>Welcome to opcgw</h1>
   <p class="intro">
-    This gateway has no OPC UA password configured yet. Set one below to
-    finish the first-run setup. The password is used by your SCADA clients
-    when they connect to the OPC UA server.
+    This gateway is not configured yet. Fill in how to reach your ChirpStack
+    server and choose an OPC UA password below to finish the first-run setup —
+    no text-file editing required.
   </p>
   <p class="intro">
-    The password is persisted to <code>config/secrets.toml</code> (file
-    mode <code>0600</code>; gitignored). After you submit, opcgw will
-    restart to apply the new configuration — this takes a few seconds.
+    The ChirpStack API token and the OPC UA password are secrets; they are
+    persisted to <code>config/secrets.toml</code> (file mode <code>0600</code>;
+    gitignored). The server address and tenant are stored in the gateway
+    database. After you submit, opcgw will restart to apply the new
+    configuration — this takes a few seconds.
   </p>
 
   <div id="error-banner" class="error-banner" hidden></div>
   <div id="success-banner" class="success-banner" hidden></div>
 
   <form id="setup-form">
+    <h2>ChirpStack connection</h2>
+    <div class="field">
+      <label for="server-address">Server address</label>
+      <input id="server-address" name="server_address" type="text" required
+             autocomplete="off" placeholder="http://chirpstack:8080">
+      <span class="hint">Full URL including scheme and port, e.g. <code>http://chirpstack:8080</code> or <code>https://cs.example.com:8080</code>.</span>
+    </div>
+    <div class="field">
+      <label for="tenant-id">Tenant ID</label>
+      <input id="tenant-id" name="tenant_id" type="text" required
+             autocomplete="off" placeholder="00000000-0000-0000-0000-000000000000">
+      <span class="hint">The ChirpStack tenant whose devices this gateway exposes.</span>
+    </div>
+    <div class="field">
+      <label for="api-token">API token</label>
+      <input id="api-token" name="api_token" type="password" required autocomplete="new-password">
+      <span class="hint">A ChirpStack API key with read access to the tenant's applications and devices. Stored as a secret.</span>
+    </div>
+
+    <h2>OPC UA server</h2>
     <div class="field">
       <label for="password">OPC UA password</label>
       <input id="password" name="password" type="password" required autocomplete="new-password">
-      <span class="hint">Must not be empty; no leading or trailing whitespace; no control characters; not a placeholder string; up to 256 characters.</span>
+      <span class="hint">Used by your SCADA clients to connect. Must not be empty; no leading or trailing whitespace; no control characters; not a placeholder string; up to 256 characters.</span>
     </div>
     <div class="field">
       <label for="password-confirm">Confirm password</label>
@@ -143,6 +174,22 @@
     whitespace_only: 'The password must contain non-whitespace characters.',
     placeholder_prefix: 'The password looks like an unfilled placeholder. Replace it with a real value.',
     confirmation_mismatch: 'The two password fields do not match.',
+    // Story F-2: ChirpStack field validation reasons (keep in sync with
+    // src/web/setup.rs::validate_chirpstack).
+    server_address_empty: 'The ChirpStack server address must not be empty.',
+    server_address_whitespace: 'The server address must not start or end with whitespace.',
+    server_address_scheme: 'The server address must start with http:// or https://.',
+    server_address_too_long: 'The server address is too long.',
+    tenant_id_empty: 'The ChirpStack tenant ID must not be empty.',
+    tenant_id_whitespace: 'The tenant ID must not start or end with whitespace.',
+    tenant_id_too_long: 'The tenant ID is too long.',
+    api_token_empty: 'The ChirpStack API token must not be empty.',
+    api_token_whitespace: 'The API token must not start or end with whitespace.',
+    api_token_placeholder: 'The API token looks like an unfilled placeholder. Paste your real ChirpStack API key.',
+    api_token_control_char: 'The API token contains control characters (likely a paste error). Remove them and try again.',
+    api_token_too_long: 'The API token is too long.',
+    config_invalid: 'The submitted configuration was rejected by the gateway validator. Check the values and try again.',
+    sqlite_write_failed: 'opcgw could not save the ChirpStack connection to its database. See the gateway logs for details.',
     control_char_invalid: 'The password contains control characters (likely a paste error). Remove them and try again.',
     too_long: 'The password is too long (maximum 256 characters).',
     invalid_json: 'The server could not parse the form data — please try again or reload the page.',
@@ -200,15 +247,28 @@
    * client-side check gives operators immediate feedback on the
    * common mistakes before the round-trip.
    */
-  function validateClientSide(password, confirmation) {
-    if (!password) return 'empty';
-    if (password.trim() !== password) return 'whitespace_bracketed';
-    if (!password.trim()) return 'whitespace_only';
+  function validateClientSide(fields) {
+    // ChirpStack fields first (mirror src/web/setup.rs::validate_chirpstack).
+    if (!fields.server_address) return 'server_address_empty';
+    if (fields.server_address.trim() !== fields.server_address) return 'server_address_whitespace';
+    if (fields.server_address.indexOf('http://') !== 0 && fields.server_address.indexOf('https://') !== 0) {
+      return 'server_address_scheme';
+    }
+    if (!fields.tenant_id) return 'tenant_id_empty';
+    if (fields.tenant_id.trim() !== fields.tenant_id) return 'tenant_id_whitespace';
+    if (!fields.api_token) return 'api_token_empty';
+    if (fields.api_token.trim() !== fields.api_token) return 'api_token_whitespace';
     // Iter-2 P8 + P20: PLACEHOLDER_PREFIX is server-rendered into the
-    // {{PLACEHOLDER_PREFIX}} token below by setup_get (src/web/setup.rs)
-    // so client + server share a single source of truth (src/utils.rs).
-    if (password.indexOf('{{PLACEHOLDER_PREFIX}}') === 0) return 'placeholder_prefix';
-    if (password !== confirmation) return 'confirmation_mismatch';
+    // {{PLACEHOLDER_PREFIX}} token by setup_get (src/web/setup.rs) so client
+    // + server share a single source of truth (src/utils.rs).
+    if (fields.api_token.indexOf('{{PLACEHOLDER_PREFIX}}') === 0) return 'api_token_placeholder';
+
+    // OPC UA password (mirror src/web/setup.rs::validate_password).
+    if (!fields.password) return 'empty';
+    if (fields.password.trim() !== fields.password) return 'whitespace_bracketed';
+    if (!fields.password.trim()) return 'whitespace_only';
+    if (fields.password.indexOf('{{PLACEHOLDER_PREFIX}}') === 0) return 'placeholder_prefix';
+    if (fields.password !== fields.password_confirm) return 'confirmation_mismatch';
     return null;
   }
 
@@ -216,10 +276,15 @@
     event.preventDefault();
     errorBanner.hidden = true;
 
-    const password = document.getElementById('password').value;
-    const confirmation = document.getElementById('password-confirm').value;
+    const fields = {
+      server_address: document.getElementById('server-address').value,
+      tenant_id: document.getElementById('tenant-id').value,
+      api_token: document.getElementById('api-token').value,
+      password: document.getElementById('password').value,
+      password_confirm: document.getElementById('password-confirm').value,
+    };
 
-    const clientReason = validateClientSide(password, confirmation);
+    const clientReason = validateClientSide(fields);
     if (clientReason) {
       showError(clientReason);
       return;
@@ -228,13 +293,10 @@
     submitBtn.disabled = true;
     submitBtn.textContent = 'Saving...';
 
-    fetch('/api/setup/password', {
+    fetch('/api/setup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        password: password,
-        password_confirm: confirmation,
-      }),
+      body: JSON.stringify(fields),
     })
       .then(function (response) {
         return response.json().then(function (body) {

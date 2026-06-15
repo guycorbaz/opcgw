@@ -7,29 +7,32 @@
 # or written again. Editing it has no effect on an already-initialised gateway —
 # use the web UI instead.
 #
-# You DO need to fill this file in (or supply the equivalent OPCGW_* env vars)
-# before the first boot: at minimum a valid [chirpstack] section (server
-# address, API token, tenant) and the [opcua] settings below. The gateway
-# validates this configuration at startup and refuses to start if it is
-# incomplete or still contains placeholder secrets.
+# Story F-2: you do NOT have to edit this file to get a working gateway. As
+# shipped, the [chirpstack] section holds a placeholder API token and the OPC UA
+# password is empty — so opcgw boots into FIRST-RUN MODE and serves a browser
+# wizard that collects the ChirpStack connection (server address, tenant, API
+# token) AND the OPC UA password. You can still pre-fill this file or supply the
+# OPCGW_* env vars to skip the wizard.
 #
 # Configuration precedence: environment variable > SQLite > this file > default.
 #
-# Secrets are NOT committed here. Inject them via environment variables:
-#   OPCGW_CHIRPSTACK__API_TOKEN   — ChirpStack API token
-#   OPCGW_OPCUA__USER_PASSWORD    — OPC UA user password
-# The OPC UA password may instead be set through the first-run web wizard (see
-# step 3), which writes it to config/secrets.toml with file mode 0600.
+# Secrets are NOT committed here. Supply them by EITHER:
+#   - the first-run web wizard (writes config/secrets.toml, file mode 0600), OR
+#   - environment variables:
+#       OPCGW_CHIRPSTACK__API_TOKEN   — ChirpStack API token
+#       OPCGW_OPCUA__USER_PASSWORD    — OPC UA user password
 #
-# Quick start:
-#   1. Fill in [chirpstack] (server_address, api_token, tenant_id) below, or set
-#      the matching OPCGW_* env vars. Copy `.env.example` to `.env` for secrets.
+# Quick start (zero-touch):
+#   1. Copy `.env.example` to `.env` (the web-UI login + log path live there).
+#      You do NOT need to put the ChirpStack token or OPC UA password in `.env`
+#      unless you want to skip the wizard.
 #   2. Run the gateway (`cargo run`, or `docker compose up` which auto-loads
 #      `.env`). The web UI is enabled by default on port 8080.
-#   3. If no OPC UA password is configured, opcgw boots into first-run mode and
-#      serves a one-shot setup wizard at http://localhost:8080/setup that
-#      collects ONLY the OPC UA password (all other settings come from this
-#      file / env vars).
+#   3. opcgw boots into first-run mode and serves a one-shot setup wizard at
+#      http://localhost:8080/setup that collects the ChirpStack connection
+#      (server_address / tenant_id / api_token) and the OPC UA password — no
+#      text-file editing required. Secrets go to config/secrets.toml (0600);
+#      the server address + tenant go to the gateway database.
 #   4. After first boot, manage everything from the web UI: the singleton-config
 #      editor ([global]/[chirpstack]/[opcua]/[web]), the ChirpStack inventory
 #      pickers (applications/devices/metrics), and the drift view.

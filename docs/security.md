@@ -31,8 +31,8 @@ walk into nested TOML keys).
 
 | Field                          | Env var                              | Required for new deployments? |
 |--------------------------------|--------------------------------------|-------------------------------|
-| `chirpstack.api_token`         | `OPCGW_CHIRPSTACK__API_TOKEN`        | **yes** — placeholder rejected at startup |
-| `opcua.user_password`          | `OPCGW_OPCUA__USER_PASSWORD`         | **yes** — placeholder rejected at startup |
+| `chirpstack.api_token`         | `OPCGW_CHIRPSTACK__API_TOKEN`        | **yes** — but Story F-2: an empty/placeholder token + no env-var triggers the first-run wizard (which collects it) instead of aborting; env-var-set-but-empty is still rejected |
+| `opcua.user_password`          | `OPCGW_OPCUA__USER_PASSWORD`         | **yes** — empty + no env-var triggers the first-run wizard; placeholder still rejected |
 | `chirpstack.tenant_id`         | `OPCGW_CHIRPSTACK__TENANT_ID`        | optional — placeholder UUID is a valid format; ChirpStack will reject calls until set |
 | `chirpstack.server_address`    | `OPCGW_CHIRPSTACK__SERVER_ADDRESS`   | optional |
 | `opcua.host_port`              | `OPCGW_OPCUA__HOST_PORT`             | optional |
@@ -52,25 +52,27 @@ Configuration values are resolved in this order (highest priority last):
 
 1. **Defaults** — hard-coded in `src/config.rs`.
 2. **`config/config.toml`** — values from the TOML file.
-3. **`config/secrets.toml`** — Epic C C-0 (2026-05-21) added a sibling secrets file written by the first-run wizard (see *First-run wizard* below). Loaded by figment between the main TOML and the env-var layer.
+3. **`config/secrets.toml`** — Epic C C-0 (2026-05-21) added a sibling secrets file written by the first-run wizard (see *First-run wizard* below). Story F-2 (2026-06-15) extended it to hold BOTH secrets: `[chirpstack].api_token` and `[opcua].user_password`. Loaded by figment between the main TOML and the env-var layer.
 4. **Environment variables** — figment merges env on top of TOML, so an env
    var of the canonical name above always wins.
 
-## First-run wizard (Epic C C-0)
+## First-run wizard (Epic C C-0; extended by Story F-2)
 
-The gateway enters **first-run mode** when ALL three credential sources are unset:
+The gateway enters **first-run mode** when EITHER secret is missing (Story F-2 — the wizard now collects the ChirpStack connection too, not just the OPC UA password):
 
-- `[opcua].user_password` in `config/config.toml` is empty.
-- `OPCGW_OPCUA__USER_PASSWORD` env-var is unset.
-- `config/secrets.toml` is absent or doesn't carry `[opcua].user_password`.
+- **OPC UA password missing**: `[opcua].user_password` is empty AND `OPCGW_OPCUA__USER_PASSWORD` is unset AND `config/secrets.toml` carries no `[opcua].user_password`; **OR**
+- **ChirpStack token missing**: `[chirpstack].api_token` is empty or a `REPLACE_ME_WITH_…` placeholder AND `OPCGW_CHIRPSTACK__API_TOKEN` is unset AND `config/secrets.toml` carries no `[chirpstack].api_token`.
+
+In first-run mode, `AppConfig::validate()` carves out the missing ChirpStack/OPC UA credentials (the same way it has always carved out the empty OPC UA password) so a pristine `config.toml` boots into the wizard instead of aborting at validation.
 
 In first-run mode:
 
 - The OPC UA server binds but rejects every authentication attempt (the existing `OpcgwAuthManager::is_configured = false` path handles this — `src/opc_ua_auth.rs:96-110`).
 - The web UI's first-run gate middleware (`src/web/setup.rs::first_run_gate_middleware`) redirects every non-wizard, non-static request to `/setup` BEFORE the basic-auth layer runs. This is intentional: in first-run mode there is no valid password to gate against, so requiring basic auth would deadlock the operator out of the setup flow.
-- The wizard's POST handler (`POST /api/setup/password`) is CSRF-exempt because there is no authenticated session to leverage — the threat model in first-run is "attacker on the local network beats operator to /setup," which CSRF does not address (the attacker would just fetch any token).
-- On successful submit, the wizard writes the password to `config/secrets.toml` with file mode `0o600` (owner read+write only), emits `event="setup_password_accepted"`, and signals the gateway's `CancellationToken` for graceful shutdown.
-- The supervisor (Docker restart policy / systemd `Restart=on-failure`) restarts the gateway. On the second boot, the figment provider stack picks up `secrets.toml`, `AppConfig::is_first_run()` returns `false`, basic auth comes online with the new password, and the OPC UA server accepts authenticated connections.
+- The wizard's POST handler (`POST /api/setup` — Story F-2 renamed it from `/api/setup/password`) is CSRF-exempt while in first-run mode because there is no authenticated session to leverage — the threat model in first-run is "attacker on the local network beats operator to /setup," which CSRF does not address. The route is also strict-`application/json`-only and same-origin-checked to block drive-by `<form>` posts.
+- The wizard collects the ChirpStack `server_address` / `tenant_id` / `api_token` and the OPC UA password. On successful submit it writes the two SECRETS (`api_token`, `user_password`) to `config/secrets.toml` with file mode `0o600` (owner read+write only) in a single atomic write, writes the NON-SECRET ChirpStack `server_address` / `tenant_id` to the SQLite singleton store (secrets are never written to SQLite), emits `event="setup_accepted"` + `event="config_reload" trigger="first_run_wizard"`, and signals the gateway's `CancellationToken` for graceful shutdown. The web-UI login credentials and the log-file location are NOT touched by the wizard — they stay in `.env` by design.
+- Failure atomicity: if either persistence step fails, the wizard reverts the first-run flip and returns HTTP 500 WITHOUT restarting, so the operator can retry. There is no cross-file transaction; revert-on-any-failure is the safety net.
+- The supervisor (Docker restart policy / systemd `Restart=on-failure`) restarts the gateway. On the second boot, the figment provider stack picks up `secrets.toml` + the SQLite singleton values, `AppConfig::is_first_run()` returns `false`, basic auth comes online with the new password, the poller connects with the real ChirpStack token, and the OPC UA server accepts authenticated connections.
 
 `config/secrets.toml` is gitignored (added 2026-05-21) and must never be committed.
 

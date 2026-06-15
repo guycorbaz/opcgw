@@ -16,8 +16,10 @@
 //   - AC#6: in first-run mode, the OPC UA path is not exercised by
 //     these tests (that's pinned in src/main.rs integration);
 //     audit-event emission is pinned in unit tests.
-//   - AC#7, #8: POST /api/setup/password validates the request body and
-//     persists to secrets.toml with chmod 0600 on success.
+//   - AC#7, #8 (Story F-2): POST /api/setup validates the request body
+//     (ChirpStack connection + OPC UA password) and persists secrets to
+//     secrets.toml (chmod 0600) + the non-secret ChirpStack server/tenant
+//     to SQLite on success; the wizard never writes .env.
 //   - AC#11: the wizard POST signals the gateway's CancellationToken
 //     after a successful write. (Verified via the token.is_cancelled()
 //     check after the request.)
@@ -215,8 +217,13 @@ async fn first_run_serves_setup_page() {
         body.len()
     );
     assert!(
-        body.contains("/api/setup/password"),
+        body.contains("/api/setup"),
         "wizard HTML should reference the submit endpoint"
+    );
+    // Story F-2: the wizard now collects the ChirpStack connection too.
+    assert!(
+        body.contains("server_address") && body.contains("api_token"),
+        "wizard HTML should include the ChirpStack connection fields"
     );
 
     cancel.cancel();
@@ -248,35 +255,49 @@ async fn first_run_serves_static_assets() {
     let _ = handle.await;
 }
 
+/// Story F-2: a full, valid wizard submission body.
+fn valid_setup_body() -> serde_json::Value {
+    serde_json::json!({
+        "server_address": "http://chirpstack:8080",
+        "tenant_id": "11111111-1111-1111-1111-111111111111",
+        "api_token": "a-real-chirpstack-token",
+        "password": "MyValidPassword!",
+        "password_confirm": "MyValidPassword!",
+    })
+}
+
 #[tokio::test]
-async fn wizard_post_persists_password_and_signals_shutdown() {
+async fn wizard_post_persists_secrets_and_chirpstack_and_signals_shutdown() {
     let secrets_dir = TempDir::new().expect("tempdir");
     let token = CancellationToken::new();
     let app_state = build_first_run_app_state(&secrets_dir, token.clone());
     let secrets_path = app_state.secrets_path.clone();
+    let sqlite = app_state.sqlite_config.clone();
     let (addr, handle, cancel) = spawn_web_server(app_state).await;
 
     let client = client_no_redirect();
     let resp = client
-        .post(format!("http://{}/api/setup/password", addr))
-        .json(&serde_json::json!({
-            "password": "MyValidPassword!",
-            "password_confirm": "MyValidPassword!",
-        }))
+        .post(format!("http://{}/api/setup", addr))
+        .json(&valid_setup_body())
         .send()
         .await
-        .expect("POST /api/setup/password");
+        .expect("POST /api/setup");
     assert_eq!(resp.status(), StatusCode::OK);
     let body: serde_json::Value = resp.json().await.expect("json body");
     assert_eq!(body["status"], "password_set_restarting");
 
-    // Verify the secrets.toml file was created with the password.
+    // Story F-2: secrets.toml holds BOTH secrets.
     assert!(secrets_path.exists(), "secrets.toml created");
     let contents =
         std::fs::read_to_string(&secrets_path).expect("read secrets.toml");
     assert!(
         contents.contains(r#"user_password = "MyValidPassword!""#),
-        "secrets.toml contains the password, got:\n{}",
+        "secrets.toml contains the OPC UA password, got:\n{}",
+        contents
+    );
+    assert!(
+        contents.contains(r#"api_token = "a-real-chirpstack-token""#),
+        "secrets.toml contains the ChirpStack token, got:\n{}",
         contents
     );
 
@@ -287,6 +308,30 @@ async fn wizard_post_persists_password_and_signals_shutdown() {
         .mode()
         & 0o777;
     assert_eq!(mode, 0o600, "secrets.toml must be chmod 0600");
+
+    // Story F-2: non-secret ChirpStack fields go to SQLite; the SECRET
+    // api_token must NOT appear there.
+    let rows = sqlite.load_singleton_config().expect("load singleton config");
+    let has = |section: &str, key: &str, want: &str| {
+        rows.iter().any(|(s, k, v)| {
+            s == section && k == key && v.contains(want)
+        })
+    };
+    assert!(
+        has("chirpstack", "server_address", "chirpstack:8080"),
+        "SQLite must hold the wizard server_address, rows: {:?}",
+        rows
+    );
+    assert!(
+        has("chirpstack", "tenant_id", "11111111"),
+        "SQLite must hold the wizard tenant_id, rows: {:?}",
+        rows
+    );
+    assert!(
+        !rows.iter().any(|(_, k, _)| k == "api_token"),
+        "the secret api_token must NEVER be written to SQLite, rows: {:?}",
+        rows
+    );
 
     // Verify the shutdown token was signalled.
     assert!(
@@ -315,8 +360,11 @@ async fn wizard_post_rejects_empty_password() {
 
     let client = client_no_redirect();
     let resp = client
-        .post(format!("http://{}/api/setup/password", addr))
+        .post(format!("http://{}/api/setup", addr))
         .json(&serde_json::json!({
+            "server_address": "http://chirpstack:8080",
+            "tenant_id": "t",
+            "api_token": "tok",
             "password": "",
             "password_confirm": "",
         }))
@@ -325,7 +373,7 @@ async fn wizard_post_rejects_empty_password() {
         .expect("POST");
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "password_validation_failed");
+    assert_eq!(body["error"], "setup_validation_failed");
     assert_eq!(body["reason"], "empty");
 
     assert!(!token.is_cancelled(), "shutdown not signalled on rejection");
@@ -343,8 +391,11 @@ async fn wizard_post_rejects_confirmation_mismatch() {
 
     let client = client_no_redirect();
     let resp = client
-        .post(format!("http://{}/api/setup/password", addr))
+        .post(format!("http://{}/api/setup", addr))
         .json(&serde_json::json!({
+            "server_address": "http://chirpstack:8080",
+            "tenant_id": "t",
+            "api_token": "tok",
             "password": "MyPassword!",
             "password_confirm": "DifferentPassword!",
         }))
@@ -368,8 +419,11 @@ async fn wizard_post_rejects_whitespace_bracketed_password() {
 
     let client = client_no_redirect();
     let resp = client
-        .post(format!("http://{}/api/setup/password", addr))
+        .post(format!("http://{}/api/setup", addr))
         .json(&serde_json::json!({
+            "server_address": "http://chirpstack:8080",
+            "tenant_id": "t",
+            "api_token": "tok",
             "password": " MyPassword ",
             "password_confirm": " MyPassword ",
         }))
@@ -382,6 +436,111 @@ async fn wizard_post_rejects_whitespace_bracketed_password() {
 
     cancel.cancel();
     let _ = handle.await;
+}
+
+#[tokio::test]
+async fn wizard_post_rejects_bad_server_address_scheme() {
+    let secrets_dir = TempDir::new().expect("tempdir");
+    let token = CancellationToken::new();
+    let app_state = build_first_run_app_state(&secrets_dir, token.clone());
+    let secrets_path = app_state.secrets_path.clone();
+    let (addr, handle, cancel) = spawn_web_server(app_state).await;
+
+    let client = client_no_redirect();
+    let resp = client
+        .post(format!("http://{}/api/setup", addr))
+        .json(&serde_json::json!({
+            "server_address": "chirpstack:8080",
+            "tenant_id": "t",
+            "api_token": "tok",
+            "password": "MyValidPassword!",
+            "password_confirm": "MyValidPassword!",
+        }))
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["reason"], "server_address_scheme");
+    assert!(!secrets_path.exists(), "no secrets.toml on rejection");
+    assert!(!token.is_cancelled(), "no restart on rejection");
+
+    cancel.cancel();
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn wizard_post_rejects_placeholder_api_token() {
+    let secrets_dir = TempDir::new().expect("tempdir");
+    let token = CancellationToken::new();
+    let app_state = build_first_run_app_state(&secrets_dir, token.clone());
+    let secrets_path = app_state.secrets_path.clone();
+    let (addr, handle, cancel) = spawn_web_server(app_state).await;
+
+    let client = client_no_redirect();
+    let resp = client
+        .post(format!("http://{}/api/setup", addr))
+        .json(&serde_json::json!({
+            "server_address": "http://chirpstack:8080",
+            "tenant_id": "t",
+            // The seed placeholder, submitted verbatim — must be rejected.
+            "api_token": "REPLACE_ME_WITH_OPCGW_CHIRPSTACK__API_TOKEN_ENV_VAR",
+            "password": "MyValidPassword!",
+            "password_confirm": "MyValidPassword!",
+        }))
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["reason"], "api_token_placeholder");
+    assert!(!secrets_path.exists(), "no secrets.toml on rejection");
+    assert!(!token.is_cancelled(), "no restart on rejection");
+
+    cancel.cancel();
+    let _ = handle.await;
+}
+
+/// Story F-2 (AC#8): the wizard must NOT touch `.env` (web-UI login
+/// user/password + log-file location stay there by design). A successful
+/// submit writes ONLY `secrets.toml` into the config directory — no `.env`
+/// file is created or modified.
+#[tokio::test]
+async fn wizard_post_does_not_write_env_file() {
+    let secrets_dir = TempDir::new().expect("tempdir");
+    let token = CancellationToken::new();
+    let app_state = build_first_run_app_state(&secrets_dir, token.clone());
+    let dir_path = secrets_dir.path().to_path_buf();
+    let (addr, handle, cancel) = spawn_web_server(app_state).await;
+
+    let client = client_no_redirect();
+    let resp = client
+        .post(format!("http://{}/api/setup", addr))
+        .json(&valid_setup_body())
+        .send()
+        .await
+        .expect("POST /api/setup");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The config dir must contain secrets.toml and NO .env file.
+    let entries: Vec<String> = std::fs::read_dir(&dir_path)
+        .expect("read config dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(
+        entries.iter().any(|n| n == "secrets.toml"),
+        "secrets.toml must exist, dir contents: {:?}",
+        entries
+    );
+    assert!(
+        !entries.iter().any(|n| n == ".env"),
+        "the wizard must NOT create a .env file, dir contents: {:?}",
+        entries
+    );
+
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+    drop(cancel);
 }
 
 #[tokio::test]

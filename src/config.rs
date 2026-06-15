@@ -95,6 +95,13 @@ pub struct ChirpstackPollerConfig {
     ///
     /// Format: `http://hostname:port` or `https://hostname:port`
     /// Example: `"http://localhost:8080"` or `"https://chirpstack.example.com:8080"`
+    ///
+    /// Story F-2: `#[serde(default)]` so a pristine `config.toml` that omits
+    /// the `[chirpstack]` connection fields deserialises to empty strings and
+    /// boots into the first-run wizard (which collects them) instead of
+    /// failing deserialisation. The non-empty/scheme rules are enforced by
+    /// [`AppConfig::validate`], which carves out the first-run signal state.
+    #[serde(default)]
     pub server_address: String,
 
     /// API token for authentication with ChirpStack server.
@@ -103,12 +110,23 @@ pub struct ChirpstackPollerConfig {
     /// - List applications and devices
     /// - Retrieve device metrics
     /// - Access the configured tenant
+    ///
+    /// Story F-2: `#[serde(default)]` — a missing token deserialises to empty
+    /// and is the ChirpStack first-run signal (see
+    /// [`AppConfig::chirpstack_token_missing`]). Secret; never written to
+    /// SQLite — supplied via `config/secrets.toml` (wizard) or the
+    /// `OPCGW_CHIRPSTACK__API_TOKEN` env-var.
+    #[serde(default)]
     pub api_token: String,
 
     /// The tenant ID for multi-tenant ChirpStack deployments.
     ///
     /// Specifies which tenant's data to access. For single-tenant
     /// deployments, this is typically the default tenant ID.
+    ///
+    /// Story F-2: `#[serde(default)]` so an absent tenant boots into the
+    /// first-run wizard rather than failing deserialisation.
+    #[serde(default)]
     pub tenant_id: String,
 
     /// Device polling frequency in seconds.
@@ -1257,12 +1275,41 @@ impl AppConfig {
         true
     }
 
+    /// Story F-2: detect whether the ChirpStack API token is still missing.
+    ///
+    /// Returns `true` when the in-memory `[chirpstack].api_token` is empty or
+    /// a `PLACEHOLDER_PREFIX` placeholder AND no `OPCGW_CHIRPSTACK__API_TOKEN`
+    /// env-var supplies a real value. This is the ChirpStack half of the
+    /// first-run signal — the mirror of the OPC UA password check in
+    /// [`Self::is_first_run`]. When an env-var supplies a real token, figment
+    /// has already merged it into `api_token`, so the first early-return
+    /// covers that case; the explicit env-var probe is belt-and-braces (it
+    /// also keeps a placeholder-overriding env-var from being treated as
+    /// "still first-run").
+    pub fn chirpstack_token_missing(&self) -> bool {
+        let token = self.chirpstack.api_token.trim();
+        if !token.is_empty() && !token.starts_with(crate::utils::PLACEHOLDER_PREFIX) {
+            return false;
+        }
+        if std::env::var("OPCGW_CHIRPSTACK__API_TOKEN")
+            .map(|v| {
+                let v = v.trim();
+                !v.is_empty() && !v.starts_with(crate::utils::PLACEHOLDER_PREFIX)
+            })
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        true
+    }
+
     /// Epic C C-0 (2026-05-21): detect the first-run state.
     ///
     /// Returns `true` if the gateway has NOT yet been configured with an
-    /// OPC UA `user_password` through any source. This is the signal the
-    /// web server uses to render the first-run setup wizard at `/setup`
-    /// instead of the regular dashboard.
+    /// OPC UA `user_password` **or** a ChirpStack `api_token` through any
+    /// source (Story F-2 extended the signal to ChirpStack). This is the
+    /// signal the web server uses to render the first-run setup wizard at
+    /// `/setup` instead of the regular dashboard.
     ///
     /// "First-run" means all three sources are unset/empty:
     /// 1. `[opcua].user_password` in the main `config.toml` is empty.
@@ -1281,6 +1328,16 @@ impl AppConfig {
     /// (the auth middleware's `Arc<WebAuthState>` is documented
     /// restart-required at `src/web/mod.rs:264`).
     pub fn is_first_run(&self) -> bool {
+        // Story F-2: the first-run wizard now also captures the ChirpStack
+        // connection + token. The gateway is in first-run mode while EITHER
+        // secret is missing — so a fresh clone whose `config.toml` ships the
+        // placeholder ChirpStack token (but already has an OPC UA password,
+        // e.g. via env-var) still routes the operator to `/setup` to finish
+        // the ChirpStack side. The OPC UA password check below preserves the
+        // original Epic C C-0 behaviour.
+        if self.chirpstack_token_missing() {
+            return true;
+        }
         // Source 1+2: in-memory user_password is empty, AND no env-var.
         //   The validator (above) accepts empty user_password ONLY when
         //   the env-var is also unset, so `user_password.is_empty()` is
@@ -1336,33 +1393,69 @@ impl AppConfig {
     pub fn validate(&self) -> Result<(), OpcGwError> {
         let mut errors = Vec::new();
 
-        // Validate ChirpstackPollerConfig
+        // Validate ChirpstackPollerConfig.
+        //
+        // Story F-2: the ChirpStack connection + token are now collected by
+        // the first-run wizard, so — exactly like the `opcua.user_password`
+        // carve-out below — empty/placeholder ChirpStack credentials are
+        // ACCEPTED while the gateway is in the first-run signal state (the
+        // API token is still missing AND no `OPCGW_CHIRPSTACK__API_TOKEN`
+        // env-var supplies one). This lets a pristine `config.toml` boot
+        // into `/setup` instead of aborting at validation. Once the wizard
+        // writes `config/secrets.toml`, the real token overrides the
+        // placeholder on the next boot and the full rules below apply again.
+        let cs_first_run = self.chirpstack_token_missing();
+
         if self.chirpstack.server_address.is_empty() {
-            errors.push("chirpstack.server_address: must not be empty".to_string());
+            // First-run: accept the empty address (wizard collects it).
+            if !cs_first_run {
+                errors.push("chirpstack.server_address: must not be empty".to_string());
+            }
         } else if !self.chirpstack.server_address.starts_with("http://")
             && !self.chirpstack.server_address.starts_with("https://")
         {
+            // Scheme rule applies whenever an address IS present, even in
+            // first-run (a malformed address is an operator typo, not a
+            // not-yet-configured state).
             errors.push(
                 "chirpstack.server_address: must start with 'http://' or 'https://'".to_string(),
             );
         }
 
         if self.chirpstack.api_token.is_empty() {
-            errors.push("chirpstack.api_token: must not be empty".to_string());
+            // Mirror the opcua carve-out: empty + no env-var = first-run
+            // signal, accepted. If the env-var IS set but resolved to empty,
+            // that's an operator error — surface it.
+            if std::env::var("OPCGW_CHIRPSTACK__API_TOKEN").is_ok() {
+                errors.push(
+                    "chirpstack.api_token: OPCGW_CHIRPSTACK__API_TOKEN env-var is set but \
+                     resolved to empty — the variable likely contains only whitespace or \
+                     expanded to an empty value. Set a non-empty token or unset the variable \
+                     to trigger the first-run setup wizard."
+                        .to_string(),
+                );
+            }
+            // else: empty + no env-var = first-run signal, accepted.
         } else if self
             .chirpstack
             .api_token
             .starts_with(crate::utils::PLACEHOLDER_PREFIX)
         {
-            errors.push(format!(
-                "chirpstack.api_token: placeholder value detected (starts with \"{}\"). \
-                 Set OPCGW_CHIRPSTACK__API_TOKEN to inject the real secret. \
-                 See docs/security.md.",
-                crate::utils::PLACEHOLDER_PREFIX
-            ));
+            // A placeholder token can only be present when no real source
+            // (env-var or secrets.toml) supplied one — i.e. genuinely
+            // first-run. Accept it so the seed `config.toml` boots into the
+            // wizard. (Pre-F-2 this was an unconditional hard error.)
+            if !cs_first_run {
+                errors.push(format!(
+                    "chirpstack.api_token: placeholder value detected (starts with \"{}\"). \
+                     Set OPCGW_CHIRPSTACK__API_TOKEN to inject the real secret, complete the \
+                     /setup wizard, or see docs/security.md.",
+                    crate::utils::PLACEHOLDER_PREFIX
+                ));
+            }
         }
 
-        if self.chirpstack.tenant_id.is_empty() {
+        if self.chirpstack.tenant_id.is_empty() && !cs_first_run {
             errors.push("chirpstack.tenant_id: must not be empty".to_string());
         }
 
@@ -3030,6 +3123,165 @@ mod tests {
         });
     }
 
+    /// Story F-2: `chirpstack_token_missing()` is true when the token is
+    /// empty and no env-var supplies one — the ChirpStack first-run signal.
+    #[test]
+    #[serial_test::serial]
+    fn test_chirpstack_token_missing_true_when_empty_no_envvar() {
+        temp_env::with_var("OPCGW_CHIRPSTACK__API_TOKEN", None::<&str>, || {
+            let mut config = get_config();
+            config.chirpstack.api_token = String::new();
+            assert!(
+                config.chirpstack_token_missing(),
+                "token-missing must be true when api_token empty AND no env-var",
+            );
+        });
+    }
+
+    /// Story F-2: a seed placeholder token (the `config.toml` default) is
+    /// treated as missing so a pristine clone boots into the wizard.
+    #[test]
+    #[serial_test::serial]
+    fn test_chirpstack_token_missing_true_when_placeholder_no_envvar() {
+        temp_env::with_var("OPCGW_CHIRPSTACK__API_TOKEN", None::<&str>, || {
+            let mut config = get_config();
+            config.chirpstack.api_token =
+                format!("{}OPCGW_CHIRPSTACK__API_TOKEN_ENV_VAR", crate::utils::PLACEHOLDER_PREFIX);
+            assert!(
+                config.chirpstack_token_missing(),
+                "placeholder token must count as missing in the first-run signal",
+            );
+        });
+    }
+
+    /// Story F-2: a real token means NOT first-run for ChirpStack.
+    #[test]
+    #[serial_test::serial]
+    fn test_chirpstack_token_missing_false_when_real_token() {
+        temp_env::with_var("OPCGW_CHIRPSTACK__API_TOKEN", None::<&str>, || {
+            let mut config = get_config();
+            config.chirpstack.api_token = "a-real-chirpstack-token".to_string();
+            assert!(
+                !config.chirpstack_token_missing(),
+                "a real api_token must NOT be treated as missing",
+            );
+        });
+    }
+
+    /// Story F-2: an env-var supplying a real token means NOT first-run,
+    /// even if the in-memory field is still empty (defence-in-depth).
+    #[test]
+    #[serial_test::serial]
+    fn test_chirpstack_token_missing_false_when_envvar_set() {
+        temp_env::with_var(
+            "OPCGW_CHIRPSTACK__API_TOKEN",
+            Some("real-token-from-env"),
+            || {
+                let mut config = get_config();
+                config.chirpstack.api_token = String::new();
+                assert!(
+                    !config.chirpstack_token_missing(),
+                    "env-var token must clear the first-run signal",
+                );
+            },
+        );
+    }
+
+    /// Story F-2: `is_first_run()` is true when the ChirpStack token is a
+    /// placeholder EVEN IF the OPC UA password is already set — the wizard
+    /// must still run to collect the ChirpStack side.
+    #[test]
+    #[serial_test::serial]
+    fn test_is_first_run_true_when_chirpstack_token_placeholder() {
+        temp_env::with_vars(
+            [
+                ("OPCGW_CHIRPSTACK__API_TOKEN", None::<&str>),
+                ("OPCGW_OPCUA__USER_PASSWORD", None::<&str>),
+            ],
+            || {
+                let mut config = get_config();
+                config.opcua.user_password = "already-set".to_string();
+                config.chirpstack.api_token =
+                    format!("{}TOKEN", crate::utils::PLACEHOLDER_PREFIX);
+                assert!(
+                    config.is_first_run(),
+                    "is_first_run must be true while the ChirpStack token is missing, \
+                     even with an OPC UA password set",
+                );
+            },
+        );
+    }
+
+    /// Story F-2 (AC#1, #3): a pristine first-run config — empty ChirpStack
+    /// connection + token AND empty OPC UA password, no env-vars — passes
+    /// validation (boots into the wizard instead of aborting).
+    #[test]
+    #[serial_test::serial]
+    fn test_validate_accepts_pristine_first_run() {
+        temp_env::with_vars(
+            [
+                ("OPCGW_CHIRPSTACK__API_TOKEN", None::<&str>),
+                ("OPCGW_OPCUA__USER_PASSWORD", None::<&str>),
+            ],
+            || {
+                let mut config = get_config();
+                config.chirpstack.server_address = String::new();
+                config.chirpstack.api_token = String::new();
+                config.chirpstack.tenant_id = String::new();
+                config.opcua.user_password = String::new();
+                assert!(
+                    config.validate().is_ok(),
+                    "pristine first-run config must validate: {:?}",
+                    config.validate(),
+                );
+            },
+        );
+    }
+
+    /// Story F-2 (AC#3): when `OPCGW_CHIRPSTACK__API_TOKEN` is set but
+    /// resolves to empty, validation rejects (operator error, mirrors the
+    /// opcua branch) rather than silently entering first-run mode.
+    #[test]
+    #[serial_test::serial]
+    fn test_validate_rejects_empty_chirpstack_token_when_envvar_set() {
+        temp_env::with_var("OPCGW_CHIRPSTACK__API_TOKEN", Some("   "), || {
+            let mut config = get_config();
+            config.chirpstack.api_token = String::new();
+            let err = config.validate().expect_err("must reject empty-but-env-set token");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("OPCGW_CHIRPSTACK__API_TOKEN env-var"),
+                "expected env-var error, got: {}",
+                msg,
+            );
+        });
+    }
+
+    /// Story F-2 (AC#3): even in first-run, a malformed (non-http) server
+    /// address is rejected — a present-but-broken address is a typo, not a
+    /// not-yet-configured state.
+    #[test]
+    #[serial_test::serial]
+    fn test_validate_rejects_bad_scheme_even_in_first_run() {
+        temp_env::with_vars(
+            [
+                ("OPCGW_CHIRPSTACK__API_TOKEN", None::<&str>),
+                ("OPCGW_OPCUA__USER_PASSWORD", None::<&str>),
+            ],
+            || {
+                let mut config = get_config();
+                config.chirpstack.api_token = String::new(); // first-run signal
+                config.chirpstack.server_address = "ftp://nope".to_string();
+                let err = config.validate().expect_err("bad scheme must reject");
+                assert!(
+                    err.to_string().contains("server_address"),
+                    "expected server_address scheme error, got: {}",
+                    err,
+                );
+            },
+        );
+    }
+
     /// Epic C C-0 (2026-05-21): `from_path` figment provider stack
     /// merges a sibling `secrets.toml` between the main config and the
     /// env-var layer. This test pins the precedence order:
@@ -4282,62 +4534,61 @@ mod tests {
     /// template must trigger a validation error that names the env var the
     /// operator should set. Uses the canonical placeholder string from
     /// `config/config.toml`.
+    ///
+    /// Story F-2 update: a placeholder `api_token` is no longer an
+    /// unconditional boot error. The seed `config.toml` ships the placeholder
+    /// and, with no `OPCGW_CHIRPSTACK__API_TOKEN` env-var, that is now the
+    /// ChirpStack first-run signal — validation ACCEPTS it so the gateway
+    /// boots into `/setup`. (The env-var-set-but-empty operator-error case is
+    /// pinned by `test_validate_rejects_empty_chirpstack_token_when_envvar_set`.)
     #[test]
-    fn test_validation_rejects_placeholder_api_token() {
-        let toml = r#"
-            [global]
-            debug = true
-            [chirpstack]
-            server_address = "http://localhost:8080"
-            api_token = "REPLACE_ME_WITH_OPCGW_CHIRPSTACK__API_TOKEN_ENV_VAR"
-            tenant_id = "00000000-0000-0000-0000-000000000000"
-            polling_frequency = 10
-            retry = 1
-            delay = 1
-            [opcua]
-            application_name = "A"
-            application_uri = "urn:a"
-            product_uri = "urn:p"
-            diagnostics_enabled = false
-            # Story 7-2 (AC#4): `true` so the test's fake `private_key_path = "k"`
-            # is treated as "missing, will be auto-created" rather than failing
-            # NFR9's startup file-existence check. None of these fixtures
-            # exercise keypair behaviour — that lives in src/security.rs::tests.
-            create_sample_keypair = true
-            certificate_path = "c"
-            private_key_path = "k"
-            trust_client_cert = true
-            check_cert_time = false
-            pki_dir = "pki"
-            user_name = "u"
-            user_password = "p"
-            [[application]]
-            application_name = "App"
-            application_id = "app1"
-            [[application.device]]
-            device_id = "dev1"
-            device_name = "Dev"
-            [[application.device.read_metric]]
-            metric_name = "m"
-            chirpstack_metric_name = "m"
-            metric_type = "Float"
-        "#;
-        let config: AppConfig = Figment::new()
-            .merge(Toml::string(toml))
-            .extract()
-            .expect("toml parses");
-        let err = config
-            .validate()
-            .expect_err("validation must fail on placeholder api_token");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("OPCGW_CHIRPSTACK__API_TOKEN"),
-            "error must name the env var to set, got: {msg}"
-        );
-        assert!(
-            msg.contains("REPLACE_ME_WITH_"),
-            "error must reference the placeholder prefix literal, got: {msg}"
-        );
+    #[serial_test::serial]
+    fn test_validation_accepts_placeholder_api_token_in_first_run() {
+        temp_env::with_var("OPCGW_CHIRPSTACK__API_TOKEN", None::<&str>, || {
+            let toml = r#"
+                [global]
+                debug = true
+                [chirpstack]
+                server_address = "http://localhost:8080"
+                api_token = "REPLACE_ME_WITH_OPCGW_CHIRPSTACK__API_TOKEN_ENV_VAR"
+                tenant_id = "00000000-0000-0000-0000-000000000000"
+                polling_frequency = 10
+                retry = 1
+                delay = 1
+                [opcua]
+                application_name = "A"
+                application_uri = "urn:a"
+                product_uri = "urn:p"
+                diagnostics_enabled = false
+                create_sample_keypair = true
+                certificate_path = "c"
+                private_key_path = "k"
+                trust_client_cert = true
+                check_cert_time = false
+                pki_dir = "pki"
+                user_name = "u"
+                user_password = "p"
+                [[application]]
+                application_name = "App"
+                application_id = "app1"
+                [[application.device]]
+                device_id = "dev1"
+                device_name = "Dev"
+                [[application.device.read_metric]]
+                metric_name = "m"
+                chirpstack_metric_name = "m"
+                metric_type = "Float"
+            "#;
+            let config: AppConfig = Figment::new()
+                .merge(Toml::string(toml))
+                .extract()
+                .expect("toml parses");
+            assert!(
+                config.validate().is_ok(),
+                "placeholder api_token + no env-var must be accepted as first-run: {:?}",
+                config.validate(),
+            );
+        });
     }
 
     /// Story 7-1 (AC#2): symmetric — placeholder `user_password` is rejected
@@ -4448,7 +4699,12 @@ mod tests {
         std::fs::write(&path, toml).expect("write temp toml");
         let path_str = path.to_str().expect("temp path is utf-8").to_string();
 
-        // Without the env vars, both placeholders fire; from_path returns Err.
+        // Story F-2: without env vars, the ChirpStack placeholder token is now
+        // ACCEPTED as the first-run signal (boots into the wizard), but the
+        // OPC UA placeholder password is STILL rejected — the OPC UA first-run
+        // carve-out accepts only an EMPTY password, not a placeholder. So
+        // from_path still fails, and the error now names only the OPC UA
+        // env-var (not the ChirpStack one).
         temp_env::with_vars(
             vec![
                 ("OPCGW_CHIRPSTACK__API_TOKEN", None::<&str>),
@@ -4456,15 +4712,16 @@ mod tests {
             ],
             || {
                 let err = AppConfig::from_path(&path_str)
-                    .expect_err("placeholder TOML with no env vars must fail to load");
+                    .expect_err("placeholder OPC UA password with no env var must fail to load");
                 let msg = err.to_string();
-                assert!(
-                    msg.contains("OPCGW_CHIRPSTACK__API_TOKEN"),
-                    "error must mention chirpstack env var, got: {msg}"
-                );
                 assert!(
                     msg.contains("OPCGW_OPCUA__USER_PASSWORD"),
                     "error must mention opcua env var, got: {msg}"
+                );
+                assert!(
+                    !msg.contains("OPCGW_CHIRPSTACK__API_TOKEN"),
+                    "ChirpStack placeholder is now first-run-accepted; error must NOT \
+                     mention the chirpstack env var, got: {msg}"
                 );
             },
         );

@@ -480,7 +480,7 @@ pub async fn basic_auth_middleware(
     // upstream forces the browser into a credential prompt which is
     // confusing UX. Bypass auth for those specific GET paths
     // unconditionally; the handler itself enforces the 410 semantics
-    // post-first-run. `/api/setup/password` POST stays gated
+    // post-first-run. `/api/setup` POST stays gated
     // post-first-run so attackers cannot probe with arbitrary bodies.
     if (path == "/setup" || path == "/setup.html")
         && req.method() == axum::http::Method::GET

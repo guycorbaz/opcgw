@@ -60,7 +60,7 @@ pub struct CsrfState {
     /// such an entry here.
     pub allowed_origins: Vec<String>,
     /// Iter-2 P2: shared with `AppState.is_first_run` so the CSRF
-    /// exemption for `/api/setup/password` only applies WHILE the
+    /// exemption for `/api/setup` only applies WHILE the
     /// gateway is in first-run mode. Pre-fix the exemption was
     /// permanent — defence-in-depth gap (the wizard handler returns
     /// 410 post-first-run, but the CSRF protection was still
@@ -292,7 +292,8 @@ pub async fn csrf_middleware(
         return next.run(req).await;
     }
 
-    // Epic C C-0 (2026-05-21): wizard POST (`/api/setup/password`) is
+    // Epic C C-0 (2026-05-21): wizard POST (`/api/setup`, Story F-2 —
+    // formerly `/api/setup/password`) is
     // CSRF-exempt because in first-run mode there is no authenticated
     // session for an attacker to leverage — CSRF's threat model
     // (cross-site request from a logged-in user's browser) does not
@@ -303,11 +304,12 @@ pub async fn csrf_middleware(
     // in non-first-run mode.
     //
     // Iter-1 code review M6 fix: require both method == POST AND
-    // path == "/api/setup/password" — pre-fix the exemption fired
-    // for ANY method on that path, so if a future refactor adds a
-    // GET/PUT/DELETE handler on the same path, it would silently
-    // skip CSRF. Tightening to a method+path match prevents that
-    // silent over-exemption.
+    // path == "/api/setup" — pre-fix the exemption fired for ANY method
+    // on that path, so if a future refactor adds a GET/PUT/DELETE handler
+    // on the same path, it would silently skip CSRF. Tightening to a
+    // method+path match prevents that silent over-exemption.
+    //
+    // Story F-2: path renamed `/api/setup/password` → `/api/setup`.
     //
     // Iter-2 P2: ALSO gate on `state.is_first_run` so the exemption
     // is scoped to the time window when CSRF's threat model doesn't
@@ -318,7 +320,7 @@ pub async fn csrf_middleware(
         .is_first_run
         .load(std::sync::atomic::Ordering::SeqCst)
         && req.method() == Method::POST
-        && req.uri().path() == "/api/setup/password"
+        && req.uri().path() == "/api/setup"
     {
         return next.run(req).await;
     }

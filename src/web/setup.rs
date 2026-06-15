@@ -36,7 +36,7 @@
 //! pattern). The current shape:
 //!
 //! - The single router in [`crate::web::build_router`] wires `/setup`,
-//!   `/setup.html`, and `/api/setup/password` alongside the CRUD +
+//!   `/setup.html`, and `/api/setup` alongside the CRUD +
 //!   dashboard routes.
 //! - [`first_run_gate_middleware`] (this module) redirects non-wizard,
 //!   non-static requests to `/setup` when `state.is_first_run` is true.
@@ -44,7 +44,7 @@
 //!   credential check for [`is_wizard_bypass_path`] paths when
 //!   `state.is_first_run` is true.
 //! - [`crate::web::csrf::csrf_middleware`] exempts `POST
-//!   /api/setup/password` from CSRF — but ONLY while in first-run mode
+//!   /api/setup` from CSRF — but ONLY while in first-run mode
 //!   (iter-2 P2 patch).
 //!
 //! CSRF's exemption-while-in-first-run is the cleanest answer to "no
@@ -90,7 +90,10 @@ use crate::web::AppState;
 const WIZARD_BYPASS_EXACT: &[&str] = &[
     "/setup",
     "/setup.html",
-    "/api/setup/password",
+    // Story F-2: renamed from "/api/setup/password" (the wizard now submits
+    // the ChirpStack connection + OPC UA password). The old path is NOT in
+    // the allowlist — leaving it would be a dead auth-exempt path.
+    "/api/setup",
     "/dashboard.css",
 ];
 
@@ -229,20 +232,33 @@ pub async fn setup_get(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
-/// Body schema for POST /api/setup/password.
+/// Body schema for POST /api/setup (Story F-2).
 ///
-/// Iter-2 P21: `#[serde(deny_unknown_fields)]` rejects bodies that
-/// carry fields beyond the two declared here. Without it, a future
-/// maintainer could add a privileged field (e.g. `admin_override`,
-/// `is_first_run`) to the struct expecting unknown-field rejection
-/// to keep the surface tight — only to learn that pre-fix serde
-/// silently accepted unknown fields. The wizard's body schema is a
-/// hard contract; new fields should require a deliberate
-/// struct-field addition, not arrive via free-form JSON.
+/// Broadened from the Epic C C-0 password-only shape to capture
+/// everything a fresh deployment needs for first boot: the ChirpStack
+/// connection (`server_address` / `tenant_id` / `api_token`) plus the
+/// OPC UA password. Secrets (`api_token`, `password`) are written to
+/// `config/secrets.toml` (0600); the non-secret ChirpStack connection
+/// fields are written to the SQLite singleton store. The OPC UA
+/// host/port are intentionally NOT collected — the gateway's existing
+/// `0.0.0.0:4840` defaults apply (AC#4 permits omission).
+///
+/// Iter-2 P21 (carried forward): `#[serde(deny_unknown_fields)]`
+/// rejects bodies carrying fields beyond those declared here. The
+/// wizard's body schema is a hard contract; new fields require a
+/// deliberate struct-field addition, not free-form JSON.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SetupPasswordRequest {
-    /// New OPC UA `user_password` to persist.
+pub struct SetupRequest {
+    /// ChirpStack server address, e.g. `http://chirpstack:8080`.
+    pub server_address: String,
+    /// ChirpStack tenant ID (UUID).
+    pub tenant_id: String,
+    /// ChirpStack API token (secret → `[chirpstack].api_token` in
+    /// `secrets.toml`).
+    pub api_token: String,
+    /// New OPC UA `user_password` to persist (secret →
+    /// `[opcua].user_password` in `secrets.toml`).
     pub password: String,
     /// Confirmation field. Must match `password` byte-for-byte.
     pub password_confirm: String,
@@ -268,7 +284,7 @@ pub struct SetupPasswordSuccess {
 /// boot-time `AppConfig::validate`. Returns the first violation found
 /// (one-at-a-time semantics, matching the JS UX where validation
 /// errors are surfaced inline near the offending field).
-fn validate_password(req: &SetupPasswordRequest) -> Option<&'static str> {
+fn validate_password(req: &SetupRequest) -> Option<&'static str> {
     if req.password.is_empty() {
         return Some("empty");
     }
@@ -315,10 +331,63 @@ fn validate_password(req: &SetupPasswordRequest) -> Option<&'static str> {
     None
 }
 
-/// POST /api/setup/password — accepts the wizard form submission.
+/// Story F-2: validate the ChirpStack connection fields submitted by the
+/// wizard, mirroring the boot-time `AppConfig::validate` rules (empty +
+/// scheme + placeholder) so the wizard can never persist a config that the
+/// next boot would reject. One-at-a-time semantics like
+/// [`validate_password`]; returns the first violation's `reason` code.
+fn validate_chirpstack(req: &SetupRequest) -> Option<&'static str> {
+    // server_address
+    if req.server_address.is_empty() {
+        return Some("server_address_empty");
+    }
+    if req.server_address.trim() != req.server_address {
+        return Some("server_address_whitespace");
+    }
+    if !req.server_address.starts_with("http://") && !req.server_address.starts_with("https://") {
+        return Some("server_address_scheme");
+    }
+    if req.server_address.chars().count() > 512 {
+        return Some("server_address_too_long");
+    }
+    // tenant_id
+    if req.tenant_id.is_empty() {
+        return Some("tenant_id_empty");
+    }
+    if req.tenant_id.trim() != req.tenant_id {
+        return Some("tenant_id_whitespace");
+    }
+    if req.tenant_id.chars().count() > 128 {
+        return Some("tenant_id_too_long");
+    }
+    // api_token (secret) — reuse the password-validator's control-char +
+    // length defences so a malformed token can't corrupt secrets.toml.
+    if req.api_token.is_empty() {
+        return Some("api_token_empty");
+    }
+    if req.api_token.trim() != req.api_token {
+        return Some("api_token_whitespace");
+    }
+    if req.api_token.starts_with(PLACEHOLDER_PREFIX) {
+        return Some("api_token_placeholder");
+    }
+    if req.api_token.chars().any(|c| (c as u32) < 0x20 || c == '\u{7F}') {
+        return Some("api_token_control_char");
+    }
+    // ChirpStack API tokens are JWTs and can be long; 2048 is a generous
+    // bound that still fits comfortably inside the 4 KiB request body limit.
+    if req.api_token.chars().count() > 2048 {
+        return Some("api_token_too_long");
+    }
+    None
+}
+
+/// POST /api/setup — accepts the wizard form submission (Story F-2:
+/// ChirpStack connection + OPC UA password).
 ///
 /// Validates the password, persists it to `config/secrets.toml`
-/// (chmod 0600), emits the `setup_password_accepted` audit event, then
+/// (chmod 0600), persists the non-secret ChirpStack connection to SQLite,
+/// emits the `setup_accepted` audit event, then
 /// signals the gateway's `CancellationToken` for a graceful shutdown.
 /// The supervisor (docker / systemd) restarts opcgw; on the next boot
 /// the figment provider stack picks up `secrets.toml` and the gateway
@@ -378,7 +447,7 @@ pub async fn setup_post(
         return (
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Json(SetupPasswordError {
-                error: "password_validation_failed",
+                error: "setup_validation_failed",
                 reason: "unsupported_media_type",
             }),
         )
@@ -444,7 +513,7 @@ pub async fn setup_post(
             return (
                 StatusCode::FORBIDDEN,
                 Json(SetupPasswordError {
-                    error: "password_validation_failed",
+                    error: "setup_validation_failed",
                     reason: "origin_mismatch",
                 }),
             )
@@ -455,11 +524,11 @@ pub async fn setup_post(
     // Manual JSON parse — bypass Axum's Json extractor so malformed
     // input maps to a structured `{ error, reason }` response with the
     // wizard's audit-event taxonomy intact.
-    let req: SetupPasswordRequest = match serde_json::from_slice(&body) {
+    let req: SetupRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
             warn!(
-                event = "setup_password_rejected",
+                event = "setup_rejected",
                 reason = "invalid_json",
                 source_ip = %addr.ip(),
                 error = %e,
@@ -468,7 +537,7 @@ pub async fn setup_post(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(SetupPasswordError {
-                    error: "password_validation_failed",
+                    error: "setup_validation_failed",
                     reason: "invalid_json",
                 }),
             )
@@ -476,9 +545,28 @@ pub async fn setup_post(
         }
     };
 
+    // Story F-2: validate the ChirpStack fields first, then the OPC UA
+    // password — both must pass before anything is persisted.
+    if let Some(reason) = validate_chirpstack(&req) {
+        warn!(
+            event = "setup_rejected",
+            reason = reason,
+            source_ip = %addr.ip(),
+            "setup_post: ChirpStack field validation rejected"
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(SetupPasswordError {
+                error: "setup_validation_failed",
+                reason,
+            }),
+        )
+            .into_response();
+    }
+
     if let Some(reason) = validate_password(&req) {
         warn!(
-            event = "setup_password_rejected",
+            event = "setup_rejected",
             reason = reason,
             source_ip = %addr.ip(),
             "setup_post: password validation rejected"
@@ -486,11 +574,42 @@ pub async fn setup_post(
         return (
             StatusCode::BAD_REQUEST,
             Json(SetupPasswordError {
-                error: "password_validation_failed",
+                error: "setup_validation_failed",
                 reason,
             }),
         )
             .into_response();
+    }
+
+    // Story F-2: belt-and-braces — overlay the submitted values onto the
+    // current config snapshot and run the full `AppConfig::validate` so the
+    // wizard can never persist a combination the next boot would reject.
+    // (The per-field validators above give precise reason codes; this catches
+    // any cross-field invariant.)
+    {
+        let current_arc = state.config_reload.subscribe().borrow().clone();
+        let mut candidate: crate::config::AppConfig = (*current_arc).clone();
+        candidate.chirpstack.server_address = req.server_address.clone();
+        candidate.chirpstack.tenant_id = req.tenant_id.clone();
+        candidate.chirpstack.api_token = req.api_token.clone();
+        candidate.opcua.user_password = req.password.clone();
+        if let Err(e) = candidate.validate() {
+            warn!(
+                event = "setup_rejected",
+                reason = "config_invalid",
+                source_ip = %addr.ip(),
+                error = ?e,
+                "setup_post: candidate config failed AppConfig::validate"
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(SetupPasswordError {
+                    error: "setup_validation_failed",
+                    reason: "config_invalid",
+                }),
+            )
+                .into_response();
+        }
     }
 
     // Iter-2 P5: race-free first-run-mode flip. compare_exchange
@@ -505,15 +624,13 @@ pub async fn setup_post(
     // wins on disk), and both return 200 — the "wizard is one-shot"
     // guarantee would be silently violated.
     //
-    // If `write_secrets_toml` FAILS after we win the exchange, we
-    // intentionally do NOT revert is_first_run to true: the gateway
-    // returns 500, the operator's browser displays the error, and
-    // (since shutdown_token is NOT cancelled in that branch) the
-    // gateway keeps running with `is_first_run=false` and no
-    // password. The only path back is operator restart; on the next
-    // boot, `AppConfig::is_first_run()` returns true again
-    // (secrets.toml absent + env-var unset + password empty) and the
-    // wizard re-runs.
+    // Story F-2 — failure atomicity: there are now TWO persistence steps
+    // (SQLite non-secret write + secrets.toml write). If EITHER fails after
+    // we win the exchange, we revert `is_first_run` to true (iter-3 P2
+    // pattern) and do NOT cancel `shutdown_token`, so the gateway keeps
+    // running in first-run mode and the operator can retry. There is no
+    // cross-file transaction; the revert-on-any-failure + no-restart rule is
+    // the safety net that keeps a partial write recoverable.
     use std::sync::atomic::Ordering;
     if state
         .is_first_run
@@ -521,7 +638,7 @@ pub async fn setup_post(
         .is_err()
     {
         warn!(
-            event = "setup_password_rejected",
+            event = "setup_rejected",
             reason = "setup_already_in_progress",
             source_ip = %addr.ip(),
             "setup_post: a concurrent submitter already claimed first-run state"
@@ -529,16 +646,63 @@ pub async fn setup_post(
         return (
             StatusCode::CONFLICT,
             Json(SetupPasswordError {
-                error: "password_validation_failed",
+                error: "setup_validation_failed",
                 reason: "setup_already_in_progress",
             }),
         )
             .into_response();
     }
 
-    // Persist to secrets.toml. The path is derived from the gateway's
-    // config_dir which is captured into AppState at boot.
-    match write_secrets_toml(&state.secrets_path, &req.password) {
+    // Story F-2: persist the NON-SECRET ChirpStack connection fields to the
+    // SQLite singleton store FIRST. In first-run mode the singleton_config
+    // table is empty (migration is deferred while secrets are placeholders —
+    // see migrate_singleton_config.rs), so the section-replace semantics of
+    // `write_singleton_section` wipe nothing; the remaining ChirpStack knobs
+    // (polling_frequency, retry, …) flow from config.toml on the next boot
+    // and the full singleton migration captures the merged set then. Secrets
+    // are NEVER written here — only to secrets.toml below.
+    let chirpstack_fields: Vec<(String, String)> = vec![
+        (
+            "server_address".to_string(),
+            serde_json::to_string(&req.server_address).unwrap_or_default(),
+        ),
+        (
+            "tenant_id".to_string(),
+            serde_json::to_string(&req.tenant_id).unwrap_or_default(),
+        ),
+    ];
+    if let Err(e) = state
+        .sqlite_config
+        .write_singleton_section("chirpstack", &chirpstack_fields)
+    {
+        // Revert the flip so the operator can retry; do NOT restart.
+        state.is_first_run.store(true, Ordering::SeqCst);
+        warn!(
+            event = "setup_persistence_failed",
+            reason = "sqlite_write_failed",
+            source_ip = %addr.ip(),
+            error = ?e,
+            "setup_post: failed to write ChirpStack connection to SQLite; \
+             is_first_run reverted for operator retry"
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(SetupPasswordError {
+                error: "persistence_failed",
+                reason: "sqlite_write_failed",
+            }),
+        )
+            .into_response();
+    }
+
+    // Persist the secrets (ChirpStack token + OPC UA password) to
+    // secrets.toml. The path is derived from the gateway's config_dir which
+    // is captured into AppState at boot.
+    let secrets = SecretsToWrite {
+        chirpstack_api_token: &req.api_token,
+        opcua_password: &req.password,
+    };
+    match write_secrets_toml(&state.secrets_path, &secrets) {
         Ok(()) => {
             // Iter-1 code review M2 fix: log the FILENAME only, not
             // the full path. Full deployment path is sensitive
@@ -550,12 +714,20 @@ pub async fn setup_post(
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("secrets.toml");
+            // Story F-2: broadened acceptance event. The wizard now
+            // persists the ChirpStack connection (to SQLite) + both secrets
+            // (to secrets.toml), so the event records the full first-run
+            // completion. The legacy `setup_password_accepted` name is
+            // retired in favour of `setup_accepted`; operators grepping the
+            // audit stream for first-run completion should watch the
+            // `config_reload` event below (stable across C-0 → F-2).
             info!(
-                event = "setup_password_accepted",
+                event = "setup_accepted",
                 source_ip = %addr.ip(),
                 secrets_filename = secrets_filename,
-                "setup_post: password persisted to secrets file; \
-                 gateway will shut down for restart"
+                "setup_post: ChirpStack connection persisted to SQLite and \
+                 secrets persisted to secrets file; gateway will shut down \
+                 for restart"
             );
 
             // Iter-1 Auditor AC#11 patch: emit the config-reload audit
@@ -570,7 +742,8 @@ pub async fn setup_post(
                 trigger = "first_run_wizard",
                 source_ip = %addr.ip(),
                 "setup_post: first-run wizard completed; \
-                 gateway restart will apply the new password"
+                 gateway restart will apply the new ChirpStack connection \
+                 and secrets"
             );
 
             // Iter-1 code review M7 fix: build the response BEFORE
@@ -736,8 +909,23 @@ impl std::fmt::Display for SecretsWriteError {
 
 impl std::error::Error for SecretsWriteError {}
 
-/// Write the OPC UA password to `secrets.toml` at the given path.
+/// Story F-2: the two secrets the first-run wizard persists to
+/// `secrets.toml`. Both are written in a single atomic file write so the
+/// gateway never observes a half-written secrets file.
+pub(crate) struct SecretsToWrite<'a> {
+    /// `[chirpstack].api_token`.
+    pub chirpstack_api_token: &'a str,
+    /// `[opcua].user_password`.
+    pub opcua_password: &'a str,
+}
+
+/// Write the wizard-collected secrets to `secrets.toml` at the given path.
 /// Sets file mode to 0o600 (owner read+write only).
+///
+/// Story F-2: writes BOTH `[chirpstack].api_token` and
+/// `[opcua].user_password` in one body (previously password-only). The
+/// figment provider stack merges this file on the next boot, overriding the
+/// `config.toml` placeholders for both secrets.
 ///
 /// Uses `tempfile + persist + rename` semantics to avoid leaving a
 /// partial file on disk if the write is interrupted: writes to a
@@ -746,30 +934,37 @@ impl std::error::Error for SecretsWriteError {}
 /// Iter-2 P7: returns the categorised [`SecretsWriteError`] so
 /// `setup_post` can map specific failure modes (EROFS / EACCES /
 /// ENOSPC) to operator-actionable JSON `reason` codes.
-fn write_secrets_toml(secrets_path: &std::path::Path, password: &str) -> Result<(), SecretsWriteError> {
+fn write_secrets_toml(
+    secrets_path: &std::path::Path,
+    secrets: &SecretsToWrite,
+) -> Result<(), SecretsWriteError> {
     use std::io::Write;
 
-    // Build the TOML body. Escape any embedded `"` in the password by
-    // using the toml crate's serialiser instead of hand-formatting.
-    // Hand-formatting risks injection if the password contains `"`,
-    // newlines, or backslashes — even though the validator above
-    // rejects whitespace-bracketed, the validator does NOT reject `"`
-    // or `\` mid-string.
+    // Build the TOML body. Escape every secret via `toml_escape_string`
+    // (handles `"`, `\`, newlines, control chars) instead of hand-
+    // formatting — the validators reject whitespace-bracketed values but
+    // do NOT reject `"` or `\` mid-string for the api_token, so escaping
+    // is the injection defence.
     let body = format!(
         r#"# opcgw secrets — generated by first-run wizard.
 #
-# This file holds the OPC UA user password and any other future
-# secrets that should NOT live in the operator-readable config.toml.
-# File permissions: chmod 0600 (the gateway will reject the file if
-# group/world has any access bits set in a future hardening story).
+# This file holds the gateway secrets that must NOT live in the
+# operator-readable config.toml: the ChirpStack API token and the OPC UA
+# user password. File permissions: chmod 0600 (the gateway will reject
+# the file if group/world has any access bits set in a future hardening
+# story).
 #
-# To rotate the password: either edit this file and restart opcgw,
-# or override via the OPCGW_OPCUA__USER_PASSWORD env-var.
+# To rotate a secret: either edit this file and restart opcgw, or override
+# via the OPCGW_CHIRPSTACK__API_TOKEN / OPCGW_OPCUA__USER_PASSWORD env-vars.
+
+[chirpstack]
+api_token = {}
 
 [opcua]
 user_password = {}
 "#,
-        toml_escape_string(password),
+        toml_escape_string(secrets.chirpstack_api_token),
+        toml_escape_string(secrets.opcua_password),
     );
 
     // Iter-1 code review H2 / EH-M4: `Path::parent()` returns
@@ -859,7 +1054,10 @@ mod tests {
 
     #[test]
     fn validate_password_accepts_reasonable_password() {
-        let req = SetupPasswordRequest {
+        let req = SetupRequest {
+            server_address: "http://chirpstack:8080".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            api_token: "valid-token".to_string(),
             password: "MyStrongP@ssw0rd!".to_string(),
             password_confirm: "MyStrongP@ssw0rd!".to_string(),
         };
@@ -868,7 +1066,10 @@ mod tests {
 
     #[test]
     fn validate_password_rejects_empty() {
-        let req = SetupPasswordRequest {
+        let req = SetupRequest {
+            server_address: "http://chirpstack:8080".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            api_token: "valid-token".to_string(),
             password: "".to_string(),
             password_confirm: "".to_string(),
         };
@@ -877,7 +1078,10 @@ mod tests {
 
     #[test]
     fn validate_password_rejects_whitespace_bracketed() {
-        let req = SetupPasswordRequest {
+        let req = SetupRequest {
+            server_address: "http://chirpstack:8080".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            api_token: "valid-token".to_string(),
             password: " hello ".to_string(),
             password_confirm: " hello ".to_string(),
         };
@@ -894,7 +1098,10 @@ mod tests {
     #[test]
     fn validate_password_rejects_whitespace_only() {
         for pw in ["   ", "\t\t", " \t \n ".trim_end_matches('\n')] {
-            let req = SetupPasswordRequest {
+            let req = SetupRequest {
+            server_address: "http://chirpstack:8080".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            api_token: "valid-token".to_string(),
                 password: pw.to_string(),
                 password_confirm: pw.to_string(),
             };
@@ -916,7 +1123,10 @@ mod tests {
 
     #[test]
     fn validate_password_rejects_placeholder_prefix() {
-        let req = SetupPasswordRequest {
+        let req = SetupRequest {
+            server_address: "http://chirpstack:8080".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            api_token: "valid-token".to_string(),
             password: format!("{}foo", PLACEHOLDER_PREFIX),
             password_confirm: format!("{}foo", PLACEHOLDER_PREFIX),
         };
@@ -925,7 +1135,10 @@ mod tests {
 
     #[test]
     fn validate_password_rejects_confirmation_mismatch() {
-        let req = SetupPasswordRequest {
+        let req = SetupRequest {
+            server_address: "http://chirpstack:8080".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            api_token: "valid-token".to_string(),
             password: "hello".to_string(),
             password_confirm: "world".to_string(),
         };
@@ -935,7 +1148,10 @@ mod tests {
     /// Iter-1 EH-H1: DEL byte (U+007F) is rejected.
     #[test]
     fn validate_password_rejects_del_byte() {
-        let req = SetupPasswordRequest {
+        let req = SetupRequest {
+            server_address: "http://chirpstack:8080".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            api_token: "valid-token".to_string(),
             password: "abc\u{7F}def".to_string(),
             password_confirm: "abc\u{7F}def".to_string(),
         };
@@ -950,7 +1166,10 @@ mod tests {
             '\u{0001}', '\u{0008}', '\u{000B}', '\u{000C}', '\u{001F}',
         ] {
             let s = format!("abc{}def", c);
-            let req = SetupPasswordRequest {
+            let req = SetupRequest {
+            server_address: "http://chirpstack:8080".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            api_token: "valid-token".to_string(),
                 password: s.clone(),
                 password_confirm: s,
             };
@@ -967,7 +1186,10 @@ mod tests {
     #[test]
     fn validate_password_rejects_too_long() {
         let long_password = "a".repeat(257);
-        let req = SetupPasswordRequest {
+        let req = SetupRequest {
+            server_address: "http://chirpstack:8080".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            api_token: "valid-token".to_string(),
             password: long_password.clone(),
             password_confirm: long_password,
         };
@@ -978,11 +1200,95 @@ mod tests {
     #[test]
     fn validate_password_accepts_256_chars() {
         let pw_256 = "a".repeat(256);
-        let req = SetupPasswordRequest {
+        let req = SetupRequest {
+            server_address: "http://chirpstack:8080".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            api_token: "valid-token".to_string(),
             password: pw_256.clone(),
             password_confirm: pw_256,
         };
         assert_eq!(validate_password(&req), None);
+    }
+
+    /// Story F-2: build a SetupRequest with valid OPC UA password fields so
+    /// `validate_chirpstack` is exercised in isolation.
+    fn cs_req(server_address: &str, tenant_id: &str, api_token: &str) -> SetupRequest {
+        SetupRequest {
+            server_address: server_address.to_string(),
+            tenant_id: tenant_id.to_string(),
+            api_token: api_token.to_string(),
+            password: "GoodPassw0rd!".to_string(),
+            password_confirm: "GoodPassw0rd!".to_string(),
+        }
+    }
+
+    #[test]
+    fn validate_chirpstack_accepts_reasonable_values() {
+        assert_eq!(
+            validate_chirpstack(&cs_req("http://chirpstack:8080", "tenant-1", "a-real-token")),
+            None
+        );
+        assert_eq!(
+            validate_chirpstack(&cs_req(
+                "https://cs.example.com:8080",
+                "00000000-0000-0000-0000-000000000001",
+                "tok"
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn validate_chirpstack_rejects_empty_and_scheme() {
+        assert_eq!(
+            validate_chirpstack(&cs_req("", "t", "tok")),
+            Some("server_address_empty")
+        );
+        assert_eq!(
+            validate_chirpstack(&cs_req("ftp://nope", "t", "tok")),
+            Some("server_address_scheme")
+        );
+        assert_eq!(
+            validate_chirpstack(&cs_req("chirpstack:8080", "t", "tok")),
+            Some("server_address_scheme")
+        );
+        assert_eq!(
+            validate_chirpstack(&cs_req(" http://x:8080 ", "t", "tok")),
+            Some("server_address_whitespace")
+        );
+    }
+
+    #[test]
+    fn validate_chirpstack_rejects_empty_tenant() {
+        assert_eq!(
+            validate_chirpstack(&cs_req("http://x:8080", "", "tok")),
+            Some("tenant_id_empty")
+        );
+    }
+
+    #[test]
+    fn validate_chirpstack_rejects_bad_api_token() {
+        assert_eq!(
+            validate_chirpstack(&cs_req("http://x:8080", "t", "")),
+            Some("api_token_empty")
+        );
+        assert_eq!(
+            validate_chirpstack(&cs_req(
+                "http://x:8080",
+                "t",
+                &format!("{}OPCGW_CHIRPSTACK__API_TOKEN_ENV_VAR", PLACEHOLDER_PREFIX)
+            )),
+            Some("api_token_placeholder")
+        );
+        assert_eq!(
+            validate_chirpstack(&cs_req("http://x:8080", "t", "tok\u{7F}en")),
+            Some("api_token_control_char")
+        );
+        let long = "a".repeat(2049);
+        assert_eq!(
+            validate_chirpstack(&cs_req("http://x:8080", "t", &long)),
+            Some("api_token_too_long")
+        );
     }
 
     /// Iter-1 EH-H1 defence-in-depth: even if validator was bypassed,
@@ -996,8 +1302,12 @@ mod tests {
     fn is_wizard_bypass_recognises_setup_routes() {
         assert!(is_wizard_bypass_path("/setup"));
         assert!(is_wizard_bypass_path("/setup.html"));
-        assert!(is_wizard_bypass_path("/api/setup/password"));
+        // Story F-2: the submit route is now exactly "/api/setup".
+        assert!(is_wizard_bypass_path("/api/setup"));
         assert!(is_wizard_bypass_path("/dashboard.css"));
+        // Story F-2: the OLD "/api/setup/password" path must NO LONGER
+        // bypass — leaving it would be a dead auth-exempt path.
+        assert!(!is_wizard_bypass_path("/api/setup/password"));
         // Iter-3 P6: /favicon.ico was dropped from the allowlist
         // because static/favicon.ico doesn't ship — pinning the
         // rejection so a future re-add requires shipping the asset.
@@ -1030,10 +1340,11 @@ mod tests {
         // but the bypass logic should still refuse):
         assert!(!is_wizard_bypass_path("/etc/passwd.css"));
         assert!(!is_wizard_bypass_path("/../secrets.css"));
-        // Future-API endpoints under /api/setup/ (only /password is
-        // wired today) must NOT be auth-exempt by virtue of the prefix.
+        // Future-API endpoints under /api/setup/ must NOT be auth-exempt by
+        // virtue of the prefix — only the exact "/api/setup" is allow-listed.
         assert!(!is_wizard_bypass_path("/api/setup/anything"));
         assert!(!is_wizard_bypass_path("/api/setup/"));
+        assert!(!is_wizard_bypass_path("/api/setup/password"));
     }
 
     #[test]
@@ -1044,20 +1355,32 @@ mod tests {
         assert_eq!(toml_escape_string("has\nnewline"), r#""has\nnewline""#);
     }
 
+    /// Story F-2 test helper: build a `SecretsToWrite` for the two-secret
+    /// writer.
+    fn secrets<'a>(api_token: &'a str, password: &'a str) -> SecretsToWrite<'a> {
+        SecretsToWrite {
+            chirpstack_api_token: api_token,
+            opcua_password: password,
+        }
+    }
+
     #[test]
-    fn write_secrets_toml_creates_file_with_password() {
+    fn write_secrets_toml_creates_file_with_both_secrets() {
         let tmp_dir = tempfile::tempdir().expect("create tempdir");
         let secrets_path = tmp_dir.path().join("secrets.toml");
 
-        write_secrets_toml(&secrets_path, "my-test-password")
+        write_secrets_toml(&secrets_path, &secrets("my-cs-token", "my-test-password"))
             .expect("write_secrets_toml succeeds");
 
         assert!(secrets_path.exists(), "secrets.toml was created");
 
         let body = std::fs::read_to_string(&secrets_path)
             .expect("read back secrets.toml");
-        assert!(body.contains(r#"user_password = "my-test-password""#));
+        // Story F-2: both sections + both secrets present.
+        assert!(body.contains("[chirpstack]"));
+        assert!(body.contains(r#"api_token = "my-cs-token""#));
         assert!(body.contains("[opcua]"));
+        assert!(body.contains(r#"user_password = "my-test-password""#));
     }
 
     #[test]
@@ -1067,7 +1390,7 @@ mod tests {
         let tmp_dir = tempfile::tempdir().expect("create tempdir");
         let secrets_path = tmp_dir.path().join("secrets.toml");
 
-        write_secrets_toml(&secrets_path, "my-test-password")
+        write_secrets_toml(&secrets_path, &secrets("tok", "my-test-password"))
             .expect("write_secrets_toml succeeds");
 
         let metadata = std::fs::metadata(&secrets_path).expect("metadata");
@@ -1110,7 +1433,11 @@ mod tests {
         // bypassing validate_password to exercise the escaper's
         // defence-in-depth control-char arms.
         let password = "has\"quote\\and-backslash\nand-newline\rand-cr\tand-tab";
-        write_secrets_toml(&secrets_path, password)
+        // Story F-2: exercise the escaper on BOTH secrets — the api_token
+        // gets a distinct special-char payload so a broken escape arm in
+        // either field is caught.
+        let api_token = "tok\"with\\specials\nand\rcontrol\tchars";
+        write_secrets_toml(&secrets_path, &secrets(api_token, password))
             .expect("write_secrets_toml succeeds");
 
         let body = std::fs::read_to_string(&secrets_path)
@@ -1121,8 +1448,13 @@ mod tests {
             user_password: String,
         }
         #[derive(Debug, Deserialize)]
+        struct ChirpstackSection {
+            api_token: String,
+        }
+        #[derive(Debug, Deserialize)]
         struct Root {
             opcua: OpcuaSection,
+            chirpstack: ChirpstackSection,
         }
 
         // Use figment (already a dep) for the round-trip parse;
@@ -1137,6 +1469,13 @@ mod tests {
         assert_eq!(
             parsed.opcua.user_password, password,
             "round-trip MUST recover the exact original password — \
+             escape arm is broken if this assertion fires. \
+             body written:\n{}",
+            body
+        );
+        assert_eq!(
+            parsed.chirpstack.api_token, api_token,
+            "round-trip MUST recover the exact original api_token — \
              escape arm is broken if this assertion fires. \
              body written:\n{}",
             body

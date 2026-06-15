@@ -526,8 +526,8 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
         let live = app_state.config_reload.subscribe();
         let cfg = (*live.borrow()).clone();
         // Iter-2 P2: share the AppState's is_first_run atomic with
-        // CsrfState so the `/api/setup/password` CSRF exemption is
-        // scoped to first-run mode (defence-in-depth).
+        // CsrfState so the `/api/setup` CSRF exemption is scoped to
+        // first-run mode (defence-in-depth).
         csrf::CsrfState::new(
             cfg.web.resolved_allowed_origins(),
             app_state.is_first_run.clone(),
@@ -602,7 +602,7 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
         // fields per-event before emitting one tracing line.
         //
         // **Iter-1 review HIGH-1 fix:** 4 KiB per-route body limit
-        // mirrors the Story C-0 pattern on `/api/setup/password`. This
+        // mirrors the Story C-0 pattern on `/api/setup`. This
         // route is basic-auth-gated (so it's NOT operator-unauthenticated
         // like the wizard) but the audit-event JSON envelope is small
         // by construction (event name + ≤3 fields × ≤256 chars each =
@@ -661,16 +661,18 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
         // Gone post-first-run.
         .route("/setup.html", get(setup::setup_get))
         .route(
-            "/api/setup/password",
+            // Story F-2: renamed from `/api/setup/password` — the wizard now
+            // submits the ChirpStack connection + OPC UA password, so the
+            // password-specific path name no longer fits.
+            "/api/setup",
             // Iter-2 P4: cap request body to 4 KiB on the wizard POST.
             // This is an UNAUTHENTICATED route in first-run mode, so
             // axum's 2 MiB default body limit is a DoS amplifier (a
             // 1 KB attacker request can force a ~2 MiB allocation per
             // hit). 4 KiB headroom comfortably covers the JSON envelope
-            // (`{"password": "<≤256 chars>", "password_confirm":
-            // "<≤256 chars>"}` is ~600 bytes worst case) with margin
-            // for whitespace + future fields. Apply via per-route
-            // layer so other routes keep axum's default.
+            // (ChirpStack server/tenant/token + OPC UA password+confirm,
+            // each bounded) with margin. Apply via per-route layer so
+            // other routes keep axum's default.
             axum::routing::post(setup::setup_post)
                 .layer(axum::extract::DefaultBodyLimit::max(4096)),
         )

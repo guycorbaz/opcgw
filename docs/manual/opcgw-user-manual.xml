@@ -767,13 +767,17 @@ docker compose logs -f opcgw</screen>
             </imageobject>
           </mediaobject>
         </figure>
-        <para>If you start opcgw with no OPC UA password configured
-        through any source (no <literal>[opcua].user_password</literal>
-        in <filename>config/config.toml</filename>, no
-        <literal>OPCGW_OPCUA__USER_PASSWORD</literal> environment
-        variable, and no <filename>config/secrets.toml</filename>
-        sibling file), the gateway enters
-        <emphasis>first-run mode</emphasis>:</para>
+        <para>From a fresh installation — where
+        <filename>config/config.toml</filename> still carries the
+        placeholder ChirpStack token and an empty OPC UA password, and
+        the matching <literal>OPCGW_*</literal> environment variables are
+        unset — the gateway enters <emphasis>first-run mode</emphasis>.
+        Since Story F-2 (v2.2.x) the wizard collects
+        <emphasis>everything needed for first boot</emphasis>: the
+        ChirpStack connection <emphasis>and</emphasis> the OPC UA
+        password, so you never have to hand-edit a configuration file to
+        get a working gateway. The gateway is in first-run mode whenever
+        either secret is missing:</para>
         <itemizedlist>
           <listitem>
             <para>The OPC UA server binds on its configured endpoint
@@ -783,9 +787,8 @@ docker compose logs -f opcgw</screen>
           </listitem>
           <listitem>
             <para>The web UI redirects every request to
-            <filename>/setup</filename>, a one-shot password-setup
-            form. The wizard is the only reachable page until
-            completion.</para>
+            <filename>/setup</filename>, a one-shot setup form. The
+            wizard is the only reachable page until completion.</para>
           </listitem>
         </itemizedlist>
 
@@ -796,29 +799,46 @@ docker compose logs -f opcgw</screen>
             <filename>/setup</filename>.</para>
           </step>
           <step>
-            <para>Enter a password and confirmation, then submit. The
-            password must be non-empty, have no leading or trailing
-            whitespace, not be a placeholder, and the two fields must
-            match.</para>
+            <para>Under <emphasis>ChirpStack connection</emphasis>, enter
+            the server address (a full URL such as
+            <literal>http://chirpstack:8080</literal>), the tenant ID,
+            and a ChirpStack API token with read access to the tenant's
+            applications and devices.</para>
           </step>
           <step>
-            <para>On success the password is saved to
+            <para>Under <emphasis>OPC UA server</emphasis>, enter a
+            password and confirmation. The password must be non-empty,
+            have no leading or trailing whitespace, not be a placeholder,
+            and the two fields must match. Submit the form.</para>
+          </step>
+          <step>
+            <para>On success the two secrets (the ChirpStack API token
+            and the OPC UA password) are saved to
             <filename>config/secrets.toml</filename> (owner-only file
-            mode <literal>0600</literal>, gitignored), and the gateway
-            shuts down gracefully.</para>
+            mode <literal>0600</literal>, gitignored) in a single atomic
+            write, the non-secret ChirpStack server address and tenant
+            are saved to the gateway database, and the gateway shuts down
+            gracefully.</para>
           </step>
           <step>
             <para>Your supervisor (Docker restart policy or
             <command>systemctl Restart=on-failure</command>) restarts
             opcgw automatically. On the second boot it picks up the new
-            password, login comes online, and the OPC UA server accepts
+            ChirpStack connection and password, login comes online, the
+            poller connects to ChirpStack, and the OPC UA server accepts
             authenticated connections.</para>
           </step>
         </procedure>
 
+        <para><emphasis role="strong">What the wizard does not
+        touch.</emphasis> The web-UI login user and password and the
+        log-file location stay in <filename>.env</filename> by design —
+        the wizard never reads or writes them.</para>
+
         <para><emphasis role="strong">One-shot semantics.</emphasis>
         Once setup is complete, <filename>/setup</filename> is no longer
-        reachable. To rotate the password later, either set
+        reachable. To rotate a secret later, either set
+        <literal>OPCGW_CHIRPSTACK__API_TOKEN</literal> /
         <literal>OPCGW_OPCUA__USER_PASSWORD</literal> or edit
         <filename>config/secrets.toml</filename> and restart.</para>
 
