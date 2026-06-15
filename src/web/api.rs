@@ -51,6 +51,11 @@ pub struct StatusResponse {
     pub application_count: usize,
     pub device_count: usize,
     pub uptime_secs: u64,
+    /// Story F-3: the configured ChirpStack poll interval in seconds
+    /// (`[chirpstack].polling_frequency`). Pure pass-through of a stored
+    /// config value — NOT an aggregate (#130). The dashboard uses it to
+    /// judge whether the poller has stalled (`last_poll_time` age ≫ this).
+    pub poll_interval_secs: u64,
     /// Story F-0: `true` when configuration edits have been staged to
     /// SQLite that the running data-plane has not yet loaded — i.e. the
     /// operator should click "Apply changes" (`POST /api/config/apply`).
@@ -224,6 +229,16 @@ pub async fn api_status(
             e.into_inner().clone()
         });
 
+    // Story F-3: read the configured poll interval from the live config
+    // (same source the singleton-config handlers read). Pass-through of a
+    // stored value; no aggregation.
+    let poll_interval_secs = state
+        .config_reload
+        .subscribe()
+        .borrow()
+        .chirpstack
+        .polling_frequency;
+
     Ok(Json(StatusResponse {
         chirpstack_available: available,
         last_poll_time: last_poll.map(|t| t.to_rfc3339()),
@@ -231,6 +246,7 @@ pub async fn api_status(
         application_count: snapshot.application_count,
         device_count: snapshot.device_count,
         uptime_secs,
+        poll_interval_secs,
         pending_changes: state.has_pending_changes(),
         apply_failed: crate::web::apply::apply_failed_flag(),
     }))
@@ -5185,6 +5201,7 @@ mod tests {
             application_count: 0,
             device_count: 0,
             uptime_secs: 0,
+            poll_interval_secs: 30,
             pending_changes: false,
             apply_failed: false,
         };

@@ -301,7 +301,7 @@ async fn api_status_returns_json_with_expected_shape_when_authed() {
     let json: Value =
         serde_json::from_str(&body).unwrap_or_else(|e| panic!("body not JSON: {e}; body={body}"));
 
-    // All 6 fields present.
+    // All expected fields present (Story F-3 added `poll_interval_secs`).
     for field in [
         "chirpstack_available",
         "last_poll_time",
@@ -309,6 +309,7 @@ async fn api_status_returns_json_with_expected_shape_when_authed() {
         "application_count",
         "device_count",
         "uptime_secs",
+        "poll_interval_secs",
     ] {
         assert!(
             json.get(field).is_some(),
@@ -329,6 +330,17 @@ async fn api_status_returns_json_with_expected_shape_when_authed() {
     assert!(json["application_count"].is_number());
     assert!(json["device_count"].is_number());
     assert!(json["uptime_secs"].is_number());
+    // Story F-3: poll_interval_secs is a positive number (the configured
+    // [chirpstack].polling_frequency passed through).
+    assert!(
+        json["poll_interval_secs"].is_number(),
+        "poll_interval_secs must be a JSON number"
+    );
+    assert!(
+        json["poll_interval_secs"].as_u64().unwrap_or(0) > 0,
+        "poll_interval_secs must be a positive poll interval, got {}",
+        json["poll_interval_secs"]
+    );
 
     // Value pinning from the seeded backend + snapshot.
     assert_eq!(json["chirpstack_available"].as_bool(), Some(true));
@@ -402,6 +414,19 @@ async fn dashboard_html_contains_viewport_meta_and_status_tiles_markup() {
         "id=\"last-refresh\"",
         "id=\"error-banner\"",
         "id=\"refresh-now\"",
+        // Story F-3: at-a-glance health verdict + poller status + per-device
+        // freshness panel. dashboard.js binds to each of these via
+        // getElementById; renaming one in the HTML without updating the JS
+        // would throw at runtime, so pin them here.
+        "id=\"health-summary\"",
+        "id=\"health-headline\"",
+        "id=\"health-detail\"",
+        "id=\"poller-status\"",
+        "id=\"poll-interval\"",
+        "id=\"freshness-fresh\"",
+        "id=\"freshness-stale\"",
+        "id=\"freshness-bad\"",
+        "id=\"freshness-never\"",
     ] {
         assert!(
             body.contains(id),

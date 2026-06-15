@@ -1,38 +1,47 @@
-// opcgw dashboard — Story 9-2 (FR38).
+// opcgw dashboard — Story 9-2 (FR38) + Story F-3 (landing redesign).
 //
-// Polls /api/status on load + every 10 s. No SPA framework, no build
-// step. Browser caches Basic-auth credentials per realm; 401 from
-// /api/status is treated as "credentials revoked" — operator gets an
+// Polls /api/status AND /api/devices on load + every 10 s. No SPA
+// framework, no build step. Browser caches Basic-auth credentials per
+// realm; 401 is treated as "credentials revoked" — operator gets an
 // inline banner and can reload to re-prompt.
 //
-// Review iter-1 patches:
-//   - E2: in-flight guard prevents overlapping fetches when network is
-//         slow (previous setInterval would compound and race render).
-//   - E5: per-call AbortController cancels the prior fetch when a new
-//         one starts (operator click-spam can no longer DoS).
-//   - E7: chirpstack_available branches explicitly on `=== false` for
-//         "Unavailable"; missing/null/non-bool renders as "Unknown".
-//   - E8: Content-Type sniff before resp.json() — proxy login pages
-//         no longer crash the dashboard with cryptic SyntaxError.
-//   - B9: network-error banner is generic — err.message no longer
-//         interpolated into the DOM (consistent with NFR7 server side).
-//   - E13: formatRelative + absolute timestamp share one parse pass
-//          so "—" vs raw-ISO mismatch can no longer surface.
+// Story F-3 adds: an at-a-glance overall health verdict (derived
+// CLIENT-SIDE from /api/status + /api/devices — no gateway-side
+// aggregation, #130), a Poller status tile (stall detection from
+// last_poll age vs poll_interval_secs), and a per-device freshness
+// summary (fresh/stale/bad/never, same band model as metrics.html).
+//
+// Story 9-2 fetch hardening preserved (now factored into makePoller so
+// BOTH endpoints get it): in-flight guard (E2), per-call AbortController
+// with feature-detect (E5/M2), stale-render guard (M1), Content-Type
+// sniff (E8), 401 handling, generic network-error banner (B9), single
+// timestamp parse pass (E13). /api/devices failing degrades gracefully:
+// the /api/status-only verdict still renders.
 
 (function () {
   "use strict";
 
   var REFRESH_INTERVAL_MS = 10000;
-  var ENDPOINT = "/api/status";
 
   var els = {
+    healthSummary: document.getElementById("health-summary"),
+    healthHeadline: document.getElementById("health-headline"),
+    healthDetail: document.getElementById("health-detail"),
     chirpstack: document.getElementById("chirpstack-status"),
+    pollerStatus: document.getElementById("poller-status"),
+    pollerHint: document.getElementById("poller-hint"),
+    pollInterval: document.getElementById("poll-interval"),
     lastPollRel: document.getElementById("last-poll-relative"),
     lastPollTime: document.getElementById("last-poll-time"),
     errorCount: document.getElementById("error-count"),
     appCount: document.getElementById("application-count"),
     devCount: document.getElementById("device-count"),
     uptime: document.getElementById("uptime"),
+    freshFresh: document.getElementById("freshness-fresh"),
+    freshStale: document.getElementById("freshness-stale"),
+    freshBad: document.getElementById("freshness-bad"),
+    freshNever: document.getElementById("freshness-never"),
+    freshHint: document.getElementById("freshness-hint"),
     lastRefresh: document.getElementById("last-refresh"),
     errorBanner: document.getElementById("error-banner"),
     refreshButton: document.getElementById("refresh-now"),
@@ -44,39 +53,17 @@
     timeStyle: "medium",
   });
 
-  // Review iter-1 E2 + E5: in-flight guard + AbortController. Holds
-  // the controller so a new request can cancel the previous one
-  // (operator click-spam / setInterval race no longer compound).
-  //
-  // Review iter-2 M2: feature-detect AbortController so older browsers
-  // (pre-2018: Safari < 11.1, Edge < 16, Chrome < 66) don't get a
-  // synchronous ReferenceError that breaks the dashboard silently.
-  // When AbortController is unavailable the `inflightToken` falls back
-  // to a plain object identity — the M1 stale-render guard still
-  // works, only the abort-on-supersede behaviour degrades gracefully.
-  var ABORT_SUPPORTED = typeof AbortController !== "undefined";
-  var inflightToken = null;
+  // Latest payloads — the health verdict depends on BOTH, so each fetch
+  // updates its slice and re-derives the verdict. `lastFreshness` is
+  // `undefined` until the first /api/devices result, and the sentinel
+  // string "unavailable" if /api/devices failed (verdict degrades).
+  var lastStatus = null;
+  var lastFreshness = undefined;
 
-  function setBadge(el, label, kind) {
-    el.textContent = label;
-    el.classList.remove("badge-available", "badge-unavailable", "badge-unknown");
-    el.classList.add("badge-" + kind);
-  }
-
-  function showError(message) {
-    els.errorBanner.textContent = message;
-    els.errorBanner.classList.remove("hidden");
-  }
-
-  function clearError() {
-    els.errorBanner.textContent = "";
-    els.errorBanner.classList.add("hidden");
-  }
+  // ---- pure helpers (side-effect-free; exercised by node --check) -------
 
   // Parse an ISO string once and return both representations the
-  // dashboard needs. Avoids the iter-1 E13 quirk where formatRelative
-  // returned "—" for unparseable but the absolute tile rendered the
-  // raw string — operator saw inconsistent values for the same field.
+  // dashboard needs (Story 9-2 E13: avoid the "—" vs raw-ISO mismatch).
   function parseTimestamp(iso) {
     if (iso === null || iso === undefined) {
       return { ok: false, reason: "never" };
@@ -94,52 +81,240 @@
       return parsed.reason === "never" ? "Never polled" : "—";
     }
     var deltaSecs = Math.max(0, Math.floor((Date.now() - parsed.ms) / 1000));
-    if (deltaSecs < 60) {
-      return deltaSecs + " s ago";
-    }
-    if (deltaSecs < 3600) {
-      return Math.floor(deltaSecs / 60) + " min ago";
-    }
-    if (deltaSecs < 86400) {
-      return Math.floor(deltaSecs / 3600) + " h ago";
-    }
+    if (deltaSecs < 60) return deltaSecs + " s ago";
+    if (deltaSecs < 3600) return Math.floor(deltaSecs / 60) + " min ago";
+    if (deltaSecs < 86400) return Math.floor(deltaSecs / 3600) + " h ago";
     return Math.floor(deltaSecs / 86400) + " d ago";
   }
 
-  function formatUptime(secs) {
-    if (typeof secs !== "number" || secs < 0) {
-      return "—";
-    }
+  function formatDuration(secs) {
+    if (typeof secs !== "number" || secs < 0) return "—";
     var d = Math.floor(secs / 86400);
     var h = Math.floor((secs % 86400) / 3600);
     var m = Math.floor((secs % 3600) / 60);
     var s = secs % 60;
-    if (d > 0) {
-      return d + "d " + h + "h";
-    }
-    if (h > 0) {
-      return h + "h " + m + "m";
-    }
-    if (m > 0) {
-      return m + "m " + s + "s";
-    }
+    if (d > 0) return d + "d " + h + "h";
+    if (h > 0) return h + "h " + m + "m";
+    if (m > 0) return m + "m " + s + "s";
     return s + "s";
   }
 
-  function render(data) {
-    // Review iter-1 E7: explicit `=== false` branch. Anything that's
-    // not strictly true OR strictly false (missing field, null,
-    // unexpected type) renders as Unknown — the failure mode "field
-    // missing" no longer collapses with "ChirpStack down".
+  function formatInterval(secs) {
+    if (typeof secs !== "number" || secs <= 0) return "—";
+    if (secs < 60) return secs + " s";
+    if (secs % 60 === 0) return secs / 60 + " min";
+    return Math.floor(secs / 60) + " min " + (secs % 60) + " s";
+  }
+
+  // Poller "stalled" iff a poll HAS happened but the most recent one is
+  // older than ~3× the poll interval (floor 60 s). A null last_poll_time
+  // is "never polled" (handled separately), not "stalled".
+  function pollerStalled(status) {
+    var parsed = parseTimestamp(status.last_poll_time);
+    if (!parsed.ok) return false;
+    var ageSecs = Math.max(0, Math.floor((Date.now() - parsed.ms) / 1000));
+    var interval =
+      typeof status.poll_interval_secs === "number" &&
+      status.poll_interval_secs > 0
+        ? status.poll_interval_secs
+        : 60;
+    return ageSecs > Math.max(60, interval * 3);
+  }
+
+  // Single-metric band — same model as metrics.html `statusFor`
+  // (good / uncertain / bad / missing). Empty string == missing.
+  function metricBand(metric, asOfMs, staleSecs, badSecs) {
+    if (
+      metric.value === null ||
+      metric.value === undefined ||
+      metric.value === ""
+    ) {
+      return "missing";
+    }
+    var parsed = parseTimestamp(metric.timestamp);
+    if (!parsed.ok) return "missing";
+    var ageSecs = Math.max(0, Math.floor((asOfMs - parsed.ms) / 1000));
+    if (ageSecs >= badSecs) return "bad";
+    if (ageSecs >= staleSecs) return "uncertain";
+    return "good";
+  }
+
+  // Device band = worst of its metrics. Precedence: bad > stale > fresh;
+  // a device with no value at all (or no metrics) is "never".
+  function deviceBand(device, asOfMs, staleSecs, badSecs) {
+    var hasBad = false,
+      hasUncertain = false,
+      hasGood = false,
+      count = 0;
+    var metrics = device.metrics || [];
+    for (var i = 0; i < metrics.length; i++) {
+      count++;
+      var b = metricBand(metrics[i], asOfMs, staleSecs, badSecs);
+      if (b === "bad") hasBad = true;
+      else if (b === "uncertain") hasUncertain = true;
+      else if (b === "good") hasGood = true;
+    }
+    if (count === 0) return "never";
+    if (hasBad) return "bad";
+    if (hasUncertain) return "stale";
+    if (hasGood) return "fresh";
+    return "never";
+  }
+
+  function summariseFreshness(devicesResponse) {
+    var asOf = parseTimestamp(devicesResponse.as_of);
+    var asOfMs = asOf.ok ? asOf.ms : Date.now();
+    var staleSecs = devicesResponse.stale_threshold_secs;
+    var badSecs = devicesResponse.bad_threshold_secs;
+    var counts = { fresh: 0, stale: 0, bad: 0, never: 0, total: 0 };
+    var apps = devicesResponse.applications || [];
+    for (var a = 0; a < apps.length; a++) {
+      var devs = apps[a].devices || [];
+      for (var d = 0; d < devs.length; d++) {
+        var band = deviceBand(devs[d], asOfMs, staleSecs, badSecs);
+        counts[band] += 1;
+        counts.total += 1;
+      }
+    }
+    return counts;
+  }
+
+  // Overall verdict (AC#1 precedence). `freshness` may be undefined
+  // (not yet loaded) or "unavailable" (fetch failed) — both mean the
+  // device-band branches are skipped and the verdict falls back to the
+  // /api/status signals.
+  function computeVerdict(status, freshness) {
+    var fresh = freshness && freshness !== "unavailable" ? freshness : null;
+    if (status.chirpstack_available === false) {
+      return {
+        level: "error",
+        headline: "ChirpStack unreachable",
+        detail:
+          "The gateway cannot reach ChirpStack — no new device data is arriving.",
+      };
+    }
+    if (pollerStalled(status)) {
+      return {
+        level: "error",
+        headline: "Poller stalled",
+        detail:
+          "No successful poll recently — the polling task may be stuck. Check the gateway logs.",
+      };
+    }
+    if (status.apply_failed === true) {
+      return {
+        level: "error",
+        headline: "Apply failed",
+        detail:
+          "The last configuration apply failed and was rolled back. Review the configuration and apply again.",
+      };
+    }
+    if (fresh && fresh.bad > 0) {
+      return {
+        level: "error",
+        headline: fresh.bad + " device(s) with stale data",
+        detail: "Some devices have not reported within the hard cutoff.",
+      };
+    }
+    if (fresh && fresh.stale > 0) {
+      return {
+        level: "warn",
+        headline: fresh.stale + " device(s) going stale",
+        detail:
+          "Some devices have not reported within the stale threshold.",
+      };
+    }
+    if (status.pending_changes === true) {
+      return {
+        level: "warn",
+        headline: "Configuration changes pending",
+        detail:
+          "Edits are staged but not applied. Click Apply on the configuration page to activate them.",
+      };
+    }
+    if ((status.application_count || 0) === 0) {
+      return {
+        level: "warn",
+        headline: "No applications configured",
+        detail: "Add an application to start polling devices.",
+      };
+    }
+    if (status.chirpstack_available !== true) {
+      return {
+        level: "warn",
+        headline: "ChirpStack status unknown",
+        detail: "Waiting for the first poll outcome.",
+      };
+    }
+    var lastPoll = parseTimestamp(status.last_poll_time);
+    if (!lastPoll.ok && lastPoll.reason === "never") {
+      return {
+        level: "warn",
+        headline: "Starting up",
+        detail: "Waiting for the first poll to complete.",
+      };
+    }
+    return {
+      level: "ok",
+      headline: "All systems operational",
+      detail: "ChirpStack reachable and the poller is active.",
+    };
+  }
+
+  // ---- DOM rendering ----------------------------------------------------
+
+  // status-badge component (F-1): swap the is-ok/is-warn/is-error
+  // modifier. `kind` ∈ {"ok","warn","error",null}; null = neutral.
+  function setBadge(el, label, kind) {
+    if (!el) return;
+    el.textContent = label;
+    el.classList.remove("is-ok", "is-warn", "is-error");
+    if (kind) el.classList.add("is-" + kind);
+  }
+
+  function showError(message) {
+    els.errorBanner.textContent = message;
+    els.errorBanner.classList.remove("hidden");
+  }
+
+  function clearError() {
+    els.errorBanner.textContent = "";
+    els.errorBanner.classList.add("hidden");
+  }
+
+  function renderVerdict() {
+    if (!lastStatus || !els.healthSummary) return;
+    var v = computeVerdict(lastStatus, lastFreshness);
+    els.healthSummary.classList.remove("is-ok", "is-warn", "is-error");
+    els.healthSummary.classList.add("is-" + v.level);
+    if (els.healthHeadline) els.healthHeadline.textContent = v.headline;
+    if (els.healthDetail) els.healthDetail.textContent = v.detail;
+  }
+
+  function renderStatus(data) {
+    // Story 9-2 E7: explicit `=== false`; anything not strictly
+    // true/false renders "Unknown" (missing field ≠ ChirpStack down).
     if (data.chirpstack_available === true) {
-      setBadge(els.chirpstack, "Available", "available");
+      setBadge(els.chirpstack, "Available", "ok");
     } else if (data.chirpstack_available === false) {
-      setBadge(els.chirpstack, "Unavailable", "unavailable");
+      setBadge(els.chirpstack, "Unavailable", "error");
     } else {
-      setBadge(els.chirpstack, "Unknown", "unknown");
+      setBadge(els.chirpstack, "Unknown", null);
     }
 
+    // Poller status.
     var parsed = parseTimestamp(data.last_poll_time);
+    if (!parsed.ok && parsed.reason === "never") {
+      setBadge(els.pollerStatus, "Starting", "warn");
+    } else if (pollerStalled(data)) {
+      setBadge(els.pollerStatus, "Stalled", "error");
+    } else {
+      setBadge(els.pollerStatus, "Active", "ok");
+    }
+    if (els.pollInterval) {
+      els.pollInterval.textContent = formatInterval(data.poll_interval_secs);
+    }
+
     els.lastPollRel.textContent = formatRelative(parsed);
     if (!parsed.ok) {
       els.lastPollTime.setAttribute("datetime", "");
@@ -154,11 +329,6 @@
     var appCount = data.application_count || 0;
     els.appCount.textContent = numberFormatter.format(appCount);
     els.devCount.textContent = numberFormatter.format(data.device_count || 0);
-    // Epic C C-0 (2026-05-21): swap the Applications hint to
-    // operator-friendly empty-state copy when no applications are
-    // configured. The fresh-gateway path lands here after the
-    // first-run wizard completes; the dashboard should explain how
-    // to add an application rather than just showing "0".
     var hintEl = document.getElementById("application-hint");
     if (hintEl) {
       if (appCount === 0) {
@@ -166,111 +336,133 @@
           'No applications configured yet. ' +
           '<a href="/applications.html">Add one</a> to start polling.';
       } else {
-        hintEl.textContent = "Configured in TOML.";
+        hintEl.textContent = "Configured.";
       }
     }
-    els.uptime.textContent = formatUptime(data.uptime_secs);
+    els.uptime.textContent = formatDuration(data.uptime_secs);
     els.lastRefresh.textContent = dateFormatter.format(new Date());
   }
 
-  function fetchStatus() {
-    // Review iter-1 E5: cancel any in-flight request so a slow-network
-    // backlog doesn't pile up when refresh-now is clicked or the
-    // setInterval fires while the previous fetch is still pending.
-    //
-    // Review iter-2 M2: feature-detect; degrade to no-abort + token
-    // identity-only on browsers that pre-date AbortController.
-    var controller = ABORT_SUPPORTED ? new AbortController() : null;
-    if (ABORT_SUPPORTED && inflightToken !== null) {
-      // The previous token IS an AbortController on this branch.
-      inflightToken.abort();
+  function renderFreshness(counts) {
+    if (counts === "unavailable") {
+      if (els.freshFresh) els.freshFresh.textContent = "—";
+      if (els.freshStale) els.freshStale.textContent = "—";
+      if (els.freshBad) els.freshBad.textContent = "—";
+      if (els.freshNever) els.freshNever.textContent = "—";
+      if (els.freshHint) {
+        els.freshHint.textContent =
+          "Device freshness is temporarily unavailable.";
+      }
+      return;
     }
-    var thisCallToken = controller !== null ? controller : {};
-    inflightToken = thisCallToken;
-
-    var fetchOpts = {
-      cache: "no-store",
-      credentials: "same-origin",
-    };
-    if (controller !== null) {
-      fetchOpts.signal = controller.signal;
-    }
-
-    fetch(ENDPOINT, fetchOpts)
-      .then(function (resp) {
-        if (resp.status === 401) {
-          showError(
-            "Session expired or credentials no longer accepted. Please reload the page."
-          );
-          return null;
-        }
-        if (!resp.ok) {
-          showError(
-            "Status unavailable (HTTP " + resp.status + "). Last successful refresh shown above."
-          );
-          return null;
-        }
-        // Review iter-1 E8: a reverse proxy returning a 200 + HTML
-        // login page would otherwise crash render() via JSON.parse.
-        // Sniff Content-Type before parsing so the operator sees a
-        // useful banner instead of "Unexpected token <".
-        var ct = resp.headers.get("content-type") || "";
-        if (ct.indexOf("application/json") === -1) {
-          showError(
-            "Status unavailable (upstream returned non-JSON; check proxy / auth gateway configuration)."
-          );
-          return null;
-        }
-        clearError();
-        return resp.json();
-      })
-      .then(function (data) {
-        // Review iter-2 M1: stale-render guard. After AbortController
-        // signals, the prior call's `.then(resp => …)` chain may
-        // already have a resolved JSON value sitting in a microtask
-        // queue that runs AFTER the new call's render. Without this
-        // guard, the stale data overwrites the fresh data and the
-        // operator sees flicker / regression. Drop any data whose
-        // owning call has been superseded.
-        if (data && inflightToken === thisCallToken) {
-          render(data);
-        }
-      })
-      .catch(function (err) {
-        // AbortError is expected on rapid-refresh — silently swallow.
-        if (err && err.name === "AbortError") {
-          return;
-        }
-        // Review iter-2 M1: only show the error banner if THIS call
-        // is still the live one. Otherwise a stale network error
-        // from an aborted call would clobber the new call's
-        // `clearError()`.
-        if (inflightToken !== thisCallToken) {
-          return;
-        }
-        // Review iter-1 B9: generic banner — err.message can carry
-        // operator-noise (CORS / SSL / DNS specifics) and is
-        // inconsistent with the server-side NFR7 stance on hiding
-        // internals. Keep the surface clean.
-        showError(
-          "Status unavailable (network error). Check the gateway connection."
-        );
-      })
-      .finally(function () {
-        // Only clear the in-flight token if we are still the current
-        // call (otherwise a later call has already taken ownership
-        // and we must not stomp on it).
-        if (inflightToken === thisCallToken) {
-          inflightToken = null;
-        }
-      });
+    if (els.freshFresh) els.freshFresh.textContent = numberFormatter.format(counts.fresh);
+    if (els.freshStale) els.freshStale.textContent = numberFormatter.format(counts.stale);
+    if (els.freshBad) els.freshBad.textContent = numberFormatter.format(counts.bad);
+    if (els.freshNever) els.freshNever.textContent = numberFormatter.format(counts.never);
   }
 
-  els.refreshButton.addEventListener("click", fetchStatus);
+  // ---- generic hardened poller (Story 9-2 E2/E5/E8/M1/M2/B9) ------------
 
-  // Initial fetch + periodic refresh.
-  fetchStatus();
-  setInterval(fetchStatus, REFRESH_INTERVAL_MS);
+  var ABORT_SUPPORTED = typeof AbortController !== "undefined";
+
+  function makePoller(url, onData, onUnavailable) {
+    var inflightToken = null;
+    return function poll() {
+      var controller = ABORT_SUPPORTED ? new AbortController() : null;
+      if (ABORT_SUPPORTED && inflightToken !== null) {
+        inflightToken.abort();
+      }
+      var thisCallToken = controller !== null ? controller : {};
+      inflightToken = thisCallToken;
+
+      var fetchOpts = { cache: "no-store", credentials: "same-origin" };
+      if (controller !== null) fetchOpts.signal = controller.signal;
+
+      fetch(url, fetchOpts)
+        .then(function (resp) {
+          if (resp.status === 401) {
+            showError(
+              "Session expired or credentials no longer accepted. Please reload the page."
+            );
+            if (onUnavailable) onUnavailable();
+            return null;
+          }
+          if (!resp.ok) {
+            showError(
+              "Status unavailable (HTTP " +
+                resp.status +
+                "). Last successful refresh shown above."
+            );
+            if (onUnavailable) onUnavailable();
+            return null;
+          }
+          var ct = resp.headers.get("content-type") || "";
+          if (ct.indexOf("application/json") === -1) {
+            showError(
+              "Status unavailable (upstream returned non-JSON; check proxy / auth gateway configuration)."
+            );
+            if (onUnavailable) onUnavailable();
+            return null;
+          }
+          clearError();
+          return resp.json();
+        })
+        .then(function (data) {
+          // M1 stale-render guard: drop data whose call was superseded.
+          if (data && inflightToken === thisCallToken) {
+            onData(data);
+          }
+        })
+        .catch(function (err) {
+          if (err && err.name === "AbortError") return;
+          if (inflightToken !== thisCallToken) return;
+          showError(
+            "Status unavailable (network error). Check the gateway connection."
+          );
+          if (onUnavailable) onUnavailable();
+        })
+        .finally(function () {
+          if (inflightToken === thisCallToken) inflightToken = null;
+        });
+    };
+  }
+
+  var pollStatus = makePoller(
+    "/api/status",
+    function (data) {
+      lastStatus = data;
+      renderStatus(data);
+      renderVerdict();
+    },
+    null // a /api/status failure already shows the banner; keep last good tiles
+  );
+
+  // /api/devices feeds the freshness panel + the device-band verdict
+  // branches. If it fails, mark freshness "unavailable" so the verdict
+  // degrades to the /api/status-only signals (does NOT blank the page).
+  var pollDevices = makePoller(
+    "/api/devices",
+    function (data) {
+      lastFreshness = summariseFreshness(data);
+      renderFreshness(lastFreshness);
+      renderVerdict();
+    },
+    function () {
+      lastFreshness = "unavailable";
+      renderFreshness(lastFreshness);
+      renderVerdict();
+    }
+  );
+
+  function refreshAll() {
+    pollStatus();
+    pollDevices();
+  }
+
+  els.refreshButton.addEventListener("click", refreshAll);
+
+  refreshAll();
+  setInterval(refreshAll, REFRESH_INTERVAL_MS);
 
   // #128: one-time version fetch for the dashboard subtitle. Cosmetic —
   // failures are ignored so a hiccup never blocks the dashboard.

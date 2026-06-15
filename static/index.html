@@ -13,11 +13,25 @@
   <p class="subtitle">ChirpStack &rarr; OPC UA gateway<span id="app-version"></span></p>
 </header>
 
+<!-- Story F-3: at-a-glance overall health verdict. dashboard.js derives the
+     level (ok / warn / error) + message client-side from /api/status (and
+     /api/devices freshness) — no gateway-side aggregation (#130). -->
+<div id="health-summary" class="banner" role="status" aria-live="polite">
+  <strong id="health-headline">Checking gateway health…</strong>
+  <span id="health-detail"></span>
+</div>
+
 <main>
   <section class="tile" id="tile-chirpstack">
     <h2>ChirpStack</h2>
-    <p class="value"><span id="chirpstack-status" class="badge badge-unknown">…</span></p>
+    <p class="value"><span id="chirpstack-status" class="status-badge">…</span></p>
     <p class="hint">Most recent poll outcome.</p>
+  </section>
+
+  <section class="tile" id="tile-poller">
+    <h2>Poller</h2>
+    <p class="value"><span id="poller-status" class="status-badge">…</span></p>
+    <p class="hint" id="poller-hint">Polls every <span id="poll-interval">—</span>.</p>
   </section>
 
   <section class="tile" id="tile-last-poll">
@@ -26,25 +40,24 @@
     <p class="hint"><time id="last-poll-time" datetime="">—</time></p>
   </section>
 
-  <section class="tile" id="tile-errors">
-    <h2>Errors (cumulative)</h2>
-    <p class="value"><span id="error-count">…</span></p>
-    <p class="hint">Since gateway startup. Never resets.</p>
+  <section class="tile" id="tile-devices">
+    <h2>Devices</h2>
+    <p class="value"><span id="device-count">…</span></p>
+    <p class="hint">Across all applications.</p>
   </section>
 
   <section class="tile" id="tile-applications">
     <h2>Applications</h2>
     <p class="value"><span id="application-count">…</span></p>
-    <p class="hint" id="application-hint">Configured in TOML.</p>
-    <!-- Epic C C-0 (2026-05-21): the dashboard.js empty-state hook
-         swaps in operator-friendly copy when application_count == 0
-         on a freshly-deployed gateway. -->
+    <p class="hint" id="application-hint">Configured.</p>
+    <!-- Epic C C-0: dashboard.js swaps in operator-friendly empty-state copy
+         when application_count == 0 on a freshly-deployed gateway. -->
   </section>
 
-  <section class="tile" id="tile-devices">
-    <h2>Devices</h2>
-    <p class="value"><span id="device-count">…</span></p>
-    <p class="hint">Across all applications.</p>
+  <section class="tile" id="tile-errors">
+    <h2>Errors (cumulative)</h2>
+    <p class="value"><span id="error-count">…</span></p>
+    <p class="hint">Since gateway startup. Never resets.</p>
   </section>
 
   <section class="tile" id="tile-uptime">
@@ -54,13 +67,32 @@
   </section>
 </main>
 
+<!-- Story F-3: per-device data freshness. Counts are derived CLIENT-SIDE in
+     dashboard.js from /api/devices (as_of − metric.timestamp vs the returned
+     stale/bad thresholds) — the same band model as metrics.html. No
+     gateway-side rollup is computed (#130). -->
+<section id="freshness" class="freshness">
+  <h2>Device data freshness</h2>
+  <p class="freshness-counts" id="freshness-counts">
+    <span class="status-badge is-ok"><span id="freshness-fresh">…</span> fresh</span>
+    <span class="status-badge is-warn"><span id="freshness-stale">…</span> stale</span>
+    <span class="status-badge is-error"><span id="freshness-bad">…</span> bad</span>
+    <span class="status-badge"><span id="freshness-never">…</span> never reported</span>
+  </p>
+  <p class="hint" id="freshness-hint">
+    A device is <em>stale</em> once its most recent value is older than the stale
+    threshold, and <em>bad</em> once it crosses the hard cutoff.
+    <a href="/metrics.html">View live values</a>.
+  </p>
+</section>
+
 <footer>
   <p>
     Last refreshed:
     <span id="last-refresh">never</span>
-    <button type="button" id="refresh-now">Refresh now</button>
+    <button type="button" id="refresh-now" class="btn">Refresh now</button>
   </p>
-  <p id="error-banner" class="error-banner hidden" role="alert"></p>
+  <p id="error-banner" class="banner is-error hidden" role="alert"></p>
 </footer>
 
 <script src="/shell.js"></script>

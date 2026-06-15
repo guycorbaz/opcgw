@@ -357,6 +357,12 @@ footer button:hover {
   background: #f3f4f6;
 }
 
+.banner.is-ok {
+  background: #d1fae5;
+  border-color: #6ee7b7;
+  color: #065f46;
+}
+
 .banner.is-warn {
   background: #fff3cd;
   border-color: #ffc107;
@@ -397,6 +403,11 @@ footer button:hover {
     background: #1e293b;
     border-color: #475569;
   }
+  .banner.is-ok {
+    background: #064e3b;
+    border-color: #047857;
+    color: #a7f3d0;
+  }
   .banner.is-warn {
     background: #422006;
     border-color: #a16207;
@@ -406,6 +417,30 @@ footer button:hover {
     border-color: #7f1d1d;
     color: #fecaca;
   }
+}
+
+/* ============================================================
+ * Story F-3 — Device data freshness panel (index.html).
+ * A block below the tile grid; counts derived client-side from
+ * /api/devices. Reuses the shared .status-badge component.
+ * ============================================================ */
+.freshness {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 1rem 1rem;
+}
+.freshness h2 {
+  font-size: 1rem;
+  margin: 0 0 0.5rem;
+}
+.freshness-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0 0 0.5rem;
+}
+.freshness-counts .status-badge {
+  font-size: 0.9rem;
 }
 
 /* ============================================================

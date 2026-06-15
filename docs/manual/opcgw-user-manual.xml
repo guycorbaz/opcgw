@@ -1840,14 +1840,25 @@ rm config/config.toml</screen>
           <listitem>
             <para><emphasis>Live health (Web UI dashboard)</emphasis> — if
             <literal>[web].enabled = true</literal>, browse to
-            <literal>http://&lt;gateway-host&gt;:&lt;web-port&gt;/</literal>
-            for a single-screen view of ChirpStack connection state,
-            last-poll timestamp, error count, and configured application /
-            device counts. The metrics page at
-            <literal>/metrics.html</literal> shows live typed values plus
-            a staleness badge (Good / Uncertain / Bad / Missing) per
-            metric. Both pages auto-refresh every 10 s and expose JSON
-            shapes at <filename>/api/status</filename> and
+            <literal>http://&lt;gateway-host&gt;:&lt;web-port&gt;/</literal>.
+            The landing page (redesigned in Story F-3) leads with an
+            <emphasis>at-a-glance health verdict</emphasis> — a banner that
+            reads <emphasis>All systems operational</emphasis> or a specific
+            degraded reason (ChirpStack unreachable, poller stalled, an apply
+            that failed, devices going stale, or staged changes pending) — and
+            shows tiles for ChirpStack connection state, poller status (active
+            vs stalled, judged against the configured poll interval), last-poll
+            timestamp, cumulative error count, application / device counts, and
+            uptime, plus a device-data-freshness panel (how many devices are
+            fresh / stale / bad / never reported). The verdict and freshness
+            counts are computed in the browser from the gateway's existing
+            status surfaces — opcgw itself computes no new aggregates, and the
+            error figure is a cumulative count since startup (there is no
+            per-error history on this page; use the logs for that). The metrics
+            page at <literal>/metrics.html</literal> shows live typed values
+            plus a staleness badge (Good / Uncertain / Bad / Missing) per
+            metric. Both pages auto-refresh every 10 s and expose JSON shapes
+            at <filename>/api/status</filename> and
             <filename>/api/devices</filename> for
             <command>curl | jq</command> / Prometheus textfile
             exporters.</para>
