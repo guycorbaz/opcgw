@@ -223,7 +223,7 @@ pub fn migrate_singleton_toml_to_sqlite(
 /// for lists). The Rust-side load path in `AppConfig::load_singletons_from_sqlite`
 /// reverses this via `serde_json::from_str`. SQLite is transport only;
 /// typing is enforced by `AppConfig::validate` post-load.
-fn serialize_section<T: serde::Serialize>(
+pub(crate) fn serialize_section<T: serde::Serialize>(
     section: &T,
     skip_fields: &[&str],
 ) -> Result<Vec<(String, String)>, OpcGwError> {

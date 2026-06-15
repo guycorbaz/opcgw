@@ -63,6 +63,30 @@
     </div>
 
     <div id="sections"></div>
+
+    <!-- Story F-4: config export / import. -->
+    <section id="config-io" class="config-io">
+      <h2>Back up &amp; restore configuration</h2>
+      <p>
+        <strong>Export</strong> downloads the full configuration — applications,
+        devices, metrics, commands, and the four sections above — as a TOML
+        file. Secrets (<code>api_token</code>, <code>user_password</code>) are
+        <strong>never</strong> included. <strong>Import</strong> loads a
+        previously exported file: it is validated and <em>staged</em> (click
+        <em>Apply changes</em> below to activate). Import never changes this
+        instance's secrets.
+      </p>
+      <p>
+        <a class="btn btn-primary" href="/api/config/export"
+           download="opcgw-config.toml">Export config (.toml)</a>
+      </p>
+      <p class="config-io-import">
+        <label for="import-file">Import config:</label>
+        <input type="file" id="import-file" accept=".toml,text/plain">
+        <button type="button" id="import-btn" class="btn">Import (stage)</button>
+      </p>
+      <p id="import-status" class="banner hidden" role="status"></p>
+    </section>
   </main>
 
   <div id="confirm-modal" class="modal-overlay">
@@ -83,6 +107,7 @@
 
   <script src="/shell.js"></script>
   <script src="/singleton-config.js"></script>
+  <script src="/config-io.js"></script>
   <script src="/apply-bar.js"></script>
 </body>
 </html>

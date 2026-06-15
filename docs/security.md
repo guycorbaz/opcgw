@@ -116,6 +116,14 @@ Story F-0 (2026-06-14) unified every configuration-write surface behind a **stag
 - **A bad staged config is non-disruptive.** The supervisor re-reads and validates the effective config from SQLite *before* tearing down the running data-plane. On a read/validation failure it logs `apply_failed` and the current data-plane keeps serving the previous config — a malformed staged edit cannot take down the gateway.
 - **Web-login credential rotation remains restart-required.** Because the web server (and its auth middleware) persists across the soft restart by design, rotating `[opcua].user_name` / the web password still requires a full process restart to take effect. Genuinely hot-reloadable knobs and the singleton-side live-reload story remain deferred to issue #113's live-borrow refactor; under F-0 they are simply applied via the soft restart instead.
 
+### Config export / import (Story F-4)
+
+Story F-4 (2026-06-15) added `GET /api/config/export` and `POST /api/config/import`. The security-relevant contract:
+
+- **Export never serializes secrets.** The export builder serializes the effective config to TOML and then strips the `SECRET_FIELDS_BY_SECTION` keys (`chirpstack.api_token`, `opcua.user_password`) and the deployment-specific `[storage]` / `[logging]` / `[command_validation]` sections. A regression test greps the export bytes for the seeded secret values and asserts they are absent — the downloaded file is safe to commit to a config repo or share. Export is basic-auth-gated (read-only, CSRF-exempt like the singleton GET).
+- **Import never carries or overwrites the target's secrets.** The import handler merges the uploaded TOML *over* the running config via the same figment stack the boot path uses. Figment deep-merges tables, so an imported `[chirpstack]` without `api_token` keeps the target instance's own token — secrets stay per-instance in `config/secrets.toml` and are untouched by an import. Import is basic-auth + CSRF protected and takes a `{ "toml": ... }` JSON envelope (no multipart upload, so the CSRF `application/json` requirement holds; the browser reads the file client-side).
+- **Import is staged, never applied inline.** A validated import is written to SQLite (atomic app-tree replace + singleton-section writes) and marked pending; the operator activates it with `POST /api/config/apply`. The Apply supervisor re-validates before teardown, so a bad import is a non-disruptive `apply_failed` — and a malformed/invalid import is rejected up front (4xx) before anything is written.
+
 ### Threat model for first-run mode
 
 - **Local network deployment assumption.** The wizard is intended to be reached on a trusted operator network (LAN, VPN, or jump-host). Deploying opcgw on a public-internet-facing interface during first-run is a security regression — set `OPCGW_OPCUA__USER_PASSWORD` via env-var BEFORE the first start to skip the wizard entirely.

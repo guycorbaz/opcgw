@@ -39,6 +39,8 @@ pub mod csrf;
 /// Story C-4: `/api/inventory/drift` handler + 4-class diff computation.
 pub mod drift;
 pub mod singleton_config;
+/// Story F-4: `GET /api/config/export` + `POST /api/config/import`.
+pub mod config_io;
 /// Story C-1: `/api/inventory/*` handlers.
 pub mod inventory;
 pub mod setup;
@@ -646,6 +648,18 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
         .route(
             "/api/config/apply",
             axum::routing::post(apply::api_config_apply),
+        )
+        // Story F-4: config export (read-only download) + import (staged).
+        .route(
+            "/api/config/export",
+            get(config_io::export_config),
+        )
+        .route(
+            "/api/config/import",
+            // Generous body limit: the full app tree can far exceed the 16 KiB
+            // singleton cap. 1 MiB comfortably covers large fleets.
+            axum::routing::post(config_io::import_config)
+                .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024)),
         )
         // Epic C C-0 (2026-05-21): wizard routes. Reachable BEFORE
         // auth+CSRF when `AppState.is_first_run = true` (the basic-auth

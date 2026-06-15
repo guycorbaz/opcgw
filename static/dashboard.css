@@ -443,6 +443,28 @@ footer button:hover {
   font-size: 0.9rem;
 }
 
+/* Story F-4 — config export/import section (singleton-config.html). */
+.config-io {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid #d1d5db;
+}
+.config-io h2 {
+  font-size: 1.05rem;
+  margin: 0 0 0.5rem;
+}
+.config-io-import {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+@media (prefers-color-scheme: dark) {
+  .config-io {
+    border-top-color: #475569;
+  }
+}
+
 /* ============================================================
  * Story 9-3 (FR37) — Live metric values grid (metrics.html).
  *

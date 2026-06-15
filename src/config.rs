@@ -604,7 +604,7 @@ impl std::fmt::Debug for OpcUaConfig {
 /// Defines a ChirpStack application and its associated devices that should
 /// be monitored by the gateway. Each application corresponds to a logical
 /// grouping of LoRaWAN devices in ChirpStack.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ChirpStackApplications {
     /// Human-readable name of the ChirpStack application.
     ///
@@ -634,7 +634,7 @@ pub struct ChirpStackApplications {
 ///
 /// Defines a LoRaWAN device and specifies which metrics should be collected
 /// from ChirpStack and how they should be presented in the OPC UA server.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ChirpstackDevice {
     /// Unique device identifier in ChirpStack.
     ///
@@ -678,7 +678,7 @@ pub struct ChirpstackDevice {
 /// Defines the possible data types that can be used when exposing
 /// ChirpStack metrics through the OPC UA interface. The type determines
 /// how the raw metric data is converted and presented.
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub enum OpcMetricTypeConfig {
     /// Boolean value (true/false).
     ///
@@ -710,7 +710,7 @@ pub enum OpcMetricTypeConfig {
 /// This structure defines a mapping between ChirpStack device metrics and their
 /// corresponding OPC UA representation. It allows the gateway to expose LoRaWAN
 /// device data through the OPC UA protocol with proper type conversion and metadata.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ReadMetric {
     /// The display name that will appear as a node identifier in the OPC UA address space
     /// This is the human-readable name that OPC UA clients will see when browsing metrics
@@ -733,7 +733,7 @@ pub struct ReadMetric {
     pub metric_unit: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DeviceCommandCfg {
     /// Unique command identifier
     pub command_id: i32,
@@ -762,7 +762,7 @@ pub struct DeviceCommandCfg {
 ///
 /// Contains settings for data persistence via SQLite database.
 #[allow(dead_code)]
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct StorageConfig {
     /// Path to the SQLite database file.
     ///
@@ -848,7 +848,7 @@ impl Default for StorageConfig {
 /// Command validation configuration parameters.
 ///
 /// Controls how command parameters are validated before enqueuing.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 // `CommandValidationConfig` is scaffolded for the Epic 7 command-validation
 // pipeline; the fields are deserialized today but not yet consumed by any
 // runtime code path. Allow `dead_code` at the struct so the config surface
@@ -917,7 +917,7 @@ impl Default for CommandValidationConfig {
 /// `OPCGW_` prefix with `split("__")`). The short forms take precedence
 /// over the nested forms when both are set.
 #[allow(dead_code)]
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct LoggingConfig {
     /// Directory where per-module daily-rolling log files are written.
     ///
@@ -942,7 +942,7 @@ pub struct LoggingConfig {
 /// This structure is loaded from TOML configuration files and environment variables
 /// using the Figment library.
 #[allow(dead_code)]
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AppConfig {
     /// Global application settings.
     pub global: Global,

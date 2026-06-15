@@ -3877,6 +3877,192 @@ impl SqliteBackend {
             }
         }
     }
+
+    /// Story F-4: atomically REPLACE the entire application tree with `apps`
+    /// (the config-import path).
+    ///
+    /// Unlike [`Self::migrate_applications_config`] — which assumes an empty
+    /// tree and writes the `c6_migration_done` migration flag — this deletes
+    /// every existing application/device/metric/command first, then inserts the
+    /// supplied tree, inside ONE EXCLUSIVE transaction. It does NOT touch the
+    /// migration meta flag (the table is already migrated on a running
+    /// instance). On any error the whole replace rolls back, leaving the prior
+    /// tree intact. Returns `(apps, devices, metrics, commands)` inserted.
+    pub fn replace_all_applications(
+        &self,
+        apps: &[ChirpStackApplications],
+    ) -> Result<(usize, usize, usize, usize), OpcGwError> {
+        let conn = self.pool.checkout(Duration::from_secs(30)).map_err(|e| {
+            error!(error = %e, "Pool checkout timeout for replace_all_applications");
+            e
+        })?;
+
+        conn.execute_batch("BEGIN EXCLUSIVE TRANSACTION").map_err(|e| {
+            OpcGwError::Database(format!("import: begin transaction: {}", e))
+        })?;
+
+        let mut app_count = 0usize;
+        let mut dev_count = 0usize;
+        let mut met_count = 0usize;
+        let mut cmd_count = 0usize;
+
+        let result: Result<(), OpcGwError> = (|| {
+            // Clear the existing tree child-first (explicit deletes so the
+            // method is correct regardless of FK CASCADE configuration).
+            for table in ["commands", "metrics", "devices", "applications"] {
+                conn.execute(&format!("DELETE FROM {table}"), [])
+                    .map_err(|e| OpcGwError::Database(format!("import delete {table}: {}", e)))?;
+            }
+
+            let now = format_rfc3339(&Utc::now());
+            for app in apps {
+                conn.execute(
+                    "INSERT INTO applications \
+                     (application_id, application_name, created_at, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![app.application_id, app.application_name, now, now],
+                )
+                .map_err(|e| {
+                    OpcGwError::Database(format!(
+                        "import insert_application '{}': {}",
+                        app.application_id, e
+                    ))
+                })?;
+                app_count += 1;
+
+                for device in &app.device_list {
+                    conn.execute(
+                        "INSERT INTO devices \
+                         (application_id, device_id, device_name, stale_threshold_seconds, created_at, updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            app.application_id,
+                            device.device_id,
+                            device.device_name,
+                            device.stale_threshold_seconds.map(|v| v as i64),
+                            now,
+                            now
+                        ],
+                    )
+                    .map_err(|e| {
+                        OpcGwError::Database(format!(
+                            "import insert_device '{}/{}': {}",
+                            app.application_id, device.device_id, e
+                        ))
+                    })?;
+                    dev_count += 1;
+
+                    for metric in &device.read_metric_list {
+                        let type_str = Self::metric_type_cfg_to_str(&metric.metric_type);
+                        conn.execute(
+                            "INSERT INTO metrics \
+                             (application_id, device_id, chirpstack_metric_name, metric_name, \
+                              metric_type, metric_unit, created_at, updated_at) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                            params![
+                                app.application_id,
+                                device.device_id,
+                                metric.chirpstack_metric_name,
+                                metric.metric_name,
+                                type_str,
+                                metric.metric_unit,
+                                now,
+                                now
+                            ],
+                        )
+                        .map_err(|e| {
+                            OpcGwError::Database(format!(
+                                "import insert_metric '{}/{}/{}': {}",
+                                app.application_id,
+                                device.device_id,
+                                metric.chirpstack_metric_name,
+                                e
+                            ))
+                        })?;
+                        met_count += 1;
+                    }
+
+                    if let Some(commands) = &device.device_command_list {
+                        for cmd in commands {
+                            conn.execute(
+                                "INSERT INTO commands \
+                                 (application_id, device_id, command_name, command_id, \
+                                  command_confirmed, command_port) \
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                                params![
+                                    app.application_id,
+                                    device.device_id,
+                                    cmd.command_name,
+                                    cmd.command_id,
+                                    cmd.command_confirmed as i32,
+                                    cmd.command_port
+                                ],
+                            )
+                            .map_err(|e| {
+                                OpcGwError::Database(format!(
+                                    "import insert_command '{}/{}/{}': {}",
+                                    app.application_id, device.device_id, cmd.command_name, e
+                                ))
+                            })?;
+                            cmd_count += 1;
+                        }
+                    }
+                }
+            }
+
+            // Row-count verification — the tables now hold exactly the imported
+            // tree (we deleted everything first).
+            let db_apps = conn
+                .query_row("SELECT COUNT(*) FROM applications", [], |r| r.get::<_, i64>(0))
+                .map_err(|e| OpcGwError::Database(format!("import count check apps: {}", e)))?
+                as usize;
+            let db_devs = conn
+                .query_row("SELECT COUNT(*) FROM devices", [], |r| r.get::<_, i64>(0))
+                .map_err(|e| OpcGwError::Database(format!("import count check devs: {}", e)))?
+                as usize;
+            let db_mets = conn
+                .query_row("SELECT COUNT(*) FROM metrics", [], |r| r.get::<_, i64>(0))
+                .map_err(|e| OpcGwError::Database(format!("import count check metrics: {}", e)))?
+                as usize;
+            let db_cmds = conn
+                .query_row("SELECT COUNT(*) FROM commands", [], |r| r.get::<_, i64>(0))
+                .map_err(|e| OpcGwError::Database(format!("import count check commands: {}", e)))?
+                as usize;
+
+            if db_apps != app_count || db_devs != dev_count
+                || db_mets != met_count || db_cmds != cmd_count
+            {
+                return Err(OpcGwError::Database(format!(
+                    "row_count_mismatch: apps expected={} actual={}, devices expected={} actual={}, \
+                     metrics expected={} actual={}, commands expected={} actual={}",
+                    app_count, db_apps, dev_count, db_devs,
+                    met_count, db_mets, cmd_count, db_cmds,
+                )));
+            }
+
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                conn.execute_batch("COMMIT")
+                    .map_err(|e| OpcGwError::Database(format!("import: commit: {}", e)))?;
+                info!(
+                    applications = app_count,
+                    devices = dev_count,
+                    metrics = met_count,
+                    commands = cmd_count,
+                    "replace_all_applications committed (config import)"
+                );
+                Ok((app_count, dev_count, met_count, cmd_count))
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                error!(error = %e, "replace_all_applications rolled back");
+                Err(e)
+            }
+        }
+    }
 }
 
 

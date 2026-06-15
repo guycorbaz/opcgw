@@ -1508,6 +1508,24 @@ auth_realm = "opcgw"
         gateway keeps running the previous configuration and logs
         <literal>apply_failed</literal>.</para>
 
+        <para><emphasis>Backing up &amp; restoring configuration (Story
+        F-4).</emphasis> The singleton-configuration page has a <emphasis>Back up
+        &amp; restore</emphasis> section. <emphasis>Export config</emphasis>
+        downloads the whole configuration — the four
+        <literal>[global]</literal> / <literal>[chirpstack]</literal> /
+        <literal>[opcua]</literal> / <literal>[web]</literal> sections plus the
+        application/device/metric/command tree — as a portable TOML file.
+        <emphasis role="strong">Secrets are never included</emphasis>: the
+        ChirpStack API token and the OPC UA password are stripped, so the file is
+        safe to keep in version control or share. <emphasis>Import
+        config</emphasis> uploads a previously exported file: opcgw validates it,
+        merges it over the running configuration (your instance keeps its own
+        secrets — an import never changes them), and <emphasis>stages</emphasis>
+        it. Click <emphasis>Apply changes</emphasis> to activate the imported
+        configuration (one soft restart, as above). Use this to back up a working
+        setup, version it, or reproduce it on another gateway — for example to
+        stand up a demo from a saved file.</para>
+
         <warning>
           <title>Web UI is HTTP-only — TLS via reverse proxy</title>
           <para>opcgw binds an HTTP listener; credentials transit in
