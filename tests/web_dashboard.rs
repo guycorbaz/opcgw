@@ -336,9 +336,13 @@ async fn api_status_returns_json_with_expected_shape_when_authed() {
         json["poll_interval_secs"].is_number(),
         "poll_interval_secs must be a JSON number"
     );
-    assert!(
-        json["poll_interval_secs"].as_u64().unwrap_or(0) > 0,
-        "poll_interval_secs must be a positive poll interval, got {}",
+    // Value-pin: the test harness's stub config has polling_frequency = 10,
+    // so a correct pass-through must surface exactly 10 (a hardcoded constant
+    // or a wrong source would not match the config value).
+    assert_eq!(
+        json["poll_interval_secs"].as_u64(),
+        Some(10),
+        "poll_interval_secs must pass through [chirpstack].polling_frequency (stub=10), got {}",
         json["poll_interval_secs"]
     );
 

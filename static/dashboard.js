@@ -121,14 +121,15 @@
     return ageSecs > Math.max(60, interval * 3);
   }
 
-  // Single-metric band — same model as metrics.html `statusFor`
-  // (good / uncertain / bad / missing). Empty string == missing.
+  // Single-metric band — byte-identical to metrics.html `statusFor`
+  // (good / uncertain / bad / missing) so the dashboard freshness counts can
+  // never disagree with what metrics.html colours for the same device. Code
+  // review iter-1: `statusFor` treats ONLY null/undefined as missing (NOT an
+  // empty string), so a "" value with a fresh timestamp bands by age — match
+  // that exactly here (the value cell still renders "—" on metrics.html, but
+  // the band/colour is age-driven on both pages).
   function metricBand(metric, asOfMs, staleSecs, badSecs) {
-    if (
-      metric.value === null ||
-      metric.value === undefined ||
-      metric.value === ""
-    ) {
+    if (metric.value === null || metric.value === undefined) {
       return "missing";
     }
     var parsed = parseTimestamp(metric.timestamp);
@@ -164,8 +165,20 @@
   function summariseFreshness(devicesResponse) {
     var asOf = parseTimestamp(devicesResponse.as_of);
     var asOfMs = asOf.ok ? asOf.ms : Date.now();
-    var staleSecs = devicesResponse.stale_threshold_secs;
-    var badSecs = devicesResponse.bad_threshold_secs;
+    // Defensive thresholds (code review iter-1 M3): if the server omits or
+    // sends a non-positive threshold, fall back to the documented defaults
+    // (same guard metrics.js carries) so a single bad field can't flip every
+    // device to "bad"/"fresh" and corrupt the top-level health verdict.
+    var staleSecs =
+      typeof devicesResponse.stale_threshold_secs === "number" &&
+      devicesResponse.stale_threshold_secs > 0
+        ? devicesResponse.stale_threshold_secs
+        : 120;
+    var badSecs =
+      typeof devicesResponse.bad_threshold_secs === "number" &&
+      devicesResponse.bad_threshold_secs > 0
+        ? devicesResponse.bad_threshold_secs
+        : 86400;
     var counts = { fresh: 0, stale: 0, bad: 0, never: 0, total: 0 };
     var apps = devicesResponse.applications || [];
     for (var a = 0; a < apps.length; a++) {
@@ -212,8 +225,9 @@
     if (fresh && fresh.bad > 0) {
       return {
         level: "error",
-        headline: fresh.bad + " device(s) with stale data",
-        detail: "Some devices have not reported within the hard cutoff.",
+        headline: fresh.bad + " device(s) with no recent data",
+        detail:
+          "Some devices have not reported within the hard cutoff (shown as “bad” below).",
       };
     }
     if (fresh && fresh.stale > 0) {
@@ -272,14 +286,32 @@
     if (kind) el.classList.add("is-" + kind);
   }
 
-  function showError(message) {
-    els.errorBanner.textContent = message;
-    els.errorBanner.classList.remove("hidden");
+  // Per-poller error slots (code review iter-1 M1/M2): the status + devices
+  // pollers must NOT clobber each other's banner. Each owns its key; the
+  // banner shows the union of active errors and hides only when both clear.
+  var bannerErrors = { status: null, devices: null };
+
+  function renderBanner() {
+    var msgs = [];
+    if (bannerErrors.status) msgs.push(bannerErrors.status);
+    if (bannerErrors.devices) msgs.push(bannerErrors.devices);
+    if (msgs.length === 0) {
+      els.errorBanner.textContent = "";
+      els.errorBanner.classList.add("hidden");
+    } else {
+      els.errorBanner.textContent = msgs.join("  •  ");
+      els.errorBanner.classList.remove("hidden");
+    }
   }
 
-  function clearError() {
-    els.errorBanner.textContent = "";
-    els.errorBanner.classList.add("hidden");
+  function setBannerError(key, message) {
+    bannerErrors[key] = message;
+    renderBanner();
+  }
+
+  function clearBannerError(key) {
+    bannerErrors[key] = null;
+    renderBanner();
   }
 
   function renderVerdict() {
@@ -365,7 +397,7 @@
 
   var ABORT_SUPPORTED = typeof AbortController !== "undefined";
 
-  function makePoller(url, onData, onUnavailable) {
+  function makePoller(key, label, url, onData, onUnavailable) {
     var inflightToken = null;
     return function poll() {
       var controller = ABORT_SUPPORTED ? new AbortController() : null;
@@ -381,30 +413,33 @@
       fetch(url, fetchOpts)
         .then(function (resp) {
           if (resp.status === 401) {
-            showError(
-              "Session expired or credentials no longer accepted. Please reload the page."
+            setBannerError(
+              key,
+              label +
+                " unavailable — session expired or credentials no longer accepted. Reload the page."
             );
             if (onUnavailable) onUnavailable();
             return null;
           }
           if (!resp.ok) {
-            showError(
-              "Status unavailable (HTTP " +
-                resp.status +
-                "). Last successful refresh shown above."
+            setBannerError(
+              key,
+              label + " unavailable (HTTP " + resp.status + ")."
             );
             if (onUnavailable) onUnavailable();
             return null;
           }
           var ct = resp.headers.get("content-type") || "";
           if (ct.indexOf("application/json") === -1) {
-            showError(
-              "Status unavailable (upstream returned non-JSON; check proxy / auth gateway configuration)."
+            setBannerError(
+              key,
+              label +
+                " unavailable (upstream returned non-JSON; check proxy / auth gateway configuration)."
             );
             if (onUnavailable) onUnavailable();
             return null;
           }
-          clearError();
+          clearBannerError(key);
           return resp.json();
         })
         .then(function (data) {
@@ -416,8 +451,9 @@
         .catch(function (err) {
           if (err && err.name === "AbortError") return;
           if (inflightToken !== thisCallToken) return;
-          showError(
-            "Status unavailable (network error). Check the gateway connection."
+          setBannerError(
+            key,
+            label + " unavailable (network error). Check the gateway connection."
           );
           if (onUnavailable) onUnavailable();
         })
@@ -428,19 +464,24 @@
   }
 
   var pollStatus = makePoller(
+    "status",
+    "Gateway status",
     "/api/status",
     function (data) {
       lastStatus = data;
       renderStatus(data);
       renderVerdict();
     },
-    null // a /api/status failure already shows the banner; keep last good tiles
+    null // keep the last-good tiles on a status failure
   );
 
   // /api/devices feeds the freshness panel + the device-band verdict
-  // branches. If it fails, mark freshness "unavailable" so the verdict
-  // degrades to the /api/status-only signals (does NOT blank the page).
+  // branches. If it fails, its own banner slot surfaces it AND freshness is
+  // marked "unavailable" so the verdict degrades to the /api/status-only
+  // signals (does NOT blank the page or clobber the status banner).
   var pollDevices = makePoller(
+    "devices",
+    "Device data",
     "/api/devices",
     function (data) {
       lastFreshness = summariseFreshness(data);

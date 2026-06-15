@@ -1,6 +1,6 @@
 # Story F.3: Dashboard Landing Redesign
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -155,3 +155,24 @@ claude-opus-4-8[1m] (Opus 4.8, 1M context)
 - `README.md` — dashboard prose + Planning row F-3.
 - `docs/manual/opcgw-user-manual.xml` — `sec-monitoring-overview` dashboard description.
 - `_bmad-output/implementation-artifacts/F-3-dashboard-landing-redesign.md` (this story), `sprint-status.yaml`, `deferred-work.md`.
+
+## Senior Developer Review (AI)
+
+**Reviewed:** 2026-06-15 · **Method:** 3 parallel adversarial layers (Blind Hunter / Edge Case Hunter / Acceptance Auditor) on a different model than the implementer · **Iterations:** 1 patch round + iter-2 verification · **Outcome:** APPROVED — loop terminated, only LOW findings remain. No HIGH found (Blind traced and withdrew its HIGH candidates).
+
+### Iteration 1 — MED findings (all FIXED)
+- **M1/M2 (shared error banner):** the two pollers (`/api/status` + `/api/devices`) shared one `#error-banner`; each `clearError()` clobbered the other's error, and a `/api/devices` failure showed a misleading "Status unavailable". **Fixed:** per-poller error slots (`bannerErrors = {status, devices}` + `setBannerError`/`clearBannerError`/`renderBanner` union) and label-prefixed messages ("Gateway status" / "Device data"); `makePoller` now takes `(key, label, …)`.
+- **M3 (threshold validation):** `summariseFreshness` trusted `stale/bad_threshold_secs` raw — a `0`/missing value would flip the top-level verdict (all-bad or all-fresh). **Fixed:** fall back to the documented defaults (120 / 86400) on a non-positive/missing threshold — the same guard `metrics.js` carries.
+- **Band-model drift (Edge M1 / Auditor):** `metricBand` treated `value === ""` as missing while `metrics.js` `statusFor` does not, so a `""` metric counted "never" on the dashboard yet "fresh" on metrics.html. **Fixed:** removed the `=== ""` clause so `metricBand` is byte-identical to `statusFor` (only null/undefined are missing).
+- **L1/L2 (LOW, fixed):** the `poll_interval_secs` test now value-pins `== 10` (proves config-sourcing, not a constant); the `bad`-band verdict headline reworded to "no recent data" to match the panel's "bad" taxonomy.
+
+### Iteration 2 — verification: CLEAN
+Confirmed the banner-slot refactor handles all 4 states, aborted fetches never set a permanent error (catch early-returns before `setBannerError`), both `makePoller` call sites updated (no leftover `showError`/`clearError`), `metricBand` now matches `statusFor` exactly, the threshold guard correctly keeps small positives (1) and rejects 0/NaN/missing, and the `== 10` value-pin is deterministic (stub `polling_frequency = 10`). Loop terminates.
+
+### Accepted (LOW — see deferred-work.md)
+- **M4 (inconsistent null-guarding):** `renderStatus`'s tile writes (`errorCount`/`uptime`/…) are unguarded while `setBadge` + freshness writes are guarded. **Accepted:** every one of those IDs is pinned by the served-HTML test, so a missing/renamed ID fails the test before shipping; this matches the pre-existing Story 9-2 pattern (F-3 did not regress it).
+- **L4 (overloaded `lastFreshness` sentinel):** `undefined | "unavailable" | countsObject`. **Accepted:** both consumers branch correctly (`!== "unavailable"`); works, minor.
+- **AC#10 docs/web-api.md:** `/api/status` + `/api/devices` were never documented in that file, so the new field is described in the README + DocBook manual prose instead. **Accepted** (no API table to drift); adding a structured `/api/status` section to `docs/web-api.md` is optional future polish.
+
+### Gates (final)
+`cargo test` exit 0 · `cargo clippy --all-targets -- -D warnings` clean · `xmllint` clean · `node --check` OK · `web_dashboard` 15/0.
