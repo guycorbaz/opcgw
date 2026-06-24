@@ -5,6 +5,91 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] — 2026-06-24 — Epic F: onboarding & web UX for public release
+
+> **Status:** release prepared. Epic F (stories F-0…F-4) is complete; all gates
+> green (`cargo test` 38 suites / 0 failed, `cargo clippy --all-targets
+> -D warnings` clean) and the mandatory epic security review came back **CLEAN**
+> (0 HIGH / 0 MEDIUM / 3 LOW). This release makes opcgw configurable entirely
+> from the browser and removes the "restart on every config change" churn.
+> A real-world onboarding smoke (empty-config boot → wizard → ChirpStack
+> connect → Apply → export/import round-trip) is the release gate before the
+> stable tag is promoted.
+
+### Added
+
+- **Zero-touch first-run wizard** (Epic F / F-2). `/setup` now captures the full
+  first-boot configuration from the browser — ChirpStack `server_address` /
+  `tenant_id` / `api_token` **and** the OPC UA password — so a fresh checkout
+  with an empty `config.toml`/`.env` boots fully configured with **no text-file
+  editing**. Secrets are written to `config/secrets.toml` (chmod `0600`, atomic
+  temp+rename); non-secret config goes to SQLite. `AppConfig::validate()` and
+  `is_first_run()` now carve out missing ChirpStack credentials so a pristine
+  config boots into the wizard instead of aborting. Web-UI login user/password
+  and the log-file location remain in `.env` by design.
+- **Config export / import** (Epic F / F-4). `GET /api/config/export` downloads
+  the full configuration (the four singleton sections + the
+  applications/devices/metrics/commands tree) as a portable TOML file with
+  **secrets excluded** (`api_token` / `user_password` are never serialized).
+  `POST /api/config/import` accepts a `{ "toml": … }` JSON envelope, merges it
+  over the current config via figment (so the target instance keeps its own
+  secrets — import never carries or overwrites them), validates the candidate,
+  and **stages** it through the Apply flow (the whole import is one atomic
+  EXCLUSIVE transaction — all-or-nothing). New `toml` dependency + `Serialize`
+  derives enable SQLite→TOML serialization.
+- **Unified web shell** (Epic F / F-1). A shared `static/shell.js` injects one
+  navigation/header bar on every operator page (active link derived from the
+  path), replacing the hand-duplicated `<nav>` across 9 pages, plus shared
+  component CSS (`.app-shell` / `.btn` / `.status-badge` / `.banner`). Vanilla
+  JS — **no build step, no framework, no `node_modules`**.
+- **Redesigned dashboard landing page** (Epic F / F-3). The landing page leads
+  with an at-a-glance health verdict (OK / specific degraded reason), a
+  poller-status tile (stall detection against the configured poll interval, via
+  a new `poll_interval_secs` field on `GET /api/status`), and a per-device data
+  freshness panel (fresh / stale / bad / never). All rollups are derived
+  client-side from the existing `/api/status` + `/api/devices` payloads — no
+  gateway-side aggregation.
+
+### Changed
+
+- **Staged configuration with an explicit "Apply changes" soft restart**
+  (Epic F / F-0). Config edits (the singleton-config editor **and** the
+  application/device/metric/command CRUD handlers) now **stage** to SQLite
+  without restarting the running gateway; `GET /api/status` reports
+  `pending_changes: true` until applied. A single `POST /api/config/apply`
+  performs **one** graceful **in-process** soft restart of the data-plane
+  (poller, OPC UA server, gRPC event stream, command-timeout handler) — the
+  **container is never restarted**, and OPC UA clients reconnect once per batch
+  rather than on every edit. The config is re-read and validated **before**
+  teardown, so a bad config is non-disruptive (the running data-plane keeps
+  serving). The restart-required allowlist is gone; all settings apply uniformly
+  on Apply.
+- **Pooled SQLite connections now set a 5 s `busy_timeout`** (Epic F / F-4
+  review, [#141](https://github.com/guycorbaz/opcgw/issues/141)). Concurrent
+  `BEGIN EXCLUSIVE` writers (a config import racing a CRUD save or the
+  Apply-triggered reload) now wait for the lock instead of failing immediately
+  with `SQLITE_BUSY` → a spurious HTTP 500. Hardens all eight EXCLUSIVE writers.
+
+### Fixed
+
+- **Uplink event-stream device set is recomputed on every Apply**
+  ([#138](https://github.com/guycorbaz/opcgw/issues/138)). Adding or removing a
+  device no longer requires a manual restart to take effect on the gRPC
+  `StreamDeviceEvents` subscription — the stream task is torn down and respawned
+  with the current device set as part of the soft restart.
+- **`command_class` is preserved on config import** (Epic F / F-4 review). The
+  Epic E valve device-class binding was previously dropped on an export→import
+  round-trip; both the import path and the boot migration now persist it.
+
+### Security
+
+- Mandatory epic-completion security review: **CLEAN** (0 HIGH / 0 MEDIUM /
+  3 LOW). Secrets never reach SQLite, logs, or the config export; all new web
+  endpoints are authentication- and CSRF-gated; the first-run wizard bypass is
+  an exact-match allowlist; SQL is fully parameterized; the Apply path
+  re-validates before teardown with revert-on-failure. The three LOW items are
+  defense-in-depth follow-ups recorded in `deferred-work.md`.
+
 ## [2.2.0] — 2026-06-13 — Epic E: model-agnostic, class-aware device abstraction
 
 > **Status:** released — tagged `v2.2.0` and published to Docker Hub
