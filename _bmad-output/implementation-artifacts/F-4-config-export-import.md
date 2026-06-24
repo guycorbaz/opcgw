@@ -1,6 +1,6 @@
 # Story F.4: Config Export / Import
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -152,3 +152,29 @@ claude-opus-4-8[1m] (Opus 4.8, 1M context)
 - `tests/web_config_io.rs` — NEW integration tests.
 - `README.md`, `docs/security.md`, `docs/manual/opcgw-user-manual.xml` — docs.
 - `_bmad-output/implementation-artifacts/F-4-config-export-import.md` (this), `sprint-status.yaml`.
+
+## Senior Developer Review (AI)
+
+**Reviewed:** 2026-06-15, re-reviewed 2026-06-24 · **Method:** 3 parallel adversarial layers (Blind Hunter / Edge Case Hunter / Acceptance Auditor) · **Iterations:** iter-1 patch round + iter-2 verification + iter-2b independent re-review (fresh agents, mandated because iter-1 added brand-new transaction flow-control) · **Outcome:** APPROVED — loop terminated, only LOW findings remain (1 MEDIUM found in iter-2b, fixed → GH #141).
+
+### Iteration 1 — 1 HIGH + MEDs (all FIXED)
+- **HIGH (Edge + Auditor converged): `command_class` dropped on import.** `DeviceCommandCfg.command_class` (Epic E valve device-class binding) was omitted from the import `INSERT INTO commands` — and export *does* serialize it — so an export→import round-trip silently lost the binding (valve commands revert to the legacy raw-byte path). The same omission was present in the boot migration `migrate_applications_config`. **Fixed:** added `command_class` to both inserts; a round-trip regression test (`export_import_round_trip_preserves_command_class`) pins it.
+- **MED (Blind/Edge: partial-stage atomicity): the 4 singleton writes (each its own committed transaction) ran BEFORE the app-tree replace** — a storage failure between them left a half-staged config in SQLite (imported singletons + old apps) that a later unrelated Apply would activate. **Fixed:** replaced the two-step write with a single `SqliteBackend::import_replace_all(singletons, apps)` that does the singleton DELETE/INSERT + the app-tree delete-all/insert in **one EXCLUSIVE transaction** — the whole import is now all-or-nothing.
+- **MED (Blind: tautological row-count check):** the verify compared the insert-loop counters to `COUNT(*)` after a delete-all (always equal). **Fixed:** compare against **input-derived** counts (`apps.len()`, summed devices/metrics/commands).
+- **MED (Auditor: missing real round-trip + oversized/empty-body tests):** added `export_import_round_trip_preserves_command_class` (export builder → import bytes → tree incl. command_class), `import_oversized_body_rejected` (>1 MiB → 413), `import_empty_body_rejected` (→ 400 invalid_json).
+
+### Iteration 2 — verification: CLEAN
+Confirmed `import_replace_all` is one `BEGIN EXCLUSIVE … (||{…})() … COMMIT/ROLLBACK` (any failure rolls back the whole import); the singleton DELETE/INSERT matches the `singleton_config` schema; `command_class` binds nullable in both inserts and the load path reads it; the input-derived count check is correct with no false-positive; the migration change has nil blast radius (no test asserts the old column list). One cosmetic LOW (stale `replace_all_applications` log labels) fixed.
+
+### Iteration 2b — INDEPENDENT re-review (2026-06-24, fresh 3-layer pass) — 1 MEDIUM (FIXED)
+iter-1 introduced brand-new flow-control (`import_replace_all`'s single EXCLUSIVE transaction), so per the iter-N+1 doctrine a genuine independent adversarial pass was run (Blind Hunter / Edge Case Hunter / Acceptance Auditor, fresh agents, before committing the review-fix round). Blind Hunter and Acceptance Auditor came back clean (all 12 ACs MET, transaction + Guard-2 avoidance + count check + command_class + secret handling all verified). Edge Case Hunter surfaced:
+- **MED (Edge: no `busy_timeout` on pool connections → spurious 500 under concurrent writers).** `ConnectionPool` (`src/storage/pool.rs`) hands out multiple connections and all 8 storage writers open `BEGIN EXCLUSIVE`/`IMMEDIATE`; with no busy timeout the loser of any write race (import vs import / import vs CRUD save / import vs Apply-reload) gets `SQLITE_BUSY` immediately → HTTP 500. Pre-existing pattern, but F-4 widens the window (import holds EXCLUSIVE across whole-tree delete+reinsert). **Fixed (Guy's explicit call):** `conn.busy_timeout(5000ms)` set on every pooled connection at creation in `ConnectionPool::new` — hardens all 8 writers. Regression test `test_pooled_connections_have_busy_timeout` pins it via `PRAGMA busy_timeout`. Tracked as **GH #141**. Loop terminates — only LOW findings remain.
+
+### Accepted / considered (LOW — see deferred-work.md)
+- **`foreign_keys` pragma not enabled on pool connections (Edge M2):** pre-existing; `import_replace_all`'s explicit child-first deletes are correct regardless. Flagged as a separate pre-existing issue (the CASCADE-reliant `delete_application`/`delete_device` paths), not an F-4 defect.
+- **`#[serde(skip_serializing)]` on the secret fields (Blind L1): REJECTED** — the figment-merge import preserves the target's secrets *by serializing the current secret into the base layer*; skipping serialization would break that. The export strips secrets *after* serialization (the correct, tested guard).
+- **Import cannot empty the app tree (Edge L1):** an imported file with no `[[application]]` keeps the current tree (figment array-absent → base kept). Documented behaviour; to clear all apps use CRUD delete.
+- **Export reflects the *applied* config, not staged edits (Edge L2);** static export filename (Auditor LOW); `apply_signal`-not-fired asserted via the `applied_gen`-unchanged proxy (Auditor LOW) — all accepted.
+
+### Gates (final)
+`cargo test` exit 0 (38 suites, 0 failed) · `cargo clippy --all-targets -- -D warnings` clean · `xmllint` clean · `node --check` OK. `web_config_io` 12/0, `config_io` unit 2/0, migration 19/0, singleton 19/0, pool 14/0 (incl. new `test_pooled_connections_have_busy_timeout`).

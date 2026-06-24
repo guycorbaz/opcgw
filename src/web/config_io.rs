@@ -192,64 +192,34 @@ pub async fn import_config(State(state): State<Arc<AppState>>, body: Bytes) -> R
         );
     }
 
-    // Persist (staged). Write the SINGLETON sections first (each is a cheap
-    // section-replace; all four, never a partial set — Story F-2 Guard-2 trap),
-    // then the app tree via the atomic replace. Secrets are NEVER written (the
-    // skip-list excludes them, so the target keeps its own secrets.toml).
-    let singleton_sections: [(&str, Vec<(String, String)>); 4] = [
-        (
-            "global",
-            match crate::storage::migrate_singleton_config::serialize_section(
-                &candidate.global,
-                secret_fields_for_section("global"),
-            ) {
-                Ok(f) => f,
-                Err(e) => return import_storage_error(&state, "global", &e.to_string()),
-            },
-        ),
-        (
-            "chirpstack",
-            match crate::storage::migrate_singleton_config::serialize_section(
-                &candidate.chirpstack,
-                secret_fields_for_section("chirpstack"),
-            ) {
-                Ok(f) => f,
-                Err(e) => return import_storage_error(&state, "chirpstack", &e.to_string()),
-            },
-        ),
-        (
-            "opcua",
-            match crate::storage::migrate_singleton_config::serialize_section(
-                &candidate.opcua,
-                secret_fields_for_section("opcua"),
-            ) {
-                Ok(f) => f,
-                Err(e) => return import_storage_error(&state, "opcua", &e.to_string()),
-            },
-        ),
-        (
-            "web",
-            match crate::storage::migrate_singleton_config::serialize_section(
-                &candidate.web,
-                secret_fields_for_section("web"),
-            ) {
-                Ok(f) => f,
-                Err(e) => return import_storage_error(&state, "web", &e.to_string()),
-            },
-        ),
-    ];
-    for (section, fields) in &singleton_sections {
-        if let Err(e) = state.sqlite_config.write_singleton_section(section, fields) {
-            return import_storage_error(&state, section, &e.to_string());
-        }
+    // Persist (staged) — ALL of it in ONE transaction (code review iter-1):
+    // the four singleton sections + the whole application tree are replaced
+    // atomically by `import_replace_all`, so a storage failure anywhere rolls
+    // the entire import back, leaving the prior config intact (no half-staged
+    // state). Secrets are NEVER written — the skip-list excludes them, so the
+    // target keeps its own secrets.toml. Build the per-section (key, value)
+    // rows first (secret fields skipped); a serialize failure aborts before
+    // any write.
+    use crate::storage::migrate_singleton_config::serialize_section;
+    let mut singletons: Vec<(&str, Vec<(String, String)>)> = Vec::with_capacity(4);
+    macro_rules! push_section {
+        ($name:literal, $field:expr) => {
+            match serialize_section($field, secret_fields_for_section($name)) {
+                Ok(f) => singletons.push(($name, f)),
+                Err(e) => return import_storage_error(&state, $name, &e.to_string()),
+            }
+        };
     }
+    push_section!("global", &candidate.global);
+    push_section!("chirpstack", &candidate.chirpstack);
+    push_section!("opcua", &candidate.opcua);
+    push_section!("web", &candidate.web);
 
-    // App-tree atomic replace (rolls back on any error, leaving the prior tree).
     if let Err(e) = state
         .sqlite_config
-        .replace_all_applications(&candidate.application_list)
+        .import_replace_all(&singletons, &candidate.application_list)
     {
-        return import_storage_error(&state, "applications", &e.to_string());
+        return import_storage_error(&state, "import", &e.to_string());
     }
 
     // Stage — the operator applies via POST /api/config/apply (F-0). Do NOT

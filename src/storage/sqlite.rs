@@ -3792,15 +3792,20 @@ impl SqliteBackend {
                             conn.execute(
                                 "INSERT INTO commands \
                                  (application_id, device_id, command_name, command_id, \
-                                  command_confirmed, command_port) \
-                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                                  command_confirmed, command_port, command_class) \
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                                 params![
                                     app.application_id,
                                     device.device_id,
                                     cmd.command_name,
                                     cmd.command_id,
                                     cmd.command_confirmed as i32,
-                                    cmd.command_port
+                                    cmd.command_port,
+                                    // Code review iter-1 (F-4): same command_class
+                                    // omission existed in the boot migration —
+                                    // a config.toml seed with a valve command
+                                    // lost its device-class binding. Fixed here too.
+                                    cmd.command_class
                                 ],
                             )
                             .map_err(|e| {
@@ -3881,19 +3886,25 @@ impl SqliteBackend {
     /// Story F-4: atomically REPLACE the entire application tree with `apps`
     /// (the config-import path).
     ///
+    /// Replaces BOTH the singleton sections AND the entire application tree in
+    /// ONE EXCLUSIVE transaction so a config import is all-or-nothing: a failure
+    /// anywhere rolls the whole import back, leaving the prior config intact (no
+    /// half-staged state). `singletons` is `(section, [(key, value-json)])` for
+    /// each section to replace (secrets already excluded by the caller).
+    ///
     /// Unlike [`Self::migrate_applications_config`] — which assumes an empty
     /// tree and writes the `c6_migration_done` migration flag — this deletes
     /// every existing application/device/metric/command first, then inserts the
-    /// supplied tree, inside ONE EXCLUSIVE transaction. It does NOT touch the
-    /// migration meta flag (the table is already migrated on a running
-    /// instance). On any error the whole replace rolls back, leaving the prior
-    /// tree intact. Returns `(apps, devices, metrics, commands)` inserted.
-    pub fn replace_all_applications(
+    /// supplied tree, and does NOT touch the migration meta flag (the table is
+    /// already migrated on a running instance). Returns
+    /// `(apps, devices, metrics, commands)` inserted.
+    pub fn import_replace_all(
         &self,
+        singletons: &[(&str, Vec<(String, String)>)],
         apps: &[ChirpStackApplications],
     ) -> Result<(usize, usize, usize, usize), OpcGwError> {
         let conn = self.pool.checkout(Duration::from_secs(30)).map_err(|e| {
-            error!(error = %e, "Pool checkout timeout for replace_all_applications");
+            error!(error = %e, "Pool checkout timeout for import_replace_all");
             e
         })?;
 
@@ -3907,8 +3918,35 @@ impl SqliteBackend {
         let mut cmd_count = 0usize;
 
         let result: Result<(), OpcGwError> = (|| {
-            // Clear the existing tree child-first (explicit deletes so the
-            // method is correct regardless of FK CASCADE configuration).
+            // (1) Replace the singleton sections (all in this same transaction,
+            // so the F-2 Guard-2 trap can't apply and a later failure reverts
+            // everything together).
+            let now_singleton = format_rfc3339(&Utc::now());
+            for (section, fields) in singletons {
+                conn.execute(
+                    "DELETE FROM singleton_config WHERE section = ?1",
+                    params![section],
+                )
+                .map_err(|e| {
+                    OpcGwError::Database(format!("import delete singleton {section}: {}", e))
+                })?;
+                for (k, v) in fields {
+                    conn.execute(
+                        "INSERT INTO singleton_config (section, key, value, updated_at) \
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![section, k, v, now_singleton],
+                    )
+                    .map_err(|e| {
+                        OpcGwError::Database(format!(
+                            "import insert singleton {section}.{k}: {}",
+                            e
+                        ))
+                    })?;
+                }
+            }
+
+            // (2) Clear the existing app tree child-first (explicit deletes so
+            // the method is correct regardless of FK CASCADE configuration).
             for table in ["commands", "metrics", "devices", "applications"] {
                 conn.execute(&format!("DELETE FROM {table}"), [])
                     .map_err(|e| OpcGwError::Database(format!("import delete {table}: {}", e)))?;
@@ -3987,15 +4025,20 @@ impl SqliteBackend {
                             conn.execute(
                                 "INSERT INTO commands \
                                  (application_id, device_id, command_name, command_id, \
-                                  command_confirmed, command_port) \
-                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                                  command_confirmed, command_port, command_class) \
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                                 params![
                                     app.application_id,
                                     device.device_id,
                                     cmd.command_name,
                                     cmd.command_id,
                                     cmd.command_confirmed as i32,
-                                    cmd.command_port
+                                    cmd.command_port,
+                                    // Code review iter-1 HIGH: persist the
+                                    // device-class binding (Epic E valve) — the
+                                    // export emits it, so the import MUST too or
+                                    // round-trip silently loses it.
+                                    cmd.command_class
                                 ],
                             )
                             .map_err(|e| {
@@ -4029,14 +4072,31 @@ impl SqliteBackend {
                 .map_err(|e| OpcGwError::Database(format!("import count check commands: {}", e)))?
                 as usize;
 
-            if db_apps != app_count || db_devs != dev_count
-                || db_mets != met_count || db_cmds != cmd_count
+            // Code review iter-1 M1: verify the persisted counts against the
+            // INPUT structure (not the insert-loop counters, which would make
+            // the check a tautology after the delete-all). A duplicate key that
+            // the validator missed, or any silently-swallowed insert, makes the
+            // DB count diverge from what the imported tree declared.
+            let want_apps = apps.len();
+            let want_devs: usize = apps.iter().map(|a| a.device_list.len()).sum();
+            let want_mets: usize = apps
+                .iter()
+                .flat_map(|a| &a.device_list)
+                .map(|d| d.read_metric_list.len())
+                .sum();
+            let want_cmds: usize = apps
+                .iter()
+                .flat_map(|a| &a.device_list)
+                .map(|d| d.device_command_list.as_ref().map_or(0, |c| c.len()))
+                .sum();
+            if db_apps != want_apps || db_devs != want_devs
+                || db_mets != want_mets || db_cmds != want_cmds
             {
                 return Err(OpcGwError::Database(format!(
-                    "row_count_mismatch: apps expected={} actual={}, devices expected={} actual={}, \
-                     metrics expected={} actual={}, commands expected={} actual={}",
-                    app_count, db_apps, dev_count, db_devs,
-                    met_count, db_mets, cmd_count, db_cmds,
+                    "row_count_mismatch: apps want={} actual={}, devices want={} actual={}, \
+                     metrics want={} actual={}, commands want={} actual={}",
+                    want_apps, db_apps, want_devs, db_devs,
+                    want_mets, db_mets, want_cmds, db_cmds,
                 )));
             }
 
@@ -4052,13 +4112,13 @@ impl SqliteBackend {
                     devices = dev_count,
                     metrics = met_count,
                     commands = cmd_count,
-                    "replace_all_applications committed (config import)"
+                    "import_replace_all committed (config import)"
                 );
                 Ok((app_count, dev_count, met_count, cmd_count))
             }
             Err(e) => {
                 let _ = conn.execute_batch("ROLLBACK");
-                error!(error = %e, "replace_all_applications rolled back");
+                error!(error = %e, "import_replace_all rolled back");
                 Err(e)
             }
         }

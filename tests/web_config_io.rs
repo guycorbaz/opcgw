@@ -99,6 +99,13 @@ device_name = "Device Original"
 metric_name = "temp"
 chirpstack_metric_name = "temperature"
 metric_type = "Float"
+
+[[application.device.command]]
+command_name = "open-close"
+command_id = 1
+command_confirmed = true
+command_port = 10
+command_class = "valve"
 "#;
 
 struct Fixture {
@@ -450,6 +457,100 @@ metric_type = "Float"
         "original tree must be intact after a rejected import"
     );
     assert!(!fx.app_state.has_pending_changes(), "nothing staged on invalid config");
+    fx.shutdown().await;
+}
+
+/// Code review iter-1 HIGH: a true export→import round-trip must preserve the
+/// command `command_class` (Epic E valve binding). Earlier the import insert
+/// omitted the column, so the device-class binding was silently lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn export_import_round_trip_preserves_command_class() {
+    let fx = spawn_fixture().await;
+    let client = reqwest::Client::new();
+
+    // Export the current config (seed has a command with command_class="valve").
+    let exported = client
+        .get(fx.url("/api/config/export"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .send()
+        .await
+        .expect("GET export")
+        .text()
+        .await
+        .expect("body");
+    assert!(
+        exported.contains("command_class") && exported.contains("valve"),
+        "export must include command_class:\n{exported}"
+    );
+
+    // Import the exported bytes back.
+    let resp = client
+        .post(fx.url("/api/config/import"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .header(header::ORIGIN, &fx.base_url)
+        .header(header::CONTENT_TYPE, "application/json")
+        .json(&json!({ "toml": exported }))
+        .send()
+        .await
+        .expect("POST import");
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    // The staged app tree must still carry command_class="valve".
+    let apps = fx.sqlite_config.load_all_applications_config().expect("load apps");
+    let cmd_class = apps
+        .iter()
+        .flat_map(|a| &a.device_list)
+        .flat_map(|d| d.device_command_list.iter().flatten())
+        .find(|c| c.command_name == "open-close")
+        .and_then(|c| c.command_class.clone());
+    assert_eq!(
+        cmd_class.as_deref(),
+        Some("valve"),
+        "command_class must survive export→import, got {cmd_class:?}"
+    );
+
+    fx.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn import_oversized_body_rejected() {
+    let fx = spawn_fixture().await;
+    let client = reqwest::Client::new();
+    // > 1 MiB body — the per-route DefaultBodyLimit rejects it before the handler.
+    let huge = "x".repeat(1024 * 1024 + 1024);
+    let resp = client
+        .post(fx.url("/api/config/import"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .header(header::ORIGIN, &fx.base_url)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(format!("{{\"toml\":\"{huge}\"}}"))
+        .send()
+        .await
+        .expect("POST import");
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(!fx.app_state.has_pending_changes(), "nothing staged on oversized body");
+    fx.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn import_empty_body_rejected() {
+    let fx = spawn_fixture().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(fx.url("/api/config/import"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .header(header::ORIGIN, &fx.base_url)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body("")
+        .send()
+        .await
+        .expect("POST import");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: Value = resp.json().await.expect("json");
+    assert_eq!(body["reason"], "invalid_json");
     fx.shutdown().await;
 }
 

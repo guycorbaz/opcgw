@@ -139,6 +139,21 @@ impl ConnectionPool {
                 ))
             })?;
 
+            // F-4 code review (iter-2, Edge Case Hunter MEDIUM): the pool hands
+            // out multiple connections, and every writer opens `BEGIN EXCLUSIVE`
+            // / `BEGIN IMMEDIATE`. Without a busy timeout the loser of any write
+            // race (two imports, an import vs a CRUD save, or an import vs the
+            // Apply-triggered reload) gets `SQLITE_BUSY` *immediately* and the
+            // web handler surfaces a spurious 500. A 5 s busy timeout makes the
+            // contending connection wait for the lock instead of failing fast —
+            // the EXCLUSIVE writes are short, so this serialises them cleanly.
+            conn.busy_timeout(Duration::from_millis(5000)).map_err(|e| {
+                OpcGwError::Database(format!(
+                    "Failed to set busy_timeout on connection {} for pool: {}",
+                    i, e
+                ))
+            })?;
+
             connections.push(conn);
             available.push(i);
         }
@@ -592,6 +607,29 @@ mod tests {
         // Drop second guard
         drop(guard2);
         assert_eq!(pool.available_connections(), 2);
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_pooled_connections_have_busy_timeout() {
+        // F-4 code review (iter-2): every pooled connection must carry the
+        // busy timeout so concurrent EXCLUSIVE/IMMEDIATE writers wait for the
+        // lock instead of failing fast with SQLITE_BUSY -> spurious HTTP 500.
+        let path = temp_db_path();
+        let pool = ConnectionPool::new(&path, 2).expect("Should create pool");
+
+        // `PRAGMA busy_timeout` reads back the value set on the connection.
+        let conn = pool
+            .checkout(Duration::from_secs(5))
+            .expect("Should checkout");
+        let timeout_ms: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("Should read busy_timeout");
+        assert_eq!(
+            timeout_ms, 5000,
+            "pooled connection should have a 5000ms busy timeout"
+        );
 
         let _ = fs::remove_file(&path);
     }
