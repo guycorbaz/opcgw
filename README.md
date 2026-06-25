@@ -391,7 +391,7 @@ A long-form roadmap with marketing-friendly language is available at [Roadmap](h
 
 ## Logging
 
-opcgw is built on `tracing` with per-module file appenders and a stderr console layer. The global verbosity is configurable at runtime — no rebuild required.
+opcgw is built on `tracing` with a single daily-rolling file appender (retention-capped, self-limiting) and a stderr console layer. The global verbosity is configurable at runtime — no rebuild required.
 
 ```bash
 # Set verbosity for a single run
@@ -421,7 +421,7 @@ Both components share thread-safe in-memory storage via `Arc<Mutex<Storage>>`.
 - **Language**: Rust 1.94.0+ with async/await
 - **Protocols**: gRPC for ChirpStack, OPC UA 1.04 for industrial clients
 - **Storage**: SQLite (WAL mode) for metric values, history, command queue, and configuration; in-memory cache for current values
-- **Logging**: Tokio-tracing with structured fields and per-module log files
+- **Logging**: Tokio-tracing with structured fields, a single retention-capped daily log file, and a stderr console layer
 - **Async Runtime**: Tokio for high-performance I/O
 - **Build**: Multi-stage Docker build for minimal image size
 

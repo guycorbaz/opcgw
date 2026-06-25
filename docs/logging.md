@@ -63,19 +63,13 @@ INFO opcgw: Resolved global log level operation="logging_init" level=DEBUG sourc
 
 > **Note:** if you set `OPCGW_LOG_LEVEL=error`, this `logging_init` line is itself suppressed (it's emitted at `info`). That is intentional — `error` means *only* errors.
 
-## Per-module file appenders are independent
+## Single log file
 
-Setting `OPCGW_LOG_LEVEL=error` only affects the **global** console (stderr) layer and the root file appender (`opc_ua_gw.log`). The per-module file appenders are configured separately at TRACE level and continue to capture deep detail regardless of the global setting:
+opcgw writes **one** daily-rolling log file, `opcgw.log.<date>`, in the log directory. Every module logs to this one file at the resolved `OPCGW_LOG_LEVEL` — the same level as the stderr console layer. There are no separate per-module files.
 
-| File | Captures everything from |
-|------|---------------------------|
-| `chirpstack.log` | `opcgw::chirpstack` (poller, ChirpStack gRPC) |
-| `opc_ua.log` | `opcgw::opc_ua` (OPC UA server) + `async_opcua` |
-| `storage.log` | `opcgw::storage` (SQLite backend, pool) |
-| `config.log` | `opcgw::config` (configuration loader) |
-| `opc_ua_gw.log` | everything (root, filtered by `OPCGW_LOG_LEVEL`) |
+The appender keeps the most recent **14** daily files and prunes older ones automatically, so the log directory is self-limiting (it does not grow without bound).
 
-This separation is deliberate: the global level is for stderr noise; the per-module files are forensic. If something goes wrong and you set `OPCGW_LOG_LEVEL=error`, you still have full-fidelity per-module logs to dig into after the fact.
+> **Forensic detail follows the global level.** For deep per-module tracing, set `OPCGW_LOG_LEVEL=debug` (or `trace`) temporarily — every module then logs at that level into the single file. Keep the level at `info` or more verbose in production: dropping below `info` (to `warn`/`error`) suppresses the `info`-level security audit events, and the gateway emits a startup `warn` that NFR12 source-IP correlation is broken.
 
 ## Log directory
 
@@ -110,13 +104,13 @@ Every log line uses canonical structured fields (Story 6-1, AC#7). Common fields
 | `status_code` | OPC UA status (`Good`, `Uncertain`, `Bad…`) |
 | `success` | `true` / `false` for the operation outcome |
 
-To trace one OPC UA read end-to-end, find its `request_id` in the console output and grep the per-module log files:
+To trace one OPC UA read end-to-end, find its `request_id` in the console output and grep the log file:
 
 ```bash
-grep "request_id=df1c…" log/*.log
+grep "request_id=df1c…" log/opcgw.log.*
 ```
 
-You'll see entries from `opc_ua.log` (read entry/exit, staleness check), `storage.log` (storage query timing), and the root `opc_ua_gw.log` — all carrying the same UUID.
+You'll see the read entry/exit, the staleness check, and the storage query timing — all carrying the same UUID in `opcgw.log`. (Run at `OPCGW_LOG_LEVEL=debug` to capture the full read/storage trace detail.)
 
 ## Nested env-var overrides
 
@@ -196,14 +190,14 @@ Every event log line carries a structured `operation=` field. The table below is
 | `staleness_transition` | `info` | Metric crossed Good ↔ Uncertain (or Uncertain ↔ Bad). | Indicates source health changed — confirm via the device's connectivity. |
 | `storage_query` | `debug` (normal) / `warn` (slow / SQLITE_BUSY) | One SQLite query. Carries `query_type`, `latency_ms`. The warn variant fires when `latency_ms > 10` (`exceeded_budget=true`) or when SQLite returned `SQLITE_BUSY`. | Sustained budget exceeded → schema or index issue. SQLITE_BUSY → connection pool exhaustion. |
 | `batch_write` | `debug` (normal) / `warn` (slow) | End-of-cycle batch persistence. Carries `metrics_count`, `latency_ms`. The warn variant fires when `latency_ms > 500`. | A slow batch_write blocks the next poll cycle — investigate disk health. |
-| `txn_begin` / `txn_commit` / `txn_rollback` | `trace` | SQLite transaction boundaries inside `batch_write_metrics`. | Diagnostics only — captured in `storage.log`. |
+| `txn_begin` / `txn_commit` / `txn_rollback` | `trace` | SQLite transaction boundaries inside `batch_write_metrics`. | Diagnostics only — visible in `opcgw.log` at `trace`. |
 
 ### Audit and diagnostic events (`event=`)
 
 Stories from 7-2 onward use a separate `event=` field instead of
 `operation=` for security-relevant audit events and one-shot
 diagnostic events (the `event=` prefix makes them easy to filter via
-`grep 'event="..."' log/*.log`). The full audit-trail catalogue lives
+`grep 'event="..."' log/opcgw.log.*`). The full audit-trail catalogue lives
 in [`docs/security.md`](security.md); this is a quick-reference
 index of the event names introduced so far.
 
@@ -341,7 +335,7 @@ A symptom-first cookbook for the most common production incidents:
 ### "OPC UA reads are returning Uncertain / Bad" — stale data
 
 1. Find the `request_id` of one slow read from the console.
-2. `grep "request_id=<uuid>" log/*.log` to see the full read trail.
+2. `grep "request_id=<uuid>" log/opcgw.log.*` to see the full read trail.
 3. The `staleness_check` line tells you the metric's age vs. threshold. If `metric_age_secs` is enormous, the **source** has stopped emitting.
 4. Cross-reference with the matching `poll_cycle_end` and the device's `device_polled` line. If `device_polled` has `success=false`, the poller can't reach that device.
 
@@ -349,7 +343,7 @@ A symptom-first cookbook for the most common production incidents:
 
 1. Check the `logging_init` line at startup — `level=…` shows the resolved level.
 2. If `level=ERROR` and you expected debug detail, set `OPCGW_LOG_LEVEL=debug` and restart.
-3. Per-module files (`chirpstack.log`, `storage.log`, …) are at TRACE regardless — open those for forensic detail.
+3. All output (console + `opcgw.log`) follows that one level — set `OPCGW_LOG_LEVEL=debug`/`trace` for forensic per-module detail in the single file.
 
 ### "Polls keep failing" — connectivity
 

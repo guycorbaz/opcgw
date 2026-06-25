@@ -483,6 +483,15 @@ pub const STORAGE_QUERY_BUDGET_MS: u64 = 10;
 /// `warn!` so it shows up in production logs without `OPCGW_LOG_LEVEL=debug`.
 pub const BATCH_WRITE_BUDGET_MS: u64 = 500;
 
+/// Maximum number of daily-rolling log files retained on disk (CR #143).
+///
+/// opcgw writes a single application log (`opcgw.log.<date>`) that rotates
+/// daily; the rolling appender prunes files beyond this many days so the log
+/// directory is self-limiting instead of growing without bound (a 16-day,
+/// 11 GB pile-up was observed in production before this cap). ~2 weeks of
+/// history is enough to investigate any incident.
+pub const LOG_MAX_RETAINED_FILES: usize = 14;
+
 // =============================================================================
 // Error Types
 // =============================================================================

@@ -256,14 +256,15 @@ Check logs for successful polling:
 ### 3. Check Logs
 
 ```bash
-# Watch ChirpStack polling
-tail -f log/chirpstack.log
+# Watch all gateway activity (one log file; rotates daily)
+tail -f log/opcgw.log.*
 
-# Watch OPC UA activity
-tail -f log/opc_ua.log
+# Filter to one subsystem
+tail -f log/opcgw.log.* | grep 'opcgw::chirpstack'   # ChirpStack polling
+tail -f log/opcgw.log.* | grep 'opcgw::opc_ua'       # OPC UA activity
 
-# Watch all activity
-tail -f log/opc_ua_gw.log
+# For deep per-module detail, raise the level (then recreate/restart):
+#   OPCGW_LOG_LEVEL=debug
 ```
 
 ### 4. Simulate Data Changes

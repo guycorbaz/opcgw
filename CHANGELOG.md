@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Logging consolidated to a single, retention-capped file**
+  ([#143](https://github.com/guycorbaz/opcgw/issues/143)). opcgw now writes one
+  daily-rolling log file, `opcgw.log.<date>`, instead of five per-module files
+  (`opc_ua_gw.log` + the TRACE-pinned `opc_ua.log` / `storage.log` /
+  `chirpstack.log` / `config.log`). Every module logs to the one file at the
+  resolved `OPCGW_LOG_LEVEL`; set it to `debug`/`trace` for deep per-module
+  detail. The appender keeps the most recent **14** daily files and prunes
+  older ones automatically, so the log directory is self-limiting (a 16-day,
+  11 GB pile-up was observed in production before this change). Keep the level
+  at `info` or more verbose to preserve NFR12 source-IP audit correlation (a
+  startup `warn` fires when it is lower).
+  - **Upgrade note:** the new retention cap only prunes `opcgw.log.*`. Any
+    pre-upgrade per-module files (`opc_ua.log.*`, `storage.log.*`, etc.) are
+    left in place — delete them once after upgrading to reclaim the space.
+
 ## [2.3.0] — 2026-06-24 — Epic F: onboarding & web UX for public release
 
 > **Status:** released — tagged `v2.3.0` and published to Docker Hub

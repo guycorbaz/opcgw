@@ -17,7 +17,7 @@
 //!
 //! The application uses a configuration file and supports command-line arguments
 //! for customization. Logging is built on top of `tracing` + `tracing-subscriber`
-//! with per-module daily-rolling file appenders and a stderr console layer.
+//! with a single daily-rolling file appender (retention-capped) and a stderr console layer.
 //! The output directory is resolved from (in order): the `OPCGW_LOG_DIR` env var,
 //! `[logging].dir` in `config.toml`, then the default `./log`.
 
@@ -539,7 +539,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //             bring up tracing so any subsequent error has a file appender
     //             to land in.
     //   Phase 2 — call `AppConfig::new()`; failures are logged via `error!`,
-    //             which reaches both stderr and the per-module appenders.
+    //             which reaches both stderr and the file appender.
     //
     // Config path precedence: CLI `-c FILE` > `CONFIG_PATH` env > default.
     // The chosen path drives both the bootstrap peek and `AppConfig::new()`.
@@ -559,79 +559,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let init_start = std::time::Instant::now();
 
-    // Configure tracing subscriber with per-module file appenders (daily rotation)
-    let (chirpstack_writer, _guard1) =
-        non_blocking(tracing_appender::rolling::daily(&log_dir, "chirpstack.log"));
-    let (opcua_writer, _guard2) =
-        non_blocking(tracing_appender::rolling::daily(&log_dir, "opc_ua.log"));
-    let (root_writer, _guard3) =
-        non_blocking(tracing_appender::rolling::daily(&log_dir, "opc_ua_gw.log"));
-    let (storage_writer, _guard4) =
-        non_blocking(tracing_appender::rolling::daily(&log_dir, "storage.log"));
-    let (config_writer, _guard5) =
-        non_blocking(tracing_appender::rolling::daily(&log_dir, "config.log"));
+    // Configure tracing subscriber with a SINGLE daily-rolling file appender
+    // (CR #143). All modules log to one file (`opcgw.log.<date>`) at the
+    // resolved global level; for deep per-module tracing set
+    // `OPCGW_LOG_LEVEL=debug`/`trace` temporarily. The appender keeps at most
+    // `LOG_MAX_RETAINED_FILES` daily files, so the log directory is
+    // self-limiting (replaces the previous five per-module appenders, two of
+    // which were pinned to TRACE regardless of the global level and grew
+    // unbounded — an 11 GB / 16-day pile-up in production).
+    let file_appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("opcgw.log")
+        .max_log_files(crate::utils::LOG_MAX_RETAINED_FILES)
+        .build(&log_dir)
+        .expect("failed to initialise the rolling log file appender");
+    let (file_writer, _guard) = non_blocking(file_appender);
 
     // Story 6-3, AC#2: microsecond-precision UTC timestamps so concurrent
     // events (e.g. opc_ua_read vs. batch_write) get distinct timestamps and
     // chronological ordering is reconstructable from `grep`. Same format on
-    // every layer (console + root + per-module files) so cross-file
-    // correlation works.
+    // both layers (console + file).
     let micro_ts = || ChronoUtc::new("%Y-%m-%dT%H:%M:%S%.6fZ".to_string());
 
     tracing_subscriber::registry()
         // Console layer: stderr so container log drivers capture it.
         // Story 6-2: filter level resolved via OPCGW_LOG_LEVEL > [logging].level > INFO.
-        // Per-module Targets filters below remain independent (AC#2).
         .with(
             fmt::layer()
                 .with_writer(std::io::stderr)
                 .with_timer(micro_ts())
                 .with_filter(log_level),
         )
-        // Root file layer: same global level as the console.
+        // Single application log file: same global level as the console
+        // (CR #143 — the former per-module TRACE files are consolidated here;
+        // raise OPCGW_LOG_LEVEL to debug/trace for deep per-module diagnostics).
         .with(
             fmt::layer()
-                .with_writer(root_writer)
+                .with_writer(file_writer)
                 .with_timer(micro_ts())
                 .with_filter(log_level),
-        )
-        // Per-module file layers with per-layer target filters
-        .with(
-            fmt::layer()
-                .with_writer(chirpstack_writer)
-                .with_timer(micro_ts())
-                .with_filter(
-                    filter::Targets::new()
-                        .with_target("opcgw::chirpstack", tracing::Level::TRACE),
-                ),
-        )
-        .with(
-            fmt::layer()
-                .with_writer(opcua_writer)
-                .with_timer(micro_ts())
-                .with_filter(
-                    filter::Targets::new()
-                        .with_target("opcgw::opc_ua", tracing::Level::TRACE)
-                        .with_target("async_opcua", tracing::Level::DEBUG),
-                ),
-        )
-        .with(
-            fmt::layer()
-                .with_writer(storage_writer)
-                .with_timer(micro_ts())
-                .with_filter(
-                    filter::Targets::new()
-                        .with_target("opcgw::storage", tracing::Level::TRACE),
-                ),
-        )
-        .with(
-            fmt::layer()
-                .with_writer(config_writer)
-                .with_timer(micro_ts())
-                .with_filter(
-                    filter::Targets::new()
-                        .with_target("opcgw::config", tracing::Level::TRACE),
-                ),
         )
         // Story 7-3 (AC#3, FR44): observe async-opcua's
         // `Accept new connection from {addr}` events and emit an

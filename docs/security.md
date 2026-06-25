@@ -451,7 +451,7 @@ export OPCGW_OPCUA__USER_PASSWORD='your-real-password-here'
 # 5. Start the gateway and confirm the boot log shows
 #    `event="pki_dir_initialised"` events with the correct modes.
 cargo run --release
-grep 'pki_dir_initialised' log/opc_ua_gw.log
+grep 'pki_dir_initialised' log/opcgw.log.*
 ```
 
 ### Upgrading from Story 7-1
@@ -472,7 +472,7 @@ world-readable private key is worse than refusing to start.
 ### Audit trail
 
 Every failed OPC UA authentication emits a structured `warn!` event in
-`log/opc_ua.log`:
+`log/opcgw.log.*`:
 
 ```
 2026-04-28T14:22:18.041234Z  WARN opcgw::opc_ua_auth: OPC UA authentication failed event="opcua_auth_failed" user="alice" endpoint="/"
@@ -492,10 +492,10 @@ timestamp:
 
 ```bash
 # Step 1: find auth failures.
-grep 'event="opcua_auth_failed"' log/opc_ua.log
+grep 'event="opcua_auth_failed"' log/opcgw.log.*
 
 # Step 2: find the matching accept event (typically <100ms before).
-grep 'Accept new connection from' log/opc_ua.log | tail -50
+grep 'Accept new connection from' log/opcgw.log.* | tail -50
 # 2026-04-28T14:22:18.039012Z  INFO opcua_server::server: Accept new connection from 192.168.1.42:54321 (3)
 ```
 
@@ -521,17 +521,20 @@ auth-failed event at **`warn!`** level on the `opcgw::opc_ua_auth`
 target. **Both targets must be at `info!` level or below** for NFR12
 to hold. Concretely:
 
-- The default `OPCGW_LOG_LEVEL=info` is sufficient — do not raise it
-  to `warn` or `error` on the global console.
-- The per-module file appender for `opc_ua.log` already captures
-  async-opcua at `DEBUG` and `opcgw::opc_ua` at `TRACE` (see
-  `config/config.example.toml` "Logging configuration"), so the
-  on-disk audit trail is unaffected by the global console level.
-- If you set `OPCGW_LOG_LEVEL=warn` to reduce console volume, the
-  console will still receive the auth-failed event but **not** the
-  preceding accept event. Operators must rely on `log/opc_ua.log`
-  (the file appender) for the correlation in that case — the global
-  console becomes a "username only" view.
+- The default `OPCGW_LOG_LEVEL=info` is sufficient **and required** —
+  do not raise it to `warn` or `error`.
+- opcgw writes a **single** log file (`opcgw.log`, CR #143) at the
+  resolved global level — the same level as the console. At `info`,
+  **both** the accept event (`info`) and the auth-failed event
+  (`warn`) are recorded there, so the on-disk audit trail carries the
+  full source-IP correlation.
+- If you raise `OPCGW_LOG_LEVEL` to `warn`/`error`, the `info`-level
+  accept event is dropped from **both** the console and the file, so
+  the source-IP correlation is lost (there is no longer a separate
+  TRACE-pinned per-module file to fall back on). The gateway emits a
+  startup `warn` (`event="nfr12_correlation_check"`) whenever the
+  level is below `info`. **Keep the level at `info` or more verbose to
+  preserve NFR12.**
 
 Loud check at startup: as of issue #91 (Epic 7 retrospective action
 item, 2026-04-29), the gateway emits a one-shot
@@ -561,11 +564,11 @@ cargo run --example opcua_client_smoke -- \
     --endpoint sign-encrypt --user opcua-user --password "$OPCGW_OPCUA__USER_PASSWORD"
 # Expected: prints "Session established on endpoint=Basic256/SignAndEncrypt" and exits 0.
 
-# Wrong password — expect failure + a warn line in log/opc_ua.log.
+# Wrong password — expect failure + a warn line in log/opcgw.log.*.
 cargo run --example opcua_client_smoke -- \
     --endpoint none --user opcua-user --password wrong
-# Expected: exits with non-zero status. Tail log/opc_ua.log:
-#   grep 'event="opcua_auth_failed"' log/opc_ua.log
+# Expected: exits with non-zero status. Tail log/opcgw.log.*:
+#   grep 'event="opcua_auth_failed"' log/opcgw.log.*
 ```
 
 ### Docker deployment
@@ -675,10 +678,10 @@ Two events, both on the `opcgw::opc_ua_session_monitor` target:
 
 ```bash
 # See current utilisation.
-grep 'event="opcua_session_count"' log/opc_ua.log | tail -5
+grep 'event="opcua_session_count"' log/opcgw.log.* | tail -5
 
 # Find at-limit rejections.
-grep 'event="opcua_session_count_at_limit"' log/opc_ua.log
+grep 'event="opcua_session_count_at_limit"' log/opcgw.log.*
 # 2026-04-29T10:14:22.105Z  WARN opcgw::opc_ua_session_monitor: ... source_ip=192.168.1.42:54311 limit=10 current=10
 ```
 

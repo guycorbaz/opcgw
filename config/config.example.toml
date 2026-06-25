@@ -41,15 +41,14 @@ debug = true
 # `level` precedence (highest first): CLI `-d` count > OPCGW_LOG_LEVEL >
 # OPCGW_LOGGING__LEVEL > [logging].level > "info" default.
 #
-# `level` controls only the global console (stderr) and the root file
-# appender (`opc_ua_gw.log`). The per-module file appenders below capture
-# at TRACE for their respective targets *independently* of this value:
-#   - chirpstack.log → opcgw::chirpstack    (TRACE)
-#   - opc_ua.log     → opcgw::opc_ua        (TRACE) + async_opcua (DEBUG)
-#   - storage.log    → opcgw::storage       (TRACE)
-#   - config.log     → opcgw::config        (TRACE)
-# So even at `level = "error"` you still get full traces in the per-module
-# files; `level` only changes what reaches the console and `opc_ua_gw.log`.
+# `level` controls both the global console (stderr) and the single
+# daily-rolling log file `opcgw.log.<date>`. All modules log to that one
+# file at this level; set it to `debug`/`trace` for deep per-module detail.
+# The file appender keeps the most recent 14 daily files and prunes older
+# ones automatically (self-limiting). Keep `level` at `info` or more
+# verbose in production: dropping below `info` (to `warn`/`error`) suppresses
+# the info-level security audit events and the gateway warns at startup that
+# NFR12 source-IP correlation is broken.
 #
 # Level semantics (AC#3 — pick the lowest level that surfaces what you need):
 #   | Level | Use case                                                       | Volume (10 dev, 1 Hz) |
@@ -61,7 +60,7 @@ debug = true
 #   | error | Unrecoverable conditions only — silent if healthy              | silent (healthy)      |
 #
 #[logging]
-# Directory where per-module daily-rolling log files are written.
+# Directory where the daily-rolling log file is written.
 # Default: "./log"
 #dir = "/var/log/opcgw"
 # Global default log level: trace, debug, info, warn, error.

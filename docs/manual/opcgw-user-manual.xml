@@ -671,8 +671,10 @@ docker compose logs -f opcgw</screen>
         <literal>key=value</literal> fields) to both the container's standard
         error — visible via <command>docker compose logs</command> — and to
         daily-rolling files in the <filename>log</filename> volume
-        (<filename>./log</filename> on the host). A root log plus per-area
-        files (ChirpStack, OPC UA, storage, configuration) are produced.</para>
+        (<filename>./log</filename> on the host). A single
+        <filename>opcgw.log</filename> file is produced, with a date suffix
+        (<filename>opcgw.log.&lt;date&gt;</filename>); every module logs to it
+        at the global <literal>OPCGW_LOG_LEVEL</literal>.</para>
         <para>Set the verbosity with <literal>OPCGW_LOG_LEVEL</literal> in
         <filename>.env</filename> — one of <literal>error</literal>,
         <literal>warn</literal>, <literal>info</literal> (default),
@@ -1379,17 +1381,24 @@ find ./pki/private -type f -name '*.pem' -exec chmod 600 {} +    # no-op on fres
           <para>Every failed OPC UA authentication emits a structured
           <literal>warn!</literal> event
           (<literal>event="opcua_auth_failed"</literal>) in
-          <filename>log/opc_ua.log</filename>. The submitted username is
+          <filename>log/opcgw.log</filename>. The submitted username is
           sanitised (control chars escaped, truncated to 64 chars); the
           attempted password is <emphasis>never</emphasis> logged. Source
           IP is correlated from async-opcua's
           <literal>info!</literal>-level
           <literal>"Accept new connection from ..."</literal> line by
-          timestamp — keep
-          <literal>OPCGW_LOG_LEVEL</literal> at <literal>info</literal>
-          or below to preserve the correlation, or rely on the per-module
-          <filename>opc_ua.log</filename> file appender (captures at
-          DEBUG independently).</para>
+          timestamp. At <literal>info</literal> both the accept event and
+          the <literal>opcua_auth_failed</literal> event land in the single
+          <filename>opcgw.log</filename> file, so the correlation holds.
+          Keep <literal>OPCGW_LOG_LEVEL</literal> at <literal>info</literal>
+          or below to preserve it: raising the level to
+          <literal>warn</literal> or higher drops the <literal>info</literal>-level
+          accept line, and — because there is no separate per-module file
+          to fall back on — the source IP can no longer be correlated. The
+          gateway emits a startup <literal>warn</literal>
+          (<literal>event="nfr12_correlation_check"</literal>) whenever the
+          configured level is less verbose than <literal>info</literal>
+          (that is, <literal>warn</literal> or <literal>error</literal>).</para>
         </warning>
       </section>
 
@@ -1882,8 +1891,9 @@ rm config/config.toml</screen>
             exporters.</para>
           </listitem>
           <listitem>
-            <para><emphasis>Diagnostics</emphasis> — tail the per-module
-            log files or aggregate them through your log shipper. See
+            <para><emphasis>Diagnostics</emphasis> — tail the single
+            <filename>opcgw.log.*</filename> file or aggregate it through
+            your log shipper. See
             <xref linkend="sec-logs-observability"/>.</para>
           </listitem>
         </itemizedlist>
@@ -2089,25 +2099,22 @@ rm config/config.toml</screen>
         <para><emphasis role="strong">Where the logs live.</emphasis>
         The gateway writes to the container's standard error (visible via
         <command>docker compose logs</command>) and to daily-rolling files
-        in the log directory (<filename>./log</filename> by default). A
-        root file captures everything; four per-area files isolate one
-        subsystem each:</para>
-        <itemizedlist>
-          <listitem><para><filename>opc_ua_gw.log</filename> — the root
-          file (everything, at the configured level).</para></listitem>
-          <listitem><para><filename>chirpstack.log</filename> — ChirpStack
-          polling and connection.</para></listitem>
-          <listitem><para><filename>opc_ua.log</filename> — the OPC UA
-          server.</para></listitem>
-          <listitem><para><filename>storage.log</filename> — the SQLite
-          storage layer.</para></listitem>
-          <listitem><para><filename>config.log</filename> — configuration
-          loading and reload.</para></listitem>
-        </itemizedlist>
-        <para>The per-area files always capture full detail regardless of
-        the configured console level, so even when the console is quiet at
-        <literal>error</literal> you still have a complete per-subsystem
-        trace to investigate after the fact.</para>
+        in the log directory (<filename>./log</filename> by default). The
+        gateway writes a single daily-rolling file,
+        <filename>opcgw.log.&lt;date&gt;</filename>: at UTC midnight a new
+        file is started with a fresh date suffix, and the appender keeps
+        the most recent 14 daily files, pruning older ones automatically
+        so the directory is self-limiting and cannot grow without bound.
+        Every module — ChirpStack polling, the OPC UA server, the SQLite
+        storage layer, and configuration — logs to this one file at the
+        global <literal>OPCGW_LOG_LEVEL</literal> (the same level as the
+        stderr console).</para>
+        <para>For deep per-module detail, raise the level temporarily with
+        <literal>OPCGW_LOG_LEVEL=debug</literal> (or
+        <literal>trace</literal>); it all flows into the same
+        <filename>opcgw.log</filename> file. Keep it at
+        <literal>info</literal> (the default) or more verbose in
+        production.</para>
 
         <para><emphasis role="strong">Correlation id for reads.</emphasis>
         Every OPC UA read carries a unique <literal>request_id</literal>,
@@ -2115,7 +2122,7 @@ rm config/config.toml</screen>
         storage query and the staleness check — share it. To follow a
         single client read end-to-end (at <literal>debug</literal> or
         lower):</para>
-        <screen>grep request_id=&lt;uuid&gt; opc_ua_gw.log</screen>
+        <screen>grep request_id=&lt;uuid&gt; log/opcgw.log.*</screen>
 
         <para><emphasis role="strong">Performance-budget
         warnings.</emphasis> Three hot paths log a
@@ -2216,9 +2223,13 @@ rm config/config.toml</screen>
 
       <section id="sec-log-rotation">
         <title>Log rotation</title>
-        <para>All log files are daily-rolling: at UTC midnight a new file
-        is started with a date suffix. opcgw does not delete old log files
-        — manage retention with your platform's standard tooling
+        <para>The single <filename>opcgw.log</filename> file is
+        daily-rolling: at UTC midnight a new file is started with a date
+        suffix (<filename>opcgw.log.&lt;date&gt;</filename>). The appender
+        keeps the most recent 14 daily files and prunes older ones
+        automatically, so retention is self-limiting and the log directory
+        cannot grow without bound. For tighter overall disk control you may
+        still layer your platform's standard tooling on top
         (<literal>logrotate</literal>, <literal>journald</literal>,
         Docker's logging driver, or a cron job).</para>
       </section>
@@ -2830,28 +2841,36 @@ sudo grep -E 'OPCGW_OPCUA__USER_NAME|OPCGW_OPCUA__USER_PASSWORD|OPCGW_WEB_' /etc
           <para><emphasis>Diagnostic recipe:</emphasis></para>
           <screen>du -sh log/
 ls -laS log/ | head -20</screen>
-          <para><emphasis>Root cause:</emphasis> opcgw uses
-          daily-rolling file appenders (one root +
-          four per-module). The per-module files always capture at
-          <literal>TRACE</literal> independently of the global level —
-          this is deliberate (forensic detail when the console is
-          intentionally quiet). Volume scales with poll cadence and OPC
-          UA read rate; 10 devices at 1 Hz polling under a SCADA client
-          actively subscribing typically produces 50-200 MB/day.</para>
+          <para><emphasis>Root cause:</emphasis> opcgw uses a single
+          daily-rolling file appender
+          (<filename>opcgw.log.&lt;date&gt;</filename>), which keeps the
+          most recent 14 daily files and prunes older ones automatically,
+          so the log directory is self-limiting. The file's size grows with
+          the global <literal>OPCGW_LOG_LEVEL</literal>: at
+          <literal>debug</literal> or <literal>trace</literal> every module
+          writes far more detail than at <literal>info</literal>. Volume
+          scales with poll cadence and OPC UA read rate; 10 devices at 1 Hz
+          polling under a SCADA client actively subscribing typically
+          produces 50-200 MB/day at <literal>debug</literal>.</para>
           <para><emphasis>Remediation:</emphasis></para>
           <orderedlist>
             <listitem>
-              <para>Configure your platform's log-retention tooling
+              <para>opcgw already caps the file log at the most recent 14
+              daily files; for tighter control of overall disk use you can
+              also configure your platform's log-retention tooling
               (<command>logrotate</command>, <command>journald</command>
               with <literal>SystemMaxUse=</literal>, Docker's
-              <literal>--log-opt max-size=</literal>) — opcgw itself
-              does not delete old daily-rolled files.</para>
+              <literal>--log-opt max-size=</literal>) on top of it.</para>
             </listitem>
             <listitem>
-              <para>Reduce the global console verbosity via
-              <envar>OPCGW_LOG_LEVEL=warn</envar> (the per-module files
-              still capture at <literal>TRACE</literal>, preserving
-              forensic detail).</para>
+              <para>Reduce the global verbosity via
+              <envar>OPCGW_LOG_LEVEL=info</envar> (or lower) — at
+              <literal>debug</literal>/<literal>trace</literal> the single
+              <filename>opcgw.log</filename> file grows fastest. Note there
+              is no separate per-module file capturing forensic detail at a
+              higher verbosity, so the level you set is the detail you keep;
+              do not drop below <literal>info</literal> if you need to
+              preserve NFR12 source-IP correlation.</para>
             </listitem>
             <listitem>
               <para>If using a custom <filename>log4rs.yaml</filename>
@@ -2986,7 +3005,7 @@ journalctl -u opcgw -n 200 | grep -E "Applied migration v00(7|8)"
 docker compose logs opcgw | grep -E "Applied migration v00(7|8)"
 
 # Foreground binary:
-tail -n 200 log/opc_ua_gw.log | grep -E "Applied migration v00(7|8)"</screen>
+tail -n 200 log/opcgw.log.* | grep -E "Applied migration v00(7|8)"</screen>
             <para>You should see two info lines:</para>
             <programlisting>Applied migration v007_typed_value_columns          version=7
 Applied migration v008_typed_value_constraints      version=8</programlisting>

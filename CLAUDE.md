@@ -48,7 +48,7 @@ The build script (`build.rs`) compiles Protocol Buffer definitions from `proto/c
 ## Configuration
 
 - **Main config:** `config/config.toml` — sections: `[global]`, `[chirpstack]` (server address, API token, tenant ID, poll frequency, retries), `[opcua]` (endpoint, security, PKI), `[[application]]` (array of apps with devices and metrics).
-- **Logging:** `config/log4rs.yaml` — per-module log levels, console + file appenders.
+- **Logging:** `tracing` + `tracing-subscriber` (no `log4rs`). Level via `OPCGW_LOG_LEVEL` / `[logging].level` (default `info`); output is a stderr console layer plus a single retention-capped daily file `opcgw.log.<date>` in the log dir.
 - **PKI:** `pki/` directory holds OPC UA certificates (own, private, trusted, rejected).
 - Environment variables can override TOML configuration values (via figment).
 

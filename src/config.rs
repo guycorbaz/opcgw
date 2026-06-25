@@ -919,20 +919,19 @@ impl Default for CommandValidationConfig {
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct LoggingConfig {
-    /// Directory where per-module daily-rolling log files are written.
+    /// Directory where the daily-rolling log file is written.
     ///
     /// Precedence: `OPCGW_LOG_DIR` env > `OPCGW_LOGGING__DIR` env >
     /// `[logging].dir` in TOML > `./log`.
     pub dir: Option<String>,
 
-    /// Global default log level applied to the console layer and the root
-    /// file appender (`opc_ua_gw.log`).
+    /// Global log level applied to the console layer and the single
+    /// daily-rolling file appender (`opcgw.log`).
     ///
     /// Precedence (highest first): CLI `-d` count > `OPCGW_LOG_LEVEL` env >
     /// `OPCGW_LOGGING__LEVEL` env > `[logging].level` in TOML > `info`.
-    /// Per-module file appenders (`chirpstack.log`, `opc_ua.log`,
-    /// `storage.log`, `config.log`) capture at TRACE for their respective
-    /// targets independently of this value.
+    /// All modules log to the one file at this level (CR #143); set it to
+    /// `debug`/`trace` for deep per-module diagnostics.
     pub level: Option<String>,
 }
 

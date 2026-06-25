@@ -233,7 +233,7 @@ async fn run_plan_a(args: &Args) -> std::process::ExitCode {
         .await
         .unwrap_or(false);
     if !connected {
-        let msg = "session did NOT activate within 10 s — check log/opc_ua.log".to_string();
+        let msg = "session did NOT activate within 10 s — check log/opcgw.log.*".to_string();
         eprintln!("plan-a: {msg}");
         let _ = session.disconnect().await;
         event_handle.abort();

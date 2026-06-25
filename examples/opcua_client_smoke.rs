@@ -179,7 +179,7 @@ async fn main() -> std::process::ExitCode {
         std::process::ExitCode::from(0)
     } else {
         eprintln!(
-            "smoke: session did NOT activate within 8s — check log/opc_ua.log for `event=\"opcua_auth_failed\"`"
+            "smoke: session did NOT activate within 8s — check log/opcgw.log.* for `event=\"opcua_auth_failed\"`"
         );
         std::process::ExitCode::from(1)
     }
