@@ -5,7 +5,7 @@ subtitle: Install opcgw and reach the web setup wizard in minutes
 permalink: /quickstart/
 ---
 
-> **opcgw is configured from the web UI (v2.1.0).** You provide a bootstrap
+> **opcgw is configured from the web UI (v2.3.0).** You provide a bootstrap
 > `config.toml` (or the matching `OPCGW_*` environment variables) for the first
 > boot; opcgw reads it once into its SQLite database and from then on you manage
 > everything — ChirpStack connection, OPC UA settings, and device/metric
@@ -42,7 +42,7 @@ cargo build --release
 docker build -t opcgw:latest .
 
 # Or use the published image (Docker Hub primary, GHCR mirror)
-docker pull docker.io/gcorbaz/opcgw:2.1
+docker pull docker.io/gcorbaz/opcgw:2.3
 ```
 
 ---
@@ -302,7 +302,7 @@ The repository ships a canonical [`docker-compose.yml`](https://github.com/guyco
 ```yaml
 services:
   opcgw:
-    image: docker.io/gcorbaz/opcgw:2.1
+    image: docker.io/gcorbaz/opcgw:2.3
     container_name: opcgw
     restart: always
     ports:

@@ -14,7 +14,7 @@ title: opcgw - ChirpStack to OPC UA Gateway
                     <a href="https://github.com/guycorbaz/opcgw" target="_blank" class="btn btn-secondary-blue">View on GitHub</a>
                 </div>
                 <div style="margin-top: 3rem;">
-                    <span class="badge-custom">✨ v2.1.0 - Web-First Configuration</span>
+                    <span class="badge-custom">✨ v2.3.0 - Browser-First Onboarding</span>
                     <span class="badge-custom">🦀 Written in Rust</span>
                     <span class="badge-custom">📡 OPC UA 1.04</span>
                 </div>
@@ -33,13 +33,13 @@ title: opcgw - ChirpStack to OPC UA Gateway
         <div class="row">
             <div class="col-md-3">
                 <div class="stat-card">
-                    <div class="stat-number">2.1</div>
+                    <div class="stat-number">2.3</div>
                     <div class="stat-label">Version</div>
                 </div>
             </div>
             <div class="col-md-3">
                 <div class="stat-card">
-                    <div class="stat-number">13</div>
+                    <div class="stat-number">15</div>
                     <div class="stat-label">Epics Delivered</div>
                 </div>
             </div>

@@ -7,7 +7,7 @@ permalink: /roadmap/
 
 ## opcgw Development Roadmap
 
-**Strategic Goal:** A production-ready gateway bridging ChirpStack to OPC UA — with persistence, real-time subscriptions, historical access, security hardening, and a web-first auto-discovery configuration experience. Delivered through v2.1.0.
+**Strategic Goal:** A production-ready gateway bridging ChirpStack to OPC UA — with persistence, real-time subscriptions, historical access, security hardening, a web-first auto-discovery configuration experience, model-agnostic device abstraction, and zero-touch browser-based onboarding. Delivered through v2.3.0.
 
 > **Principle:** Quality over Speed. Every epic ships behind an adversarial multi-layer code-review loop.
 
@@ -26,9 +26,12 @@ Phase B (Real-time subscriptions + historical data + web UI)
 
 Phase C (v2.0 GA + storage payload migration + auto-discovery + SQLite config)
   Epic A ✅ → Epic B ✅ → Epic C ✅ → Epic D ✅
+
+Phase D (device abstraction + public-release onboarding)
+  Epic E ✅ → Epic F ✅
 ```
 
-All planned epics are complete and shipped (**v2.1.0** prepared, pending publish). The next direction is a v2.x internal-quality / cleanup epic; see the canonical [sprint-status](https://github.com/guycorbaz/opcgw/blob/main/_bmad-output/implementation-artifacts/sprint-status.yaml) for details.
+All planned epics are complete and shipped through **v2.3.0** (Epic F — onboarding & web UX, released 2026-06-24; Epic E — model-agnostic device abstraction, in v2.2.0). The next direction is a v2.x internal-quality / cleanup epic plus the open change-request backlog; see the canonical [sprint-status](https://github.com/guycorbaz/opcgw/blob/main/_bmad-output/implementation-artifacts/sprint-status.yaml) for details.
 
 ---
 
@@ -136,6 +139,18 @@ Moved the `[global]` / `[chirpstack]` / `[opcua]` / `[web]` singleton sections i
 
 ---
 
+## Phase D — Device Abstraction & Public-Release Onboarding ✅
+
+### Epic E: Model-Agnostic, Class-Aware Device Abstraction ✅ (v2.2.0)
+
+Generalised opcgw from a metrics-only reader into a model-agnostic, class-aware abstraction layer. Added the downlink command path (an OPC UA write becomes a LoRaWAN downlink via ChirpStack `Enqueue`), uplink event ingestion that stores each metric's **raw last value** stamped with the device's source timestamp (no aggregation), a device-class registry, and command delivery confirmation. First driver: the Tonhe valve.
+
+### Epic F: Onboarding & Web UX for Public Release ✅ (v2.3.0)
+
+Made opcgw effortless to configure and pleasant to use ahead of its public announcement. A **zero-touch first-run wizard** captures the ChirpStack connection + OPC UA settings so a fresh install boots browser-only with no text-file editing. Config edits now **stage** and apply together via one explicit **"Apply changes"** soft restart (the container is never restarted; closes the "restart on every change" issue). A **unified web shell** gives every page one nav/header (vanilla, no build step), the landing page shows gateway health at a glance, and configurations **export/import** as portable secret-free TOML.
+
+---
+
 ## Known Failures
 
 ### Story 8-4: Threshold-Based Alarm Conditions (FR23) — descoped 2026-05-14
@@ -154,7 +169,7 @@ Canonical narrative: `_bmad-output/implementation-artifacts/deferred-work.md` an
 
 ## Next
 
-All planned epics are complete. The current direction (per the Epic D retrospective) is a **v2.x internal-quality / cleanup epic** — codifying recurring code-review lessons and paying down internal tech debt — rather than new user-facing features. A live operator end-to-end smoke test against a real ChirpStack server is the remaining gate before the v2.1.0 tag and Docker publish.
+All planned epics are complete and **v2.3.0 is released** (Epic F shipped 2026-06-24, validated by a live operator end-to-end onboarding smoke against a real ChirpStack server before the stable tag). The current direction is a **v2.x internal-quality / cleanup epic** — codifying recurring code-review lessons and paying down internal tech debt — alongside the open change-request backlog ([#136](https://github.com/guycorbaz/opcgw/issues/136), [#137](https://github.com/guycorbaz/opcgw/issues/137), [#139](https://github.com/guycorbaz/opcgw/issues/139)).
 
 ---
 
