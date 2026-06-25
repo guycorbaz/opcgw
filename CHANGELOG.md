@@ -7,14 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.3.0] — 2026-06-24 — Epic F: onboarding & web UX for public release
 
-> **Status:** release prepared. Epic F (stories F-0…F-4) is complete; all gates
-> green (`cargo test` 38 suites / 0 failed, `cargo clippy --all-targets
-> -D warnings` clean) and the mandatory epic security review came back **CLEAN**
-> (0 HIGH / 0 MEDIUM / 3 LOW). This release makes opcgw configurable entirely
-> from the browser and removes the "restart on every config change" churn.
-> A real-world onboarding smoke (empty-config boot → wizard → ChirpStack
-> connect → Apply → export/import round-trip) is the release gate before the
-> stable tag is promoted.
+> **Status:** released — tagged `v2.3.0` and published to Docker Hub
+> (`2.3.0` / `2.3` / `latest`) and GHCR (multi-arch amd64 + arm64); GitHub
+> release published. Epic F (stories F-0…F-4) is complete; all gates green
+> (`cargo test` 38 suites / 0 failed, `cargo clippy --all-targets -D warnings`
+> clean) and the mandatory epic security review came back **CLEAN** (0 HIGH /
+> 0 MEDIUM / 3 LOW). The real-world onboarding smoke (empty-config boot →
+> first-run wizard → ChirpStack connect → Apply soft-restart → config
+> export/import round-trip) **passed on `v2.3.0-rc1`** before promotion. This
+> release makes opcgw configurable entirely from the browser and removes the
+> "restart on every config change" churn.
 
 ### Added
 

@@ -8,16 +8,16 @@
 #   sudo chmod 700 ./pki/private
 #   sudo chmod 600 ./pki/private/*    # OPC UA private-key permissions
 #
-# Pull the published v2.1 image instead of building locally by either:
+# Pull the published v2.3 image instead of building locally by either:
 #   * `docker compose pull` (uses the `image:` declared below), or
-#   * `docker pull docker.io/gcorbaz/opcgw:2.1 && docker tag docker.io/gcorbaz/opcgw:2.1 opcgw`
+#   * `docker pull docker.io/gcorbaz/opcgw:2.3 && docker tag docker.io/gcorbaz/opcgw:2.3 opcgw`
 # For local-dev builds against the working tree, run `docker build -t opcgw .`
 # first and Compose will pick up the local tag.
 
 services:
   opcgw:
     container_name: opcgw
-    image: docker.io/gcorbaz/opcgw:2.1
+    image: docker.io/gcorbaz/opcgw:2.3
     restart: always
     ports:
       # OPC UA. Uses OPCGW_OPCUA__HOST_PORT from `.env` when set, else 4840.
