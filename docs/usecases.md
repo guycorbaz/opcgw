@@ -78,6 +78,44 @@ metric_unit = "mS/cm"
 
 **ROI**: Sensor network + gateway cost recouped in first season through water/fertilizer savings.
 
+> 💡 **Note**: The TOML above illustrates the data model. In v2.x you normally configure all this from the **web UI** — `config.toml` is only a one-time bootstrap seed; the live configuration lives in SQLite and is portable via export/import.
+
+---
+
+## 💧 Precision Irrigation: Valve Actuation from SCADA
+
+### The Challenge
+
+An orchard operator wants to **open and close field irrigation valves directly from the control room**, not just read sensors. Previously:
+- Valves opened manually in the field → wasted trips and water
+- No closed-loop control → irrigation tied to schedules, not conditions
+- No confirmation the valve actually moved → silent failures
+
+### The Solution with opcgw
+
+opcgw is not read-only: an OPC UA **write** to a command node becomes a LoRaWAN **downlink** to the device.
+
+**Architecture**:
+```
+[SCADA / Fuxa] → OPC UA write → opcgw → ChirpStack Enqueue → LoRaWAN → [Tonhe Valve]
+                                  ↑                                          ↓
+                          command status  ←  ack / txack events  ←  uplink (StreamDeviceEvents)
+```
+
+**Flow**:
+1. Operator (or automation logic) writes `1 = Open` / `0 = Close` to the valve's OPC UA command node
+2. opcgw maps it through the `command_class = "valve"` device-class binding and enqueues a downlink via ChirpStack `Enqueue`
+3. The command moves through **Pending → Sent → Confirmed** as `ack` / `txack` events arrive on the device stream
+4. The valve's reported state streams back as a **raw last-known value** (no aggregation), visible alongside the command status
+
+**Results**:
+- ✅ Valves driven straight from the SCADA HMI — no field trips to actuate
+- ✅ Closed-loop irrigation: soil-moisture readings can trigger valve commands
+- ✅ Delivery confirmation (Pending → Sent → Confirmed) instead of fire-and-forget
+- ✅ Model-agnostic: the same class-aware path extends to other actuators, not just valves
+
+> Controlling irrigation valves from SCADA is opcgw's origin story — the Tonhe E20 valve was its first proven control driver.
+
 ---
 
 ## 🏭 Smart Factory: Real-Time Equipment Monitoring
@@ -131,6 +169,8 @@ metric_name = "Running"
 chirpstack_metric_name = "machine_running"
 metric_type = "Bool"
 ```
+
+> 💡 **Note**: This TOML shows the data model for clarity. In practice you configure devices and metrics from the **web UI** (with ChirpStack auto-discovery pickers); `config.toml` is just a bootstrap seed and the live config lives in SQLite, portable via export/import.
 
 **Integration with MES**:
 - MES subscribes to OPC UA variables

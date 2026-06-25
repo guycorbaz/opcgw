@@ -6,7 +6,7 @@ permalink: /architecture/
 
 # Architecture Documentation — opcgw
 
-> Last updated: 2026-05-27 (Story D-2: figment Provider rework + TOML mutation-surface decommission — Epic D 3/3 done)
+> Last updated: 2026-06-25 — covers Epic E (v2.2.0: downlink command path + gRPC uplink event ingestion + device-class registry) and Epic F (v2.3.0: staged-apply config model + first-run wizard + unified web shell). Configuration-architecture baseline established by Story D-2 (Epic D 3/3).
 
 ## Executive Summary
 
@@ -103,7 +103,7 @@ Because `spawn_data_plane()` recomputes `streamed_devices(&config)` from the fre
 ### `main.rs` — Entry Point
 
 - Parses CLI arguments via `clap` (`-c` config path)
-- Initializes structured logging (tracing + tracing-subscriber) from `config/log4rs.yaml`
+- Initializes structured logging (tracing + tracing-subscriber, `RUST_LOG`/`EnvFilter`-driven)
 - Loads `AppConfig` from TOML + `OPCGW_*` environment variables (figment)
 - Runs SQLite schema migrations (`src/storage/schema.rs`)
 - Runs one-shot TOML→SQLite data migration if needed (`src/storage/migrate_config.rs`)
@@ -278,15 +278,15 @@ POST /api/applications/:id/devices
 
 ## Deployment
 
-**Docker:** Multi-stage build (`rust:1.87` builder → `ubuntu:latest` runtime). Exposes ports 4855 (OPC UA) and 8080 (web UI). Mounts `log/`, `config/`, `pki/`, `data/` as volumes.
+**Docker:** Multi-stage build (`rust:1.94` builder → `ubuntu:24.04` runtime, non-root user `opcgw` UID 10001). Exposes ports 4840 (OPC UA) and 8080 (web UI). Mounts `log/`, `config/`, `pki/`, `data/` as volumes (the `data/` mount is required — it holds the authoritative SQLite database).
 
-**docker-compose.yml:** Single service `opcgw`, restart always, ports 4855:4855 + 8080:8080.
+**docker-compose.yml:** Single service `opcgw`, restart always, ports 4840:4840 + 8080:8080.
 
 ## Testing Strategy
 
 - **Unit tests** in individual source modules via `#[cfg(test)]`
 - **Integration tests** in `tests/` covering CRUD APIs, authentication, inventory, drift, migration
-- `cargo test --all-targets` (≥ 1480 tests passing as of Story C-6)
+- `cargo test --all-targets` (full unit + integration suite passing as of Epic F)
 - `cargo clippy --all-targets -- -D warnings` clean
 
 ## Known Architectural Considerations

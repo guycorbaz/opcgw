@@ -49,19 +49,43 @@ docker pull docker.io/gcorbaz/opcgw:2.3
 
 ## Configuration
 
-The TOML below is the **bootstrap seed** for the first boot only. opcgw reads it
-once to populate its SQLite database, then ignores it — afterwards you edit
-configuration in the web UI. You can keep the seed minimal (a valid
-`[chirpstack]` + `[opcua]` section is enough) and add applications/devices via
-the web UI's ChirpStack inventory pickers after first boot.
+opcgw is **zero-touch on first boot (v2.3.0)**: you do not edit a config file to
+get started. Start the container (or binary) with the shipped placeholder
+`config.toml`, open the web UI, and the setup wizard captures everything it needs.
 
-### 1. Create Configuration File
+### 1. First boot — the setup wizard (recommended)
+
+1. Start the gateway (see [Running the Gateway](#running-the-gateway) below). With
+   a pristine config, opcgw detects that ChirpStack credentials are missing and
+   boots straight into first-run mode instead of aborting.
+2. Open the web UI in a browser: **`http://<host>:8080/`**. You are redirected to
+   the `/setup` wizard.
+3. In the wizard, enter:
+   - ChirpStack **server address** (`http://your-chirpstack-server:8080`)
+   - ChirpStack **tenant ID**
+   - ChirpStack **API token**
+   - OPC UA **password** (for the OPC UA / web-UI login)
+4. Submit. The wizard writes the secrets to `config/secrets.toml` (chmod `0600`)
+   and the rest of the configuration to opcgw's SQLite database, then performs an
+   in-process soft restart. The container itself is **never** restarted.
+5. After the wizard, add your ChirpStack applications, devices and metrics from
+   the web UI's **ChirpStack inventory pickers** — no hand-written `[[application]]`
+   blocks required.
+
+> No text-file editing is needed for a first boot. The shipped `config.toml` ships
+> with `REPLACE_ME_WITH_*` placeholders that the gateway recognises, so it starts,
+> serves the wizard, and waits for you in the browser.
+
+### 2. Optional — seed configuration from a TOML file (advanced)
+
+`config.toml` is a **bootstrap seed**: opcgw reads it once on first start to
+populate its SQLite database, then ignores it. Editing it after the first boot
+has no effect — use the web UI. If you prefer to pre-seed instead of using the
+wizard, copy the example and fill in the non-secret fields:
 
 ```bash
 cp config/config.example.toml config/config.toml
 ```
-
-### 2. Edit Configuration
 
 ```toml
 # Global settings
@@ -71,7 +95,9 @@ debug = true  # Set to false in production
 # ChirpStack connection
 [chirpstack]
 server_address = "http://your-chirpstack-server:8080"
-api_token = "your-api-token-here"           # Get from ChirpStack UI
+# NEVER put a real token inline. Keep the placeholder and inject the real value
+# via the wizard, config/secrets.toml, or the OPCGW_CHIRPSTACK__API_TOKEN env var.
+api_token = "REPLACE_ME_WITH_OPCGW_CHIRPSTACK__API_TOKEN_ENV_VAR"
 tenant_id = "your-tenant-id"                # From ChirpStack
 polling_frequency = 10                       # Poll every 10 seconds
 retry = 3                                    # Retry 3 times
@@ -82,79 +108,59 @@ delay = 100                                  # 100ms between retries
 application_name = "My IoT Gateway"
 application_uri = "urn:my-company:opcua:gateway"
 host_ip_address = "0.0.0.0"                 # Listen on all interfaces
-host_port = 4855                             # Standard OPC UA port
+host_port = 4840                             # Standard OPC UA port
 user_name = "admin"
-user_password = "secure_password"
+# NEVER put a real password inline. Keep the placeholder and inject the real value
+# via the wizard, config/secrets.toml, or the OPCGW_OPCUA__USER_PASSWORD env var.
+user_password = "REPLACE_ME_WITH_OPCGW_OPCUA__USER_PASSWORD_ENV_VAR"
 pki_dir = "./pki"                            # Certificate storage
 create_sample_keypair = true                 # Auto-create certs
 
-# Applications (from ChirpStack)
-# Each [[application]] block represents one ChirpStack application
+# Applications are optional in the seed — leave the list empty and populate it
+# from the web UI's ChirpStack inventory pickers after first boot. A block like
+# the one below pre-seeds one application with one device and one metric:
 [[application]]
 application_name = "Farm Sensors"           # Display name in OPC UA
 application_id = "1"                        # ChirpStack app ID
 
-# Devices under this application
 [[application.device]]
 device_name = "Field A Sensor"
 device_id = "device001"
 
-# Metrics from this device
 [[application.device.read_metric]]
 metric_name = "Soil Moisture"
 chirpstack_metric_name = "soil_moisture"    # Field name in ChirpStack
 metric_type = "Float"
 metric_unit = "%"
-
-[[application.device.read_metric]]
-metric_name = "Temperature"
-chirpstack_metric_name = "temp_celsius"
-metric_type = "Float"
-metric_unit = "°C"
-
-# Another device in same application
-[[application.device]]
-device_name = "Field B Sensor"
-device_id = "device002"
-
-[[application.device.read_metric]]
-metric_name = "Soil Moisture"
-chirpstack_metric_name = "soil_moisture"
-metric_type = "Float"
-metric_unit = "%"
-
-# Another application
-[[application]]
-application_name = "Building Management"
-application_id = "2"
-
-[[application.device]]
-device_name = "Floor 1 HVAC"
-device_id = "hvac_f1"
-
-[[application.device.read_metric]]
-metric_name = "Temperature Setpoint"
-chirpstack_metric_name = "temp_setpoint"
-metric_type = "Float"
-metric_unit = "°C"
-
-[[application.device.read_metric]]
-metric_name = "Fan Running"
-chirpstack_metric_name = "fan_on"
-metric_type = "Bool"
 ```
 
-### 3. Validate Configuration
+> **Secrets are never stored inline in examples.** The `REPLACE_ME_WITH_*`
+> placeholders are recognised by the gateway; provide the real values through the
+> wizard (which writes `config/secrets.toml`, chmod `0600`) or the
+> `OPCGW_*` environment variables.
+
+### 3. Staged "Apply changes" model
+
+After the first boot, configuration edits made in the web UI **stage** into SQLite
+rather than taking effect immediately. While changes are pending,
+`GET /api/status` reports `pending_changes: true`. You apply all staged edits
+together with a single explicit **Apply changes** action in the UI
+(`POST /api/config/apply`), which triggers an in-process soft restart of the
+data plane. The container is **never** restarted — there is no "restart to pick
+up changes" step.
+
+### 4. Validation
 
 The gateway validates configuration on startup:
-- All required fields present
 - server_address is valid URL format
 - polling_frequency > 0
-- Each device has at least one metric
 - No duplicate device IDs
-- user_name and user_password not empty
+- Secrets are not left as `REPLACE_ME_WITH_*` placeholders (once configured)
 
-If validation fails, error message will show which field is invalid.
+A **pristine install with no applications and missing ChirpStack credentials is
+valid** — it boots into the setup wizard rather than failing. An empty
+application list is expected before you have run the wizard / inventory discovery.
+If validation fails, the error message shows which field is invalid.
 
 ---
 
@@ -183,7 +189,7 @@ docker-compose up
 # [INFO] Gateway started successfully
 # [INFO] Poll interval: 10s
 # [INFO] Applications: 2, Devices: 3
-# [INFO] OPC UA endpoint: 0.0.0.0:4855
+# [INFO] OPC UA endpoint: 0.0.0.0:4840
 ```
 
 ### Output
@@ -195,7 +201,7 @@ Successful startup looks like:
                                 poll_interval_seconds=10 
                                 application_count=2 
                                 device_count=3 
-                                opc_ua_endpoint=0.0.0.0:4855 
+                                opc_ua_endpoint=0.0.0.0:4840 
                                 chirpstack_server=http://localhost:8080
 ```
 
@@ -203,7 +209,7 @@ If startup fails, check:
 - ChirpStack server is reachable
 - API token is correct
 - Tenant ID exists in ChirpStack
-- No other service on port 4855
+- No other service on port 4840
 - Configuration file is valid TOML
 
 ---
@@ -222,7 +228,7 @@ Check logs for successful polling:
 **Using UA Expert (free download)**:
 1. Launch UA Expert
 2. Double-click "Add Server"
-3. Enter address: `opc.tcp://localhost:4855`
+3. Enter address: `opc.tcp://localhost:4840`
 4. Click "OK"
 5. Browse tree:
    ```
@@ -242,7 +248,7 @@ Check logs for successful polling:
 
 **Using Ignition**:
 1. Create OPC UA connection in Gateway
-2. Address: `opc.tcp://localhost:4855`
+2. Address: `opc.tcp://localhost:4840`
 3. Username: `admin`
 4. Password: (from config)
 5. Browse tags and drag to windows
@@ -306,7 +312,7 @@ services:
     container_name: opcgw
     restart: always
     ports:
-      - "4855:4855"   # OPC UA
+      - "4840:4840"   # OPC UA
       - "8080:8080"   # Web UI (setup wizard + configuration)
     volumes:
       - ./config:/usr/local/bin/config
@@ -354,20 +360,24 @@ error: connection refused to http://localhost:8080
 ```
 error: Configuration validation failed:
   - chirpstack.polling_frequency: must be greater than 0
-  - application_list: must have at least 1 application
 ```
 
 **Fix**: Check config file syntax, required fields, value ranges. See [Configuration](configuration.html).
 
+Note: an **empty application list is not an error** on a fresh install — opcgw
+boots into the setup wizard and you add applications/devices from the web UI's
+ChirpStack inventory pickers. You only see validation failures for malformed
+values (bad URL, zero polling interval, duplicate device IDs, etc.).
+
 ### "OPC UA port in use"
 
 ```
-error: Failed to bind OPC UA server to 0.0.0.0:4855
+error: Failed to bind OPC UA server to 0.0.0.0:4840
 ```
 
-**Fix**: Change port in config or kill process using 4855:
+**Fix**: Change port in config or kill process using 4840:
 ```bash
-lsof -i :4855
+lsof -i :4840
 kill <PID>
 ```
 
@@ -387,9 +397,9 @@ Connection refused or timeout
 
 **Check**:
 - Gateway is running: `docker ps` or `ps aux | grep opcgw`
-- Port is exposed: `netstat -tlnp | grep 4855`
+- Port is exposed: `netstat -tlnp | grep 4840`
 - Firewall allows port: check local firewall and network ACLs
-- Client using correct address: `opc.tcp://host:4855`
+- Client using correct address: `opc.tcp://host:4840`
 
 ---
 

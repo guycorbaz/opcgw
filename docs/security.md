@@ -1473,6 +1473,16 @@ Per NFR7, audit `error` fields never include secrets.
 
 ## Dynamic OPC UA address-space mutation (Story 9-8)
 
+> **Superseded (v2.3.0 / Epic F):** under the staged-apply model (Story F-0),
+> configuration changes no longer mutate the running gateway in place. Edits
+> stage to SQLite and apply together via one explicit **"Apply changes"**
+> in-process soft restart, which rebuilds the data plane (poller, OPC UA server,
+> gRPC event stream) from the new config — so the OPC UA address space is
+> reconstructed on Apply rather than live-mutated. The live-reload seam below
+> (`config_reload.rs` / `notify_crud_write`) is retained compiled-but-dormant;
+> its full removal is a tracked follow-up. The description is kept for historical
+> context.
+
 Story 9-8 closes the FR24 requirement (dynamic OPC UA node
 mutation at runtime) by extending Story 9-7's hot-reload seam with
 an apply pass that walks the topology diff and mutates the running

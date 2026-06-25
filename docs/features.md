@@ -25,15 +25,30 @@ permalink: /features/
 - **Stale-Data Detection**: Good / Uncertain / Bad status codes from a configurable staleness threshold
 - **Connection Limiting & Auth**: Session caps, security endpoints, and authenticated access
 
+### 🎛️ Device Control & Class-Aware Abstraction
+
+- **OPC UA Write → LoRaWAN Downlink**: A client write to a command node is turned into a downlink to the device via ChirpStack's `DeviceService.Enqueue`
+- **Command Lifecycle Tracking**: Each command moves through Pending → Sent → Confirmed / Failed, with delivery confirmation from `ack` / `txack` events on the device stream
+- **Class-Aware, Model-Agnostic**: A device-class registry maps per-class command semantics via `command_class` (e.g. `"valve"`) — the Tonhe E20 valve is the first driver, but the model is open to sensors, meters, and actuators
+- **Uplink Event-Stream Ingestion**: Devices stream uplinks over gRPC (`StreamDeviceEvents`); each metric is stored as its **raw last-known value** stamped with the device's source timestamp — **no aggregation** (the time-aggregating metrics-poll path is bypassed for streamed devices, so discrete state is never averaged into nonsense)
+
 ### 🔐 Web-First Configuration & Auto-Discovery
 
 - **Browser-Based Setup**: First-run web wizard — no hand-editing after the initial bootstrap seed
 - **ChirpStack Auto-Discovery**: Pick applications, devices, and metrics from your live ChirpStack inventory by name instead of pasting UUIDs / DevEUIs
 - **SQLite-Backed Config**: All configuration stored in SQLite; `config.toml` is a one-time bootstrap seed
+- **Staged Apply Model**: Config edits accumulate as pending changes in SQLite and take effect only when you press **Apply changes**, which performs a single graceful in-process soft restart of the data plane — no restart-per-save churn, and the container is never restarted
+- **Config Export / Import**: Download your full configuration as portable TOML (`GET /api/config/export`, **secrets excluded**) and restore it elsewhere (`POST /api/config/import`) — the whole import is staged atomically through the Apply flow
 - **Drift Detection**: Diff your configured inventory against ChirpStack and reconcile from the UI
 - **Duplicate Prevention**: Validation blocks duplicate names / OPC UA node collisions before they persist
 - **Environment Overrides**: `OPCGW_*` environment variables override stored config (double-underscore between section and field)
 - **No Hardcoded Credentials**: Secrets via environment variables or a `0600` `secrets.toml`
+
+### 📈 Health Dashboard
+
+- **At-a-Glance Verdict**: The landing page leads with a single overall health verdict instead of raw counters
+- **Poller-Stall Tile**: Surfaces whether the poller is keeping up with the configured poll interval
+- **Per-Device Freshness**: A per-device data-freshness panel classifies each device as fresh / stale / bad / never, all derived client-side from the existing status / device APIs
 
 ### 📊 Comprehensive Logging
 
@@ -160,9 +175,11 @@ permalink: /features/
 Most of the original roadmap has already shipped. Highlights now in the released gateway:
 
 - ✅ **SQLite persistence** for metric values, history, and the command queue (Epic 2)
-- ✅ **Command queue** write-back to ChirpStack devices (Epic 3)
+- ✅ **End-to-end downlink command path** — an OPC UA write becomes a LoRaWAN downlink via ChirpStack `Enqueue`, with a Pending → Sent → Confirmed / Failed command lifecycle (Epic E, v2.2.0)
 - ✅ **Real-time OPC UA subscriptions** and **historical data access** (Epic 8)
 - ✅ **Web UI** for configuration and monitoring (Epic 9)
 - ✅ **Auto-discovery and web-first configuration**, SQLite-backed config (Epics C + D)
+- ✅ **Class-aware device abstraction** — model-agnostic `command_class` registry (Tonhe valve first driver) and raw, no-aggregation uplink event-stream ingestion (Epic E, v2.2.0)
+- ✅ **Onboarding & web UX for public release** — zero-touch first-run wizard, staged "Apply changes" soft restart, config export/import, and a redesigned health dashboard (Epic F, v2.3.0)
 
 See the [Development Roadmap](roadmap.html) for the current plan and what comes next.

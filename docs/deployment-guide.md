@@ -1,6 +1,6 @@
 # Deployment Guide — opcgw
 
-> Generated: 2026-04-01 | Scan Level: Exhaustive
+> Generated: 2026-04-01 | Updated: 2026-06-25 for v2.3.0 | Scan Level: Exhaustive
 
 ## Deployment Options
 
@@ -21,30 +21,44 @@ cargo build --release
 ```
 
 **Required files at runtime:**
-- `config/config.toml` — Application configuration
-- `config/log4rs.yaml` — Logging configuration
+- `config/config.toml` — Bootstrap-seed configuration (authoritative config lives in SQLite; see [Configuration model](#configuration-model-sqlite-authoritative) below)
+- `config/secrets.toml` — Operator secrets (`[chirpstack].api_token`, `[opcua].user_password`), chmod 0600
 - `pki/` — OPC UA certificates directory (with own/, private/, trusted/, rejected/ subdirs)
+- `data/` — SQLite database directory (authoritative configuration + metric history)
 - `log/` — Log output directory (created automatically)
 
 ### 2. Docker
 
 **Dockerfile** uses a multi-stage build:
-1. **Builder stage:** `rust:1.87` — installs protobuf compiler, builds release binary
-2. **Runtime stage:** `ubuntu:latest` — minimal runtime with `iputils-ping`
+1. **Builder stage:** `rust:1.94.0` — installs protobuf compiler, builds release binary
+2. **Runtime stage:** `ubuntu:24.04` — minimal runtime with `iputils-ping`, runs as **non-root user `opcgw` (UID 10001)**
+
+The container exposes **4840** (OPC UA) and **8080** (web UI). Because it runs non-root, the host-side bind-mount targets must be owned by UID 10001 before first start:
+
+```bash
+sudo chown -R 10001:10001 ./log ./config ./pki ./data
+sudo chmod 700 ./pki/private
+sudo chmod 600 ./pki/private/*
+```
 
 ```bash
 # Build image
 docker build -t opcgw .
 
-# Run standalone
+# Run standalone (pull the published image, or use the local build tag)
 docker run -d \
   --name opcgw \
-  -p 4855:4855 \
+  -p 4840:4840 \
+  -p 8080:8080 \
+  --env-file ./.env \
   -v ./config:/usr/local/bin/config \
   -v ./pki:/usr/local/bin/pki \
   -v ./log:/usr/local/bin/log \
-  opcgw
+  -v ./data:/usr/local/bin/data \
+  gcorbaz/opcgw:2.3
 ```
+
+> The `./data` mount is **required** — it holds the SQLite database. Without it the database lives in the ephemeral container layer and is lost on `docker compose down` / container replacement.
 
 ### 3. Docker Compose
 
@@ -54,17 +68,20 @@ docker compose up -d
 
 **docker-compose.yml configuration:**
 - Service: `opcgw`
-- Port mapping: `4855:4855`
+- Image: `docker.io/gcorbaz/opcgw:2.3`
+- Port mappings: `4840:4840` (OPC UA) + `8080:8080` (web UI), driven by `OPCGW_OPCUA__HOST_PORT` / `OPCGW_WEB__PORT` (defaults 4840 / 8080)
+- Environment: `env_file: .env` — secret credentials and any `OPCGW_*` overrides live in a single `.env` file (copy `.env.example` → `.env`, fill in values, `chmod 600 .env`)
 - Restart policy: `always`
-- Volume mounts: `log/`, `config/`, `pki/`
+- Healthcheck: TCP liveness probe against the OPC UA port (the runtime image has no curl/wget)
+- Volume mounts: `log/`, `config/`, `pki/`, **`data/`** (the `data/` mount is required for SQLite persistence — see note above)
 
 ## Network Requirements
 
 | Connection | Protocol | Default Port | Direction | Purpose |
 |-----------|----------|-------------|-----------|---------|
-| ChirpStack | gRPC (HTTP/2) | 8080 | Outbound | Device metrics polling, command enqueue |
+| ChirpStack | gRPC (HTTP/2) | 8080 | Outbound | Device metrics polling, uplink event stream, command enqueue |
 | OPC UA Clients | OPC UA (TCP) | 4840 | Inbound | SCADA/client connections |
-| Docker exposed | TCP | 4855 | Inbound | Docker port mapping |
+| Web UI | HTTP (Axum) | 8080 | Inbound | Setup wizard + configuration dashboard |
 
 ## Configuration for Production
 
@@ -83,7 +100,20 @@ docker compose up -d
 
 - **Polling frequency:** Adjust `chirpstack.polling_frequency` based on device update rates
 - **Retry settings:** Configure `chirpstack.retry` and `chirpstack.delay` for network resilience
-- **Logging levels:** Reduce to `info` or `warn` in production (edit `log4rs.yaml`)
+- **Logging levels:** Reduce to `info` or `warn` in production via the `RUST_LOG` env filter (tracing / tracing-subscriber)
+
+## Configuration model (SQLite authoritative)
+
+From v2.x the gateway stores its configuration in **SQLite**, not in text files:
+
+- **SQLite** (in the mounted `data/` directory) is **authoritative** for all non-secret runtime configuration. Schema migrations v001–v012 run automatically and forward-only on boot.
+- **`config/config.toml`** is a **bootstrap seed only** — read at boot to populate a fresh database, then overridden by SQLite for any key the operator has set through the web UI. Operators may delete it post-migration.
+- **`config/secrets.toml`** (chmod 0600) holds the operator secrets (`[chirpstack].api_token`, `[opcua].user_password`); the gateway never mutates this file at runtime.
+- **Precedence:** env (`OPCGW_*`) > SQLite > `config.toml` > built-in default.
+
+**First boot uses the browser `/setup` wizard** — no text-file editing required. Point a browser at the web UI port (`http://<host>:8080`) and the gateway serves the first-run wizard to capture the ChirpStack server/tenant/token and the OPC UA password.
+
+**Staged-apply.** Configuration changes made through the web UI are **staged** to SQLite without disturbing the running gateway; `GET /api/status` reports `pending_changes: true` until the operator clicks **Apply changes** (`POST /api/config/apply`), which performs a single in-process soft restart of the data-plane. The Docker **container is never restarted** on a config change.
 
 ## PKI Certificate Management
 
@@ -99,14 +129,23 @@ When `create_sample_keypair = true`, the server auto-generates self-signed certi
 
 ## Health Monitoring
 
-Currently, no dedicated health endpoint exists. Monitor via:
-- **Log files:** Check `log/` directory for errors
+The web server exposes dedicated health endpoints (web UI must be enabled):
+
+- **`GET /api/health`** (added v2.1.0) — minimal smoke endpoint returning `{"status":"ok","version":"..."}`. Suitable for external uptime/load-balancer probes.
+- **`GET /api/status`** — richer status: health metrics, `pending_changes` (staged-but-unapplied config), and `poll_interval_secs`.
+
+The container healthcheck in `docker-compose.yml` is a TCP liveness probe against the OPC UA port (the runtime image ships no curl/wget). The web dashboard (Story F-3) derives a client-side health verdict and per-device freshness panel from `/api/status` + `/api/devices`.
+
+Additional signals:
+- **Log output:** structured tracing logs (`log/` directory and/or stdout)
 - **OPC UA diagnostics:** Connect an OPC UA client with diagnostics enabled
 - **ChirpStack status:** The gateway tracks server availability internally (exposed as internal metric `cp0`)
 
 ## Epic A migration
 
-> **Who this section is for:** operators upgrading an existing opcgw deployment from v2.0-rc (pre-Epic-A schema, v006) to v2.0 GA (post-Epic-A schema, v008). New deployments do not need this section — a fresh gateway creates a v008 database on first startup.
+> **Who this section is for:** operators upgrading an existing opcgw deployment from v2.0-rc (pre-Epic-A schema, v006) to v2.0 GA (post-Epic-A schema, v008). New deployments do not need this section — a fresh gateway creates the current-schema database on first startup.
+>
+> **Note (v2.1+):** the later migrations (v009–v012, covering SQLite-authoritative singleton config and Epic E/F additions) likewise run **automatically and forward-only** on boot — the same mechanism described below, no operator intervention.
 
 [Issue #108](https://github.com/guycorbaz/opcgw/issues/108) shipped a payload-less `MetricType` enum across Phase A and Phase B that flattened every persisted metric value to its discriminant string (`"Float"`, `"Int"`, `"Bool"`, `"String"`) instead of the real measurement. Epic A (stories A-1 through A-7) re-shapes the storage layer to carry real measurement payloads end-to-end. The schema changes land in two SQLite migrations:
 

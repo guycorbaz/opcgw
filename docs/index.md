@@ -66,8 +66,8 @@ title: opcgw - ChirpStack to OPC UA Gateway
             <div class="col-lg-6 mb-4">
                 <div class="feature-card">
                     <div class="feature-icon"><i class="fas fa-network-wired"></i></div>
-                    <h3 class="feature-title">Real-Time Data Bridge</h3>
-                    <p class="feature-text">Continuously polls ChirpStack via gRPC and exposes metrics as OPC UA variables for your SCADA systems</p>
+                    <h3 class="feature-title">Bidirectional Data Bridge</h3>
+                    <p class="feature-text">Polls ChirpStack and ingests real-time uplink events, exposing metrics as OPC UA variables — and turns OPC UA writes into LoRaWAN downlinks for two-way control</p>
                 </div>
             </div>
             <div class="col-lg-6 mb-4">
@@ -93,16 +93,16 @@ title: opcgw - ChirpStack to OPC UA Gateway
             </div>
             <div class="col-lg-6 mb-4">
                 <div class="feature-card">
-                    <div class="feature-icon"><i class="fas fa-chart-line"></i></div>
-                    <h3 class="feature-title">Scalable Architecture</h3>
-                    <p class="feature-text">Support for hundreds of devices with configurable polling intervals and automatic retry logic</p>
+                    <div class="feature-icon"><i class="fas fa-sliders-h"></i></div>
+                    <h3 class="feature-title">Device Control &amp; Class-Aware Abstraction</h3>
+                    <p class="feature-text">Send commands from SCADA — an OPC UA write becomes a LoRaWAN downlink with Pending → Sent → Confirmed lifecycle. A model-agnostic device-class registry (e.g. the Tonhe valve driver) keeps it vendor-independent</p>
                 </div>
             </div>
             <div class="col-lg-6 mb-4">
                 <div class="feature-card">
                     <div class="feature-icon"><i class="fas fa-eye"></i></div>
                     <h3 class="feature-title">Observable</h3>
-                    <p class="feature-text">Structured logging with per-module log files for deep visibility into gateway operation</p>
+                    <p class="feature-text">Structured <code>tracing</code> logs with a closed-enum <code>event=</code> taxonomy (SIEM-friendly), plus an at-a-glance health dashboard and <code>/api/health</code> + <code>/api/status</code> endpoints</p>
                 </div>
             </div>
         </div>
@@ -118,9 +118,10 @@ title: opcgw - ChirpStack to OPC UA Gateway
 <pre style="margin: 0; color: inherit;">git clone https://github.com/guycorbaz/opcgw.git
 cd opcgw
 cp config/config.example.toml config/config.toml
-# Add your ChirpStack server + token to config/config.toml (bootstrap seed)
+# No token editing needed — config.toml is just a bootstrap seed
 cargo run --release -- -c config/config.toml
-# Then open http://localhost:8080 to finish configuring in the web UI</pre>
+# Open http://localhost:8080/setup and complete the first-run wizard
+# in your browser (ChirpStack server, tenant, API token, OPC UA password)</pre>
                 </div>
                 <p class="text-center" style="color: #64748b; margin-top: 2rem;">Or use Docker:</p>
                 <div class="code-block">

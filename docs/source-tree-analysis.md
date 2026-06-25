@@ -24,9 +24,11 @@ opcgw/
 │   ├── google/api/               # Google API annotations (HTTP mapping)
 │   └── common/                   # Common protobuf definitions
 │
-├── config/                       # Runtime configuration
-│   ├── config.toml               # Main application config (ChirpStack, OPC UA, applications)
-│   └── log4rs.yaml               # Logging configuration (per-module appenders)
+├── config/                       # Bootstrap configuration (seed only — runtime config lives in SQLite)
+│   ├── config.toml               # Bootstrap seed (ChirpStack, OPC UA, applications); read once into SQLite
+│   ├── config.example.toml       # Annotated example seed
+│   └── secrets.toml              # Secrets (API token, OPC UA password), chmod 0600 — created by the wizard
+│                                 # Logging is configured via RUST_LOG (tracing); there is no log4rs.yaml
 │
 ├── tests/                        # Test fixtures
 │   └── config/
@@ -60,8 +62,8 @@ opcgw/
 ├── build.rs                      # Build script: compiles .proto files with tonic-build
 ├── Cargo.toml                    # Rust package manifest (dependencies, profiles)
 ├── Cargo.lock                    # Dependency lock file
-├── Dockerfile                    # Multi-stage Docker build (rust:1.87 → ubuntu)
-├── docker-compose.yml            # Docker Compose: exposes port 4855, mounts config/log/pki
+├── Dockerfile                    # Multi-stage Docker build (rust:1.94 → ubuntu:24.04, non-root)
+├── docker-compose.yml            # Docker Compose: exposes port 4840, mounts config/log/pki
 ├── Makefile.toml                 # cargo-make task definitions (test, coverage)
 ├── README.md                     # Project README with setup and usage instructions
 ├── CLAUDE.md                     # Claude Code AI assistant instructions
@@ -90,4 +92,4 @@ opcgw/
 |------|------|
 | `src/main.rs` | Application entry point — parses CLI args, inits logger, creates storage, spawns tokio tasks |
 | `build.rs` | Build-time entry point — compiles `.proto` files into Rust code via `tonic-build` |
-| `Dockerfile` | Container entry point — `ENTRYPOINT ["/usr/local/bin/opcgw"]` on port 4855 |
+| `Dockerfile` | Container entry point — `ENTRYPOINT ["/usr/local/bin/opcgw"]` on port 4840 |

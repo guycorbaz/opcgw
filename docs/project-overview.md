@@ -4,7 +4,7 @@
 
 ## Purpose
 
-**opcgw** (OPC UA ChirpStack Gateway) is a Rust application that bridges ChirpStack 4 (an open-source LoRaWAN Network Server) with OPC UA clients for industrial automation and SCADA systems. It polls device metrics from ChirpStack's gRPC API, stores them in memory, and exposes them as OPC UA variables. It also supports sending commands to LoRaWAN devices via OPC UA write operations.
+**opcgw** (OPC UA ChirpStack Gateway) is a Rust application that bridges ChirpStack 4 (an open-source LoRaWAN Network Server) with OPC UA clients for industrial automation and SCADA systems. It polls device metrics from ChirpStack's gRPC API and ingests real-time uplink events, persisting them in a SQLite database (with an in-memory cache for fast reads) and exposing them as OPC UA variables. It also supports sending commands to LoRaWAN devices via OPC UA write operations, which are translated into LoRaWAN downlinks through ChirpStack.
 
 The project was born from a real-world need: controlling LoRa watering valves in fruit tree orchards via a SCADA system to optimize water use.
 
@@ -12,56 +12,64 @@ The project was born from a real-world need: controlling LoRa watering valves in
 
 | Category | Technology | Version | Notes |
 |----------|-----------|---------|-------|
-| Language | Rust | 2021 edition | Min rustc 1.87.0 |
-| Async Runtime | Tokio | 1.47.1 | Full features, multi-thread |
-| gRPC | Tonic | 0.13.1 | ChirpStack API client |
-| Protobuf | tonic-build | 0.13.1 | Build-time proto compilation |
-| ChirpStack SDK | chirpstack_api | 4.13.0 | Generated API types |
-| OPC UA | async-opcua | 0.16.x | Server feature enabled |
+| Language | Rust | 2021 edition | Builder/MSRV rustc 1.94.0 |
+| Async Runtime | Tokio | 1.50.0 | Full features, multi-thread |
+| gRPC | Tonic | 0.14.5 | ChirpStack API client |
+| Protobuf | tonic-build | 0.14.5 | Build-time proto compilation |
+| ChirpStack SDK | chirpstack_api | 4.17.0 | Generated API types |
+| OPC UA | async-opcua | 0.17.1 | Server feature enabled |
+| Web Framework | axum | 0.8 | Web UI + REST API |
+| Persistence | rusqlite | 0.38.0 | Bundled SQLite, schema migrations v001–v012 |
 | Configuration | Figment | 0.10.19 | TOML + env var merging |
-| Serialization | Serde | 1.0.219 | Derive feature |
-| CLI | Clap | 4.5.47 | Derive feature |
-| Logging | log + log4rs | 0.4.28 / 1.4.0 | Per-module file appenders |
-| Error Handling | thiserror | 2.0.16 | Custom error enum |
-| Networking | url, local-ip-address | 2.5.7 / 0.6.5 | URL parsing, local IP detection |
+| Serialization | Serde | 1.0.228 | Derive feature |
+| CLI | Clap | 4.6.0 | Derive feature |
+| Logging | tracing + tracing-subscriber | 0.1.41 / 0.3.19 | Structured logging, env-filter |
+| Error Handling | thiserror | 2.0.18 | Custom error enum |
 | Containerization | Docker | - | Multi-stage build |
 
 ## Architecture Pattern
 
-**Concurrent Service Architecture** — Two long-running async tasks (ChirpStack Poller and OPC UA Server) communicate through shared in-memory storage protected by `Arc<Mutex<Storage>>`.
+**Concurrent Service Architecture** — Long-running async tasks (ChirpStack poller, gRPC uplink event stream, OPC UA server, command-timeout handler, and the axum web server) communicate through shared storage. Storage is authoritative in SQLite (data persists across restarts) and fronted by an in-memory cache protected by `Arc<Mutex<Storage>>`.
 
 ```
-ChirpStack gRPC API  ──►  ChirpstackPoller  ──►  Storage (HashMap)  ──►  OPC UA Server  ──►  OPC UA Clients
-                                                       ▲                       │
-                                                       └───── Command Queue ◄──┘
+                          ┌─── Uplink event stream (StreamDeviceEvents) ───┐
+                          │                                                ▼
+ChirpStack gRPC API  ──►  ChirpstackPoller  ──►  Storage (SQLite + in-memory cache)  ──►  OPC UA Server  ──►  OPC UA Clients
+        ▲                                                                                       │
+        │                                                                                       │
+        └──── Downlink command path (ChirpStack Enqueue) ◄──── OPC UA write (command node) ◄────┘
 ```
+
+The web layer (axum) stages configuration edits to SQLite; a single `POST /api/config/apply` performs an in-process soft restart of the data-plane tasks. The Docker container itself is never restarted.
 
 ## Repository Type
 
-**Monolith** — Single cohesive Rust crate with 6 source modules.
+**Monolith** — Single cohesive Rust crate (38 source files).
 
-## Current Status (v1.0.0)
+## Current Status (v2.3.0)
 
-**Implemented:**
+**Implemented in v2.3.0:**
 - ChirpStack gRPC polling with auth, retries, and server availability monitoring
-- In-memory storage with typed metrics (Bool, Int, Float, String)
-- OPC UA server with dynamic address space (Application > Device > Metric hierarchy)
-- Read callbacks for real-time metric access from OPC UA clients
-- Write callbacks for sending commands to LoRaWAN devices via ChirpStack
-- TOML + environment variable configuration
+- Real-time uplink ingestion via the gRPC `StreamDeviceEvents` stream, storing the RAW last value (no aggregation)
+- Downlink command path: OPC UA write on a command node → LoRaWAN downlink via ChirpStack `Enqueue`, with command lifecycle tracking (Pending → Sent → Confirmed/Failed)
+- Model-agnostic, class-aware device-class registry (`command_class`, e.g. `valve`); the Tonhe valve is the first driver
+- Persistent SQLite storage (authoritative), with forward-only migrations (v001–v012) applied automatically on boot, plus an in-memory cache; data survives restarts (verified by cold-start restore)
+- Typed metrics (Bool, Int, Float, String) and a dynamic OPC UA address space (Application > Device > Metric hierarchy)
+- OPC UA subscriptions / data-change notifications and HistoryRead
+- Zero-touch first-run wizard: configure ChirpStack server / tenant / API token and the OPC UA password entirely from the browser at `/setup` — no text-file editing
+- Web-based configuration UI (unified vanilla web shell, no build step / framework / node_modules): ChirpStack inventory auto-discovery pickers and a live config editor backed by SQLite
+- Staged-apply configuration model: edits stage to SQLite (`GET /api/status` → `pending_changes: true`) and apply via a single in-process soft restart
+- Config export / import: `GET /api/config/export` (TOML, secrets excluded) and `POST /api/config/import`
+- Health and status endpoints: `GET /api/health` and `GET /api/status` (health metrics, `pending_changes`, `poll_interval_secs`), plus a redesigned dashboard (at-a-glance health verdict, poller-stall tile, per-device freshness)
+- Security hardening: HMAC web auth, OPC UA PKI, and audit events
+- Configuration precedence: env > SQLite > `config.toml` (bootstrap seed, read once into SQLite) > default; secrets stored separately in `config/secrets.toml` (chmod 0600)
+- Structured logging via `tracing` / `tracing-subscriber`
 - Docker deployment support
-- Per-module logging with file appenders
 
-**Not Yet Implemented / In Progress:**
-- Many OPC UA features missing (subscriptions/data change notifications, historical data access, alarms & conditions, method nodes, complex type support, monitored items tuning)
-- Full data type conversions (only Gauge metric type supported from ChirpStack)
-- Web-based configuration interface (currently file-only via TOML; target: web UI for managing applications, devices, and metrics)
-- Persistent storage in a local database (currently in-memory HashMap only; all data is lost on restart)
-- Enhanced error handling (some methods still panic)
-- Load testing and performance optimization
-- Unit conversion with configurable factors
-- Health check endpoints
-- Comprehensive integration tests
+**Deferred / backlog:**
+- OPC UA threshold-alarm conditions (alarms & conditions) — not implemented
+- Dispatch decoupling of the command path (CR #136)
+- A second device class beyond the valve driver (E-2b)
 
 ## License
 
