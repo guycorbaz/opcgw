@@ -405,6 +405,8 @@ dir = "/var/log/opcgw"
 
 Valid levels: `trace`, `debug`, `info` (default), `warn`, `error`. Per-module file appenders capture independently of the global level — see [`docs/logging.md`](./docs/logging.md) for the operator-facing reference, including the structured-field schema, correlation-ID tracing, and the env-var override convention.
 
+At startup, opcgw also verifies that the performance-critical `idx_metric_history_device_timestamp` index exists. If it is missing (e.g. dropped manually or left absent by a partially-applied migration), the gateway logs a single `warn!` with `event="metric_history_index_missing"` and a remediation hint, then continues — a missing performance index degrades history-query speed but never aborts startup.
+
 ## Architecture
 
 opcgw consists of two main components running concurrently:

@@ -11,7 +11,14 @@
 
 use rusqlite::Connection;
 use crate::utils::OpcGwError;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+
+/// Name of the composite index on `metric_history(device_id, timestamp)` that
+/// backs all time-range history queries. Created by `v001_initial.sql` and
+/// re-asserted by `v008_typed_value_constraints.sql`. Validated at startup by
+/// [`validate_required_indexes`] so a dropped or never-created index surfaces
+/// as a loud operator warning instead of a silent full-table-scan regression.
+const METRIC_HISTORY_INDEX_NAME: &str = "idx_metric_history_device_timestamp";
 
 /// Embedded migration SQL files via include_str!()
 /// No runtime file dependency — migrations are compiled into the binary
@@ -365,6 +372,68 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
         "Schema migration complete"
     );
 
+    // GH-74: confirm the performance-critical history index actually exists.
+    // Migrations create it with `CREATE INDEX IF NOT EXISTS`, but a dropped
+    // index or a partially-applied migration would otherwise degrade silently.
+    validate_required_indexes(conn)?;
+
+    Ok(())
+}
+
+/// Verify that performance-critical indexes are present after migrations.
+///
+/// Currently checks [`METRIC_HISTORY_INDEX_NAME`] on the `metric_history`
+/// table, which backs every `metric_history` time-range query. A *missing*
+/// index is **non-fatal**: the gateway logs a loud, structured `warn!` (so the
+/// operator can recreate it) and continues — an absent performance index
+/// degrades query speed but must not, on its own, take the service down.
+/// Schema (re)creation remains the sole responsibility of the migration
+/// files — this function never attempts to repair the index.
+///
+/// A *failed* `sqlite_master` lookup is treated differently: it signals a
+/// database-level fault (locked or corrupt catalog) in which every other query
+/// would fail too, so it propagates as [`OpcGwError::Database`] and aborts
+/// startup — consistent with the error handling of the surrounding migration
+/// steps, all of which abort on any rusqlite error.
+///
+/// # Errors
+/// Returns [`OpcGwError::Database`] only if the `sqlite_master` lookup itself
+/// fails; an absent index is reported via logging, not an error.
+fn validate_required_indexes(conn: &Connection) -> Result<(), OpcGwError> {
+    // Match on both the index name and its table: SQLite index names are
+    // globally unique, but pinning `tbl_name` keeps the check honest if the
+    // catalog is ever in an unexpected state.
+    let index_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type='index' AND name=?1 AND tbl_name='metric_history'",
+            [METRIC_HISTORY_INDEX_NAME],
+            |row| row.get(0),
+        )
+        .map_err(|e| {
+            OpcGwError::Database(format!(
+                "Failed to verify presence of index {}: {}",
+                METRIC_HISTORY_INDEX_NAME, e
+            ))
+        })?;
+
+    if index_count == 0 {
+        warn!(
+            event = "metric_history_index_missing",
+            index = METRIC_HISTORY_INDEX_NAME,
+            table = "metric_history",
+            impact = "time-range history queries fall back to full-table scans",
+            recommended_action = "recreate the index manually (see migrations/v001_initial.sql) \
+                or restore the database from a clean migration",
+            "Required metric_history index is missing; history query performance will be degraded"
+        );
+    } else {
+        debug!(
+            index = METRIC_HISTORY_INDEX_NAME,
+            "Required metric_history index verified present"
+        );
+    }
+
     Ok(())
 }
 
@@ -373,6 +442,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
+    use tracing_test::traced_test;
 
     fn temp_db() -> (Connection, PathBuf) {
         let path = PathBuf::from(format!(
@@ -425,6 +495,62 @@ mod tests {
         assert_eq!(version, 12, "Version should still be 12 (latest)");
 
         // Cleanup
+        let _ = fs::remove_file(&path);
+    }
+
+    /// GH-74: after a normal migration the metric_history index exists, so
+    /// validation passes and emits no warning.
+    #[test]
+    #[traced_test]
+    fn test_validate_required_indexes_present_after_migration() {
+        let (conn, path) = temp_db();
+        run_migrations(&conn).expect("Migration should succeed");
+
+        // Index must actually be present in sqlite_master.
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name=?1",
+                [METRIC_HISTORY_INDEX_NAME],
+                |row| row.get(0),
+            )
+            .expect("Failed to query index presence");
+        assert!(exists, "metric_history index should exist after migration");
+
+        // Validation succeeds and stays quiet about a missing index.
+        validate_required_indexes(&conn).expect("Validation should succeed when index present");
+        assert!(
+            !logs_contain("metric_history_index_missing"),
+            "no missing-index warning expected when the index is present"
+        );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// GH-74: if the index is dropped, validation still succeeds (non-fatal)
+    /// but emits the structured `metric_history_index_missing` warning.
+    #[test]
+    #[traced_test]
+    fn test_validate_required_indexes_warns_when_missing() {
+        let (conn, path) = temp_db();
+        run_migrations(&conn).expect("Migration should succeed");
+
+        // Simulate a dropped / never-created performance index.
+        conn.execute_batch(&format!("DROP INDEX {}", METRIC_HISTORY_INDEX_NAME))
+            .expect("Failed to drop index for test");
+
+        // Non-fatal: returns Ok despite the missing index.
+        validate_required_indexes(&conn)
+            .expect("Validation must not fail when the index is missing");
+
+        assert!(
+            logs_contain("metric_history_index_missing"),
+            "expected metric_history_index_missing warning"
+        );
+        assert!(
+            logs_contain(METRIC_HISTORY_INDEX_NAME),
+            "warning should name the missing index"
+        );
+
         let _ = fs::remove_file(&path);
     }
 
