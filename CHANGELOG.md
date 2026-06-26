@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.2] — 2026-06-26 — storage hardening
+
+> **Status:** release prep — version bumped and notes finalized; `v2.3.2` tag
+> and Docker/GHCR publish pending. A small, low-risk hardening patch in the
+> 2.3 line (the `:2.3` Docker tag will move to this release). No schema or
+> configuration-surface changes; no behavioural change to data collection or
+> serving.
+
+### Added
+
+- **Startup integrity check for the `metric_history` index**
+  ([#74](https://github.com/guycorbaz/opcgw/issues/74)). After migrations run,
+  opcgw verifies that the performance-critical
+  `idx_metric_history_device_timestamp` index exists. If it is missing (e.g.
+  dropped manually or left absent by a partially-applied migration), the
+  gateway logs a single `warn!` with `event="metric_history_index_missing"`
+  and a remediation hint, then continues — a missing performance index would
+  otherwise degrade history-query speed silently. Missing the index is
+  non-fatal; only an unreadable `sqlite_master` catalog (a database-level
+  fault) aborts startup, consistent with the other migration steps.
+- **Configurable storage-latency WARN budgets**
+  ([#144](https://github.com/guycorbaz/opcgw/issues/144)). The thresholds that
+  decide when a slow SQLite query or batch write is logged at `warn`
+  (`exceeded_budget=true`) instead of `debug` are now tunable via two
+  environment variables — `OPCGW_STORAGE_QUERY_BUDGET_MS` and
+  `OPCGW_BATCH_WRITE_BUDGET_MS` (positive integer milliseconds), resolved once
+  at startup. Invalid or zero values fall back to the default with a `warn!`.
+
+### Changed
+
+- **Storage-latency budget defaults raised to NAS-realistic values**
+  ([#144](https://github.com/guycorbaz/opcgw/issues/144)): storage-query budget
+  `10 ms → 250 ms`, batch-write budget `500 ms → 2000 ms`. On NAS /
+  network-backed SQLite the old SSD-tuned thresholds fired on normal latency
+  (~50 `exceeded_budget=true` WARN/hour observed in production), drowning out
+  genuine signals. The budgets only gate logging — no storage behaviour
+  changes — and operators on fast local disks can lower them via the new env
+  vars to restore earlier regression detection.
+
+### Deferred
+
+- **#73 (async sleep in `append_metric_history`)** was triaged for this
+  release and **deferred**: the named function is dead in production (its only
+  caller, `store_metric`, is uncalled), and the real concern is that the
+  synchronous `SqliteBackend` is invoked directly from async tasks without
+  `spawn_blocking`/`block_in_place`. Re-scoped to a proper async-storage
+  refactor; see the issue for the full finding.
+
 ## [2.3.1] — 2026-06-25 — single-file logging
 
 > **Status:** released — tagged `v2.3.1` and published to Docker Hub
