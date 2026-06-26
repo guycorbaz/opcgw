@@ -27,6 +27,7 @@
 #![allow(unused)]
 
 use std::string::ToString;
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 // =============================================================================
@@ -472,16 +473,117 @@ pub const OPCGW_CP_ID: &str = "cp0";
 /// staleness/health computation.
 pub const OPC_UA_READ_BUDGET_MS: u64 = 100;
 
-/// SQLite query budget. Most reads/writes against the WAL-mode backend
-/// finish in under 1 ms; 10 ms is a generous ceiling that surfaces lock
-/// contention, large result sets, or an under-tuned `busy_handler` without
-/// firing on every cycle.
-pub const STORAGE_QUERY_BUDGET_MS: u64 = 10;
+// ---------------------------------------------------------------------------
+// Storage-latency budgets (GH-144)
+//
+// These two budgets only gate the WARN-vs-DEBUG decision on storage-query and
+// batch-write timing logs — they change no functional behavior. They are
+// runtime-tunable via environment variables (resolved once at startup, see
+// `init_storage_budgets_from_env`) because the right ceiling depends on the
+// backing disk: a local SSD finishes most queries in well under 1 ms, while a
+// NAS / network-backed SQLite routinely runs ~100 ms+ per single-row write and
+// up to ~2 s per end-of-cycle batch. The shipped defaults are sized for
+// NAS-class storage so the WARNs stay meaningful out of the box; operators on
+// fast local disks can tighten them to restore early regression detection.
 
-/// Batch-write budget: an end-of-cycle batch covering ~100 metrics should
-/// complete in well under 500 ms even on slower disks. Above this we want a
-/// `warn!` so it shows up in production logs without `OPCGW_LOG_LEVEL=debug`.
-pub const BATCH_WRITE_BUDGET_MS: u64 = 500;
+/// Default storage-query budget in ms (used when `OPCGW_STORAGE_QUERY_BUDGET_MS`
+/// is unset or invalid). Sized for NAS-class single-row writes.
+pub const DEFAULT_STORAGE_QUERY_BUDGET_MS: u64 = 250;
+
+/// Default batch-write budget in ms (used when `OPCGW_BATCH_WRITE_BUDGET_MS` is
+/// unset or invalid). Sized for a ~100-metric end-of-cycle batch on NAS storage.
+pub const DEFAULT_BATCH_WRITE_BUDGET_MS: u64 = 2000;
+
+/// Env var overriding the storage-query budget (positive integer milliseconds).
+pub const STORAGE_QUERY_BUDGET_ENV: &str = "OPCGW_STORAGE_QUERY_BUDGET_MS";
+
+/// Env var overriding the batch-write budget (positive integer milliseconds).
+pub const BATCH_WRITE_BUDGET_ENV: &str = "OPCGW_BATCH_WRITE_BUDGET_MS";
+
+static STORAGE_QUERY_BUDGET_MS: AtomicU64 = AtomicU64::new(DEFAULT_STORAGE_QUERY_BUDGET_MS);
+static BATCH_WRITE_BUDGET_MS: AtomicU64 = AtomicU64::new(DEFAULT_BATCH_WRITE_BUDGET_MS);
+
+/// Current storage-query budget in ms (the threshold above which a
+/// `storage_query` timing log is upgraded from `debug!` to
+/// `warn!(exceeded_budget=true)`). Reads a process-global atomic — cheap enough
+/// to call on every query; never re-reads the environment.
+pub fn storage_query_budget_ms() -> u64 {
+    STORAGE_QUERY_BUDGET_MS.load(Ordering::Relaxed)
+}
+
+/// Current batch-write budget in ms (the threshold above which a `batch_write`
+/// timing log is emitted at `warn!` instead of `debug!`). Reads a
+/// process-global atomic; never re-reads the environment.
+pub fn batch_write_budget_ms() -> u64 {
+    BATCH_WRITE_BUDGET_MS.load(Ordering::Relaxed)
+}
+
+/// Resolve both storage-latency budgets from the environment exactly once at
+/// startup. Call this *after* the tracing subscriber is initialised so the
+/// resolution logs are captured. Invalid or zero values fall back to the
+/// default with a single `warn!`; a successfully applied override logs at
+/// `info!` with `source="env"`, otherwise `source="default"`.
+pub fn init_storage_budgets_from_env() {
+    resolve_budget_env(
+        STORAGE_QUERY_BUDGET_ENV,
+        &STORAGE_QUERY_BUDGET_MS,
+        DEFAULT_STORAGE_QUERY_BUDGET_MS,
+    );
+    resolve_budget_env(
+        BATCH_WRITE_BUDGET_ENV,
+        &BATCH_WRITE_BUDGET_MS,
+        DEFAULT_BATCH_WRITE_BUDGET_MS,
+    );
+}
+
+/// Parse a budget env var value: `Ok(ms)` for a positive integer, `Err(reason)`
+/// for anything else (non-numeric, or zero — zero would warn on every query).
+/// Pure function so it can be unit-tested without touching the global atomics.
+fn parse_budget_value(raw: &str) -> Result<u64, &'static str> {
+    match raw.trim().parse::<u64>() {
+        Ok(0) => Err("must be greater than zero"),
+        Ok(ms) => Ok(ms),
+        Err(_) => Err("not a positive integer"),
+    }
+}
+
+/// Apply one env var to its atomic, logging the resolved value and source.
+fn resolve_budget_env(env_key: &str, slot: &AtomicU64, default_ms: u64) {
+    match std::env::var(env_key) {
+        Ok(raw) => match parse_budget_value(&raw) {
+            Ok(ms) => {
+                slot.store(ms, Ordering::Relaxed);
+                tracing::info!(
+                    operation = "storage_budget_init",
+                    env_key = env_key,
+                    budget_ms = ms,
+                    source = "env",
+                    "Storage-latency budget resolved from environment"
+                );
+            }
+            Err(reason) => {
+                tracing::warn!(
+                    operation = "storage_budget_init",
+                    env_key = env_key,
+                    rejected_value = %raw,
+                    reason = reason,
+                    budget_ms = default_ms,
+                    source = "default",
+                    "Invalid storage-latency budget override; using default"
+                );
+            }
+        },
+        Err(_) => {
+            tracing::info!(
+                operation = "storage_budget_init",
+                env_key = env_key,
+                budget_ms = default_ms,
+                source = "default",
+                "Storage-latency budget using built-in default"
+            );
+        }
+    }
+}
 
 /// Maximum number of daily-rolling log files retained on disk (CR #143).
 ///
@@ -703,4 +805,93 @@ pub enum OpcGwError {
 /// ```
 pub fn print_type_of<T>(_: &T) {
     println!("{}", std::any::type_name::<T>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// GH-144: a positive integer is accepted as the budget value.
+    #[test]
+    fn parse_budget_value_accepts_positive_integer() {
+        assert_eq!(parse_budget_value("50"), Ok(50));
+        assert_eq!(parse_budget_value("2000"), Ok(2000));
+        // surrounding whitespace is tolerated
+        assert_eq!(parse_budget_value("  120 "), Ok(120));
+    }
+
+    /// GH-144: non-numeric input is rejected so the caller falls back to default.
+    #[test]
+    fn parse_budget_value_rejects_non_numeric() {
+        assert!(parse_budget_value("abc").is_err());
+        assert!(parse_budget_value("12ms").is_err());
+        assert!(parse_budget_value("").is_err());
+        assert!(parse_budget_value("-5").is_err());
+    }
+
+    /// GH-144: zero is rejected — a 0 ms budget would warn on every query.
+    #[test]
+    fn parse_budget_value_rejects_zero() {
+        assert!(parse_budget_value("0").is_err());
+    }
+
+    /// GH-144: the shipped defaults are the NAS-realistic values and the
+    /// accessors return them when no override has been applied. No test calls
+    /// `init_storage_budgets_from_env`, so the process-global atomics remain at
+    /// their compile-time defaults throughout the test binary — hence the exact
+    /// equality is safe here.
+    #[test]
+    fn budget_defaults_are_nas_realistic() {
+        assert_eq!(DEFAULT_STORAGE_QUERY_BUDGET_MS, 250);
+        assert_eq!(DEFAULT_BATCH_WRITE_BUDGET_MS, 2000);
+        assert_eq!(storage_query_budget_ms(), DEFAULT_STORAGE_QUERY_BUDGET_MS);
+        assert_eq!(batch_write_budget_ms(), DEFAULT_BATCH_WRITE_BUDGET_MS);
+    }
+
+    /// GH-144: a valid env override is parsed and applied to its slot.
+    /// Uses a private local atomic + a unique env key so it exercises the real
+    /// resolution path WITHOUT touching the process-global budget atomics (which
+    /// would risk cross-test bleed). Edition 2021 `set_var`/`remove_var` are safe.
+    #[test]
+    fn resolve_budget_env_applies_valid_override() {
+        let key = "OPCGW_TEST_BUDGET_VALID";
+        std::env::set_var(key, "77");
+        let slot = AtomicU64::new(DEFAULT_STORAGE_QUERY_BUDGET_MS);
+        resolve_budget_env(key, &slot, DEFAULT_STORAGE_QUERY_BUDGET_MS);
+        std::env::remove_var(key);
+        assert_eq!(slot.load(Ordering::Relaxed), 77);
+    }
+
+    /// GH-144: a non-numeric override leaves the slot at the default.
+    #[test]
+    fn resolve_budget_env_falls_back_on_invalid() {
+        let key = "OPCGW_TEST_BUDGET_INVALID";
+        std::env::set_var(key, "abc");
+        let slot = AtomicU64::new(DEFAULT_BATCH_WRITE_BUDGET_MS);
+        resolve_budget_env(key, &slot, DEFAULT_BATCH_WRITE_BUDGET_MS);
+        std::env::remove_var(key);
+        assert_eq!(slot.load(Ordering::Relaxed), DEFAULT_BATCH_WRITE_BUDGET_MS);
+    }
+
+    /// GH-144: a zero override leaves the slot at the default (0 would warn on
+    /// every query).
+    #[test]
+    fn resolve_budget_env_falls_back_on_zero() {
+        let key = "OPCGW_TEST_BUDGET_ZERO";
+        std::env::set_var(key, "0");
+        let slot = AtomicU64::new(DEFAULT_STORAGE_QUERY_BUDGET_MS);
+        resolve_budget_env(key, &slot, DEFAULT_STORAGE_QUERY_BUDGET_MS);
+        std::env::remove_var(key);
+        assert_eq!(slot.load(Ordering::Relaxed), DEFAULT_STORAGE_QUERY_BUDGET_MS);
+    }
+
+    /// GH-144: when the env var is unset, the slot keeps its default.
+    #[test]
+    fn resolve_budget_env_uses_default_when_unset() {
+        let key = "OPCGW_TEST_BUDGET_UNSET";
+        std::env::remove_var(key);
+        let slot = AtomicU64::new(DEFAULT_STORAGE_QUERY_BUDGET_MS);
+        resolve_budget_env(key, &slot, DEFAULT_STORAGE_QUERY_BUDGET_MS);
+        assert_eq!(slot.load(Ordering::Relaxed), DEFAULT_STORAGE_QUERY_BUDGET_MS);
+    }
 }

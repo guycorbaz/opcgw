@@ -188,8 +188,8 @@ Every event log line carries a structured `operation=` field. The table below is
 | `staleness_check` | `debug` | Per-read staleness computation; carries `metric_age_secs`, `threshold_secs`, `is_stale`, `status_code`. | Filter by device to see if a single source is silent. |
 | `staleness_boundary` | `debug` | Metric age within ±5 s of the staleness threshold — flickering between Good and Uncertain. | If a metric is constantly near-boundary, raise the threshold or investigate the device's emit cadence. |
 | `staleness_transition` | `info` | Metric crossed Good ↔ Uncertain (or Uncertain ↔ Bad). | Indicates source health changed — confirm via the device's connectivity. |
-| `storage_query` | `debug` (normal) / `warn` (slow / SQLITE_BUSY) | One SQLite query. Carries `query_type`, `latency_ms`. The warn variant fires when `latency_ms > 10` (`exceeded_budget=true`) or when SQLite returned `SQLITE_BUSY`. | Sustained budget exceeded → schema or index issue. SQLITE_BUSY → connection pool exhaustion. |
-| `batch_write` | `debug` (normal) / `warn` (slow) | End-of-cycle batch persistence. Carries `metrics_count`, `latency_ms`. The warn variant fires when `latency_ms > 500`. | A slow batch_write blocks the next poll cycle — investigate disk health. |
+| `storage_query` | `debug` (normal) / `warn` (slow / SQLITE_BUSY) | One SQLite query. Carries `query_type`, `latency_ms`, `budget_ms`. The warn variant fires when `latency_ms > budget_ms` (`exceeded_budget=true`) or when SQLite returned `SQLITE_BUSY`. The budget defaults to **250 ms** and is configurable via `OPCGW_STORAGE_QUERY_BUDGET_MS` (GH-144). | Sustained budget exceeded → schema or index issue, or a budget set too low for NAS/network storage (raise it). SQLITE_BUSY → connection pool exhaustion. |
+| `batch_write` | `debug` (normal) / `warn` (slow) | End-of-cycle batch persistence. Carries `metrics_count`, `latency_ms`, `budget_ms`. The warn variant fires when `latency_ms > budget_ms`. The budget defaults to **2000 ms** and is configurable via `OPCGW_BATCH_WRITE_BUDGET_MS` (GH-144). | A slow batch_write blocks the next poll cycle — investigate disk health, or raise the budget if it's set too low for your storage. |
 | `txn_begin` / `txn_commit` / `txn_rollback` | `trace` | SQLite transaction boundaries inside `batch_write_metrics`. | Diagnostics only — visible in `opcgw.log` at `trace`. |
 
 ### Audit and diagnostic events (`event=`)
@@ -354,10 +354,12 @@ A symptom-first cookbook for the most common production incidents:
 
 ### "Reads are slow" — budget warnings
 
-1. Filter the console for `exceeded_budget=true`. Each line names the operation (`opc_ua_read`, `storage_query`, `batch_write`) and the breached threshold.
+1. Filter the console for `exceeded_budget=true`. Each line names the operation (`opc_ua_read`, `storage_query`, `batch_write`) and carries both `latency_ms` and the breached `budget_ms`.
 2. `storage_query` exceeded → SQLite contention; check pool size and look for `SQLITE_BUSY` warns.
 3. `batch_write` exceeded → disk I/O. Verify the database is on local SSD, not a network mount.
 4. `opc_ua_read` exceeded but `storage_query` is fine → likely staleness computation overhead; rare.
+
+**On NAS / network-backed storage** the `storage_query` and `batch_write` budgets fire on normal latency because the shipped defaults (250 ms / 2000 ms) are sized for that case but a slow mount can still exceed them. The thresholds are configurable — raise them with `OPCGW_STORAGE_QUERY_BUDGET_MS` and `OPCGW_BATCH_WRITE_BUDGET_MS` (positive integer milliseconds, GH-144) to silence the noise, or lower them on fast local disks to restore early regression detection. Both are resolved once at startup and logged as `operation="storage_budget_init"` with the resolved `budget_ms` and `source` (`env` or `default`).
 
 ### "I see `staleness_boundary` lines" — flickering metrics
 

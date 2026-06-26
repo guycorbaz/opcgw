@@ -619,6 +619,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         source = log_level_source,
         "Resolved global log level"
     );
+    // GH-144: resolve the configurable storage-latency budgets from the
+    // environment now that the subscriber is up, so the resolution logs are
+    // captured. These only tune the storage_query / batch_write WARN
+    // thresholds; defaults are NAS-realistic.
+    crate::utils::init_storage_budgets_from_env();
     // Epic 7 retrospective action item (issue #91): Stories 7-2 and 7-3
     // satisfy NFR12 (source-IP in failed-auth audit logs) via two-event
     // correlation against async-opcua's `info!`-level

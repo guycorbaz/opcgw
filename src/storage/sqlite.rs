@@ -115,11 +115,12 @@ fn log_sqlite_busy_if_applicable(
 }
 
 impl Drop for StorageOpLog {
-    /// Story 6-3, AC#3: when a storage query crosses the
-    /// `STORAGE_QUERY_BUDGET_MS` threshold (10 ms — generous on a WAL-mode
-    /// backend), upgrade the routine `debug!` to a `warn!` carrying
-    /// `exceeded_budget=true`. Tells the operator "this query was unusually
-    /// slow" without spamming on every cycle.
+    /// Story 6-3, AC#3: when a storage query crosses the configurable
+    /// storage-query budget (`crate::utils::storage_query_budget_ms()`,
+    /// default 250 ms, override via `OPCGW_STORAGE_QUERY_BUDGET_MS` — GH-144),
+    /// upgrade the routine `debug!` to a `warn!` carrying `exceeded_budget=true`.
+    /// Tells the operator "this query was unusually slow" without spamming on
+    /// every cycle.
     fn drop(&mut self) {
         // Review patch P18: skip emitting during panic unwind. A `Drop`
         // on a panicking thread would emit a misleading `success=false`
@@ -130,12 +131,13 @@ impl Drop for StorageOpLog {
             return;
         }
         let latency_ms = self.start.elapsed().as_millis() as u64;
-        if latency_ms > crate::utils::STORAGE_QUERY_BUDGET_MS {
+        let budget_ms = crate::utils::storage_query_budget_ms();
+        if latency_ms > budget_ms {
             warn!(
                 operation = "storage_query",
                 query_type = self.query_type,
                 latency_ms = latency_ms,
-                budget_ms = crate::utils::STORAGE_QUERY_BUDGET_MS,
+                budget_ms = budget_ms,
                 exceeded_budget = true,
                 success = self.success,
             );

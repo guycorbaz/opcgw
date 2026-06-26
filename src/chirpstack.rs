@@ -1473,15 +1473,18 @@ impl ChirpstackPoller {
                 let batch_latency_ms = batch_start.elapsed().as_millis() as u64;
                 match batch_result {
                     Ok(_) => {
-                        // Story 6-3, AC#3: a batch write that took longer
-                        // than `BATCH_WRITE_BUDGET_MS` is worth surfacing at
-                        // `warn` so it shows up at the default log level.
-                        if batch_latency_ms > crate::utils::BATCH_WRITE_BUDGET_MS {
+                        // Story 6-3, AC#3: a batch write that took longer than
+                        // the configurable batch-write budget (default 2000 ms,
+                        // override via `OPCGW_BATCH_WRITE_BUDGET_MS` — GH-144) is
+                        // worth surfacing at `warn` so it shows up at the
+                        // default log level.
+                        let batch_budget_ms = crate::utils::batch_write_budget_ms();
+                        if batch_latency_ms > batch_budget_ms {
                             warn!(
                                 operation = "batch_write",
                                 metrics_count = batch_count,
                                 latency_ms = batch_latency_ms,
-                                budget_ms = crate::utils::BATCH_WRITE_BUDGET_MS,
+                                budget_ms = batch_budget_ms,
                                 exceeded_budget = true,
                                 success = true,
                                 "Batch write exceeded budget"
@@ -3469,24 +3472,31 @@ mod tests {
         assert!(!logs_contain("operation=\"error_spike\""));
     }
 
-    /// Story 6-3, AC#3 verification: when a successful batch write takes
-    /// longer than `BATCH_WRITE_BUDGET_MS` (500 ms), the production code in
-    /// `poll_metrics` upgrades the routine `debug!` to a structured `warn!`
-    /// carrying `exceeded_budget=true`. This test exercises the same
-    /// `if latency > BUDGET` pattern used at the call site.
+    /// Story 6-3, AC#3 verification: when a successful batch write takes longer
+    /// than the batch-write budget, the production code in `poll_metrics`
+    /// upgrades the routine `debug!` to a structured `warn!` carrying
+    /// `exceeded_budget=true`. This test exercises the same `if latency > BUDGET`
+    /// formatting pattern used at the call site.
+    ///
+    /// GH-144: the budget is now runtime-configurable, so this test reads the
+    /// real `batch_write_budget_ms()` accessor (rather than a hardcoded literal)
+    /// and drives the same `if latency > budget` formatting pattern used at the
+    /// production call site — verifying the WARN *shape*
+    /// (operation/exceeded_budget/budget_ms fields) against whatever budget is
+    /// in effect. No test mutates the global budget, so it resolves to the
+    /// default (2000).
     #[test]
     #[traced_test]
     fn batch_write_budget_emits_warn_when_exceeded() {
-        let batch_start = Instant::now();
-        std::thread::sleep(Duration::from_millis(510));
-        let batch_latency_ms = batch_start.elapsed().as_millis() as u64;
+        let batch_budget_ms: u64 = crate::utils::batch_write_budget_ms();
+        let batch_latency_ms: u64 = batch_budget_ms + 10;
         let batch_count: u32 = 42;
-        if batch_latency_ms > crate::utils::BATCH_WRITE_BUDGET_MS {
+        if batch_latency_ms > batch_budget_ms {
             tracing::warn!(
                 operation = "batch_write",
                 metrics_count = batch_count,
                 latency_ms = batch_latency_ms,
-                budget_ms = crate::utils::BATCH_WRITE_BUDGET_MS,
+                budget_ms = batch_budget_ms,
                 exceeded_budget = true,
                 success = true,
                 "Batch write exceeded budget"
@@ -3501,8 +3511,8 @@ mod tests {
             "expected exceeded_budget=true marker"
         );
         assert!(
-            logs_contain("budget_ms=500"),
-            "expected budget_ms=500 to match BATCH_WRITE_BUDGET_MS"
+            logs_contain(&format!("budget_ms={}", batch_budget_ms)),
+            "expected the resolved budget_ms to be rendered in the warn"
         );
     }
 

@@ -67,16 +67,22 @@
         );
     }
 
-    /// Story 6-3, AC#3 verification: a `StorageOpLog` whose lifetime crosses
-    /// `STORAGE_QUERY_BUDGET_MS` (10 ms) emits a structured `warn!` with
-    /// `exceeded_budget=true` instead of the routine `debug!`.
+    /// Story 6-3, AC#3 verification: a `StorageOpLog` whose lifetime crosses the
+    /// storage-query budget emits a structured `warn!` with `exceeded_budget=true`
+    /// instead of the routine `debug!`.
+    ///
+    /// GH-144: the budget is now runtime-configurable (default
+    /// `DEFAULT_STORAGE_QUERY_BUDGET_MS` = 250 ms). This test sleeps just past
+    /// that default and asserts the rendered `budget_ms` matches it, so it stays
+    /// deterministic without mutating the process-global budget.
     #[test]
     #[traced_test]
     fn storage_query_budget_emits_warn_when_exceeded() {
+        let budget = crate::utils::DEFAULT_STORAGE_QUERY_BUDGET_MS;
         {
             let mut op = StorageOpLog::start("test_slow_query");
             op.ok();
-            std::thread::sleep(Duration::from_millis(15));
+            std::thread::sleep(Duration::from_millis(budget + 20));
             // op drops here, emitting the structured log
         }
         assert!(
@@ -85,11 +91,11 @@
         );
         assert!(
             logs_contain("exceeded_budget=true"),
-            "expected exceeded_budget=true marker after >10 ms operation"
+            "expected exceeded_budget=true marker after exceeding the budget"
         );
         assert!(
-            logs_contain("budget_ms=10"),
-            "expected budget_ms=10 to match STORAGE_QUERY_BUDGET_MS"
+            logs_contain("budget_ms=250"),
+            "expected budget_ms to match DEFAULT_STORAGE_QUERY_BUDGET_MS (250)"
         );
     }
 
@@ -97,9 +103,11 @@
     /// emits the `exceeded_budget` marker.
     ///
     /// Iter-3 review pending #4 resolution: marked `#[ignore]` because the
-    /// 10 ms threshold is brittle under heavy CI load — a slow runner can
-    /// push the no-sleep `Drop` past 10 ms and falsely flap. The
-    /// AC-positive case (`storage_query_warn_when_budget_exceeded` above)
+    /// budget threshold is brittle under heavy CI load — a slow runner can
+    /// push the no-sleep `Drop` past the budget and falsely flap. (GH-144
+    /// raised the default budget to 250 ms, which makes this far less likely,
+    /// but the timing dependency remains, so the `#[ignore]` stands.) The
+    /// AC-positive case (`storage_query_budget_emits_warn_when_exceeded` above)
     /// is the load-bearing assertion; this negative-side test is a
     /// belt-and-suspenders check kept available for manual invocation:
     /// `cargo test --bin opcgw storage_query_below_budget -- --ignored`.
@@ -113,7 +121,7 @@
         {
             let mut op = StorageOpLog::start("test_fast_query");
             op.ok();
-            // No sleep — this should drop in well under 10 ms.
+            // No sleep — this should drop in well under the budget (250 ms).
         }
         assert!(
             logs_contain("operation=\"storage_query\""),

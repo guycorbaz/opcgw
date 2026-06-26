@@ -407,6 +407,8 @@ Valid levels: `trace`, `debug`, `info` (default), `warn`, `error`. Per-module fi
 
 At startup, opcgw also verifies that the performance-critical `idx_metric_history_device_timestamp` index exists. If it is missing (e.g. dropped manually or left absent by a partially-applied migration), the gateway logs a single `warn!` with `event="metric_history_index_missing"` and a remediation hint, then continues — a missing performance index degrades history-query speed but never aborts startup.
 
+**Storage-latency budgets.** Slow SQLite queries and batch writes are surfaced as `exceeded_budget=true` warnings. The thresholds default to NAS-realistic values (storage query **250 ms**, batch write **2000 ms**) and are tunable per deployment via the `OPCGW_STORAGE_QUERY_BUDGET_MS` and `OPCGW_BATCH_WRITE_BUDGET_MS` environment variables (positive integer milliseconds) — lower them on fast local SSDs for earlier regression detection. They only affect logging, never storage behaviour, and are resolved once at startup (logged as `operation="storage_budget_init"`).
+
 ## Architecture
 
 opcgw consists of two main components running concurrently:

@@ -2048,7 +2048,15 @@ rm config/config.toml</screen>
           <varlistentry>
             <term>Storage query latency</term>
             <listitem>
-              <para>Per-query budget is 10 ms. Persistent
+              <para>The per-query budget defaults to 250 ms and the
+              end-of-cycle batch-write budget to 2000 ms; both are sized
+              for NAS / network-backed storage and are configurable via the
+              <literal>OPCGW_STORAGE_QUERY_BUDGET_MS</literal> and
+              <literal>OPCGW_BATCH_WRITE_BUDGET_MS</literal> environment
+              variables (positive integer milliseconds). Lower them on fast
+              local SSDs to restore earlier regression detection. A query
+              past its budget emits a <literal>warn</literal> with
+              <literal>exceeded_budget = true</literal>; persistent
               <literal>SQLITE_BUSY</literal> warnings indicate write
               contention or pool sizing problems.</para>
             </listitem>
