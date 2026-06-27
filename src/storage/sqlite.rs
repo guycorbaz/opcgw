@@ -3551,6 +3551,10 @@ impl SqliteBackend {
         device_id: &str,
         device_name: &str,
         metrics: &[ReadMetric],
+        // Story G-3 (#132): optional per-device stale threshold (seconds).
+        // None → NULL column → device uses the global [opcua] default.
+        // Persisted in the v012 `devices.stale_threshold_seconds` column.
+        stale_threshold_seconds: Option<u64>,
     ) -> Result<(), OpcGwError> {
         let conn = self.pool.checkout(Duration::from_secs(5)).map_err(|e| {
             error!(error = %e, "Pool checkout timeout for insert_device_with_metrics");
@@ -3563,9 +3567,16 @@ impl SqliteBackend {
             let now = format_rfc3339(&Utc::now());
             conn.execute(
                 "INSERT INTO devices \
-                 (application_id, device_id, device_name, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![application_id, device_id, device_name, now, now],
+                 (application_id, device_id, device_name, stale_threshold_seconds, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    application_id,
+                    device_id,
+                    device_name,
+                    stale_threshold_seconds.map(|v| v as i64),
+                    now,
+                    now
+                ],
             )
             .map_err(|e| {
                 OpcGwError::Database(format!(
@@ -3623,6 +3634,9 @@ impl SqliteBackend {
         device_id: &str,
         new_name: &str,
         new_metrics: &[ReadMetric],
+        // Story G-3 (#132): per-device stale threshold (seconds); None → NULL
+        // (use the global [opcua] default). Written in the same EXCLUSIVE txn.
+        stale_threshold_seconds: Option<u64>,
     ) -> Result<(), OpcGwError> {
         let conn = self.pool.checkout(Duration::from_secs(5)).map_err(|e| {
             error!(error = %e, "Pool checkout timeout for update_device_name_and_metrics");
@@ -3634,9 +3648,15 @@ impl SqliteBackend {
         let result: Result<(), OpcGwError> = (|| {
             let now = format_rfc3339(&Utc::now());
             conn.execute(
-                "UPDATE devices SET device_name = ?1, updated_at = ?2 \
-                 WHERE application_id = ?3 AND device_id = ?4",
-                params![new_name, now, application_id, device_id],
+                "UPDATE devices SET device_name = ?1, stale_threshold_seconds = ?2, updated_at = ?3 \
+                 WHERE application_id = ?4 AND device_id = ?5",
+                params![
+                    new_name,
+                    stale_threshold_seconds.map(|v| v as i64),
+                    now,
+                    application_id,
+                    device_id
+                ],
             )
             .map_err(|e| {
                 OpcGwError::Database(format!(

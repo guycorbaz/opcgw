@@ -284,7 +284,7 @@ async fn spawn_fixture(seed_toml: &str) -> CrudFixture {
         }).unwrap_or(());
         for dev in &app.device_list {
             sqlite_backend.insert_device_with_metrics(
-                &app.application_id, &dev.device_id, &dev.device_name, &dev.read_metric_list,
+                &app.application_id, &dev.device_id, &dev.device_name, &dev.read_metric_list, dev.stale_threshold_seconds,
             ).unwrap_or(());
             if let Some(cmds) = &dev.device_command_list {
                 for cmd in cmds {

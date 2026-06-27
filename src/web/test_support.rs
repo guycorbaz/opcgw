@@ -56,6 +56,7 @@ pub fn make_test_reload_handle_and_writer_with_apps(
                     &dev.device_id,
                     &dev.device_name,
                     &dev.read_metric_list,
+                    dev.stale_threshold_seconds,
                 )
                 .unwrap_or(());
             if let Some(cmds) = &dev.device_command_list {

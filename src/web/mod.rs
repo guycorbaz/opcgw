@@ -106,6 +106,11 @@ pub struct ApplicationSummary {
 pub struct DeviceSummary {
     pub device_id: String,
     pub device_name: String,
+    /// Story G-3 (#132): per-device OPC UA stale threshold (seconds), or `None`
+    /// when the device uses the global `[opcua].stale_threshold_seconds`. Carried
+    /// on the snapshot so `/api/devices` can surface it per device for the
+    /// client freshness band.
+    pub stale_threshold_seconds: Option<u64>,
     /// Configured metric specs in TOML-declaration order. Adding a new
     /// metric to the bottom of the TOML list shows up at the bottom of
     /// the row in the dashboard — no random hashmap reordering.
@@ -223,6 +228,7 @@ impl DashboardConfigSnapshot {
                         DeviceSummary {
                             device_id: dev.device_id.clone(),
                             device_name: dev.device_name.clone(),
+                            stale_threshold_seconds: dev.stale_threshold_seconds,
                             metrics,
                         }
                     })

@@ -639,7 +639,7 @@ The PKI directory layout (\texttt{pki/own/}, \texttt{pki/private/}, \texttt{pki/
 
 \begin{description}
 \item[stale\_threshold\_seconds]
-Drives the OPC UA \texttt{StatusCode} returned with each metric read. See \hyperref[sec-staleness-status-codes]{Stale-Data Status Codes}.
+Drives the OPC UA \texttt{StatusCode} returned with each metric read. See \hyperref[sec-staleness-status-codes]{Stale-Data Status Codes}. This is the \emph{global} default; an individual device can override it from the web UI --- open the device in the \texttt{Configuration} drill-down and set its optional \emph{Stale threshold (seconds)} field (empty = use this global default). A higher per-device value suits slow-reporting LoRaWAN sensors that would otherwise read \texttt{Uncertain} between their normal uplinks.
 \item[create\_sample\_keypair]
 When \texttt{true}, opcgw auto-generates a self-signed certificate on first start. \emph{Production default is \texttt{false}} --- provide real CA-signed (or self-signed) certificates manually at \texttt{pki/own/cert.der} and \texttt{pki/private/private.pem}. Release builds with \texttt{create\_sample\_keypair\ =\ true} emit a startup warning.
 \item[max\_connections]

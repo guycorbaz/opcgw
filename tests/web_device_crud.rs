@@ -269,7 +269,7 @@ async fn spawn_fixture(seed_toml: &str) -> CrudFixture {
         }).unwrap_or(());
         for dev in &app.device_list {
             sqlite_backend.insert_device_with_metrics(
-                &app.application_id, &dev.device_id, &dev.device_name, &dev.read_metric_list,
+                &app.application_id, &dev.device_id, &dev.device_name, &dev.read_metric_list, dev.stale_threshold_seconds,
             ).unwrap_or(());
             if let Some(cmds) = &dev.device_command_list {
                 for cmd in cmds {
@@ -643,6 +643,74 @@ async fn post_device_with_empty_metric_list_succeeds() {
     .await
     .expect("send");
     assert_eq!(resp.status(), StatusCode::CREATED);
+    fix.shutdown().await;
+}
+
+/// Story G-3 (#132): per-device stale threshold round-trips through create →
+/// GET → update(clear), and an out-of-band value is rejected.
+#[tokio::test]
+async fn post_put_device_round_trips_per_device_stale_threshold() {
+    let fix = spawn_fixture(APP_TOML_TEMPLATE).await;
+    let client = reqwest::Client::new();
+    let origin = fix.base_url.clone();
+
+    // Create with an explicit override.
+    let body = r#"{"device_id":"dev-slow","device_name":"Slow Sensor","read_metric_list":[],"stale_threshold_seconds":600}"#;
+    let resp = json_request(
+        &client,
+        reqwest::Method::POST,
+        &fix.url("/api/applications/app-1/devices"),
+        Some(&origin),
+        Some(body),
+    )
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created: Value = resp.json().await.expect("json");
+    assert_eq!(created["stale_threshold_seconds"].as_u64(), Some(600));
+
+    // GET returns the stored override.
+    wait_until_listener_swap().await;
+    let got: Value = client
+        .get(fix.url("/api/applications/app-1/devices/dev-slow"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(got["stale_threshold_seconds"].as_u64(), Some(600));
+
+    // PUT with null clears the override (back to global).
+    let put = json_request(
+        &client,
+        reqwest::Method::PUT,
+        &fix.url("/api/applications/app-1/devices/dev-slow"),
+        Some(&origin),
+        Some(r#"{"device_name":"Slow Sensor","read_metric_list":[],"stale_threshold_seconds":null}"#),
+    )
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(put.status(), StatusCode::OK);
+    let put_body: Value = put.json().await.expect("json");
+    assert!(put_body["stale_threshold_seconds"].is_null());
+
+    // Out-of-band (0) is rejected with 400.
+    let bad = json_request(
+        &client,
+        reqwest::Method::PUT,
+        &fix.url("/api/applications/app-1/devices/dev-slow"),
+        Some(&origin),
+        Some(r#"{"device_name":"Slow Sensor","read_metric_list":[],"stale_threshold_seconds":0}"#),
+    )
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
     fix.shutdown().await;
 }
 

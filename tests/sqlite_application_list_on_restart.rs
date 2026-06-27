@@ -69,7 +69,7 @@ fn sqlite_application_list_overrides_config_toml_seed_on_load() {
         },
     ];
     backend
-        .insert_device_with_metrics(APP_ID, DEVICE_ID, "lsn50-magasin", &metrics)
+        .insert_device_with_metrics(APP_ID, DEVICE_ID, "lsn50-magasin", &metrics, None)
         .expect("insert device with metrics");
 
     // --- load_all_applications_config round-trips the topology (the data

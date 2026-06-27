@@ -184,7 +184,15 @@
     for (var a = 0; a < apps.length; a++) {
       var devs = apps[a].devices || [];
       for (var d = 0; d < devs.length; d++) {
-        var band = deviceBand(devs[d], asOfMs, staleSecs, badSecs);
+        // Story G-3 (#132): honour a per-device stale threshold when set
+        // (and valid); otherwise fall back to the global default. Same band
+        // model — just a per-device staleSecs.
+        var devStale =
+          typeof devs[d].stale_threshold_seconds === "number" &&
+          devs[d].stale_threshold_seconds > 0
+            ? devs[d].stale_threshold_seconds
+            : staleSecs;
+        var band = deviceBand(devs[d], asOfMs, devStale, badSecs);
         counts[band] += 1;
         counts.total += 1;
       }

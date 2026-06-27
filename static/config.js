@@ -883,6 +883,16 @@
     mForm.appendChild(el('label', { text: 'Device name' }));
     var devNameInput = el('input', { type: 'text', required: 'required', value: dev.device_name || '' });
     mForm.appendChild(devNameInput);
+    // Story G-3 (#132): optional per-device OPC UA stale threshold. Empty =
+    // use the global [opcua].stale_threshold_seconds default (120 s).
+    mForm.appendChild(el('label', { text: 'Stale threshold (seconds) — optional, overrides the global default' }));
+    var staleInput = el('input', {
+      type: 'number', min: '1', max: '86400',
+      placeholder: 'leave empty to use the global default',
+      value: (dev.stale_threshold_seconds === null || dev.stale_threshold_seconds === undefined)
+        ? '' : String(dev.stale_threshold_seconds),
+    });
+    mForm.appendChild(staleInput);
     mForm.appendChild(el('h3', { text: 'Metric mappings' }));
     var metricContainer = el('div');
     (dev.read_metric_list || []).forEach(function (m) { buildMetricRow(m, metricContainer); });
@@ -896,9 +906,12 @@
     mForm.addEventListener('submit', async function (ev) {
       ev.preventDefault();
       clearError(metricsError);
+      var staleRaw = (staleInput.value || '').trim();
       var payload = {
         device_name: (devNameInput.value || '').trim(),
         read_metric_list: readMetricsFromContainer(metricContainer),
+        // null clears the override (back to the global default); PUT-replace.
+        stale_threshold_seconds: staleRaw === '' ? null : parseInt(staleRaw, 10),
       };
       try {
         var r = await fetch(devUrl, { method: 'PUT', credentials: 'include', headers: jsonHeaders(), body: JSON.stringify(payload) });

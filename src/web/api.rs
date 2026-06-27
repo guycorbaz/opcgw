@@ -462,6 +462,10 @@ pub struct ApplicationView {
 pub struct DeviceView {
     pub device_id: String,
     pub device_name: String,
+    /// Story G-3 (#132): per-device stale threshold (seconds); `null` = use the
+    /// top-level `stale_threshold_secs` global. The client freshness band uses
+    /// this when set, falling back to the global default otherwise.
+    pub stale_threshold_seconds: Option<u64>,
     pub metrics: Vec<MetricView>,
 }
 
@@ -654,6 +658,7 @@ pub async fn api_devices(
                     DeviceView {
                         device_id: dev.device_id.clone(),
                         device_name: dev.device_name.clone(),
+                        stale_threshold_seconds: dev.stale_threshold_seconds,
                         metrics,
                     }
                 })
@@ -1896,6 +1901,11 @@ pub struct CreateDeviceRequest {
     pub device_name: String,
     #[serde(default)]
     pub read_metric_list: Vec<MetricMappingRequest>,
+    /// Story G-3 (#132): optional per-device OPC UA stale threshold (seconds),
+    /// overriding the global `[opcua].stale_threshold_seconds` (default 120).
+    /// Absent/null → use the global default. Validated to the band `(0, 86400]`.
+    #[serde(default)]
+    pub stale_threshold_seconds: Option<u64>,
 }
 
 /// `PUT /api/applications/:application_id/devices/:device_id` request body.
@@ -2049,6 +2059,9 @@ pub struct DeviceResponse {
     pub device_id: String,
     pub device_name: String,
     pub read_metric_list: Vec<MetricMappingResponse>,
+    /// Story G-3 (#132): per-device stale threshold (seconds); `null` = the
+    /// device uses the global `[opcua].stale_threshold_seconds` default.
+    pub stale_threshold_seconds: Option<u64>,
 }
 
 /// One row in [`DeviceResponse::read_metric_list`]. `metric_type` is
@@ -2119,6 +2132,43 @@ pub async fn list_devices(
 ///
 /// `subscribe().borrow()` is cheap (clones an Arc); we drop the
 /// borrow guard before any `.await` because the guard is `!Send`.
+/// Story G-3 (#132): reject an out-of-band per-device stale threshold before
+/// it is persisted. The band is `(0, 86400]` — the same `AppConfig::validate`
+/// per-device contract (config.rs) — so a value that would later fail
+/// config-load validation is rejected at the CRUD layer with a clean 400
+/// rather than silently poisoning the next reload. `None` (use global) is OK.
+#[allow(clippy::result_large_err)]
+fn validate_opt_stale_threshold(
+    value: Option<u64>,
+    application_id: &str,
+    device_id: &str,
+    addr: &SocketAddr,
+) -> Result<(), Response> {
+    if let Some(v) = value {
+        if v == 0 || v > BAD_THRESHOLD_SECS {
+            warn!(
+                event = "device_crud_rejected",
+                reason = "validation",
+                field = "stale_threshold_seconds",
+                application_id = %application_id,
+                device_id = %device_id,
+                value = v,
+                source_ip = %addr.ip(),
+                "device CRUD: stale_threshold_seconds out of band (0, 86400]"
+            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_hint(
+                    "stale_threshold_seconds must be in the range (0, 86400]",
+                    "omit the field (or send null) to use the global [opcua] default",
+                )),
+            )
+                .into_response());
+        }
+    }
+    Ok(())
+}
+
 pub async fn get_device(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -2160,6 +2210,7 @@ pub async fn get_device(
         device_id: dev.device_id.clone(),
         device_name: dev.device_name.clone(),
         read_metric_list,
+        stale_threshold_seconds: dev.stale_threshold_seconds,
     }))
 }
 
@@ -2185,6 +2236,13 @@ pub async fn create_device(
     for (idx, m) in body.read_metric_list.iter().enumerate() {
         validate_metric_mapping_fields(idx, m, &addr)?;
     }
+    // Story G-3 (#132): reject an out-of-band per-device stale threshold.
+    validate_opt_stale_threshold(
+        body.stale_threshold_seconds,
+        &application_id,
+        &body.device_id,
+        &addr,
+    )?;
 
     // Story C-3 AC#6: pre-flight per-device duplicate check on
     // chirpstack_metric_name + metric_name. Pre-C-3, duplicates were
@@ -2301,7 +2359,13 @@ pub async fn create_device(
 
     state
         .sqlite_config
-        .insert_device_with_metrics(&application_id, &body.device_id, &body.device_name, &read_metrics)
+        .insert_device_with_metrics(
+            &application_id,
+            &body.device_id,
+            &body.device_name,
+            &read_metrics,
+            body.stale_threshold_seconds,
+        )
         .map_err(|e| sqlite_crud_error(e, "device", "create_device", &addr))?;
 
     let all_apps = state
@@ -2373,6 +2437,7 @@ pub async fn create_device(
             device_id: body.device_id,
             device_name: body.device_name,
             read_metric_list,
+            stale_threshold_seconds: body.stale_threshold_seconds,
         }),
     ))
 }
@@ -2423,6 +2488,9 @@ pub async fn update_device(
 
     let mut new_name: Option<String> = None;
     let mut new_metric_list: Option<Vec<MetricMappingRequest>> = None;
+    // Story G-3 (#132): PUT-replace semantics — absent or null clears the
+    // per-device override (device falls back to the global default).
+    let mut new_threshold: Option<u64> = None;
     for (k, v) in obj {
         match k.as_str() {
             "device_name" => {
@@ -2467,6 +2535,34 @@ pub async fn update_device(
                             .into_response()
                     })?;
                 new_metric_list = Some(parsed);
+            }
+            "stale_threshold_seconds" => {
+                // Story G-3 (#132): null → clear to global default; a JSON
+                // number → per-device override (band-checked below).
+                if v.is_null() {
+                    new_threshold = None;
+                } else {
+                    let n = v.as_u64().ok_or_else(|| {
+                        warn!(
+                            event = "device_crud_rejected",
+                            reason = "validation",
+                            field = "stale_threshold_seconds",
+                            application_id = %application_id,
+                            device_id = %device_id,
+                            source_ip = %addr.ip(),
+                            "PUT body field 'stale_threshold_seconds' must be a non-negative integer or null"
+                        );
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorResponse::with_hint(
+                                "stale_threshold_seconds must be a positive integer or null",
+                                "send null (or omit) to use the global [opcua] default",
+                            )),
+                        )
+                            .into_response()
+                    })?;
+                    new_threshold = Some(n);
+                }
             }
             "device_id" => {
                 warn!(
@@ -2560,6 +2656,8 @@ pub async fn update_device(
     for (idx, m) in read_metric_list.iter().enumerate() {
         validate_metric_mapping_fields(idx, m, &addr)?;
     }
+    // Story G-3 (#132): band-check the per-device stale threshold.
+    validate_opt_stale_threshold(new_threshold, &application_id, &device_id, &addr)?;
 
     // Iter-1 review B-M6: existence pre-check FIRST. Without this
     // ordering, a PUT to a nonexistent app/device with a duplicate
@@ -2672,7 +2770,13 @@ pub async fn update_device(
 
     state
         .sqlite_config
-        .update_device_name_and_metrics(&application_id, &device_id, &device_name, &new_metrics)
+        .update_device_name_and_metrics(
+            &application_id,
+            &device_id,
+            &device_name,
+            &new_metrics,
+            new_threshold,
+        )
         .map_err(|e| sqlite_crud_error(e, "device", "update_device", &addr))?;
 
     let all_apps = state
@@ -2736,6 +2840,7 @@ pub async fn update_device(
         device_id,
         device_name,
         read_metric_list: read_metric_list_resp,
+        stale_threshold_seconds: new_threshold,
     }))
 }
 
@@ -4884,6 +4989,7 @@ mod tests {
                     .map(|j| crate::web::DeviceSummary {
                         device_id: format!("dev-{i}-{j}"),
                         device_name: format!("Dev {i}-{j}"),
+                        stale_threshold_seconds: None,
                         metrics: vec![],
                     })
                     .collect();
@@ -5273,6 +5379,7 @@ mod tests {
         crate::web::DeviceSummary {
             device_id: id.to_string(),
             device_name: name.to_string(),
+            stale_threshold_seconds: None,
             metrics: metrics
                 .iter()
                 .map(|(n, t)| crate::web::MetricSpec {

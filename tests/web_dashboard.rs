@@ -649,6 +649,8 @@ async fn api_devices_returns_json_with_expected_shape_when_authed() {
                 opcgw::web::DeviceSummary {
                     device_id: "d1".to_string(),
                     device_name: "Device One".to_string(),
+                    // Story G-3 (#132): per-device override surfaced on /api/devices.
+                    stale_threshold_seconds: Some(600),
                     metrics: vec![opcgw::web::MetricSpec {
                         metric_name: "temperature".to_string(),
                         chirpstack_metric_name: "temperature".to_string(),
@@ -659,6 +661,8 @@ async fn api_devices_returns_json_with_expected_shape_when_authed() {
                 opcgw::web::DeviceSummary {
                     device_id: "d2".to_string(),
                     device_name: "Device Two".to_string(),
+                    // No per-device override → null on the wire (uses global).
+                    stale_threshold_seconds: None,
                     metrics: vec![],
                 },
             ],
@@ -718,6 +722,14 @@ async fn api_devices_returns_json_with_expected_shape_when_authed() {
     let devs = apps[0]["devices"].as_array().expect("devices array");
     assert_eq!(devs.len(), 2);
     assert_eq!(devs[0]["device_id"].as_str(), Some("d1"));
+    // Story G-3 (#132): per-device stale threshold surfaced on /api/devices.
+    // d1 carries an override (600); d2 has none → null (uses the global).
+    assert!(
+        devs[0].get("stale_threshold_seconds").is_some(),
+        "Story G-3: DeviceView must include stale_threshold_seconds; got {devs:?}"
+    );
+    assert_eq!(devs[0]["stale_threshold_seconds"].as_u64(), Some(600));
+    assert!(devs[1]["stale_threshold_seconds"].is_null());
     let metrics = devs[0]["metrics"].as_array().expect("metrics array");
     assert_eq!(metrics.len(), 1);
     assert_eq!(metrics[0]["metric_name"].as_str(), Some("temperature"));
@@ -768,6 +780,7 @@ async fn api_devices_emits_typed_value_and_unit_per_variant() {
             devices: vec![opcgw::web::DeviceSummary {
                 device_id: "dev-a6".to_string(),
                 device_name: "A-6 Device".to_string(),
+                stale_threshold_seconds: None,
                 metrics: vec![
                     opcgw::web::MetricSpec {
                         metric_name: "temperature".to_string(),

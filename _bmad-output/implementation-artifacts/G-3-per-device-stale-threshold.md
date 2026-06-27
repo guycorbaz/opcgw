@@ -1,6 +1,6 @@
 # Story G.3: Per-Device OPC UA Stale Threshold
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -41,13 +41,13 @@ so that infrequent sensors (a weather station every few minutes, a valve that re
 
 ## Tasks / Subtasks
 
-- [ ] **Task 1 — Device CRUD request/response + handlers (AC: 2, 3).** Add optional `stale_threshold_seconds` to the device create + update request structs in `src/web/api.rs` (the `#[serde(default)]` Option<u64> pattern); validate via the existing per-device rule / `clamp_stale_threshold`; include it in the device GET response struct. Surface a clear rejection (structured error body) on an invalid value.
-- [ ] **Task 2 — Storage write path (AC: 2).** Extend `insert_device_with_metrics` (`src/storage/sqlite.rs:3548`) and the device-update storage path to write the `devices.stale_threshold_seconds` column (the v012 column already exists; the bulk-migration insert at `sqlite.rs:2579` is the reference for the column write). Ensure `load_all_applications_config` (already reads it) round-trips create→load and update→load.
-- [ ] **Task 3 — `/api/devices` per-device field (AC: 4).** Add `stale_threshold_seconds: Option<u64>` to `DeviceView` (`api.rs:462`), populated from the loaded device config; keep the top-level global `stale_threshold_secs`/`bad_threshold_secs`.
-- [ ] **Task 4 — Client freshness honors per-device (AC: 4).** Update the dashboard device-freshness band logic (`static/dashboard.js`) to use `device.stale_threshold_seconds ?? global` when computing fresh/stale/bad; keep the existing clamp/fallback guard (120/86400). Mirror in any device freshness shown in the config view if applicable (keep one band model).
-- [ ] **Task 5 — Device-detail form field (AC: 1).** In `static/config.js` `mountDeviceDetail` Metrics panel, add an optional numeric "Stale threshold (seconds)" input (prefilled from `dev.stale_threshold_seconds`), included in the existing device `PUT` payload; empty → omit/`null` (global).
-- [ ] **Task 6 — Tests (AC: 6).** Update `api_devices_returns_json_with_expected_shape_when_authed` to assert the per-device field; add device-CRUD coverage that a created/updated device round-trips `stale_threshold_seconds` (set, cleared→null, invalid→rejected) through SQLite; client `node --check`. Confirm existing `web_device_crud.rs` / `web_dashboard.rs` pass.
-- [ ] **Task 7 — Docs + gates (AC: 6, 7).** Update the LaTeX manual (`docs/manual/latex/body.tex` — note per-device override is now web-editable in the device detail view; the staleness section) + `docs/web-api.md` (device CRUD field + `/api/devices` shape) if present; rebuild the manual PDF. Run full `cargo test`, `cargo clippy --all-targets -- -D warnings`, `node --check`.
+- [x] **Task 1 — Device CRUD request/response + handlers.** Added `#[serde(default)] stale_threshold_seconds: Option<u64>` to `CreateDeviceRequest` + `DeviceResponse` (api.rs); `update_device`'s JSON-walk gained a `"stale_threshold_seconds"` arm (null→clear, number→override); new `validate_opt_stale_threshold` helper rejects out-of-band `(0, 86400]` with a 400 (`#[allow(clippy::result_large_err)]` per the existing validator convention); `get_device` returns the stored value.
+- [x] **Task 2 — Storage write path.** `insert_device_with_metrics` + `update_device_name_and_metrics` (sqlite.rs) take `Option<u64>` and write the v012 `devices.stale_threshold_seconds` column (INSERT col + `UPDATE … SET stale_threshold_seconds = ?`). No new migration. `load_all_applications_config` already reads it → create/update round-trip verified by test.
+- [x] **Task 3 — `/api/devices` per-device field.** `DeviceView` + `DeviceSummary` (web/mod.rs) gained `stale_threshold_seconds: Option<u64>`, populated in `DashboardConfigSnapshot::from_config` and surfaced in `api_devices`. Top-level global `stale_threshold_secs`/`bad_threshold_secs` unchanged.
+- [x] **Task 4 — Client freshness honors per-device.** `static/dashboard.js summariseFreshness` now uses `device.stale_threshold_seconds` (when a valid positive number) else the global `staleSecs` — same band model, per-device `staleSecs`.
+- [x] **Task 5 — Device-detail form field.** `static/config.js mountDeviceDetail` Metrics panel adds an optional numeric "Stale threshold (seconds)" input (prefilled from `dev.stale_threshold_seconds`); the device `PUT` payload sends the parsed int, or `null` when empty (PUT-replace → clears to global).
+- [x] **Task 6 — Tests.** `api_devices_returns_json_with_expected_shape_when_authed` extended (d1=Some(600), d2=null asserted); new `post_put_device_round_trips_per_device_stale_threshold` (create→GET→clear→invalid-rejected); all DeviceSummary fixtures updated; `node --check` clean.
+- [x] **Task 7 — Docs + gates.** Manual `body.tex` staleness/config-knob note added (per-device override web-editable); manual PDF rebuilt (67 pp). `web-api.md` carries no device-CRUD field table, so no change needed there. Gates: full `cargo test` 0-fail, `cargo clippy --all-targets -- -D warnings` clean, `node --check config.js dashboard.js` OK.
 
 ## Dev Notes
 
@@ -91,10 +91,33 @@ Touches `src/web/api.rs`, `src/storage/sqlite.rs`, `static/config.js`, `static/d
 
 ### Agent Model Used
 
+claude-opus-4-8[1m] (Opus 4.8, 1M context)
+
 ### Debug Log References
+
+- Gates: full `cargo test` exit 0 (no failures); `cargo clippy --all-targets -- -D warnings` clean; `web_dashboard` 16/0 (extended /api/devices shape pin), `web_device_crud` incl. new `post_put_device_round_trips_per_device_stale_threshold` pass; `node --check static/config.js static/dashboard.js` OK; manual PDF 67 pp.
 
 ### Completion Notes List
 
+- **Scope held:** closed the web write path only — no schema migration (v012 column reused), no change to the OPC UA staleness derivation (E-1 already honors per-device from the loaded config), no new endpoint. After the operator clicks **Apply**, the F-0 soft restart reloads config from SQLite and the OPC UA path picks up web-set per-device thresholds.
+- **PUT-replace semantics** for the field: a `null` (or absent) `stale_threshold_seconds` clears the override to the global default, consistent with how `device_name`/`read_metric_list` PUT-replace. The G-0 device form always sends the field.
+- **Validation** rejects out-of-band `(0, 86400]` at the CRUD layer (400) so a value that would later fail `AppConfig::validate` can't poison the next reload. Reused the band constant `BAD_THRESHOLD_SECS`.
+- **Signature change churn:** `insert_device_with_metrics` / `update_device_name_and_metrics` gained an `Option<u64>` param → updated all callers (test_support.rs + 7 integration-test helper blocks, all passing the device's own value or `None`).
+- **Reviewer focus:** the `update_device` null-vs-number JSON-walk arm + PUT-replace clearing; that the v012 column write is correct in both insert and update; the client per-device-vs-global freshness fallback; no secret/no-regression on `/api/devices` shape (additive field).
+
 ### File List
 
+- `src/web/api.rs` — `CreateDeviceRequest`/`DeviceResponse`/`DeviceView` + `stale_threshold_seconds`; `validate_opt_stale_threshold`; create/update/get_device + `api_devices` wiring
+- `src/web/mod.rs` — `DeviceSummary.stale_threshold_seconds` + `from_config` populate
+- `src/storage/sqlite.rs` — `insert_device_with_metrics` + `update_device_name_and_metrics` write the v012 column
+- `src/web/test_support.rs` — caller updated for the new arg
+- `static/config.js` — device-detail "Stale threshold (seconds)" input + PUT payload
+- `static/dashboard.js` — per-device freshness band (per-device threshold ?? global)
+- `tests/web_dashboard.rs` — `/api/devices` shape pin extended (per-device field); DeviceSummary fixtures updated
+- `tests/web_device_crud.rs` — new round-trip test + helper caller updated
+- `tests/{web_picker,web_duplicate_prevention,web_application_crud,web_command_crud,web_inventory_drift,sqlite_application_list_on_restart}.rs` — helper callers updated for the new arg
+- `docs/manual/latex/body.tex` — per-device stale-threshold note (staleness / config-knob)
+
 ### Change Log
+
+- 2026-06-27: Implemented G-3 — per-device OPC UA stale threshold web write path (#132): device CRUD + storage column write (v012, no migration) + `/api/devices` per-device field + dashboard freshness + device-detail form input. Status → review.
