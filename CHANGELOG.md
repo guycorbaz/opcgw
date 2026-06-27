@@ -5,13 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.4.0] — unreleased — Web UX & Usability (Epic G, in progress)
+## [2.4.0] — 2026-06-27 — Web UX: drill-down configuration
 
-> **Status:** in development. `v2.4.0-rc1` is an early release candidate cut to
-> trial the new drill-down configuration UI in production; Docker image
-> `gcorbaz/opcgw:2.4.0-rc1` (multi-arch, GHCR mirror) is published from the rc
-> tag and does **not** move the `:2.4` / `:latest` tags. Further Epic G stories
-> (G-1..G-4) land before the stable `2.4.0` tag.
+> **Status:** released. Validated as `v2.4.0-rc1` in production (clean boot,
+> drill-down UI exercised), then promoted to stable. Docker images
+> `gcorbaz/opcgw:2.4.0` / `:2.4` / `:latest` (multi-arch amd64+arm64) + GHCR
+> mirror. This release ships **Epic G story G-0**; the remaining Web-UX stories
+> (device-profile metric picker, contextual field help, per-device stale
+> threshold, dashboard error drill-down — [#124](https://github.com/guycorbaz/opcgw/issues/124)
+> / [#142](https://github.com/guycorbaz/opcgw/issues/142) / [#132](https://github.com/guycorbaz/opcgw/issues/132)
+> / [#127](https://github.com/guycorbaz/opcgw/issues/127)) continue in a later release.
 
 ### Added / changed
 - **G-0 — Drill-down configuration UI** ([#139](https://github.com/guycorbaz/opcgw/issues/139)).
