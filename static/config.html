@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>opcgw — Configuration</title>
+<link rel="stylesheet" href="/dashboard.css">
+<style>
+  /* Story G-0: drill-down configuration. Minimal-footprint overrides on top
+     of dashboard.css, ported from the retired applications/devices-config/
+     commands pages so behaviour and look are unchanged. */
+  .breadcrumb { margin: 0.6rem 0 1rem; font-size: 0.95rem; }
+  .breadcrumb a { color: #2980b9; text-decoration: none; cursor: pointer; }
+  .breadcrumb a:hover { text-decoration: underline; }
+  .breadcrumb .sep { color: #999; margin: 0 0.4rem; }
+  .breadcrumb .current { font-weight: bold; }
+
+  .crud-form { display: grid; gap: 0.5rem; max-width: 600px; margin: 1rem 0; }
+  .crud-form label { font-weight: bold; }
+  .crud-form input, .crud-form select { padding: 0.4rem; font-size: 1rem; }
+  .crud-form button { padding: 0.5rem; cursor: pointer; }
+
+  .config-section { border: 1px solid #ccc; padding: 0.8rem; margin: 1rem 0; }
+  .config-section h2, .config-section h3 { margin-top: 0; }
+
+  table.rows { width: 100%; border-collapse: collapse; margin-bottom: 0.8rem; }
+  table.rows th, table.rows td {
+    padding: 0.5rem; border-bottom: 1px solid #ccc; text-align: left;
+  }
+  .actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+  .btn-open, .btn-edit, .btn-delete, .btn-add, .btn-add-metric, .btn-remove-metric {
+    padding: 0.3rem 0.6rem; cursor: pointer; border: none; color: #fff;
+  }
+  .btn-open { background: #2980b9; }
+  .btn-edit { background: #2980b9; }
+  .btn-delete { background: #c0392b; }
+  .btn-add, .btn-add-metric { background: #27ae60; }
+  .btn-remove-metric { background: #c0392b; padding: 0.2rem 0.5rem; }
+
+  .metric-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr auto;
+    gap: 0.4rem; align-items: end; margin-bottom: 0.4rem;
+  }
+  .metric-row input, .metric-row select { padding: 0.3rem; font-size: 0.9rem; }
+  .metric-row label { font-size: 0.8rem; font-weight: normal; }
+
+  .modal {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.5); display: none; z-index: 100; overflow-y: auto;
+    border: none;
+  }
+  .modal[open] { display: flex; }
+  .modal-content {
+    background: #fff; padding: 1rem; margin: auto;
+    max-width: 700px; width: 90%; max-height: 90vh; overflow-y: auto;
+  }
+  .error-banner { color: #c0392b; padding: 0.5rem; }
+
+  /* Story C-2 picker UI (ported verbatim from devices-config.html). */
+  .picker-toolbar { display: flex; gap: 0.6rem; align-items: center; font-size: 0.85rem; }
+  .picker-toolbar a { cursor: pointer; color: #2980b9; text-decoration: underline; }
+  .picker-toolbar button { padding: 0.2rem 0.4rem; cursor: pointer; font-size: 0.85rem; }
+  .picker-fallback-banner { background: #fcf3cf; color: #7d6608; padding: 0.5rem; margin: 0.4rem 0; border-left: 4px solid #f1c40f; }
+  .dev-eui-footnote { font-size: 0.8rem; color: #666; margin-top: -0.3rem; }
+  .metric-pick-row { display: grid; grid-template-columns: auto 1fr 1fr auto; gap: 0.4rem; align-items: center; margin-bottom: 0.3rem; }
+  .metric-pick-row label { font-weight: normal; }
+  .metric-pick-row .sample-cell { font-size: 0.85rem; color: #777; font-family: monospace; }
+  table.commands { width: 100%; border-collapse: collapse; margin-bottom: 0.8rem; }
+  table.commands th, table.commands td { padding: 0.5rem; border-bottom: 1px solid #ccc; text-align: left; }
+
+  @media (max-width: 600px) {
+    table.rows, table.rows thead, table.rows tbody,
+    table.rows tr, table.rows th, table.rows td { display: block; }
+    table.rows tr { margin-bottom: 0.8rem; border: 1px solid #ddd; padding: 0.4rem; }
+    .actions { flex-direction: column; }
+    .metric-row { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<!-- The unified nav/header bar is injected by /shell.js (Story F-1). -->
+<header class="page-header">
+  <h1>opcgw &mdash; Configuration</h1>
+</header>
+
+<main>
+  <div class="breadcrumb" id="breadcrumb" role="navigation" aria-label="Configuration breadcrumb"></div>
+  <div id="config-error" class="error-banner" hidden></div>
+  <div id="config-root">
+    <p class="loading">Loading&hellip;</p>
+  </div>
+</main>
+
+<script src="/shell.js"></script>
+<script src="/inventory-picker.js"></script>
+<script src="/config.js"></script>
+<script src="/apply-bar.js"></script>
+</body>
+</html>

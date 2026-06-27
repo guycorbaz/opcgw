@@ -1019,15 +1019,18 @@ async fn applications_html_renders_table() {
     let fix = spawn_fixture(APP_TOML_TEMPLATE).await;
     let client = reqwest::Client::new();
     let resp = client
-        .get(fix.url("/applications.html"))
+        .get(fix.url("/config.html"))
         .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
         .send()
         .await
         .expect("send");
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.text().await.expect("text");
-    assert!(body.contains("<table"), "no <table in body: {body}");
-    assert!(body.contains("Application"), "no Application label");
+    // Story G-0: the flat applications page was consolidated into the
+    // drill-down at /config.html; the table is rendered client-side by
+    // config.js into #config-root. Pin the served-HTML wiring markers.
+    assert!(body.contains(r#"id="config-root""#), "no config-root in body: {body}");
+    assert!(body.contains(r#"src="/config.js""#), "config.html must load config.js");
     fix.shutdown().await;
 }
 
@@ -1036,7 +1039,7 @@ async fn applications_js_fetches_api_applications() {
     let fix = spawn_fixture(APP_TOML_TEMPLATE).await;
     let client = reqwest::Client::new();
     let resp = client
-        .get(fix.url("/applications.js"))
+        .get(fix.url("/config.js"))
         .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
         .send()
         .await

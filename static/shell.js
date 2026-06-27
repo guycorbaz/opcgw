@@ -23,12 +23,13 @@
   'use strict';
 
   // Single source of truth for the primary navigation.
+  // Story G-0: the three flat config links (Applications / Devices configuration
+  // / Commands) collapsed into ONE "Configuration" drill-down (Application →
+  // Device → Metrics/Commands) at /config.html.
   var NAV = [
     { href: '/index.html', label: 'Dashboard' },
-    { href: '/applications.html', label: 'Applications' },
-    { href: '/devices-config.html', label: 'Devices configuration' },
+    { href: '/config.html', label: 'Configuration' },
     { href: '/metrics.html', label: 'Live Metrics' },
-    { href: '/commands.html', label: 'Commands' },
     { href: '/inventory-drift.html', label: 'Inventory drift' },
     { href: '/singleton-config.html', label: 'Singleton config' },
   ];

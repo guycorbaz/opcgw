@@ -134,6 +134,9 @@ async fn build_production_static_dir() -> TempDir {
         "metrics.js",
         // Story F-1: the unified web-shell component, included by every page.
         "shell.js",
+        // Story G-0: the consolidated drill-down configuration page + controller.
+        "config.html",
+        "config.js",
     ] {
         let body = tokio::fs::read(src.join(name))
             .await
@@ -1107,12 +1110,12 @@ async fn shell_js_is_served_and_owns_the_nav() {
         shell.contains("app-shell"),
         "shell.js must build the .app-shell component"
     );
+    // Story G-0: the three flat config links (Applications / Devices
+    // configuration / Commands) collapsed into ONE "Configuration" drill-down.
     for label in [
         "Dashboard",
-        "Applications",
-        "Devices configuration",
+        "Configuration",
         "Live Metrics",
-        "Commands",
         "Inventory drift",
         "Singleton config",
     ] {
@@ -1121,11 +1124,10 @@ async fn shell_js_is_served_and_owns_the_nav() {
             "shell.js nav definition must include the {label:?} entry"
         );
     }
-
     // The pages include the shell and no longer hard-code a <nav> (Story F-1
-    // AC#3/#7). Check index.html and metrics.html (the two pages copied into
-    // the test static dir).
-    for page in ["/index.html", "/metrics.html"] {
+    // AC#3/#7; Story G-0 adds config.html). Check the pages copied into the
+    // test static dir.
+    for page in ["/index.html", "/metrics.html", "/config.html"] {
         let r = client
             .get(format!("http://{addr}{page}"))
             .header(
@@ -1144,6 +1146,96 @@ async fn shell_js_is_served_and_owns_the_nav() {
         assert!(
             !body.contains("<nav"),
             "{page} must NOT hard-code a <nav> — the shell injects it (Story F-1 AC#7)"
+        );
+    }
+
+    cancel.cancel();
+    handle
+        .await
+        .expect("web::run task panicked or was cancelled abnormally");
+}
+
+/// Story G-0: the consolidated drill-down config page is served with the
+/// viewport meta + the container DOM IDs config.js binds to + the controller
+/// script references, mirroring the dashboard/metrics marker pins. We don't
+/// execute the JS (no headless browser) — the views are rendered client-side.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn config_html_is_served_with_drilldown_markup() {
+    init_test_subscriber();
+
+    let (addr, cancel, handle, _static_tmp) = spawn_test_server(DashboardConfigSnapshot {
+        application_count: 0,
+        device_count: 0,
+        applications: vec![],
+    })
+    .await;
+
+    let client = common::build_http_client(Duration::from_secs(5));
+    let resp = client
+        .get(format!("http://{addr}/config.html"))
+        .header(
+            header::AUTHORIZATION,
+            build_basic_auth(TEST_USER, TEST_PASSWORD),
+        )
+        .send()
+        .await
+        .expect("GET /config.html (auth'd)");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.text().await.expect("config.html body");
+
+    assert!(
+        body.contains(r#"<meta name="viewport""#),
+        "config.html must carry the responsive viewport meta (FR41)"
+    );
+    // DOM IDs config.js binds to (breadcrumb + render root).
+    for id in ["breadcrumb", "config-root"] {
+        assert!(
+            body.contains(&format!("id=\"{id}\"")),
+            "config.html must contain #{id} for config.js to bind to"
+        );
+    }
+    // Wired to the shared shell + the consolidated controller; no hard-coded nav.
+    assert!(
+        body.contains(r#"src="/shell.js""#),
+        "config.html must include the unified shell"
+    );
+    assert!(
+        body.contains(r#"src="/config.js""#),
+        "config.html must load the config.js controller"
+    );
+    assert!(
+        !body.contains("<nav"),
+        "config.html must NOT hard-code a <nav> — the shell injects it"
+    );
+
+    // config.js is served with a JS Content-Type and drives all four CRUD
+    // surfaces from the existing endpoints.
+    let js = client
+        .get(format!("http://{addr}/config.js"))
+        .header(
+            header::AUTHORIZATION,
+            build_basic_auth(TEST_USER, TEST_PASSWORD),
+        )
+        .send()
+        .await
+        .expect("GET /config.js (auth'd)");
+    assert_eq!(js.status(), StatusCode::OK);
+    let ct = js
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        ct.contains("javascript"),
+        "config.js Content-Type should be a JS type, got {ct:?}"
+    );
+    let jsbody = js.text().await.expect("config.js body");
+    for needle in ["/api/applications", "/devices", "/commands"] {
+        assert!(
+            jsbody.contains(needle),
+            "config.js must drive the {needle:?} endpoint surface"
         );
     }
 

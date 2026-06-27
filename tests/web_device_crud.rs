@@ -393,30 +393,26 @@ async fn devices_config_html_renders_per_application_table() {
     let fix = spawn_fixture(APP_TOML_TEMPLATE).await;
     let client = reqwest::Client::new();
     let resp = client
-        .get(fix.url("/devices-config.html"))
+        .get(fix.url("/config.html"))
         .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
         .send()
         .await
         .expect("send");
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.text().await.expect("text");
-    // Iter-1 review M6 (Edge E11): the previous assertion
-    // `body.contains("<table") || body.contains("application-section")`
-    // was tautological — the literal "application-section" lives in
-    // a CSS rule (line 14: `.application-section { ... }`) and is
-    // therefore present on every response regardless of template
-    // rendering. Pin to discriminative tokens that only appear when
-    // the page is served correctly: the unique container id and the
-    // dialog/edit-form structural elements.
+    // Story G-0: the flat devices-config page was consolidated into the
+    // drill-down at /config.html. The device table is now rendered
+    // client-side by config.js into #config-root, so pin the served-HTML
+    // markers that prove the consolidated page is wired correctly.
     assert!(
-        body.contains(r#"id="applications-container""#),
-        "missing applications-container id; page not rendered correctly"
+        body.contains(r#"id="config-root""#),
+        "missing config-root id; config page not rendered correctly"
     );
     assert!(
-        body.contains(r#"id="edit-modal""#),
-        "missing edit-modal id; page not rendered correctly"
+        body.contains(r#"src="/config.js""#),
+        "config.html must load the config.js controller"
     );
-    assert!(body.contains("Devices"), "no Devices label");
+    assert!(body.contains("Configuration"), "no Configuration label");
     fix.shutdown().await;
 }
 
@@ -425,7 +421,7 @@ async fn devices_config_js_fetches_api_devices_per_application() {
     let fix = spawn_fixture(APP_TOML_TEMPLATE).await;
     let client = reqwest::Client::new();
     let resp = client
-        .get(fix.url("/devices-config.js"))
+        .get(fix.url("/config.js"))
         .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
         .send()
         .await
@@ -444,7 +440,7 @@ async fn devices_config_html_carries_viewport_meta() {
     let fix = spawn_fixture(APP_TOML_TEMPLATE).await;
     let client = reqwest::Client::new();
     let resp = client
-        .get(fix.url("/devices-config.html"))
+        .get(fix.url("/config.html"))
         .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
         .send()
         .await
@@ -459,7 +455,7 @@ async fn devices_config_uses_dashboard_css_baseline() {
     let fix = spawn_fixture(APP_TOML_TEMPLATE).await;
     let client = reqwest::Client::new();
     let resp = client
-        .get(fix.url("/devices-config.html"))
+        .get(fix.url("/config.html"))
         .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
         .send()
         .await

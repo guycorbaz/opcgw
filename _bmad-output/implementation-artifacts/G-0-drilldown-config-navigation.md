@@ -1,6 +1,6 @@
 # Story G.0: Drill-Down Configuration Navigation
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -48,16 +48,14 @@ G-0 replaces these three with **one hierarchical drill-down**: pick an Applicati
 
 ## Tasks / Subtasks
 
-- [ ] **Task 1 — Scaffold the drill-down page (AC: 1, 3, 8).**
-  - [ ] Create `static/config.html`: includes `shell.js`, `config.js`, `apply-bar.js`, `inventory-picker.js`; a `.page-header`; a breadcrumb element; three view containers (applications / devices / device-detail) toggled by view state. Reuse `dashboard.css` component classes (`.btn`, `.status-badge`, `.banner`, `.crud-form`, `.page-header`); add page-local CSS only where needed.
-  - [ ] Create `static/config.js`: a small client-side view/router driven by `location.hash` (`#/`, `#/app/:id`, `#/app/:id/device/:id`), with breadcrumb + Back/Forward via `hashchange`.
-- [ ] **Task 2 — Applications level (AC: 1, 2, 9).** Port `applications.js` behaviour: list (`GET /api/applications`), create (`POST`, with `opcgwPicker` application picker + manual fallback + audit), rename (`PUT`), delete (`DELETE`). Surface duplicate/validation error bodies.
-- [ ] **Task 3 — Devices level (AC: 1, 2, 9).** Port `devices-config.js` device behaviour within a selected application: list (`GET /api/applications/:app/devices`), create (`POST`, with cascading device picker + manual fallback + audit), delete (`DELETE`), and entry into device-detail.
-- [ ] **Task 4 — Device detail: Metrics + Commands (AC: 1, 2, 9).** On one screen: metric-mapping rows from `GET /api/applications/:app/devices/:dev` (edit via `PUT` device, add/remove `read_metric` rows — preserve the edited-flag heuristic) **and** commands from `GET …/commands` with create/edit/delete (`POST`/`PUT`/`DELETE …/commands/:id`; fPort 1-223, confirmed, command_class selector). Keep metric-config and command editing visually grouped but distinct.
-- [ ] **Task 5 — Nav + redirects (AC: 4, 5).** Update `shell.js` `NAV` (collapse 3 → "Configuration" → `/config.html`). Replace `applications.html`/`devices-config.html`/`commands.html` with redirect stubs (meta-refresh + `location.replace` into the matching `#/…` level when an id is present).
-- [ ] **Task 6 — Tests (AC: 6, 7, 10).** Update `shell_js_is_served_and_owns_the_nav` to the new nav set + `config.html` served-HTML assertions; add a `config_html_*` marker test mirroring the index/metrics pattern. Confirm all other `web_*` tests pass untouched. Run `node --check` on new JS.
-- [ ] **Task 7 — Docs sync (AC: 10; CLAUDE.md doc-sync rule).** Update the LaTeX manual (`docs/manual/latex/body.tex`) Configuration chapter screenshots/prose to describe the drill-down; update `README.md` if it names the old pages; rebuild the manual PDF (`cd docs/manual && make pdf`) to confirm it still builds. Add a short note to `docs/web-api.md` if it lists pages (API surface itself is unchanged).
-- [ ] **Task 8 — Gates (AC: 10).** `cargo test` 0-fail; `cargo clippy --all-targets -- -D warnings` clean; `node --check` on each new/changed `.js`; well-formedness check on new HTML; `git grep -c "<nav" static/*.html` == 0; confirm no `package.json`/`node_modules`.
+- [x] **Task 1 — Scaffold the drill-down page (AC: 1, 3, 8).** `static/config.html` (shell.js + config.js + apply-bar.js + inventory-picker.js, `.page-header`, `#breadcrumb`, `#config-root`, ported CSS) + `static/config.js` (hash router `#/`, `#/app/:id`, `#/app/:id/device/:id`, breadcrumb, per-render token to cancel stale loads, `hashchange` Back/Forward).
+- [x] **Task 2 — Applications level (AC: 1, 2, 9).** `mountApplications`: list + create (opcgwPicker app picker + manual fallback + edited-flag + abort + audit + empty→manual + drift prefill), rename (PUT), delete (DELETE); duplicate/validation error bodies surfaced.
+- [x] **Task 3 — Devices level (AC: 1, 2, 9).** `mountDevices` + `buildAddDeviceSection`: device list + add-device (cascading device picker + uplink metric picker, manual fallbacks, edited-flag, abort, audit, C-4 deep-link prefill), delete, Open → device detail.
+- [x] **Task 4 — Device detail: Metrics + Commands (AC: 1, 2, 9).** `mountDeviceDetail`: metric-mapping rows (add/remove, save via PUT device) + commands table with create form + dynamic edit dialog (fPort 1-223, confirmed, command_class) + delete.
+- [x] **Task 5 — Nav + redirects (AC: 4, 5).** `shell.js` NAV collapsed 3 → "Configuration" → `/config.html`. `applications.html`/`devices-config.html`/`commands.html` replaced with redirect stubs (meta-refresh + `location.replace`, devices-config deep-links to `#/app/:id` when `prefill_app_id` present). Old `*.js` controllers removed.
+- [x] **Task 6 — Tests (AC: 6, 7, 10).** `shell_js_is_served_and_owns_the_nav` updated to the new nav set + checks `config.html`; new `config_html_is_served_with_drilldown_markup`; `config.html`/`config.js` added to the test static dir. Retargeted the served-asset tests in `web_application_crud.rs` / `web_device_crud.rs` / `web_command_crud.rs` to `config.html`/`config.js` (necessary because the old pages became redirect stubs — see Completion Notes deviation). `node --check` clean.
+- [x] **Task 7 — Docs sync (AC: 10).** LaTeX manual (`docs/manual/latex/body.tex`): drill-down add-flow + nav-bar list + 3 drift/storage references updated; manual PDF rebuilt clean (67 pp). `README.md` config-guidance reference updated.
+- [x] **Task 8 — Gates (AC: 10).** `cargo test` full suite exit 0; `cargo clippy --all-targets -- -D warnings` clean; `node --check` on `config.js` + `shell.js` OK; `git grep -c "<nav" static/*.html` == 0; no `package.json`/`node_modules`.
 
 ## Dev Notes
 
@@ -116,8 +114,36 @@ A single `config.html` + `config.js` with hash-routed in-page views (`#/`, `#/ap
 
 ### Agent Model Used
 
+claude-opus-4-8[1m] (Opus 4.8, 1M context)
+
 ### Debug Log References
+
+- Gates: full `cargo test` exit 0 (no failures); `cargo clippy --all-targets -- -D warnings` clean; `web_dashboard` 16/0 (incl. new `config_html_is_served_with_drilldown_markup` + updated nav contract); `web_application_crud` 25/0, `web_command_crud` 55/0, `web_device_crud` 48/0 (retargeted asset tests); `node --check static/config.js static/shell.js` OK; `git grep -c "<nav" static/*.html` all 0; manual PDF rebuilt 67 pp.
 
 ### Completion Notes List
 
+- **Frontend-only, as scoped.** Zero `src/web/*.rs` production changes — all CRUD/inventory/apply endpoints reused verbatim (they already stage to SQLite via F-0). The new UI is one hash-routed drill-down (`static/config.html` + `static/config.js`) with three mountable views; the C-2 `opcgwPicker` helpers (modes, edited-flag, abort-on-rapid-action, audit, escapeHtml) are reused, not reinvented, and the hardened behaviours (empty→manual fallback, `recordPickerPopulation`, AbortController stale-fetch guards, C-4 deep-link prefill) are carried across.
+- **Per-render token** cancels stale view loads on rapid drill navigation (the drill-level analogue of C-2's mode-toggle abort fix).
+- **DEVIATION from AC-7's "one allowed Rust change".** AC-7 anticipated only the nav-contract test would change. In fact the served-asset smoke tests in `web_application_crud.rs` / `web_device_crud.rs` / `web_command_crud.rs` load the now-retired `applications.html`/`.js` etc.; retiring those pages (→ redirect stubs) necessarily breaks them, so they were retargeted to `config.html`/`config.js` (test-only changes tracking the asset move; all assertions preserved in spirit — page served, references its controller, viewport meta). No production code touched. Flagging for the reviewer.
+- **Command edit** uses a dynamically-built `<dialog>` (showModal with attribute fallback), preserving the existing modal UX without static markup in `config.html`.
+- **Drift deep-links** still work: the `devices-config.html` redirect stub forwards query params and sets `#/app/<prefill_app_id>`; `config.js` consumes `prefill_app_id` / `prefill_dev_eui` / `prefill_name` / `prefill_metric_key`.
+- Old controllers `static/{applications,devices-config,commands}.js` removed (superseded by `config.js`; nothing references them).
+- **Suggested reviewer focus:** the retargeted CRUD asset tests (deviation above); the drill-down abort/stale-render token; faithful carry-over of the picker edited-flag + prefill paths; that no secret is rendered and CSRF/auth contracts are unchanged (endpoints untouched).
+
 ### File List
+
+- `static/config.html` (new) — drill-down page shell
+- `static/config.js` (new) — hash router + 3 mountable views (apps / devices / device-detail) + command edit dialog
+- `static/shell.js` (modified) — NAV: 3 config links → one "Configuration" → `/config.html`
+- `static/applications.html` (modified) — redirect stub → `/config.html`
+- `static/devices-config.html` (modified) — redirect stub → `/config.html` (+ `#/app/:id` on prefill)
+- `static/commands.html` (modified) — redirect stub → `/config.html`
+- `static/applications.js` (deleted), `static/devices-config.js` (deleted), `static/commands.js` (deleted) — superseded by `config.js`
+- `tests/web_dashboard.rs` (modified) — static-dir list += config.{html,js}; nav contract updated; new `config_html_is_served_with_drilldown_markup`
+- `tests/web_application_crud.rs`, `tests/web_device_crud.rs`, `tests/web_command_crud.rs` (modified) — asset smoke retargeted to config.{html,js}
+- `docs/manual/latex/body.tex` (modified) — drill-down add-flow + nav-bar list + drift/storage references
+- `README.md` (modified) — config-guidance reference → `/config.html` drill-down
+
+### Change Log
+
+- 2026-06-27: Implemented G-0 — consolidated applications/devices-config/commands flat pages into the `/config.html` drill-down (Application → Device → Metrics/Commands), frontend-only, reusing existing staged-apply endpoints + opcgwPicker. Status → review.

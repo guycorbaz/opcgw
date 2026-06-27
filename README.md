@@ -235,7 +235,7 @@ metric_type = "Float"
 metric_unit = "%"
 ```
 
-> **Configuration lives in SQLite (v2.1.0).** The TOML above is a **bootstrap seed**: on first boot opcgw migrates it into its SQLite database and thereafter ignores `config.toml` at runtime. Manage configuration from the web UI instead — applications/devices/metrics via the ChirpStack inventory pickers (`/applications.html`, `/devices-config.html`), and the singleton sections (`[global]`, `[chirpstack]`, `[opcua]`, `[web]`) via the singleton-configuration editor (Epic D). A few `[opcua]` / `[web]` knobs only take effect after a gateway restart; the editor flags those. See `docs/c-6-migration-runbook.md` (applications/devices) and `docs/d-0-migration-runbook.md` (singleton sections).
+> **Configuration lives in SQLite (v2.1.0).** The TOML above is a **bootstrap seed**: on first boot opcgw migrates it into its SQLite database and thereafter ignores `config.toml` at runtime. Manage configuration from the web UI instead — applications/devices/metrics/commands via the **Configuration** drill-down (`/config.html`, an Application → Device → Metrics/Commands hierarchy with ChirpStack inventory pickers), and the singleton sections (`[global]`, `[chirpstack]`, `[opcua]`, `[web]`) via the singleton-configuration editor (Epic D). A few `[opcua]` / `[web]` knobs only take effect after a gateway restart; the editor flags those. See `docs/c-6-migration-runbook.md` (applications/devices) and `docs/d-0-migration-runbook.md` (singleton sections).
 
 **For complete configuration details**, see the [Configuration Reference](https://guycorbaz.github.io/opcgw/configuration/).
 

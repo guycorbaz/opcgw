@@ -347,7 +347,7 @@ async fn commands_html_renders_per_device_table() {
     let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
     let client = reqwest::Client::new();
     let resp = client
-        .get(fx.url("/commands.html"))
+        .get(fx.url("/config.html"))
         .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
         .send()
         .await
@@ -355,7 +355,7 @@ async fn commands_html_renders_per_device_table() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.text().await.expect("text");
     assert!(body.contains("<title>"), "must render an HTML page");
-    assert!(body.contains("commands.js"), "must reference the JS controller");
+    assert!(body.contains("config.js"), "must reference the JS controller");
     fx.shutdown().await;
 }
 
@@ -365,7 +365,7 @@ async fn commands_js_fetches_api_commands_per_device() {
     let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
     let client = reqwest::Client::new();
     let resp = client
-        .get(fx.url("/commands.js"))
+        .get(fx.url("/config.js"))
         .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
         .send()
         .await
@@ -383,7 +383,7 @@ async fn commands_html_carries_viewport_meta() {
     let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
     let client = reqwest::Client::new();
     let resp = client
-        .get(fx.url("/commands.html"))
+        .get(fx.url("/config.html"))
         .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
         .send()
         .await
@@ -399,7 +399,7 @@ async fn commands_uses_dashboard_css_baseline() {
     let fx = spawn_fixture(APP_TOML_TEMPLATE).await;
     let client = reqwest::Client::new();
     let resp = client
-        .get(fx.url("/commands.html"))
+        .get(fx.url("/config.html"))
         .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
         .send()
         .await

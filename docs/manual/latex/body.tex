@@ -404,18 +404,18 @@ From a fresh installation --- where \texttt{config/config.toml} still carries th
 \caption{Name-driven inventory pickers}\label{fig-pickers}
 \end{figure}
 
-The \texttt{/applications.html} and \texttt{/devices-config.html} pages offer \emph{name-driven pickers} instead of the legacy free-form UUID/DevEUI text inputs. The pickers are populated from \texttt{GET\ /api/inventory/\{applications,devices,uplinks\}} --- the operator never needs to copy a UUID from ChirpStack into opcgw by hand.
+The single \texttt{Configuration} page (\texttt{/config.html}) presents your setup as a \emph{drill-down hierarchy} --- \emph{Application → Device → Metrics/Commands} --- so you navigate it the way it maps to ChirpStack. Throughout, name-driven pickers replace the legacy free-form UUID/DevEUI text inputs; they are populated from \texttt{GET\ /api/inventory/\{applications,devices,uplinks\}} so the operator never needs to copy a UUID from ChirpStack into opcgw by hand. A breadcrumb at the top of the page (\emph{Applications / \textless{}app\textgreater{} / \textless{}device\textgreater{}}) shows where you are and lets you step back up; each level is also a shareable link.
 
-The full add-flow is \emph{application → device → metric}:
+The full add-flow follows the same hierarchy:
 
 \begin{enumerate}
 \def\labelenumi{\arabic{enumi}.}
 \item
-  On \texttt{/applications.html}, the \emph{Create application} form shows a dropdown sourced from \texttt{/api/inventory/applications}. Pick an application by name; the hidden \texttt{application\_id} pre-fills and the \texttt{Application\ Name} field defaults to the ChirpStack name (operator-editable). Submit lands the application in \texttt{config/config.toml} through the existing CRUD path.
+  At the top \emph{Applications} level, the \emph{Add application} form shows a dropdown sourced from \texttt{/api/inventory/applications}. Pick an application by name; the \texttt{application\_id} pre-fills and the \texttt{Application\ Name} field defaults to the ChirpStack name (operator-editable). Each row has an \emph{Open} button that drills into that application.
 \item
-  On \texttt{/devices-config.html}, each already-configured application has an \emph{Add device} sub-form. The dropdown fetches \texttt{/api/inventory/devices?application\_id=\textless{}id\textgreater{}} and lets the operator pick a device by name. The DevEUI is shown beneath the picker as a small read-only footnote so the operator can copy it for ChirpStack-side troubleshooting if needed.
+  Inside an application, the \emph{Add device} form fetches \texttt{/api/inventory/devices?application\_id=\textless{}id\textgreater{}} and lets the operator pick a device by name. The DevEUI is shown beneath the picker as a small read-only footnote so the operator can copy it for ChirpStack-side troubleshooting if needed. \emph{Open} a device to reach its detail view.
 \item
-  The metric-picker sub-form is fed by \texttt{/api/inventory/uplinks?dev\_eui=\textless{}eui\textgreater{}\&limit=10} and renders the \texttt{observed\_keys} aggregate as a multi-select checkbox list. Each row carries an auto-inferred wire-type (\texttt{Float\ \textbar{}\ Int\ \textbar{}\ Bool\ \textbar{}\ String}) which the operator can override per row. Tick any combination of keys to add them as metrics in one submission.
+  The device detail view groups the device\textquotesingle s \emph{Metrics} (the read-metric mappings) and its \emph{Commands} on one screen. The metric picker is fed by \texttt{/api/inventory/uplinks?dev\_eui=\textless{}eui\textgreater{}\&limit=10} and renders the \texttt{observed\_keys} aggregate as a multi-select checkbox list; each row carries an auto-inferred wire-type (\texttt{Float\ \textbar{}\ Int\ \textbar{}\ Bool\ \textbar{}\ String}) the operator can override. The Commands panel manages downlink commands (name, LoRaWAN f\_port, confirmed flag, and optional device class such as \texttt{valve}).
 \end{enumerate}
 
 \textbf{Manual-entry fallback (load-bearing).} Every picker carries a \emph{Switch to manual entry} toggle. The toggle also fires automatically when ChirpStack is unreachable, so the operator never gets trapped. The chosen mode is remembered per page in the browser, so an operator who prefers manual entry does not have to re-toggle on every page load.
@@ -470,13 +470,13 @@ Typical scenarios:
 \item[Device retired in ChirpStack]
 The device shows as \texttt{stale}. \emph{Remove from opcgw} deletes the device + its metric mappings (cascade scope shown in the confirmation modal). ChirpStack-side resources are untouched.
 \item[New device enrolled in ChirpStack]
-The device shows as \texttt{available}. \emph{Add to opcgw} deep-links to \texttt{/devices-config.html} with the device picker pre-selected; the operator picks metrics from the recent-uplinks list and saves.
+The device shows as \texttt{available}. \emph{Add to opcgw} deep-links to the \texttt{Configuration} page (drilled into the target application, device picker pre-selected); the operator picks metrics from the recent-uplinks list and saves.
 \item[Application renamed in ChirpStack]
 The application shows as \texttt{drifted} with both names visible. \emph{Update opcgw name to ChirpStack\textquotesingle s} issues a \texttt{PUT\ /api/applications/\textless{}id\textgreater{}} with the new name; \emph{Keep opcgw alias} emits a \texttt{drift\_dismissed} audit event so the deliberate choice is traceable.
 \item[Codec firmware adds a metric key]
 The metric shows as \texttt{available}. \emph{Add to opcgw} deep-links to the metric picker with the key pre-ticked.
 \item[Configured wire-type doesn\textquotesingle t match observed uplinks]
-The metric shows as \texttt{drifted} with \texttt{drift\_details.reason="wire\_type\_mismatch"}. The drift view links to the devices-config page so the operator can edit the metric type via the canonical edit flow.
+The metric shows as \texttt{drifted} with \texttt{drift\_details.reason="wire\_type\_mismatch"}. The drift view links to the \texttt{Configuration} page so the operator can edit the metric type via the canonical edit flow.
 \end{description}
 
 When ChirpStack is unreachable, the page renders the opcgw-side rows as \texttt{ok} placeholders, surfaces a banner explaining the situation, and disables all destructive action buttons + hides \emph{Add to opcgw} buttons. A \emph{Retry} button next to the banner re-fires the drift fetch.
@@ -673,7 +673,7 @@ Every failed OPC UA authentication emits a structured \texttt{warn!} event (\tex
 
 opcgw ships an embedded Axum HTTP server gated by HTTP Basic auth. \emph{Off by default} --- existing operators upgrading from earlier releases see no behavioural change unless they explicitly enable it. The credentials are \emph{shared} with the \texttt{{[}opcua{]}} section (same \texttt{user\_name} / \texttt{user\_password}); one rotation step covers both surfaces.
 
-All configuration and monitoring pages share a single \emph{navigation bar} across the top of the window (Dashboard, Applications, Devices configuration, Live Metrics, Commands, Inventory drift, Singleton config), so the web UI behaves as one cohesive application. The current page is highlighted in the bar. The web UI is built from plain HTML/CSS/JavaScript with no build step or external framework --- a deliberate choice that keeps the gateway lightweight and auditable.
+All configuration and monitoring pages share a single \emph{navigation bar} across the top of the window (Dashboard, Configuration, Live Metrics, Inventory drift, Singleton config), so the web UI behaves as one cohesive application. The \emph{Configuration} entry is the drill-down (Application → Device → Metrics/Commands) described in \hyperref[sec-web-pickers]{Adding applications, devices, and metrics via the web UI}. The current page is highlighted in the bar. The web UI is built from plain HTML/CSS/JavaScript with no build step or external framework --- a deliberate choice that keeps the gateway lightweight and auditable.
 
 \begin{lstlisting}
 [web]
@@ -742,7 +742,7 @@ history_retention_days = 7
 
 \begin{admonition}{admimp}{Canonical write path: use the web UI, not the TOML file}
 
-The \texttt{{[}{[}application{]}{]}} tree is stored in SQLite and managed exclusively via the embedded web UI (\texttt{/applications.html} and \texttt{/devices-config.html}). The TOML \texttt{{[}{[}application{]}{]}} section is read \emph{once} on the first boot and migrated into SQLite automatically. After migration, editing the TOML file has no effect on the running configuration.
+The \texttt{{[}{[}application{]}{]}} tree is stored in SQLite and managed exclusively via the embedded web UI (the \texttt{Configuration} drill-down at \texttt{/config.html}). The TOML \texttt{{[}{[}application{]}{]}} section is read \emph{once} on the first boot and migrated into SQLite automatically. After migration, editing the TOML file has no effect on the running configuration.
 
 Use this section as a reference when writing an initial bootstrap seed (to pre-populate SQLite on first boot) or when restoring from a TOML backup. For day-to-day configuration changes, use the web UI.
 
