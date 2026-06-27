@@ -1,0 +1,1837 @@
+\chapter{Overview}\label{ch-overview}
+
+\section{What is opcgw?}\label{sec-what-is-opcgw}
+
+opcgw (OPC Gateway) is a middleware application that bridges the gap between LoRaWAN sensor networks and industrial automation systems. It provides bidirectional integration between:
+
+\begin{itemize}
+\item
+  \emph{ChirpStack LoRaWAN Network Server} --- Manages LoRaWAN devices, gathers uplink metrics from distributed IoT sensors, and accepts downlink commands.
+\item
+  \emph{OPC UA Clients} --- SCADA systems, industrial controllers, and human-machine interfaces that consume metrics in real time and issue commands.
+\end{itemize}
+
+The gateway continuously polls device metrics from ChirpStack, persists them in a local SQLite database with WAL-mode concurrency, exposes the current values plus gateway health as OPC UA variables, and queues outbound commands for reliable delivery.
+
+\section{Key Features}\label{sec-key-features}
+
+\begin{itemize}
+\item
+  \emph{Real-time data collection} --- Polls device metrics from ChirpStack at configurable intervals and exposes them as boolean, integer, float, and string values.
+\item
+  \emph{Persistent storage} --- Metric values and their history are kept in an embedded database, so data survives restarts and remains available for historical analysis.
+\item
+  \emph{Command delivery} --- Send commands (downlinks) to devices through a queue that validates the parameters and tracks each command from pending, through sent, to confirmed or failed. For confirmed downlinks (for example a valve), \emph{confirmed} means the device acknowledged receipt; opcgw learns this from ChirpStack\textquotesingle s live device-event stream. A command that is never acknowledged within the configurable delivery timeout (\texttt{command\_delivery\_timeout\_secs}, default 60 s) is marked failed. The current status of recent commands is readable from the OPC UA \texttt{CommandStatusQuery} variable.
+\item
+  \emph{OPC UA 1.04 server} --- Exposes every configured metric to SCADA and automation clients, alongside a \texttt{Gateway} folder of health metrics (last poll time, error count, ChirpStack availability). Unencrypted, signed, and signed-and-encrypted endpoints are offered concurrently.
+\item
+  \emph{Subscriptions and history} --- Clients can subscribe to live value changes and read historical values over a configurable time window.
+\item
+  \emph{OPC UA security} --- User/password authentication, a configurable limit on concurrent client sessions, and enforced filesystem permissions on the OPC UA private key.
+\item
+  \emph{Embedded web UI (opt-in)} --- An optional, password-protected web interface for monitoring live status and metric values and for managing applications, devices, and commands. Disabled by default.
+\item
+  \emph{Data-freshness indicators} --- Each value is tagged \texttt{Good}, \texttt{Uncertain}, or \texttt{Bad} based on its age, so operators can see staleness at a glance without parsing timestamps.
+\item
+  \emph{Graceful degradation} --- Keeps operating when ChirpStack is unreachable or individual devices return errors; errors and outages are surfaced in the logs and as OPC UA health metrics.
+\item
+  \emph{Structured logging} --- Detailed, structured log output with configurable verbosity for monitoring and troubleshooting.
+\item
+  \emph{Data retention} --- Historical metrics and command history are pruned automatically according to configurable retention windows.
+\item
+  \emph{Graceful shutdown} --- \texttt{Ctrl-C} (or \texttt{SIGTERM}) initiates an orderly shutdown.
+\end{itemize}
+
+\section{System Architecture}\label{sec-system-architecture}
+
+opcgw runs as a single process built around a few cooperating components that share one embedded SQLite database. The diagram below shows how data moves between them.
+
+\begin{figure}
+\centering
+\includegraphics[width=1\linewidth,height=\textheight,keepaspectratio]{figures/architecture.pdf}
+\caption{opcgw data flow}\label{fig-architecture}
+\end{figure}
+
+\begin{itemize}
+\item
+  \emph{Poller} --- Connects to ChirpStack over gRPC, polls device metrics on a fixed cadence, validates each value against its configured type, and writes the results to the store. It tracks connectivity and reports outages.
+\item
+  \emph{SQLite store} --- A single embedded database holds the current metric values, the metric history, and the gateway\textquotesingle s own configuration. It survives restarts and is the shared source of truth for every other component.
+\item
+  \emph{OPC UA server} --- Builds its address space from the configured applications, devices, and metrics; serves each value with a freshness status code; supports subscriptions and historical reads; and accepts client writes that become device commands.
+\item
+  \emph{Web UI (optional)} --- A password-protected web interface for first-run setup, configuration, and live monitoring. Enabled by default; it can be turned off.
+\item
+  \emph{Command delivery} --- Writes received over OPC UA are validated, queued, sent to ChirpStack as downlinks, and tracked from pending through sent to confirmed or failed.
+\end{itemize}
+
+\chapter{System Requirements}\label{ch-requirements}
+
+\section{Hardware Requirements}\label{sec-hardware-requirements}
+
+opcgw is lightweight. Its resource needs scale mainly with the number of variables (metrics) and devices you monitor and how long you retain history, not with a fixed minimum. The guidance below is a starting point; size up for larger fleets.
+
+\begin{description}
+\item[Processor]
+A modest CPU is enough for small and medium fleets. Add cores when you poll many devices, so polling, serving OPC UA, and pruning run in parallel. The published Docker images are 64-bit (x86-64 and ARM64); a 32-bit target would require building from source.
+\item[Memory]
+Scales with the number of variables and devices. A few hundred MB is ample for a small deployment; allow on the order of 2 GB for large fleets (hundreds of devices / thousands of variables). Per-variable overhead is small.
+\item[Storage]
+Scales with how many variables you store and how long you keep history. The image plus a small database fit in well under 100 MB; budget around 1 GB or more if you retain a month of history at a short polling interval. Log files add to this depending on the configured verbosity.
+\item[Network]
+Outbound TCP to the ChirpStack gRPC endpoint (typically port 8080) and inbound TCP for OPC UA clients (default port 4840).
+\end{description}
+
+\section{Software Requirements}\label{sec-software-requirements}
+
+\begin{itemize}
+\item
+  \emph{OS} --- Linux (Debian, Ubuntu, CentOS, Alpine), macOS, or Windows with Docker. The reference deployment uses Linux containers.
+\item
+  \emph{Runtime} --- Docker, using the published image (\texttt{docker.io/gcorbaz/opcgw:2.1}, mirrored at \texttt{ghcr.io/guycorbaz/opcgw:2.1}; multi-arch \texttt{linux/amd64} + \texttt{linux/arm64}). See \hyperref[ch-installation]{Installation}. Building from source is also possible (Rust 1.94.0+ and the \texttt{protobuf-compiler} / \texttt{libssl-dev} / \texttt{pkg-config} packages) for platforms the prebuilt image does not cover.
+\item
+  \emph{SQLite} --- bundled via \texttt{rusqlite}\textquotesingle s \texttt{bundled} feature; no separate SQLite installation is needed at runtime. The \texttt{sqlite3} CLI is recommended on the operator host for the migration pre-flight script (\hyperref[ch-upgrade]{Upgrade and Migration}).
+\item
+  \emph{ChirpStack} --- version 4.0 or later with the gRPC API enabled and an API token issued for the target tenant.
+\item
+  \emph{Firewall} --- outbound to ChirpStack (gRPC), inbound to OPC UA clients (port 4840 by default), and inbound to the embedded web UI (default port 8080) if \texttt{{[}web{]}.enabled\ =\ true}.
+\end{itemize}
+
+\chapter{Installation}\label{ch-installation}
+
+Installation is a \emph{one-time} task: you do it once to get the gateway running and serving OPC UA. Everyday configuration --- adding applications, devices, and metrics --- is done afterwards from the web UI and is covered separately in \hyperref[ch-configuration]{Configuration}.
+
+opcgw is distributed as a Docker image and is installed with Docker Compose. The steps are: create a working directory, write a minimal \texttt{docker-compose.yml}, put your secrets in a \texttt{.env} file, supply a minimal bootstrap configuration, prepare the directories and the OPC UA keys, then start the gateway and verify it.
+
+\section{Prerequisites}\label{sec-install-prerequisites}
+
+\begin{itemize}
+\item
+  Docker Engine with the Compose plugin (\texttt{docker\ compose}). See \href{https://docs.docker.com/get-docker/}{docker.com}.
+\item
+  A reachable ChirpStack server and an API token with permission to list applications/devices and read metrics for your tenant.
+\item
+  Two free host ports: \texttt{4840} (OPC UA) and \texttt{8080} (web UI).
+\end{itemize}
+
+\section{The docker-compose.yml file}\label{sec-install-compose}
+
+Create a working directory and a \texttt{docker-compose.yml} inside it. A minimal file is all you need:
+
+\begin{lstlisting}
+services:
+  opcgw:
+    image: docker.io/gcorbaz/opcgw:2.1
+    container_name: opcgw
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "4840:4840"   # OPC UA
+      - "8080:8080"   # web UI
+    volumes:
+      - ./config:/usr/local/bin/config   # config.toml + secrets.toml
+      - ./pki:/usr/local/bin/pki         # OPC UA certificates
+      - ./data:/usr/local/bin/data       # SQLite database (must persist)
+      - ./log:/usr/local/bin/log         # log files
+\end{lstlisting}
+
+Notes:
+
+\begin{itemize}
+\item
+  \texttt{env\_file:\ .env} loads \emph{all} environment variables from a single \texttt{.env} file (next section). Nothing is configured inside the compose file itself.
+\item
+  The \texttt{data} volume holds the SQLite database and \emph{must} persist. Without it, every \texttt{docker\ compose\ down} destroys your stored metrics, history, and configuration.
+\item
+  Pin a version tag. There is no \texttt{:latest} tag --- use a minor line such as \texttt{:2.1} (latest patch) or an exact release such as \texttt{:2.1.0}. The image runs as the non-root user \texttt{opcgw} (UID 10001).
+\item
+  To pull from the GitHub Container Registry mirror instead of Docker Hub, change the image to \texttt{ghcr.io/guycorbaz/opcgw:2.1}. Both registries carry identical multi-architecture (\texttt{amd64}/\texttt{arm64}) images.
+\end{itemize}
+
+\section{Environment variables and the .env file}\label{sec-install-env}
+
+All of the gateway\textquotesingle s environment configuration lives in one \texttt{.env} file next to \texttt{docker-compose.yml}. The repository ships a \texttt{.env.example} template; copy it and fill in your values:
+
+\begin{lstlisting}
+cp .env.example .env
+$EDITOR .env
+chmod 600 .env
+\end{lstlisting}
+
+Two variables are \emph{required} --- they are your secrets, which is why they are supplied as environment variables rather than committed to a file:
+
+\begin{lstlisting}
+OPCGW_CHIRPSTACK__API_TOKEN=<your-chirpstack-api-token>
+OPCGW_OPCUA__USER_PASSWORD=<a-strong-password>
+\end{lstlisting}
+
+The password is used both for the OPC UA user login and for the web UI\textquotesingle s login. Every variable uses the \texttt{OPCGW\_} prefix, with \texttt{\_\_} (double underscore) separating nested configuration keys. Any configuration value can be set this way; the variables most deployments touch (ChirpStack address, OPC UA user name, web-UI enable, log level) are listed in \texttt{.env.example}, and the \emph{complete} list is in \hyperref[app-env-reference]{appendix\_title}.
+
+\begin{admonition}{admwarn}{Keep secrets out of version control}
+
+Never commit a populated \texttt{.env} or bake tokens into the image. \texttt{.env} is git-ignored; set its mode to \texttt{0600}. For Kubernetes or a secret manager, inject the same \texttt{OPCGW\_*} variables by your platform\textquotesingle s mechanism instead of a file.
+
+\end{admonition}
+
+\section{The bootstrap configuration file}\label{sec-install-bootstrap-config}
+
+opcgw keeps its runtime configuration in its SQLite database and is configured from the web UI. On a fresh install it needs a small \texttt{config/config.toml} to seed the very first boot; after that the database is authoritative and you manage everything from the web UI (see \hyperref[ch-configuration]{Configuration}).
+
+A minimal seed only needs to point the gateway at your ChirpStack server:
+
+\begin{lstlisting}
+# config/config.toml — one-time bootstrap seed
+[chirpstack]
+server_address = "chirpstack.example.com:8080"
+tenant_id = "<your-tenant-uuid>"
+
+[opcua]
+# Auto-generate a self-signed OPC UA keypair on first start.
+# Set this to false in production and provision your own keypair
+# (see "OPC UA encryption keys" below).
+create_sample_keypair = true
+# OPC UA listens on the standard port 4840 by default. To use a different
+# port, set host_port here and publish the same port in docker-compose.yml.
+\end{lstlisting}
+
+You do \emph{not} add applications, devices, or metrics here --- that is done in the web UI after first start. The secrets stay in \texttt{.env}; do not put the API token or password in this file.
+
+\section{OPC UA encryption keys}\label{sec-install-keys}
+
+OPC UA\textquotesingle s signed and encrypted endpoints use a certificate and private key (the gateway\textquotesingle s "application instance certificate"), kept in the \texttt{pki/} directory:
+
+\begin{itemize}
+\item
+  \texttt{pki/own/} --- the gateway\textquotesingle s own certificate.
+\item
+  \texttt{pki/private/} --- the matching private key. Must be tightly permissioned (see below).
+\item
+  \texttt{pki/trusted/} --- certificates of clients the gateway accepts.
+\item
+  \texttt{pki/rejected/} --- certificates of clients that have been refused. To trust a client, move its certificate from here into \texttt{trusted/}.
+\end{itemize}
+
+\emph{Evaluation} --- set \texttt{create\_sample\_keypair\ =\ true} (shown above) and the gateway generates a self-signed keypair into \texttt{pki/own/} and \texttt{pki/private/} on first start.
+
+\emph{Production} --- set \texttt{create\_sample\_keypair\ =\ false} and provision your own keypair; the gateway refuses to start if the key is missing while the option is off. The certificate must carry the gateway\textquotesingle s application URI (the \texttt{{[}opcua{]}.application\_uri} value, default \texttt{urn:chirpstack:opcua:gateway}) in its SubjectAltName --- OPC UA requires this. Generate one with \texttt{openssl}:
+
+\begin{enumerate}
+\item
+  Create the private key (PEM):
+
+\begin{lstlisting}
+openssl genrsa -out pki/private/private.pem 2048
+\end{lstlisting}
+\item
+  Create a self-signed certificate carrying the application URI, valid here for five years (adjust the subject to your organisation):
+
+\begin{lstlisting}
+openssl req -new -x509 -key pki/private/private.pem \
+  -out pki/own/cert.pem -days 1825 \
+  -subj "/CN=Chirpstack OPC UA Gateway/O=Your Organisation" \
+  -addext "subjectAltName=URI:urn:chirpstack:opcua:gateway"
+\end{lstlisting}
+\item
+  Convert the certificate to DER --- the format opcgw loads (\texttt{{[}opcua{]}.certificate\_path}, \texttt{own/cert.der}):
+
+\begin{lstlisting}
+openssl x509 -in pki/own/cert.pem -outform der -out pki/own/cert.der
+\end{lstlisting}
+\item
+  Lock down the private key (the gateway refuses to start otherwise):
+
+\begin{lstlisting}
+chmod 700 pki/private
+chmod 600 pki/private/private.pem
+\end{lstlisting}
+\end{enumerate}
+
+The first time a client connects, its certificate lands in \texttt{pki/rejected/}; move it to \texttt{pki/trusted/} to allow that client.
+
+\section{Preparing directories and starting opcgw}\label{sec-install-start}
+
+The container runs as UID 10001 and cannot change ownership of host files, so create the bind-mount directories and set their ownership and the private-key permissions before the first start:
+
+\begin{lstlisting}
+mkdir -p ./config ./log ./data
+mkdir -p ./pki/own ./pki/private ./pki/trusted ./pki/rejected
+chown -R 10001:10001 ./config ./pki ./log ./data
+chmod 700 ./pki/private
+\end{lstlisting}
+
+Place your \texttt{config/config.toml} (previous sections) in \texttt{./config}, then start the gateway:
+
+\begin{lstlisting}
+docker compose up -d
+docker compose logs -f opcgw
+\end{lstlisting}
+
+Leave the log tail running to watch the first ChirpStack poll cycle complete.
+
+\section{Verifying the installation}\label{sec-install-verify}
+
+A successful start emits a sequence of structured log lines. Confirm the gateway came up:
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  The OPC UA endpoint is listening:
+
+\begin{lstlisting}
+nc -z localhost 4840 && echo "OPC UA endpoint reachable"
+\end{lstlisting}
+\item
+  The startup checkpoints are present (configuration loaded, ChirpStack connected, OPC UA bound):
+
+\begin{lstlisting}
+docker compose logs opcgw 2>&1 | grep -E '(config_loaded|chirpstack_connect|opcua_limits_configured)'
+\end{lstlisting}
+\item
+  The first poll cycle has run (usually within \textasciitilde30 s of start):
+
+\begin{lstlisting}
+docker compose logs opcgw 2>&1 | grep 'poll_cycle_start'
+\end{lstlisting}
+
+  If nothing appears after \textasciitilde30 s, see \hyperref[ch-troubleshooting]{Troubleshooting}.
+\item
+  The container runs as the non-root user:
+
+\begin{lstlisting}
+docker exec opcgw id
+# Expected: uid=10001(opcgw) gid=10001(opcgw)
+\end{lstlisting}
+\item
+  The web UI is reachable and requires authentication --- browse to \texttt{http://\textless{}host\textgreater{}:8080}, which should prompt for the user name (default \texttt{opcua-user}) and the password from your \texttt{.env}. This is where you continue with \hyperref[ch-configuration]{Configuration}.
+\end{enumerate}
+
+\begin{admonition}{admimp}{Important}
+
+The web UI is HTTP-only --- its credentials travel in cleartext. For anything beyond a trusted LAN, put a TLS-terminating reverse proxy (nginx, Caddy, Traefik) in front of it. See \hyperref[sec-web-config]{Web UI}.
+
+\end{admonition}
+
+\section{Logging}\label{sec-install-logging}
+
+Logging is set up once, at install time. The gateway writes structured log lines (microsecond UTC timestamps, \texttt{key=value} fields) to both the container\textquotesingle s standard error --- visible via \texttt{docker\ compose\ logs} --- and to daily-rolling files in the \texttt{log} volume (\texttt{./log} on the host). A single \texttt{opcgw.log} file is produced, with a date suffix (\texttt{opcgw.log.\textless{}date\textgreater{}}); every module logs to it at the global \texttt{OPCGW\_LOG\_LEVEL}.
+
+Set the verbosity with \texttt{OPCGW\_LOG\_LEVEL} in \texttt{.env} --- one of \texttt{error}, \texttt{warn}, \texttt{info} (default), \texttt{debug}, or \texttt{trace}:
+
+\begin{lstlisting}
+OPCGW_LOG_LEVEL=info
+\end{lstlisting}
+
+The log files rotate daily; see \hyperref[sec-log-rotation]{Log rotation} for retention and housekeeping.
+
+\section{Stopping the gateway}\label{sec-install-stop}
+
+Stop opcgw with \texttt{docker\ compose\ stop} (keep the container) or \texttt{docker\ compose\ down} (remove it; your data volume persists). Both send \texttt{SIGTERM}, which the gateway shuts down on gracefully: it stops accepting new OPC UA connections, lets the in-flight poll cycle finish so no metrics are lost, checkpoints the database, and flushes the logs.
+
+\begin{admonition}{admwarn}{Avoid force-killing}
+
+Do not use \texttt{kill\ -9} / \texttt{SIGKILL}. The database is journaled and will recover, but in-flight downlink commands may need manual inspection and buffered log lines can be lost. Always prefer a graceful stop.
+
+\end{admonition}
+
+\chapter{Configuration}\label{ch-configuration}
+
+\section{Configuration Overview}\label{sec-config-overview}
+
+After the first boot, opcgw\textquotesingle s configuration lives in its SQLite database and is edited entirely from the web UI --- you do not hand-edit files for day-to-day changes. \texttt{config/config.toml} is only a \emph{first-boot seed}: opcgw reads it once to populate a fresh deployment, then SQLite becomes authoritative. Secrets stay in a separate file and environment variables override everything.
+
+The configuration precedence ordering (highest priority first) is:
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  Environment variables (\texttt{OPCGW\_} prefix) --- always win. See \hyperref[app-env-reference]{appendix\_title}.
+\item
+  The SQLite database --- the web-UI-editable runtime config.
+\item
+  \texttt{config/secrets.toml} --- secret fields only.
+\item
+  \texttt{config/config.toml} --- first-boot seed (lowest priority above hard-coded defaults).
+\item
+  Built-in defaults.
+\end{enumerate}
+
+The rest of this chapter follows the path an operator actually takes: complete the \emph{first-run setup wizard}, then add applications, devices, and metrics through the web UI \emph{pickers}, and periodically \emph{reconcile drift} against ChirpStack. A settings reference for each configuration section follows the workflow, and \hyperref[sec-config-storage]{How configuration is stored and migrated} explains how configuration is stored and migrated.
+
+\section{First-run setup wizard}\label{sec-first-run-wizard}
+
+\begin{figure}
+\centering
+\includegraphics[width=0.8\linewidth,height=\textheight,keepaspectratio]{figures/screenshot-setup-wizard.pdf}
+\caption{First-run setup wizard}\label{fig-setup-wizard}
+\end{figure}
+
+From a fresh installation --- where \texttt{config/config.toml} still carries the placeholder ChirpStack token and an empty OPC UA password, and the matching \texttt{OPCGW\_*} environment variables are unset --- the gateway enters \emph{first-run mode}. Since Story F-2 (v2.2.x) the wizard collects \emph{everything needed for first boot}: the ChirpStack connection \emph{and} the OPC UA password, so you never have to hand-edit a configuration file to get a working gateway. The gateway is in first-run mode whenever either secret is missing:
+
+\begin{itemize}
+\item
+  The OPC UA server binds on its configured endpoint but rejects every authentication attempt. External uptime probes can confirm the gateway is alive, but no SCADA client can connect until setup is complete.
+\item
+  The web UI redirects every request to \texttt{/setup}, a one-shot setup form. The wizard is the only reachable page until completion.
+\end{itemize}
+
+\begin{enumerate}
+\item
+  Open the web UI in a browser; any URL redirects to \texttt{/setup}.
+\item
+  Under \emph{ChirpStack connection}, enter the server address (a full URL such as \texttt{http://chirpstack:8080}), the tenant ID, and a ChirpStack API token with read access to the tenant\textquotesingle s applications and devices.
+\item
+  Under \emph{OPC UA server}, enter a password and confirmation. The password must be non-empty, have no leading or trailing whitespace, not be a placeholder, and the two fields must match. Submit the form.
+\item
+  On success the two secrets (the ChirpStack API token and the OPC UA password) are saved to \texttt{config/secrets.toml} (owner-only file mode \texttt{0600}, gitignored) in a single atomic write, the non-secret ChirpStack server address and tenant are saved to the gateway database, and the gateway shuts down gracefully.
+\item
+  Your supervisor (Docker restart policy or \texttt{systemctl\ Restart=on-failure}) restarts opcgw automatically. On the second boot it picks up the new ChirpStack connection and password, login comes online, the poller connects to ChirpStack, and the OPC UA server accepts authenticated connections.
+\end{enumerate}
+
+\textbf{What the wizard does not touch.} The web-UI login user and password and the log-file location stay in \texttt{.env} by design --- the wizard never reads or writes them.
+
+\textbf{One-shot semantics.} Once setup is complete, \texttt{/setup} is no longer reachable. To rotate a secret later, either set \texttt{OPCGW\_CHIRPSTACK\_\_API\_TOKEN} / \texttt{OPCGW\_OPCUA\_\_USER\_PASSWORD} or edit \texttt{config/secrets.toml} and restart.
+
+\textbf{Trust model.} Reach the wizard only over a trusted operator network. For public-internet deployments, set \texttt{OPCGW\_OPCUA\_\_USER\_PASSWORD} before the first start to skip the wizard entirely.
+
+\textbf{Wizard scope: password only.} The wizard collects only the login password. Everything else (ChirpStack credentials, OPC UA endpoint and PKI directory, login user name) must already be present in \texttt{config/config.toml} or supplied via \texttt{OPCGW\_*} environment variables before the gateway starts. The login user name defaults to \texttt{opcua-user} if omitted. The recommended starting point is the shipped \texttt{config/config.toml}: copy it, fill in your ChirpStack and admin credentials, and leave the password unset. A fresh deployment with no applications configured boots fine --- you add applications, devices, and metrics from the web UI once the wizard is done.
+
+\section{Adding applications, devices, and metrics via the web UI}\label{sec-web-pickers}
+
+\begin{figure}
+\centering
+\includegraphics[width=0.8\linewidth,height=\textheight,keepaspectratio]{figures/screenshot-pickers.pdf}
+\caption{Name-driven inventory pickers}\label{fig-pickers}
+\end{figure}
+
+The \texttt{/applications.html} and \texttt{/devices-config.html} pages offer \emph{name-driven pickers} instead of the legacy free-form UUID/DevEUI text inputs. The pickers are populated from \texttt{GET\ /api/inventory/\{applications,devices,uplinks\}} --- the operator never needs to copy a UUID from ChirpStack into opcgw by hand.
+
+The full add-flow is \emph{application → device → metric}:
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  On \texttt{/applications.html}, the \emph{Create application} form shows a dropdown sourced from \texttt{/api/inventory/applications}. Pick an application by name; the hidden \texttt{application\_id} pre-fills and the \texttt{Application\ Name} field defaults to the ChirpStack name (operator-editable). Submit lands the application in \texttt{config/config.toml} through the existing CRUD path.
+\item
+  On \texttt{/devices-config.html}, each already-configured application has an \emph{Add device} sub-form. The dropdown fetches \texttt{/api/inventory/devices?application\_id=\textless{}id\textgreater{}} and lets the operator pick a device by name. The DevEUI is shown beneath the picker as a small read-only footnote so the operator can copy it for ChirpStack-side troubleshooting if needed.
+\item
+  The metric-picker sub-form is fed by \texttt{/api/inventory/uplinks?dev\_eui=\textless{}eui\textgreater{}\&limit=10} and renders the \texttt{observed\_keys} aggregate as a multi-select checkbox list. Each row carries an auto-inferred wire-type (\texttt{Float\ \textbar{}\ Int\ \textbar{}\ Bool\ \textbar{}\ String}) which the operator can override per row. Tick any combination of keys to add them as metrics in one submission.
+\end{enumerate}
+
+\textbf{Manual-entry fallback (load-bearing).} Every picker carries a \emph{Switch to manual entry} toggle. The toggle also fires automatically when ChirpStack is unreachable, so the operator never gets trapped. The chosen mode is remembered per page in the browser, so an operator who prefers manual entry does not have to re-toggle on every page load.
+
+Three failure modes are covered:
+
+\begin{itemize}
+\item
+  \emph{ChirpStack maintenance window} --- picker auto-fallbacks; operator can still configure opcgw using values they know.
+\item
+  \emph{Device not yet enrolled in ChirpStack} --- picker shows an empty-state and flips to manual; the operator can pre-create opcgw config so the device works the moment its first uplink lands.
+\item
+  \emph{Metric not yet emitted by the codec} --- the uplink picker shows \emph{no recent uplinks} and falls back to manual metric-row entry so the operator can hand-type a metric\_name they know the codec will eventually produce.
+\end{itemize}
+
+\textbf{Re-fetch on demand.} Each picker has a small \texttt{↻} refresh icon that re-queries ChirpStack, bypassing the short-lived inventory cache. Useful when you added a device to ChirpStack in another tab and want to see it in opcgw immediately.
+
+Picker activity (opens, manual fallbacks, and the inferred metric type when you add a metric) is recorded in the audit log; see \hyperref[app-audit-events]{appendix\_title}.
+
+\section{Reconciling drift between opcgw and ChirpStack}\label{sec-inventory-drift}
+
+\begin{figure}
+\centering
+\includegraphics[width=0.8\linewidth,height=\textheight,keepaspectratio]{figures/screenshot-drift.pdf}
+\caption{Inventory drift view}\label{fig-drift}
+\end{figure}
+
+The \texttt{/inventory-drift.html} page compares opcgw\textquotesingle s configured applications, devices, and metrics against ChirpStack\textquotesingle s current inventory and highlights stale, missing, available, and renamed resources. It covers what happens when the ChirpStack-side inventory changes after opcgw has been configured.
+
+Every resource is classified into one of four buckets:
+
+\begin{itemize}
+\item
+  \texttt{ok} --- present in both opcgw and ChirpStack, names match. Information only; no action needed.
+\item
+  \texttt{stale} --- configured in opcgw, no longer in ChirpStack (or, for metrics, not seen in the last 10 uplinks). Operator can \emph{Remove from opcgw} or \emph{Keep as alias}. Soft-stale metrics (codec emits the key conditionally) are rendered in a softer yellow tone vs hard-stale red.
+\item
+  \texttt{available} --- present in ChirpStack, not in opcgw. \emph{Add to opcgw} deep-links to the picker page with the chosen resource pre-selected.
+\item
+  \texttt{drifted} --- present in both but names (applications/devices) or wire types (metrics) do not match. \emph{Update opcgw name to ChirpStack\textquotesingle s} or \emph{Keep opcgw alias}.
+\end{itemize}
+
+\begin{admonition}{admnote}{No background polling}
+
+The drift view is operator-triggered only --- opcgw does not periodically compute drift. Every page load (and \emph{Refresh now} click) forces a fresh fetch from ChirpStack (\texttt{?refresh=true}), bypassing the inventory cache. This bounds the ChirpStack-side load to active reconciliation sessions.
+
+\end{admonition}
+
+Typical scenarios:
+
+\begin{description}
+\item[Device retired in ChirpStack]
+The device shows as \texttt{stale}. \emph{Remove from opcgw} deletes the device + its metric mappings (cascade scope shown in the confirmation modal). ChirpStack-side resources are untouched.
+\item[New device enrolled in ChirpStack]
+The device shows as \texttt{available}. \emph{Add to opcgw} deep-links to \texttt{/devices-config.html} with the device picker pre-selected; the operator picks metrics from the recent-uplinks list and saves.
+\item[Application renamed in ChirpStack]
+The application shows as \texttt{drifted} with both names visible. \emph{Update opcgw name to ChirpStack\textquotesingle s} issues a \texttt{PUT\ /api/applications/\textless{}id\textgreater{}} with the new name; \emph{Keep opcgw alias} emits a \texttt{drift\_dismissed} audit event so the deliberate choice is traceable.
+\item[Codec firmware adds a metric key]
+The metric shows as \texttt{available}. \emph{Add to opcgw} deep-links to the metric picker with the key pre-ticked.
+\item[Configured wire-type doesn\textquotesingle t match observed uplinks]
+The metric shows as \texttt{drifted} with \texttt{drift\_details.reason="wire\_type\_mismatch"}. The drift view links to the devices-config page so the operator can edit the metric type via the canonical edit flow.
+\end{description}
+
+When ChirpStack is unreachable, the page renders the opcgw-side rows as \texttt{ok} placeholders, surfaces a banner explaining the situation, and disables all destructive action buttons + hides \emph{Add to opcgw} buttons. A \emph{Retry} button next to the banner re-fires the drift fetch.
+
+Opening the drift view and each reconciliation action you take --- including a deliberate \emph{Keep as alias} decision --- are recorded in the audit log; see \hyperref[app-audit-events]{appendix\_title}.
+
+\section{Settings reference}\label{sec-settings-reference}
+
+The settings below are the gateway\textquotesingle s runtime configuration. Normally you edit them from the web UI\textquotesingle s configuration editor --- that is the supported way to change them, and the values live in the SQLite database. The \texttt{config.toml} snippets shown for each group are only the first-boot seed (and the key names you would use in an \texttt{OPCGW\_} environment-variable override; see \hyperref[app-env-reference]{appendix\_title}). The \texttt{{[}group{]}} names below match those keys and the editor\textquotesingle s groups.
+
+\section{Global settings}\label{sec-global-config}
+
+The \texttt{{[}global{]}} group currently carries a single flag:
+
+\begin{lstlisting}
+[global]
+# Verbose internal debug output (currently a no-op operationally;
+# reserved for future debug-only behaviours that should not depend on
+# the tracing log level).
+debug = true
+\end{lstlisting}
+
+All log-related configuration lives under the dedicated \texttt{{[}logging{]}} section described next.
+
+\section{Logging}\label{sec-logging-config}
+
+Logging is set up once at install time --- the log directory and verbosity level. See \hyperref[sec-install-logging]{Logging} for setup and \hyperref[sec-logs-observability]{Logs and observability} for reading the logs in day-to-day operation. The keys are summarised in \hyperref[app-config-reference]{appendix\_title} and \hyperref[app-env-reference]{appendix\_title}.
+
+\section{ChirpStack connection}\label{sec-chirpstack-config}
+
+\begin{lstlisting}
+[chirpstack]
+# ChirpStack server address (gRPC endpoint, http:// or https://)
+server_address = "http://chirpstack.example.com:8080"
+
+# API token issued by ChirpStack. NEVER commit a real token to VCS;
+# use OPCGW_CHIRPSTACK__API_TOKEN at deploy time.
+api_token = "your_api_token_here"
+
+# Tenant UUID
+tenant_id = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+
+# Polling frequency in seconds (default: 10)
+polling_frequency = 10
+
+# Connection retries when ChirpStack is unreachable (default: 10)
+retry = 10
+
+# Delay (seconds) between two retries (default: 10)
+delay = 10
+
+# Page size for pagination in list APIs (default: 100, range 1-1000)
+list_page_size = 100
+
+# Route ALL devices' values through the uplink event stream (default: false).
+# See "How device values reach OPC UA" below.
+#stream_all_devices = false
+\end{lstlisting}
+
+\textbf{How device values reach OPC UA.} opcgw has two value paths. The \emph{uplink event stream} delivers every decoded device report as it happens: OPC UA shows the raw last-known value, stamped with the device\textquotesingle s own report time --- no averaging or summing (trending is your SCADA\textquotesingle s job). The legacy \emph{metrics poll} instead asks ChirpStack for time-aggregated buckets every \texttt{polling\_frequency} seconds; averages and sums corrupt discrete states (a valve status byte must read \texttt{195}, not an average), so the poll is being retired as a value source. Valve-class devices (any device whose command has \texttt{command\_class\ =\ "valve"}) always use the stream. Set \texttt{stream\_all\_devices\ =\ true} to route every device with read metrics through the stream --- the recommended setting. One caveat: fields that ChirpStack sources outside the codec\textquotesingle s uplink object (typically \texttt{batteryLevel} from DevStatus) never appear on the stream; if you map one, the log warns with \texttt{uplink\_metric\_never\_seen}. On startup or after a reconnect, opcgw backfills the last value from the device\textquotesingle s recent event history, so OPC UA is not empty while waiting for the next report.
+
+\begin{admonition}{admwarn}{API Token Security}
+
+The \texttt{api\_token} grants full ChirpStack access. Do not commit production tokens. Override at deploy time:
+
+\begin{lstlisting}
+export OPCGW_CHIRPSTACK__API_TOKEN="your_secret_token"
+\end{lstlisting}
+
+The token is never written to log output (a security regression test in the suite asserts this).
+
+\end{admonition}
+
+\section{OPC UA server}\label{sec-opcua-config}
+
+\begin{lstlisting}
+[opcua]
+# Application identity (mandatory)
+application_name = "Chirpstack OPC UA Gateway"
+application_uri  = "urn:chirpstack:opcua:gateway"
+product_uri      = "urn:chirpstack:opcua:gateway"
+
+# Diagnostics output from the OPC UA stack itself.
+# REQUIRED true when [opcua].max_connections is set — the session-count
+# gauge and the at-limit warn both read async-opcua's CurrentSessionCount
+# diagnostics variable. Startup fail-fasts otherwise.
+diagnostics_enabled = true
+
+# Optional: TCP hello timeout (default 5 s)
+# hello_timeout = 10
+
+# Optional: bind address (default: first interface IP)
+# host_ip_address = "0.0.0.0"
+
+# Optional: TCP port (default 4840 for this project)
+# host_port = 4840
+
+# PKI configuration (relative paths are resolved under pki_dir).
+# create_sample_keypair = false is the production default.
+# Set to true ONLY for development self-signed keypair auto-generation.
+create_sample_keypair = false
+certificate_path      = "own/cert.der"
+private_key_path      = "private/private.pem"
+trust_client_cert     = true
+check_cert_time       = true
+pki_dir               = "./pki"
+
+# User authentication (single user — multi-user RBAC is out of scope).
+# The password placeholder in the shipped TOML is rejected at startup —
+# always inject via OPCGW_OPCUA__USER_PASSWORD env var.
+user_name     = "opcua-user"
+user_password = "REPLACE_ME_WITH_OPCGW_OPCUA__USER_PASSWORD_ENV_VAR"
+
+# Staleness threshold in seconds.
+# Metrics older than this return Uncertain in OPC UA;
+# older than 24 h return Bad. Default: 120 (2 x default polling_frequency).
+# Range: 1-86400. Override: OPCGW_OPCUA__STALE_THRESHOLD_SECONDS
+stale_threshold_seconds = 120
+
+# Maximum concurrent OPC UA sessions. New sessions beyond
+# this limit are rejected with BadTooManySessions. Existing sessions
+# unaffected. Default: 10. Range: 1-4096. Setting 0 or > 4096 fails
+# startup. Override: OPCGW_OPCUA__MAX_CONNECTIONS
+# max_connections = 10
+
+# Subscription / message-size limits. Optional; default to
+# async-opcua library defaults. Override: OPCGW_OPCUA__<UPPER>
+# max_subscriptions_per_session = 10    # range 1-1000
+# max_monitored_items_per_sub   = 1000  # range 1-100000
+# max_message_size              = 327675  # range 1-268435456 (≈ 256 MiB)
+# max_chunk_count               = 5     # range 1-4096
+
+# HistoryRead per-call response cap. Caps the number
+# of HistoryData rows returned per NodeId per HistoryRead call. SCADA
+# clients page via follow-up calls (manual paging). Default 10000 ≈
+# 28 h of poll data at 10 s polling. Range: 1-1000000.
+# max_history_data_results_per_node = 10000
+\end{lstlisting}
+
+The gateway advertises \emph{three} OPC UA endpoints on the same TCP port. SCADA clients pick the endpoint matching their security posture; the gateway accepts the user-token credentials against any of the three.
+
+\begin{longtable}[]{@{}llll@{}}
+\caption{OPC UA endpoint matrix}\tabularnewline
+\toprule\noalign{}
+Endpoint & Security policy & Security mode & Intended use \\
+\midrule\noalign{}
+\endfirsthead
+\toprule\noalign{}
+Endpoint & Security policy & Security mode & Intended use \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+\texttt{null} & \texttt{None} & \texttt{None} & Development / first-run smoke tests on trusted LANs. \\
+\texttt{basic256\_sign} & \texttt{Basic256} & \texttt{Sign} & Signed, unencrypted traffic when LAN traffic must remain inspectable. \\
+\texttt{basic256\_sign\_encrypt} & \texttt{Basic256} & \texttt{SignAndEncrypt} & \emph{Production default.} Highest security level the gateway advertises. \\
+\end{longtable}
+
+The PKI directory layout (\texttt{pki/own/}, \texttt{pki/private/}, \texttt{pki/trusted/}, \texttt{pki/rejected/}) is documented in \texttt{docs/security.md\ §\ "OPC\ UA\ security\ endpoints\ and\ authentication"}.
+
+\begin{description}
+\item[stale\_threshold\_seconds]
+Drives the OPC UA \texttt{StatusCode} returned with each metric read. See \hyperref[sec-staleness-status-codes]{Stale-Data Status Codes}.
+\item[create\_sample\_keypair]
+When \texttt{true}, opcgw auto-generates a self-signed certificate on first start. \emph{Production default is \texttt{false}} --- provide real CA-signed (or self-signed) certificates manually at \texttt{pki/own/cert.der} and \texttt{pki/private/private.pem}. Release builds with \texttt{create\_sample\_keypair\ =\ true} emit a startup warning.
+\item[max\_connections]
+Caps concurrent OPC UA sessions. New sessions beyond the cap are rejected with \texttt{BadTooManySessions}; existing sessions unaffected. A misbehaving SCADA reconnect loop or a deliberate session flood cannot exhaust file descriptors or memory. Sized per \texttt{(N\ SCADA\ clients\ ×\ sessions\ each)\ +\ 20\%\ headroom}; values above 50 should prompt a deployment review. Hard cap 4096 (fd-exhaustion guard). Inspect utilisation via \texttt{event="opcua\_session\_count"} info gauge and at-limit rejections via \texttt{event="opcua\_session\_count\_at\_limit"} warns.
+\item[max\_subscriptions\_per\_session, max\_monitored\_items\_per\_sub, max\_message\_size, max\_chunk\_count]
+Subscription / message-size shaping knobs fed into async-opcua\textquotesingle s \texttt{ServerBuilder} at startup. Defaults match async-opcua 0.17.1 library defaults; uncomment only if a deployment scenario requires tuning. Resolved values are echoed at startup as \texttt{event="opcua\_limits\_configured"}.
+\item[max\_history\_data\_results\_per\_node]
+Per-NodeId HistoryRead response cap. SCADA clients exceeding the cap page via follow-up calls (manual paging --- continuation points are not yet implemented; see \texttt{docs/security.md\ §\ "Historical\ data\ access"}).
+\end{description}
+
+\begin{admonition}{admwarn}{OPC UA Private-Key Permissions}
+
+opcgw enforces filesystem permissions on the OPC UA private key at startup, fail-closed. The gateway \emph{refuses to start} if any \texttt{pki/private/*.pem} file is not at mode \texttt{0o600}, or if the parent \texttt{pki/private} directory is not at mode \texttt{0o700}. The error message includes the observed mode and the \texttt{chmod} recipe. Operator remediation:
+
+\begin{lstlisting}
+chmod 700 pki/private
+find ./pki/private -type f -name '*.pem' -exec chmod 600 {} +    # no-op on fresh install
+\end{lstlisting}
+
+Silently running with a world-readable private key is worse than refusing to start --- this fail-closed behaviour is intentional.
+
+\end{admonition}
+
+\begin{admonition}{admwarn}{OPC UA Authentication Audit Trail}
+
+Every failed OPC UA authentication emits a structured \texttt{warn!} event (\texttt{event="opcua\_auth\_failed"}) in \texttt{log/opcgw.log}. The submitted username is sanitised (control chars escaped, truncated to 64 chars); the attempted password is \emph{never} logged. Source IP is correlated from async-opcua\textquotesingle s \texttt{info!}-level \texttt{"Accept\ new\ connection\ from\ ..."} line by timestamp. At \texttt{info} both the accept event and the \texttt{opcua\_auth\_failed} event land in the single \texttt{opcgw.log} file, so the correlation holds. Keep \texttt{OPCGW\_LOG\_LEVEL} at \texttt{info} or below to preserve it: raising the level to \texttt{warn} or higher drops the \texttt{info}-level accept line, and --- because there is no separate per-module file to fall back on --- the source IP can no longer be correlated. The gateway emits a startup \texttt{warn} (\texttt{event="nfr12\_correlation\_check"}) whenever the configured level is less verbose than \texttt{info} (that is, \texttt{warn} or \texttt{error}).
+
+\end{admonition}
+
+\section{Web UI}\label{sec-web-config}
+
+opcgw ships an embedded Axum HTTP server gated by HTTP Basic auth. \emph{Off by default} --- existing operators upgrading from earlier releases see no behavioural change unless they explicitly enable it. The credentials are \emph{shared} with the \texttt{{[}opcua{]}} section (same \texttt{user\_name} / \texttt{user\_password}); one rotation step covers both surfaces.
+
+All configuration and monitoring pages share a single \emph{navigation bar} across the top of the window (Dashboard, Applications, Devices configuration, Live Metrics, Commands, Inventory drift, Singleton config), so the web UI behaves as one cohesive application. The current page is highlighted in the bar. The web UI is built from plain HTML/CSS/JavaScript with no build step or external framework --- a deliberate choice that keeps the gateway lightweight and auditable.
+
+\begin{lstlisting}
+[web]
+# Master switch — default false.
+# Override: OPCGW_WEB__ENABLED=true
+enabled = true
+
+# Listening port. Default 8080. Range 1024-65535 (privileged ports rejected).
+port = 8080
+
+# Bind address. Default "0.0.0.0" (all interfaces). Use "127.0.0.1" if a
+# reverse proxy on the same host fronts the gateway.
+bind_address = "0.0.0.0"
+
+# HTTP Basic auth realm string. Default "opcgw". Max 64 chars, ASCII,
+# no '"', no '\', no leading/trailing whitespace.
+auth_realm = "opcgw"
+
+# CSRF allow-list for state-changing routes (POST/PUT/DELETE).
+# Each entry must parse as scheme://host[:port] (no path/query/fragment).
+# When omitted, defaults to ["http://<bind_address>:<port>"].
+# allowed_origins = ["http://gateway.local:8080"]
+\end{lstlisting}
+
+\begin{description}
+\item[GET /]
+Live status dashboard. Single-screen view of ChirpStack connection state, last-poll timestamp, cumulative error count, configured application + device counts. Auto-refreshes every 10 s; mobile-responsive layout; OS-driven dark mode. Underlying JSON shape at \texttt{GET\ /api/status}.
+\item[GET /metrics.html]
+Live metric values page. Per-application / per-device grid showing metric name, \emph{typed} value (Float / Int / Bool / String --- 2.0+), unit, last-updated timestamp, and a staleness badge (Good / Uncertain / Bad / Missing). JSON shape at \texttt{GET\ /api/devices}.
+\item[GET /api/health]
+Minimal smoke endpoint returning \texttt{\{"status":"ok"\}}. Used by integration tests and external monitoring probes.
+\item[/api/applications/* --- CRUD endpoints]
+POST / PUT / DELETE on the application, device, and command resources. CSRF-protected via \texttt{{[}web{]}.allowed\_origins}. Audit events: \texttt{application\_*} / \texttt{device\_*} / \texttt{command\_*} + \texttt{*\_crud\_rejected} on validation failure. State-changing mutations also fire \texttt{topology\_change\_detected} if the OPC UA address space needs reshaping.
+\end{description}
+
+\emph{When changes take effect --- staged edits and Apply.} Every configuration edit you make through the web UI --- the application tree (applications, devices, metrics, commands) \emph{and} the singleton \texttt{{[}global{]}} / \texttt{{[}chirpstack{]}} / \texttt{{[}opcua{]}} / \texttt{{[}web{]}} sections --- is \emph{staged}: it is saved to the database but does not change the running gateway yet. A yellow ``Unapplied configuration changes'' bar appears at the bottom of the page whenever you have staged edits. When you are done editing, click \emph{Apply changes} in that bar. The gateway then performs a single graceful \emph{in-process soft restart} that re-reads the whole configuration from the database and brings the data-plane (ChirpStack poller, OPC UA server, uplink event stream, command handling) back up on the new settings. The Docker container is \emph{never} restarted by Apply; OPC UA clients briefly disconnect and reconnect once per Apply. Because Apply re-reads everything, \emph{all} settings now take effect this way --- including the network bindings, ports, PKI paths, and OPC UA session limits that previously required a manual restart. The one exception is the web-login credentials (the web server itself survives the soft restart, so rotating \texttt{user\_name} / \texttt{user\_password} still needs a full process restart). A staged change that fails to load on Apply is non-disruptive: the gateway keeps running the previous configuration and logs \texttt{apply\_failed}.
+
+\emph{Backing up \& restoring configuration (Story F-4).} The singleton-configuration page has a \emph{Back up \& restore} section. \emph{Export config} downloads the whole configuration --- the four \texttt{{[}global{]}} / \texttt{{[}chirpstack{]}} / \texttt{{[}opcua{]}} / \texttt{{[}web{]}} sections plus the application/device/metric/command tree --- as a portable TOML file. \textbf{Secrets are never included}: the ChirpStack API token and the OPC UA password are stripped, so the file is safe to keep in version control or share. \emph{Import config} uploads a previously exported file: opcgw validates it, merges it over the running configuration (your instance keeps its own secrets --- an import never changes them), and \emph{stages} it. Click \emph{Apply changes} to activate the imported configuration (one soft restart, as above). Use this to back up a working setup, version it, or reproduce it on another gateway --- for example to stand up a demo from a saved file.
+
+\begin{admonition}{admwarn}{Web UI is HTTP-only --- TLS via reverse proxy}
+
+opcgw binds an HTTP listener; credentials transit in cleartext. Enable \texttt{{[}web{]}} only on trusted LANs. For internet exposure or any path crossing an untrusted hop, deploy a TLS-terminating reverse proxy (nginx, Caddy, Traefik) in front of the gateway and set \texttt{bind\_address\ =\ "127.0.0.1"} so the listener is loopback-only.
+
+\end{admonition}
+
+\section{Command delivery}\label{sec-command-delivery-config}
+
+\begin{lstlisting}
+[command_delivery]
+# Polling interval for ChirpStack delivery confirmations (default 5 s)
+status_poll_interval_secs = 5
+
+# Maximum time to wait for ChirpStack to confirm a Sent command (default 60 s).
+# Commands still pending after this become Failed.
+confirmation_timeout_secs = 60
+
+# Frequency of the timeout-detection scan (default 10 s)
+timeout_check_interval_secs = 10
+
+# Retention period for completed commands (default 7 days).
+# Confirmed/Failed commands are purged after this window.
+history_retention_days = 7
+\end{lstlisting}
+
+\section{Applications, devices, and metrics (bootstrap seed)}\label{sec-application-config}
+
+\begin{admonition}{admimp}{Canonical write path: use the web UI, not the TOML file}
+
+The \texttt{{[}{[}application{]}{]}} tree is stored in SQLite and managed exclusively via the embedded web UI (\texttt{/applications.html} and \texttt{/devices-config.html}). The TOML \texttt{{[}{[}application{]}{]}} section is read \emph{once} on the first boot and migrated into SQLite automatically. After migration, editing the TOML file has no effect on the running configuration.
+
+Use this section as a reference when writing an initial bootstrap seed (to pre-populate SQLite on first boot) or when restoring from a TOML backup. For day-to-day configuration changes, use the web UI.
+
+\end{admonition}
+
+The \texttt{{[}{[}application{]}{]}} TOML schema matches the internal \texttt{ChirpStackApplications} struct. Each block declares one application (ChirpStack application UUID + human name) and contains nested device and metric blocks.
+
+\begin{lstlisting}
+[[application]]
+application_id   = "ae2012c2-75a1-407d-98ab-1520fb511edf"
+application_name = "Arrosage"
+
+  [[application.device]]
+  device_name = "Niveau_citerne"
+  device_id   = "a840418371886840"            # DevEUI
+
+    [[application.device.read_metric]]
+    metric_name             = "Niveau_cit"     # OPC UA browse name
+    chirpstack_metric_name  = "Water_deep_cm"  # ChirpStack metric key
+    metric_type             = "Float"          # Bool | Int | Float | String
+    metric_unit             = "cm"             # optional, web-dashboard suffix
+
+  [[application.device]]
+  device_name = "Vanne01"
+  device_id   = "524d1e0a02243201"
+
+    [[application.device.read_metric]]
+    metric_name            = "Status_v01"
+    chirpstack_metric_name = "valveStatusCode"
+    metric_type            = "Int"
+
+    [[application.device.command]]
+    command_name      = "Open_close_valve01"
+    command_id        = 1
+    command_confirmed = true     # request ChirpStack delivery confirmation
+    command_port      = 10       # downlink fPort
+    command_class     = "valve"  # optional device-class binding (Epic E)
+\end{lstlisting}
+
+\begin{itemize}
+\item
+  \texttt{application\_id} must match a real ChirpStack application UUID --- opcgw uses it to scope the \texttt{List} calls.
+\item
+  \texttt{device\_id} must match the DevEUI of a real device.
+\item
+  \texttt{{[}{[}application.device.read\_metric{]}{]}} declares uplink metrics. The \texttt{metric\_type} string drives both the persisted variant in SQLite and the OPC UA \texttt{Variant} projection:
+\end{itemize}
+
+\begin{longtable}[]{@{}lll@{}}
+\caption{metric\_type to OPC UA Variant mapping}\tabularnewline
+\toprule\noalign{}
+TOML \texttt{metric\_type} & Storage \texttt{MetricType} & OPC UA \texttt{Variant} \\
+\midrule\noalign{}
+\endfirsthead
+\toprule\noalign{}
+TOML \texttt{metric\_type} & Storage \texttt{MetricType} & OPC UA \texttt{Variant} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+\texttt{"Float"} & \texttt{Float(f64)} & \texttt{Variant::Float(f32)} --- narrowed at the OPC UA boundary; emits \texttt{event="metric\_read"\ reason="narrowing\_overflow"\ \textbar{}\ "narrowing\_underflow"} on lossy narrowing \\
+\texttt{"Int"} & \texttt{Int(i64)} & \texttt{Variant::Int32(i32)} when the value fits in i32; \texttt{Variant::Int64(i64)} otherwise (counters, large-magnitude metrics) \\
+\texttt{"Bool"} & \texttt{Bool(bool)} & \texttt{Variant::Boolean(bool)} \\
+\texttt{"String"} & \texttt{String(String)} & \texttt{Variant::String(UAString)} --- UTF-8 preserved \\
+\end{longtable}
+
+\begin{itemize}
+\item
+  \texttt{metric\_unit} is an optional human-readable unit string surfaced on the web dashboard as a value suffix (e.g. \texttt{34.2\ \%}, \texttt{17.5\ cm}). Empty-string units coalesce to no-suffix.
+\item
+  \texttt{{[}{[}application.device.command{]}{]}} declares a downlink command surface. OPC UA writes against the corresponding node enqueue a downlink with the configured \texttt{command\_id} and \texttt{command\_port}; when \texttt{command\_confirmed\ =\ true} the queue tracks delivery state and times out per the \texttt{{[}command\_delivery{]}} settings.
+\item
+  The optional \texttt{command\_class} binds the command to a device class so opcgw can present a model-independent command surface. When omitted, an OPC UA write is delivered as raw payload bytes (the value is sent verbatim as a single byte). When set to \texttt{"valve"}, opcgw maps the canonical value \texttt{1} (open) / \texttt{0} (close) to a semantic command object (\texttt{\{"command":"open"\}} / \texttt{\{"command":"close"\}}) that the ChirpStack device-profile codec encodes into the model-specific wire bytes --- so every valve model looks identical on OPC UA. Binding a command to a class also routes the device\textquotesingle s \emph{values} through the uplink event stream (raw last-known value with the device\textquotesingle s report time --- see the \texttt{{[}chirpstack{]}} section), so the valve\textquotesingle s status fields always show the true reported state. (Adding new device classes arrives in later Epic E stories; the class is settable from the web command editor.)
+\end{itemize}
+
+\begin{admonition}{admnote}{Uniqueness constraints (enforced by validator and SQLite schema)}
+
+\texttt{application\_id} must be unique across the application list; \texttt{device\_id} must be unique within one application (the same DevEUI under different applications is explicitly allowed); \texttt{chirpstack\_metric\_name} and \texttt{metric\_name} must be unique within one device; \texttt{command\_id} and \texttt{command\_name} must be unique within one device. These constraints are enforced by both the \texttt{AppConfig::validate()} function and the SQLite composite primary keys (schema v009).
+
+\end{admonition}
+
+\begin{admonition}{admnote}{Audit-event Taxonomy}
+
+Configuration mutations via the web CRUD endpoints emit a closed-enum audit-event taxonomy: \texttt{application\_created} / \texttt{application\_updated} / \texttt{application\_deleted}; \texttt{device\_created} / \texttt{device\_updated} / \texttt{device\_deleted}; \texttt{command\_created} / \texttt{command\_updated} / \texttt{command\_deleted}; \texttt{config\_reload\ trigger="crud\_write"} after each successful SQLite commit. See \texttt{docs/logging.md\ §\ "Audit\ and\ diagnostic\ events"} for the full reference.
+
+\end{admonition}
+
+\section{How configuration is stored and migrated}\label{sec-config-storage}
+
+Non-secret configuration --- the application tree \emph{and} the singleton sections \texttt{{[}global{]}}, \texttt{{[}chirpstack{]}}, \texttt{{[}opcua{]}}, and \texttt{{[}web{]}} --- is stored in the SQLite database (\texttt{data/opcgw.db}, file mode \texttt{0o600}). Edit the application tree on the web CRUD pages and the singleton sections in the singleton-config editor at \texttt{/singleton-config.html}; opcgw reads SQLite on every boot.
+
+Secrets --- \texttt{{[}chirpstack{]}.api\_token} and \texttt{{[}opcua{]}.user\_password} --- stay in \texttt{config/secrets.toml} (file mode \texttt{0o600}, written by the first-run wizard). They are deliberately never migrated to SQLite; the singleton editor masks them and refuses to write them.
+
+\textbf{First-boot migration.} On the first boot, opcgw reads \texttt{config/config.toml} and migrates its non-secret values into SQLite. After that, SQLite is authoritative: hand-edits to a migrated key in \texttt{config.toml} have no effect at runtime, and opcgw logs a once-per-boot warning if \texttt{config.toml} is still present alongside a populated database.
+
+\begin{admonition}{admnote}{SQLite file permissions}
+
+On fresh creation opcgw sets \texttt{data/opcgw.db} to mode \texttt{0o600}. Existing databases are not changed retroactively; if the file is wider than \texttt{0o600}, opcgw warns once per boot. Run \texttt{chmod\ 0600\ data/opcgw.db} on existing deployments.
+
+\end{admonition}
+
+Recommended cleanup once the migration has run:
+
+\begin{enumerate}
+\item
+  Verify the database matches your intended configuration:
+
+\begin{lstlisting}
+bash scripts/check-d0-migration.sh data/opcgw.db
+\end{lstlisting}
+\item
+  Optionally archive then remove the seed file:
+
+\begin{lstlisting}
+cp config/config.toml config/config.toml.bootstrap-archived
+rm config/config.toml
+\end{lstlisting}
+\item
+  Restart opcgw. With \texttt{config.toml} absent, the unused-file warning no longer fires and opcgw boots from SQLite + \texttt{secrets.toml} alone.
+\end{enumerate}
+
+To change a runtime setting afterwards, use the singleton-config editor or an \texttt{OPCGW\_} environment-variable override --- not a \texttt{config.toml} hand-edit.
+
+\section{Environment Variable Overrides}\label{sec-config-env-overrides}
+
+Any configuration value can be overridden by an environment variable, and environment variables always take precedence over SQLite and the seed file. The convention is the \texttt{OPCGW\_} prefix with \texttt{\_\_} separating nested keys (for example \texttt{OPCGW\_CHIRPSTACK\_\_POLLING\_FREQUENCY=30}). Two convenience aliases, \texttt{OPCGW\_LOG\_DIR} and \texttt{OPCGW\_LOG\_LEVEL}, are read early during startup so logging is configured before the rest of the config loads. The full list of variables is in \hyperref[app-env-reference]{appendix\_title}.
+
+\chapter{Daily Operation and Maintenance}\label{ch-operation}
+
+\section{What to Monitor}\label{sec-monitoring-overview}
+
+\begin{figure}
+\centering
+\includegraphics[width=0.8\linewidth,height=\textheight,keepaspectratio]{figures/screenshot-dashboard.pdf}
+\caption{Web UI status dashboard}\label{fig-dashboard}
+\end{figure}
+
+The gateway exposes its own health through three channels. For a typical production deployment:
+
+\begin{itemize}
+\item
+  \emph{Live health (OPC UA)} --- read the \texttt{Gateway} folder via OPC UA from your SCADA front-end. See \hyperref[sec-gateway-folder]{The Gateway Folder in OPC UA}.
+\item
+  \emph{Live health (Web UI dashboard)} --- if \texttt{{[}web{]}.enabled\ =\ true}, browse to \texttt{http://\textless{}gateway-host\textgreater{}:\textless{}web-port\textgreater{}/}. The landing page (redesigned in Story F-3) leads with an \emph{at-a-glance health verdict} --- a banner that reads \emph{All systems operational} or a specific degraded reason (ChirpStack unreachable, poller stalled, an apply that failed, devices going stale, or staged changes pending) --- and shows tiles for ChirpStack connection state, poller status (active vs stalled, judged against the configured poll interval), last-poll timestamp, cumulative error count, application / device counts, and uptime, plus a device-data-freshness panel (how many devices are fresh / stale / bad / never reported). The verdict and freshness counts are computed in the browser from the gateway\textquotesingle s existing status surfaces --- opcgw itself computes no new aggregates, and the error figure is a cumulative count since startup (there is no per-error history on this page; use the logs for that). The metrics page at \texttt{/metrics.html} shows live typed values plus a staleness badge (Good / Uncertain / Bad / Missing) per metric. Both pages auto-refresh every 10 s and expose JSON shapes at \texttt{/api/status} and \texttt{/api/devices} for \texttt{curl\ \textbar{}\ jq} / Prometheus textfile exporters.
+\item
+  \emph{Diagnostics} --- tail the single \texttt{opcgw.log.*} file or aggregate it through your log shipper. See \hyperref[sec-logs-observability]{Logs and observability}.
+\end{itemize}
+
+\section{The Gateway Folder in OPC UA}\label{sec-gateway-folder}
+
+Under the configured root, opcgw publishes a synthetic \texttt{Gateway} folder containing three health variables:
+
+\begin{description}
+\item[\texttt{LastPollTimestamp} (\texttt{String}, RFC 3339)]
+Time of the last successful poll cycle. The value is \texttt{NULL} (OPC UA \texttt{Variant::Empty}) until the first cycle completes; reading it before that emits a \texttt{warn} log line with \texttt{warning="no\_data\_yet"}.
+\item[\texttt{error\_count} (\texttt{Int32})]
+Cumulative per-cycle error count carried in the persisted gateway status row. Saturates at \texttt{i32::MAX}; a saturation read emits a warning. Spikes between consecutive cycles (\texttt{delta\ \textgreater{}=\ 5}) emit \texttt{operation\ =\ "error\_spike"}.
+\item[\texttt{chirpstack\_available} (\texttt{Boolean})]
+\texttt{true} when the most recent poll cycle succeeded for at least one device, \texttt{false} otherwise. The first per-cycle ChirpStack failure also emits \texttt{operation\ =\ "chirpstack\_outage"}.
+\end{description}
+
+All three reads are subject to the same staleness logic as regular metrics; under normal operation they return \texttt{Good}.
+
+\section{Stale-Data Status Codes}\label{sec-staleness-status-codes}
+
+Every metric read returns a value plus an OPC UA \texttt{StatusCode} derived from the metric\textquotesingle s age relative to \texttt{{[}opcua{]}.stale\_threshold\_seconds}. The age is measured from the \emph{device\textquotesingle s report time} (the OPC UA \texttt{source\_timestamp}), not from the moment opcgw received the value:
+
+\begin{longtable}[]{@{}lll@{}}
+\caption{Metric staleness mapping}\tabularnewline
+\toprule\noalign{}
+Age & StatusCode & Operator interpretation \\
+\midrule\noalign{}
+\endfirsthead
+\toprule\noalign{}
+Age & StatusCode & Operator interpretation \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+≤ \texttt{stale\_threshold\_seconds} & \texttt{Good} & Fresh, trustworthy reading \\
+between threshold and 24 h & \texttt{Uncertain} & Last-known value still served, but stale \\
+\textgreater{} 24 h & \texttt{Bad} & Decisively stale; treat the value as suspect \\
+\end{longtable}
+
+The global threshold (default 120 s) is often too tight for battery-powered LoRaWAN sensors that report every 15--20 minutes --- they would read \texttt{Uncertain} between two perfectly normal reports. Set a per-device override in that case: \texttt{stale\_threshold\_seconds\ =\ 1800} on the \texttt{{[}{[}application.device{]}{]}} block (the device-level value wins over \texttt{{[}opcua{]}.stale\_threshold\_seconds}). Pick roughly twice the device\textquotesingle s report interval.
+
+Transitions between status codes emit \texttt{operation\ =\ "staleness\_transition"}: in-flight transitions at \texttt{info}, the cold-start first observation at \texttt{debug} (so restarts of a large stale fleet do not flood the alert pipeline). Metrics whose age sits within ±5 s of the threshold also emit \texttt{operation\ =\ "staleness\_boundary"} at \texttt{debug} for diagnosability.
+
+\section{Operational KPIs}\label{sec-monitoring-metrics}
+
+\begin{description}
+\item[Poll latency]
+Time to complete a full metric poll cycle. Should remain below \texttt{polling\_frequency}. Watch the per-cycle duration in the \texttt{operation\ =\ "poll\_cycle\_end"} log line and the budget warning if \texttt{operation\ =\ "batch\_write"} exceeds 500 ms.
+\item[Connected devices]
+Devices producing successful reads in the most recent cycle. The \texttt{device\_polled\ success=true} count tells you the live fleet; a sudden drop is a signal to investigate ChirpStack or radio coverage.
+\item[Database size]
+SQLite database file size growth. The pruner enforces the historical retention window --- if the database is growing faster than expected, check the \texttt{operation\ =\ "prune\_metric\_history"} line.
+\item[OPC UA read latency]
+Per-read budget is 100 ms. The gateway emits a \texttt{warn} with \texttt{exceeded\_budget\ =\ true} on any read past that bound; the microbench measured p95 around 11 µs at 1 kHz read rate, so budget exceedance is a strong signal of contention.
+\item[Storage query latency]
+The per-query budget defaults to 250 ms and the end-of-cycle batch-write budget to 2000 ms; both are sized for NAS / network-backed storage and are configurable via the \texttt{OPCGW\_STORAGE\_QUERY\_BUDGET\_MS} and \texttt{OPCGW\_BATCH\_WRITE\_BUDGET\_MS} environment variables (positive integer milliseconds). Lower them on fast local SSDs to restore earlier regression detection. A query past its budget emits a \texttt{warn} with \texttt{exceeded\_budget\ =\ true}; persistent \texttt{SQLITE\_BUSY} warnings indicate write contention or pool sizing problems.
+\end{description}
+
+\section{Command Queue Monitoring}\label{sec-command-monitoring}
+
+Downlink commands traverse three states:
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  \texttt{Pending} --- Enqueued by an OPC UA write; not yet sent to ChirpStack.
+\item
+  \texttt{Sent} --- ChirpStack accepted the downlink. If \texttt{command\_confirmed\ =\ true}, the gateway polls for confirmation every \texttt{status\_poll\_interval\_secs}.
+\item
+  \texttt{Confirmed} / \texttt{Failed} --- Terminal states. A \texttt{Sent} command that does not transition within \texttt{confirmation\_timeout\_secs} becomes \texttt{Failed}.
+\end{enumerate}
+
+Use the SQLite database to inspect queue state directly when needed:
+
+\begin{lstlisting}
+sqlite3 data/opcgw.db \
+  "SELECT command_id, status, created_at, sent_at, confirmed_at, error_message
+   FROM commands ORDER BY created_at DESC LIMIT 20;"
+\end{lstlisting}
+
+\section{Logs and observability}\label{sec-logs-observability}
+
+Logging is configured once at install time (see \hyperref[sec-install-logging]{Logging}). This section covers the day-to-day reading of those logs.
+
+Every log line is structured --- a free-text message plus \texttt{key=value} fields and a microsecond UTC timestamp --- so the logs are easy to filter with \texttt{grep} or feed into a log shipper.
+
+\textbf{Where the logs live.} The gateway writes to the container\textquotesingle s standard error (visible via \texttt{docker\ compose\ logs}) and to daily-rolling files in the log directory (\texttt{./log} by default). The gateway writes a single daily-rolling file, \texttt{opcgw.log.\textless{}date\textgreater{}}: at UTC midnight a new file is started with a fresh date suffix, and the appender keeps the most recent 14 daily files, pruning older ones automatically so the directory is self-limiting and cannot grow without bound. Every module --- ChirpStack polling, the OPC UA server, the SQLite storage layer, and configuration --- logs to this one file at the global \texttt{OPCGW\_LOG\_LEVEL} (the same level as the stderr console).
+
+For deep per-module detail, raise the level temporarily with \texttt{OPCGW\_LOG\_LEVEL=debug} (or \texttt{trace}); it all flows into the same \texttt{opcgw.log} file. Keep it at \texttt{info} (the default) or more verbose in production.
+
+\textbf{Correlation id for reads.} Every OPC UA read carries a unique \texttt{request\_id}, and all log lines emitted while serving that read --- including the storage query and the staleness check --- share it. To follow a single client read end-to-end (at \texttt{debug} or lower):
+
+\begin{lstlisting}
+grep request_id=<uuid> log/opcgw.log.*
+\end{lstlisting}
+
+\textbf{Performance-budget warnings.} Three hot paths log a \texttt{warn} with \texttt{exceeded\_budget=true} when a single operation runs slower than its budget. In steady state these stay silent; a sustained stream of them points to contention worth investigating.
+
+\begin{longtable}[]{@{}ll@{}}
+\caption{Performance budgets}\tabularnewline
+\toprule\noalign{}
+Operation & Budget (warns if exceeded) \\
+\midrule\noalign{}
+\endfirsthead
+\toprule\noalign{}
+Operation & Budget (warns if exceeded) \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+OPC UA read & 100 ms per read \\
+Storage query & 10 ms per query \\
+Metric batch write & 500 ms per batch flush \\
+\end{longtable}
+
+Audit-relevant and diagnostic log lines carry an \texttt{event=} field for easy filtering (\texttt{grep\ \textquotesingle{}event="..."\textquotesingle{}\ log/*.log}); the routine operational lines carry an \texttt{operation=} field. The full catalogues are in \hyperref[app-operation-names]{appendix\_title} and \hyperref[app-audit-events]{appendix\_title}.
+
+\section{Database maintenance}\label{sec-database-maintenance}
+
+SQLite is largely self-maintaining under WAL mode. Two operations are worth scheduling.
+
+\begin{enumerate}
+\item
+  Without stopping the gateway, run:
+
+\begin{lstlisting}
+sqlite3 data/opcgw.db "PRAGMA optimize;"
+\end{lstlisting}
+\item
+  This refreshes query-planner statistics and completes in milliseconds on a production-sized database.
+\end{enumerate}
+
+\begin{enumerate}
+\item
+  Stop opcgw gracefully (\texttt{SIGTERM}).
+\item
+  Run the check --- expected output is \texttt{ok}:
+
+\begin{lstlisting}
+sqlite3 data/opcgw.db "PRAGMA integrity_check;"
+\end{lstlisting}
+\item
+  Restart opcgw.
+\end{enumerate}
+
+\section{Historical metric pruning}\label{sec-historical-data-pruning}
+
+The metric-history store grows with poll volume. A background pruner automatically deletes readings older than the configured retention window, so no operator action is normally required. Pruning activity is logged with \texttt{operation\ =\ "prune\_metric\_history"}, including the cutoff time and the number of rows deleted.
+
+There is no explicit "off" switch. To keep history effectively forever, set the retention window longer than your operational horizon.
+
+\section{Command history retention}\label{sec-command-history-pruning}
+
+Completed downlink commands (\texttt{Confirmed} or \texttt{Failed}) are retained for \texttt{{[}command\_delivery{]}.history\_retention\_days} (default 7 days), then purged automatically by the same background pruner.
+
+\section{Log rotation}\label{sec-log-rotation}
+
+The single \texttt{opcgw.log} file is daily-rolling: at UTC midnight a new file is started with a date suffix (\texttt{opcgw.log.\textless{}date\textgreater{}}). The appender keeps the most recent 14 daily files and prunes older ones automatically, so retention is self-limiting and the log directory cannot grow without bound. For tighter overall disk control you may still layer your platform\textquotesingle s standard tooling on top (\texttt{logrotate}, \texttt{journald}, Docker\textquotesingle s logging driver, or a cron job).
+
+\chapter{Troubleshooting}\label{ch-troubleshooting}
+
+\section{Symptom Cookbook}\label{sec-symptom-cookbook}
+
+Each subsection below pairs a symptom an operator can observe with the structured log lines that diagnose it and the corrective action.
+
+\subsection{Cannot connect to ChirpStack}\label{sec-issue-chirpstack-connection}
+
+\emph{Log signature:} \texttt{operation="chirpstack\_connect"} with \texttt{success=false}, repeated; or a single \texttt{operation="chirpstack\_outage"} on the first per-cycle failure.
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  Confirm the configured \texttt{server\_address} resolves and the gRPC port is reachable: \texttt{nc\ -vz\ chirpstack.example.com\ 8080}.
+\item
+  Validate the API token. A 16/Unauthenticated tonic code would surface as a generic \texttt{OpcGwError::ChirpStack(...)}; cross-check by hitting ChirpStack directly with \texttt{grpcurl\ -H\ "Authorization:\ Bearer\ \$TOKEN"\ \textbackslash{}\ chirpstack:8080\ list}.
+\item
+  Inspect \texttt{last\_successful\_poll} in the \texttt{chirpstack\_outage} warn line: a long gap indicates a sustained outage. A future release will introduce automatic reconnection; until then, the poller continues attempting on its normal cadence.
+\end{enumerate}
+
+\subsection{Attempted to add a duplicate}\label{sec-issue-duplicate-rejected}
+
+\emph{Log signature:} \texttt{event="application\_crud\_rejected"} or \texttt{event="device\_crud\_rejected"} or \texttt{event="command\_crud\_rejected"}, each carrying \texttt{reason="conflict"\ conflict\_kind="duplicate"}. For a hot-reload (operator hand-edited \texttt{config/config.toml} and saved): \texttt{event="config\_reload\_rejected"\ reason="conflict"\ conflict\_kind="duplicate"}.
+
+opcgw rejects same-level duplicates server-side: two applications with the same \texttt{application\_id}; two devices with the same \texttt{device\_id} under one application; two metrics with the same \texttt{metric\_name} or \texttt{chirpstack\_metric\_name} within one device; two commands with the same \texttt{command\_id} or \texttt{command\_name} within one device.
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  Find the rejection in the structured log: \texttt{grep\ \textquotesingle{}conflict\_kind="duplicate"\textquotesingle{}\ opcgw.log}. The \texttt{field} + \texttt{value} + \texttt{scope} fields name exactly what was rejected and at which level.
+\item
+  For an HTTP rejection (web UI / API), the 409 response body has the same shape: \texttt{\{"error":"duplicate","field":"...","value":"...","scope":"...","hint":"..."\}}. The UI surfaces the \texttt{hint} inline near the offending input --- pick a different identifier, or DELETE the existing entry first.
+\item
+  For a \texttt{config\_reload\_rejected} (TOML hand-edit), the in-memory configuration is unchanged (no partial apply); the on-disk \texttt{config.toml} is also untouched (the gateway does not rewrite operator files). Hand-edit the TOML to fix the duplicate, save the file, and re-trigger the reload (SIGHUP).
+\item
+  Two patterns are explicitly NOT duplicates and remain allowed: the same DevEUI under different applications (one physical sensor exposed under multiple OPC UA namespaces); the same \texttt{chirpstack\_metric\_name} on different devices (multiple sensors of the same kind).
+\end{enumerate}
+
+\subsection{Sudden burst of errors}\label{sec-issue-error-spike}
+
+\emph{Log signature:} \texttt{operation="error\_spike"} with \texttt{delta\ \textgreater{}=\ 5}.
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  Cross-reference the surrounding \texttt{device\_poll} warns to identify the affected devices.
+\item
+  If a single fleet-wide gateway, check ChirpStack itself. If a localised group, check the radio path (\texttt{rssi}, \texttt{snr} in ChirpStack UI).
+\item
+  The spike is informational only --- it does not gate further polling.
+\end{enumerate}
+
+\subsection{SQLite busy / locked warnings}\label{sec-issue-sqlite-busy}
+
+\emph{Log signature:} \texttt{operation="storage\_query"\ error="SQLITE\_BUSY"\ sqlite\_error\_code=DatabaseBusy} (or \texttt{DatabaseLocked}).
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  The \texttt{sqlite\_error\_code} field distinguishes \texttt{DatabaseBusy} (waiting on a lock) from \texttt{DatabaseLocked} (cross-connection write contention).
+\item
+  WAL mode and the per-task connection pool make rare \texttt{SQLITE\_BUSY} tolerable. Sustained busy warnings under steady load suggest pool undersizing or a long-running write --- verify the \texttt{operation\ =\ "batch\_write"} latencies.
+\item
+  Run integrity check during a maintenance window: \texttt{sqlite3\ data/opcgw.db\ "PRAGMA\ integrity\_check;"}.
+\end{enumerate}
+
+\subsection{Performance budgets exceeded}\label{sec-issue-budget-exceeded}
+
+\emph{Log signature:} any of \texttt{opc\_ua\_read}, \texttt{storage\_query}, or \texttt{batch\_write} with \texttt{exceeded\_budget=true}.
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  Capture the \texttt{request\_id} on an \texttt{opc\_ua\_read} warn and grep the file logs for the full read-path trace.
+\item
+  If the bottleneck is \texttt{storage\_query}, check \texttt{query\_type} and the \texttt{SQLITE\_BUSY} rate at the same time.
+\item
+  If \texttt{batch\_write} is slow, the cumulative per-cycle metric count (\texttt{metrics\_count}) plus disk I/O contention are the usual culprits.
+\end{enumerate}
+
+\subsection{\texorpdfstring{OPC UA client sees NULL \texttt{LastPollTimestamp}}{OPC UA client sees NULL LastPollTimestamp}}\label{sec-issue-no-data-yet}
+
+\emph{Log signature:} \texttt{operation="health\_metric\_read"\ metric="LastPollTimestamp"\ warning="no\_data\_yet"}; once-per-process \texttt{operation="gateway\_status\_init"}.
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  This is normal during startup, before the first poll cycle has completed. The gateway is healthy.
+\item
+  If it persists past one polling interval, the first cycle is failing --- see \hyperref[sec-issue-chirpstack-connection]{Cannot connect to ChirpStack}.
+\end{enumerate}
+
+\subsection{OPC UA clients cannot connect}\label{sec-issue-no-opc-clients}
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  Verify the OPC UA server bound successfully --- search the log for \texttt{event="opcua\_limits\_configured"} (emitted once by \texttt{src/opc\_ua.rs} after the OPC UA server applies its session / subscription / message-size limits) or the periodic \texttt{event="opcua\_session\_count"} gauge.
+\item
+  Confirm the port is listening: \texttt{ss\ -tlnp\ sport\ =\ :4840} (or \texttt{netstat\ -tlnp\ \textbar{}\ grep\ 4840}).
+\item
+  Confirm the firewall permits inbound connections to the configured port.
+\item
+  If PKI is enabled, confirm the client certificate is under \texttt{pki\_dir/trusted/}. Rejected certificates land in \texttt{pki\_dir/rejected/}; copy them across explicitly to trust them.
+\end{enumerate}
+
+\subsection{OPC UA clients see Uncertain or Bad status}\label{sec-issue-stale-metrics}
+
+\emph{Log signature:} \texttt{operation="staleness\_transition"\ status\_code=Uncertain} (or \texttt{Bad}); possibly \texttt{operation="staleness\_boundary"} for metrics flickering near the threshold.
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  Map the affected metric to its device and check that the device is producing uplinks (ChirpStack UI).
+\item
+  Verify \texttt{polling\_frequency} against \texttt{stale\_threshold\_seconds}: the latter should be at least 2× the former so transient missed cycles do not flap the status.
+\item
+  For a fleet-wide \texttt{Uncertain} wave that resolves on its own, suspect a brief ChirpStack outage; cross-check \texttt{chirpstack\_outage} in the same time window.
+\end{enumerate}
+
+\subsection{Database integrity errors}\label{sec-issue-database-corruption}
+
+\emph{Log signature:} \texttt{OpcGwError::Storage} with messages mentioning \texttt{"disk\ image\ malformed"}.
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  Stop the gateway gracefully (\texttt{SIGTERM}) so the WAL is checkpointed.
+\item
+  Back up the database before any recovery action: \texttt{cp\ -p\ data/opcgw.db\ data/opcgw.db.backup}.
+\item
+  Run the SQLite integrity check: \texttt{sqlite3\ data/opcgw.db\ "PRAGMA\ integrity\_check;"}. If it returns \texttt{ok}, the issue may have been transient; restart the gateway.
+\item
+  If integrity is broken, the gateway will recreate the schema on next start --- but historical metrics are lost. Plan backups accordingly.
+\end{enumerate}
+
+\subsection{ChirpStack authentication failure}\label{sec-issue-chirpstack-auth}
+
+\emph{Symptom:} The gateway never logs a successful \texttt{chirpstack\_connect} info line; OPC UA reads return the discriminant string or \texttt{BadDataUnavailable}; no \texttt{poll\_cycle\_end} emissions.
+
+\emph{Diagnostic recipe:}
+
+\begin{lstlisting}
+# systemd:
+journalctl -u opcgw | grep -E 'operation="chirpstack_connect".*(Unauthenticated|PermissionDenied|InvalidArgument)'
+
+# Docker:
+docker logs opcgw 2>&1 | grep -E 'operation="chirpstack_connect".*(Unauthenticated|PermissionDenied|InvalidArgument)'
+\end{lstlisting}
+
+\emph{Root cause:} Most commonly an unset, rotated, or wrong-tenant \texttt{OPCGW\_CHIRPSTACK\_\_API\_TOKEN}. The shipped \texttt{config/config.toml} contains a placeholder token; the gateway refuses to start with the placeholder in place. ChirpStack returns gRPC code 16 / Unauthenticated when the bearer token is invalid.
+
+\emph{Remediation:}
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  Confirm the env-var is set in the running process:
+
+\begin{lstlisting}
+# Docker:
+docker exec opcgw env | grep -c OPCGW_CHIRPSTACK__API_TOKEN
+# Expected: 1
+# systemd:
+sudo systemctl show opcgw -p Environment | grep -c OPCGW_CHIRPSTACK__API_TOKEN
+# Inspect the loaded env-file:
+sudo grep OPCGW_CHIRPSTACK__API_TOKEN /etc/opcgw/env
+\end{lstlisting}
+\item
+  Issue a fresh ChirpStack API token (ChirpStack v4 UI → API Keys) scoped to the configured \texttt{{[}chirpstack{]}.tenant\_id}. Verify independently with \texttt{grpcurl\ -H\ "Authorization:\ Bearer\ \$TOKEN"\ chirpstack:8080\ list}.
+\item
+  Inject the new token via the env-var (NOT into \texttt{config.toml}) and restart the gateway (\texttt{systemctl\ restart\ opcgw} / \texttt{docker\ compose\ up\ -d}).
+\end{enumerate}
+
+\subsection{OPC UA connection refused / BadTooManySessions}\label{sec-issue-opcua-connection-refused}
+
+\emph{Symptom:} SCADA client cannot establish a session; existing sessions continue working (suggests the session cap), or all clients are refused (suggests auth / endpoint mismatch).
+
+\emph{Diagnostic recipe:}
+
+\begin{lstlisting}
+journalctl -u opcgw | grep -E '(opcua_session_count_at_limit|opcua_auth_failed)'
+\end{lstlisting}
+
+\emph{Root cause:}
+
+\begin{itemize}
+\item
+  \texttt{event="opcua\_session\_count\_at\_limit"} warns --- the \texttt{{[}opcua{]}.max\_connections} cap (default 10) is saturated; new \texttt{CreateSession} attempts get \texttt{BadTooManySessions}. Cross-reference the \texttt{source\_ip} field to identify a runaway reconnect loop or a port-scan.
+\item
+  \texttt{event="opcua\_auth\_failed"} warns --- user-token credentials don\textquotesingle t match \texttt{{[}opcua{]}.user\_name} / \texttt{{[}opcua{]}.user\_password}. The \texttt{user} field is sanitised; the attempted password is never logged.
+\end{itemize}
+
+\emph{Remediation:}
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  For at-limit rejections: raise \texttt{{[}opcua{]}.max\_connections} per the tuning checklist in \hyperref[sec-opcua-config]{OPC UA server} (sized as \texttt{N\ SCADA\ clients\ ×\ sessions\ each\ +\ 20\%\ headroom}), then SIGHUP --- note that \texttt{max\_connections} is \emph{restart-required} per the hot-reload taxonomy, so a full process restart is needed. Investigate the offending \texttt{source\_ip} if the cap rejection is unexpected.
+\item
+  For auth failures: rotate \texttt{OPCGW\_OPCUA\_\_USER\_PASSWORD}; verify the SCADA client is configured with the matching credential; confirm \texttt{OPCGW\_LOG\_LEVEL} is \texttt{info} or below so the source-IP correlation (\texttt{"Accept\ new\ connection\ from\ ..."} line by async-opcua) survives.
+\end{enumerate}
+
+\subsection{Polled metrics not appearing in OPC UA Read}\label{sec-issue-metric-parse-legacy}
+
+\emph{Symptom:} SCADA client reads a metric NodeId and receives \texttt{BadDataUnavailable} (legacy-row symptom) or the discriminant string \texttt{"Float"} / \texttt{"Int"} (legacy symptom --- should NOT occur on v2.0 GA). Web dashboard shows the \texttt{Missing} badge.
+
+\emph{Diagnostic recipe:}
+
+\begin{lstlisting}
+journalctl -u opcgw | grep 'event="metric_parse"'
+# Inspect the row directly:
+sqlite3 ./opcgw.db \
+  "SELECT device_id, metric_name, value_type, value_real, value_int, value_bool, value_text
+   FROM metric_values WHERE device_id='<eui>' AND metric_name='<name>';"
+\end{lstlisting}
+
+\emph{Root cause:}
+
+\begin{itemize}
+\item
+  \texttt{value\_type=\textquotesingle{}legacy\textquotesingle{}} rows surface as \texttt{BadDataUnavailable} for ONE poll interval after a Path-A migration (\hyperref[ch-upgrade]{Upgrade and Migration}) until the next poll cycle UPSERTs a typed payload.
+\item
+  \texttt{event="metric\_parse"\ reason="non\_finite"} or \texttt{reason="invalid\_bool"} or \texttt{reason="int\_overflow"} --- the poller skipped this metric for this cycle (the NaN/Inf filter at the poller boundary). The metric is skipped, not silently coerced.
+\item
+  If \texttt{value\_type} is \texttt{real} / \texttt{int} / \texttt{bool} / \texttt{text} but the corresponding typed column is NULL: schema drift --- investigate via \texttt{PRAGMA\ quick\_check;}.
+\end{itemize}
+
+\emph{Remediation:}
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  For legacy rows: wait one poll interval; the row will be replaced with a typed payload on the next successful poll. Persistent legacy rows past one interval indicate the poller cannot reach the device --- cross-check \texttt{device\_polled\ success=true}.
+\item
+  For \texttt{reason="non\_finite"}: investigate sensor calibration. For \texttt{reason="invalid\_bool"}: confirm device firmware emits \texttt{0.0} or \texttt{1.0}. For \texttt{reason="int\_overflow"}: the metric exceeds i64 range --- check device firmware emit precision.
+\end{enumerate}
+
+\subsection{HistoryRead returns empty / BadDataUnavailable}\label{sec-issue-historyread-empty}
+
+\emph{Symptom:} SCADA client issues an OPC UA \texttt{HistoryRead} over a 7-day window and gets fewer rows than expected, or every row carries \texttt{StatusCode::BadDataUnavailable}.
+
+\emph{Diagnostic recipe:}
+
+\begin{lstlisting}
+journalctl -u opcgw | grep 'event="metric_history_summary"' | tail -10
+journalctl -u opcgw | grep 'event="metric_history_read"' | tail -10
+\end{lstlisting}
+
+\emph{Root cause:} \texttt{metric\_history\_summary} (trace) is the aggregate-skip telemetry per \texttt{query\_metric\_history} call; it carries \texttt{schema\_drift\_skipped} and \texttt{unparseable\_timestamp\_skipped} counters. Legacy rows in \texttt{metric\_history} surface as \texttt{DataValue\ \{\ value:\ None,\ status:\ BadDataUnavailable\ \}} --- they are NOT silently dropped from the stream. Per-row narrowing failures fire \texttt{metric\_history\_read} with \texttt{reason\ ∈\ \{narrowing\_overflow,\ narrowing\_underflow\}}.
+
+\emph{Remediation:}
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  For legacy rows (\texttt{BadDataUnavailable} in the response stream): expected during the 2.0 payload migration window. New rows captured after upgrade carry typed payloads.
+\item
+  For per-call cap saturation: check \texttt{{[}opcua{]}.max\_history\_data\_results\_per\_node} (default 10000 ≈ 28 h at 10 s polling). For longer windows, SCADA clients must page via follow-up calls (manual paging --- continuation points are not implemented; see \texttt{docs/security.md\ §\ "Historical\ data\ access"}).
+\end{enumerate}
+
+\subsection{Gateway refuses to start --- PKI permissions}\label{sec-issue-pki-permissions}
+
+\emph{Symptom:} opcgw exits at startup with an error message mentioning the private-key file mode or the \texttt{pki/private} directory mode.
+
+\emph{Diagnostic recipe:}
+
+\begin{lstlisting}
+ls -la pki/private/
+# Expected:
+#   drwx------ ... pki/private
+#   -rw------- ... pki/private/private.pem
+\end{lstlisting}
+
+\emph{Root cause:} opcgw enforces the private-key permissions fail-closed at startup. The gateway refuses to start unless each \texttt{pki/private/*.pem} file is mode \texttt{0o600} and the parent directory is mode \texttt{0o700}. The error text includes the observed mode and a \texttt{chmod} recipe.
+
+\emph{Remediation:}
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  Tighten the permissions per the error message:
+
+\begin{lstlisting}
+chmod 700 pki/private
+find ./pki/private -type f -name '*.pem' -exec chmod 600 {} +    # no-op on fresh install
+\end{lstlisting}
+\item
+  For Docker / Compose deployments, the host-side directory must be at the same modes --- UID 10001 owns the files and the gateway cannot \texttt{chmod} loose modes (it can only validate them). Apply on the host before \texttt{docker\ compose\ up}.
+\item
+  For an upgrade from older deployments (which left \texttt{private.pem} at mode \texttt{0o644}): run \texttt{find\ pki/private\ -type\ f\ -name\ \textquotesingle{}*.pem\textquotesingle{}\ -exec\ chmod\ 600\ \{\}\ \textbackslash{};} then restart.
+\end{enumerate}
+
+\subsection{Web UI returns 401 / 404}\label{sec-issue-web-auth-401}
+
+\emph{Symptom:} Browser displays the gateway URL\textquotesingle s Basic-auth prompt repeatedly (401), or after a successful auth shows a 404 on \texttt{/index.html} or \texttt{/metrics.html}.
+
+\emph{Diagnostic recipe:}
+
+\begin{lstlisting}
+journalctl -u opcgw | grep 'event="web_auth_failed"' | tail -10
+# Verify the web server actually started:
+journalctl -u opcgw | grep 'event="web_server_started"'
+\end{lstlisting}
+
+\emph{Root cause:}
+
+\begin{itemize}
+\item
+  For 401: the \texttt{web\_auth\_failed} warn carries a \texttt{reason} field (\texttt{missing}, \texttt{malformed\_scheme}, \texttt{malformed\_base64}, \texttt{missing\_colon}, \texttt{user\_mismatch}, \texttt{password\_mismatch}). Web credentials are \emph{shared} with \texttt{{[}opcua{]}.user\_name} / \texttt{{[}opcua{]}.user\_password} --- check the env vars.
+\item
+  For 404: the embedded web server resolves \texttt{static/} relative to the gateway\textquotesingle s CWD. For Docker the \texttt{Dockerfile} copies \texttt{static/} into \texttt{/usr/local/bin/static}; for systemd the unit file must set \texttt{WorkingDirectory=/var/lib/opcgw} with \texttt{static/} deployed there.
+\end{itemize}
+
+\emph{Remediation:}
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  Confirm env vars are set:
+
+\begin{lstlisting}
+# Docker
+docker exec opcgw env | grep -E 'OPCGW_OPCUA__USER_NAME|OPCGW_OPCUA__USER_PASSWORD|OPCGW_WEB_'
+# systemd
+sudo grep -E 'OPCGW_OPCUA__USER_NAME|OPCGW_OPCUA__USER_PASSWORD|OPCGW_WEB_' /etc/opcgw/env
+\end{lstlisting}
+\item
+  Confirm \texttt{{[}web{]}.enabled\ =\ true} (or \texttt{OPCGW\_WEB\_\_ENABLED=true}) and that \texttt{event="web\_server\_started"} appears within \textasciitilde5 s of startup. Absence of that line means the web server is disabled.
+\item
+  For 404: verify \texttt{static/index.html}, \texttt{static/metrics.html}, and the JavaScript files are present in the CWD-relative \texttt{static/} directory.
+\end{enumerate}
+
+\subsection{Log files growing too fast}\label{sec-issue-log-growth}
+
+\emph{Symptom:} The \texttt{{[}logging{]}.dir} directory grows by hundreds of MB per day, eventually saturating local disk.
+
+\emph{Diagnostic recipe:}
+
+\begin{lstlisting}
+du -sh log/
+ls -laS log/ | head -20
+\end{lstlisting}
+
+\emph{Root cause:} opcgw uses a single daily-rolling file appender (\texttt{opcgw.log.\textless{}date\textgreater{}}), which keeps the most recent 14 daily files and prunes older ones automatically, so the log directory is self-limiting. The file\textquotesingle s size grows with the global \texttt{OPCGW\_LOG\_LEVEL}: at \texttt{debug} or \texttt{trace} every module writes far more detail than at \texttt{info}. Volume scales with poll cadence and OPC UA read rate; 10 devices at 1 Hz polling under a SCADA client actively subscribing typically produces 50-200 MB/day at \texttt{debug}.
+
+\emph{Remediation:}
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  opcgw already caps the file log at the most recent 14 daily files; for tighter control of overall disk use you can also configure your platform\textquotesingle s log-retention tooling (\texttt{logrotate}, \texttt{journald} with \texttt{SystemMaxUse=}, Docker\textquotesingle s \texttt{-\/-log-opt\ max-size=}) on top of it.
+\item
+  Reduce the global verbosity via \texttt{OPCGW\_LOG\_LEVEL=info} (or lower) --- at \texttt{debug}/\texttt{trace} the single \texttt{opcgw.log} file grows fastest. Note there is no separate per-module file capturing forensic detail at a higher verbosity, so the level you set is the detail you keep; do not drop below \texttt{info} if you need to preserve NFR12 source-IP correlation.
+\item
+  If using a custom \texttt{log4rs.yaml} (legacy from pre-tracing days), inspect its \texttt{rolling\_file} + \texttt{size} + \texttt{roller} stanza for the rotation window.
+\end{enumerate}
+
+\chapter{Upgrade and Migration}\label{ch-upgrade}
+
+This chapter covers operator-driven upgrade procedures. The canonical, exhaustively-tested runbook for the v2.0-rc → v2.0 GA transition (payload-bearing \texttt{MetricType}; SQLite schema v006 → v008) lives in \texttt{docs/deployment-guide.md}. The summary below is operator-facing; defer to the deployment-guide for the per-line architectural rationale, SLA tests, and the v007 / v008 migration internals.
+
+\section{Pre-upgrade Checklist}\label{sec-upgrade-pre-flight}
+
+Before stopping the current (v2.0-rc) gateway:
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  \emph{Take a file-level backup of the SQLite database.} The backup is your \emph{only} rollback path --- the migration is one-way. Use the explicit three-path form, never a glob, so unrelated backup files (e.g. \texttt{opcgw.db.bak.YYYY-MM-DD}) are not collected:
+
+\begin{lstlisting}
+cp /path/to/opcgw.db /path/to/opcgw.db.pre-2.0.bak
+cp /path/to/opcgw.db-wal /path/to/opcgw.db-wal.pre-2.0.bak 2>/dev/null || true
+cp /path/to/opcgw.db-shm /path/to/opcgw.db-shm.pre-2.0.bak 2>/dev/null || true
+\end{lstlisting}
+\item
+  \emph{Identify your current schema version.} Run the bundled pre-flight script:
+
+\begin{lstlisting}
+./scripts/check-schema-version.sh /path/to/opcgw.db
+\end{lstlisting}
+
+  The script wraps \texttt{PRAGMA\ user\_version} with an operator-friendly recommendation, and pre-checks that the file is actually an opcgw database (has the \texttt{metric\_values} and \texttt{metric\_history} tables) so you don\textquotesingle t accidentally point it at an unrelated SQLite file (Firefox \texttt{places.sqlite}, etc.).
+
+  \begin{itemize}
+  \item
+    Version \emph{6} --- pre-2.0. Migration applies.
+  \item
+    Version \emph{7} --- interrupted prior upgrade left the database between v007 and v008. Starting the v2.0 gateway will complete the migration (idempotent --- only v008 will be re-applied).
+  \item
+    Version \emph{8} --- already migrated. No action needed.
+  \end{itemize}
+\item
+  \emph{Decide Path A vs Path B.} Path A preserves legacy (pre-2.0) historical rows (surfacing them as \texttt{BadDataUnavailable} for one poll interval); Path B drops the database file and starts fresh. For most production deployments Path A is the right choice; test / dev gateways and deployments where legacy history is uninteresting can use Path B.
+\end{enumerate}
+
+\section{Path A: In-Place Auto-Migration (Default)}\label{sec-upgrade-path-a}
+
+The recommended path for operators who want to preserve historical metric rows captured under the v2.0-rc schema.
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  Stop the v2.0-rc gateway gracefully:
+
+\begin{lstlisting}
+# systemd:
+sudo systemctl stop opcgw
+
+# Docker Compose:
+docker compose stop opcgw
+
+# Foreground binary:  Ctrl-C  or  kill -TERM <pid>
+\end{lstlisting}
+\item
+  Replace the binary or pull the new image:
+
+\begin{lstlisting}
+# Docker Hub:
+docker pull docker.io/gcorbaz/opcgw:2.0
+
+# GHCR mirror:
+docker pull ghcr.io/guycorbaz/opcgw:2.0
+
+# Source build:
+cargo install --path .
+\end{lstlisting}
+\item
+  Start the v2.0 gateway pointing at the same \texttt{opcgw.db} file. The \texttt{run\_migrations()} path applies v007 (typed value columns --- metadata-only ALTER TABLE) and v008 (exactly-one-non-NULL \texttt{CHECK} constraint, via \texttt{CREATE\ TABLE\ …\ AS\ SELECT} wrapped in \texttt{BEGIN/COMMIT}) automatically. Legacy rows are tagged \texttt{value\_type\ =\ \textquotesingle{}legacy\textquotesingle{}} with NULL typed columns by the v007 column default; no rows are dropped.
+\item
+  Verify the migrations applied. Pick the recipe matching your deployment shape:
+
+\begin{lstlisting}
+# systemd:
+journalctl -u opcgw -n 200 | grep -E "Applied migration v00(7|8)"
+
+# Docker Compose:
+docker compose logs opcgw | grep -E "Applied migration v00(7|8)"
+
+# Foreground binary:
+tail -n 200 log/opcgw.log.* | grep -E "Applied migration v00(7|8)"
+\end{lstlisting}
+
+  You should see two info lines:
+
+\begin{lstlisting}
+Applied migration v007_typed_value_columns          version=7
+Applied migration v008_typed_value_constraints      version=8
+\end{lstlisting}
+\item
+  Wait for the first poll cycle. OPC UA clients will see \texttt{BadDataUnavailable} on legacy rows for the duration of one poll interval. Once the poller UPSERTs each metric with a typed payload, the legacy rows are replaced and OPC UA Reads return the real measurement.
+\end{enumerate}
+
+\section{Path B: Drop-and-Recreate}\label{sec-upgrade-path-b}
+
+The right path for operators who do not need legacy history (test deployments, dev gateways, or production gateways where historical rows are uninteresting under the new typed-payload contract).
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  Stop the v2.0-rc gateway (same recipes as Path A).
+\item
+  Remove the database file and its sidecar files. Use the explicit three-path form, NOT a glob --- a glob like \texttt{opcgw.db*} would also remove your \texttt{opcgw.db.pre-2.0.bak} backup file and any operator-managed backup snapshots in the same directory:
+
+\begin{lstlisting}
+rm /path/to/opcgw.db /path/to/opcgw.db-wal /path/to/opcgw.db-shm
+\end{lstlisting}
+
+  For Docker bind-mounts, run the \texttt{rm} on the host side directory that\textquotesingle s bind-mounted into the container.
+\item
+  Replace the binary or pull the new image (same as Path A).
+\item
+  Start the v2.0 gateway. It creates a fresh v008-schema database with zero rows; the next poll cycle populates \texttt{metric\_values} with real typed payloads from the start.
+\end{enumerate}
+
+\section{Rollback Contract}\label{sec-upgrade-rollback}
+
+The 2.0 payload migration is \emph{one-way}. v007 column additions cannot be cleanly dropped without breaking post-migration data integrity contracts (the typed columns become NOT-NULL-able after v008\textquotesingle s \texttt{CHECK} lands, and the \texttt{MetricType} enum no longer carries a string representation). v008\textquotesingle s exactly-one-non-NULL \texttt{CHECK} is not in v006 and cannot be added to a v006-shaped database without first running v007.
+
+\emph{The only rollback path is to restore the pre-upgrade backup file} taken in the pre-upgrade checklist, then run the v2.0-rc binary against it:
+
+\begin{lstlisting}
+# Stop the v2.0 gateway first.
+cp /path/to/opcgw.db.pre-2.0.bak /path/to/opcgw.db
+# Restore the v2.0-rc binary or revert the Docker image tag.
+# Start the v2.0-rc gateway.
+\end{lstlisting}
+
+There is no in-tree rollback tool. \emph{Take the backup BEFORE starting the upgrade} --- the migration starts the moment you launch the v2.0 binary against a v006 database.
+
+\section{Post-Migration Verification}\label{sec-upgrade-verification}
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  Schema version is \texttt{8}:
+
+\begin{lstlisting}
+sqlite3 /path/to/opcgw.db "PRAGMA user_version;"
+# Expected output: 8
+\end{lstlisting}
+\item
+  First poll cycle completed --- look for \texttt{operation="poll\_cycle\_end"} in the gateway logs (Path A: this may take up to one \texttt{{[}chirpstack{]}.polling\_frequency} interval; default 10 s).
+
+\begin{lstlisting}
+# systemd:
+journalctl -u opcgw | grep "poll_cycle_end" | head -3
+
+# Docker Compose:
+docker compose logs opcgw 2>&1 | grep "poll_cycle_end" | head -3
+\end{lstlisting}
+\item
+  OPC UA Read returns the actual measurement payload --- \emph{not} the discriminant string (\texttt{Variant::String("Float")}), \emph{not} \texttt{BadDataUnavailable} for any typed row. Connect a SCADA client (UaExpert, FUXA, Ignition) and read a metric variable. Expected \texttt{DataValue.value} per \texttt{MetricType} variant: see the mapping table in \hyperref[sec-application-config]{Applications, devices, and metrics (bootstrap seed)}.
+\item
+  (Path A only) Legacy rows clear within one poll interval. Re-read the same metric a poll interval later; if it previously returned \texttt{BadDataUnavailable}, it now returns the freshly UPSERTed typed payload.
+\end{enumerate}
+
+\section{SLA Expectation}\label{sec-upgrade-sla}
+
+For typical residential / small-scale deployments (≤10k rows per table, ≤10 MB total database size), the v007 + v008 migrations complete in \emph{under 5 seconds}. This SLA is pinned by regression tests (\texttt{test\_v006\_to\_v008\_full\_upgrade\_path\_under\_5s} and per-migration siblings).
+
+For larger databases (≥100 MB, typically ≥500k historical rows), v008\textquotesingle s \texttt{CREATE\ TABLE\ …\ AS\ SELECT} pattern is the dominant cost and scales roughly linearly with row count. \emph{Expect a multi-minute startup delay on the first upgrade run} --- the gateway appears unresponsive (OPC UA port not yet bound) until the migration completes. The auto-migration is synchronous before the OPC UA server binds its port --- operator-visible behaviour is "the gateway takes longer than usual to start the first time after upgrading", which is expected and not a defect.
+
+\section{Common Gotchas}\label{sec-upgrade-gotchas}
+
+The full list with examples lives in \texttt{docs/deployment-guide.md\ §\ "Common\ gotchas"}. The six pitfalls operators most commonly hit:
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\item
+  Legacy rows look like "missing data" in the web dashboard and as \texttt{BadDataUnavailable} in OPC UA Reads --- \emph{for one poll interval only}. Wait one cycle.
+\item
+  The \texttt{metric\_history} table is migrated the same way as \texttt{metric\_values}. Legacy rows surface in HistoryRead responses as \texttt{DataValue\ \{\ value:\ None,\ status:\ BadDataUnavailable\ \}} --- NOT silently dropped.
+\item
+  New audit events may fire on first startup. v2.0 introduced five \texttt{event="metric\_*"} audit lines; if a v006 database happens to contain legacy non-finite rows, the defensive guards emit warns. Operator- actionable but not blocking.
+\item
+  \texttt{run\_migrations()} is idempotent. Re-running the v2.0 binary against a v007 or v008 database is a no-op.
+\item
+  v008\textquotesingle s \texttt{CREATE\ TABLE\ …\ AS\ SELECT} is \texttt{BEGIN/COMMIT}-wrapped. A process kill mid-v008 leaves the database in a consistent v007 state; restart the gateway and v008 retries.
+\item
+  Docker bind mounts preserve \texttt{opcgw.db} across container replacement --- Path A "just works" with the standard \texttt{docker\ compose\ pull\ \&\&\ docker\ compose\ up\ -d} workflow because the database file lives on the host. Path B requires \texttt{rm\ ./opcgw.db\ ./opcgw.db-wal\ ./opcgw.db-shm} in the host-side bind-mount directory (avoid the \texttt{opcgw.db*} glob).
+\end{enumerate}
+
+\appendix
+
+\chapter{Configuration Reference}\label{app-config-reference}
+
+Quick-lookup table for every TOML key. See \hyperref[ch-configuration]{Configuration} for narrative descriptions and examples.
+
+\begin{longtable}[]{@{}llll@{}}
+\caption{Configuration keys}\tabularnewline
+\toprule\noalign{}
+Section.Key & Type & Default & Override \\
+\midrule\noalign{}
+\endfirsthead
+\toprule\noalign{}
+Section.Key & Type & Default & Override \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+\texttt{global.debug} & bool & \texttt{false} & \texttt{OPCGW\_GLOBAL\_\_DEBUG} \\
+\texttt{logging.dir} & path & \texttt{./log} & \texttt{OPCGW\_LOG\_DIR}, \texttt{OPCGW\_LOGGING\_\_DIR} \\
+\texttt{logging.level} & enum & \texttt{info} & \texttt{OPCGW\_LOG\_LEVEL}, \texttt{OPCGW\_LOGGING\_\_LEVEL}, CLI \texttt{-d} \\
+\texttt{chirpstack.server\_address} & URL & --- & \texttt{OPCGW\_CHIRPSTACK\_\_SERVER\_ADDRESS} \\
+\texttt{chirpstack.api\_token} & string & --- & \texttt{OPCGW\_CHIRPSTACK\_\_API\_TOKEN} \\
+\texttt{chirpstack.tenant\_id} & UUID & --- & \texttt{OPCGW\_CHIRPSTACK\_\_TENANT\_ID} \\
+\texttt{chirpstack.polling\_frequency} & seconds & \texttt{10} & \texttt{OPCGW\_CHIRPSTACK\_\_POLLING\_FREQUENCY} \\
+\texttt{chirpstack.retry} & int & \texttt{10} & \texttt{OPCGW\_CHIRPSTACK\_\_RETRY} \\
+\texttt{chirpstack.delay} & seconds & \texttt{10} & \texttt{OPCGW\_CHIRPSTACK\_\_DELAY} \\
+\texttt{chirpstack.list\_page\_size} & int & \texttt{100} & \texttt{OPCGW\_CHIRPSTACK\_\_LIST\_PAGE\_SIZE} \\
+\texttt{opcua.application\_name} & string & --- & --- \\
+\texttt{opcua.application\_uri} & URI & --- & --- \\
+\texttt{opcua.product\_uri} & URI & --- & --- \\
+\texttt{opcua.diagnostics\_enabled} & bool & \texttt{false} & \texttt{OPCGW\_OPCUA\_\_DIAGNOSTICS\_ENABLED} \\
+\texttt{opcua.host\_ip\_address} & IP & first interface & \texttt{OPCGW\_OPCUA\_\_HOST\_IP\_ADDRESS} \\
+\texttt{opcua.host\_port} & port & \texttt{4840} & \texttt{OPCGW\_OPCUA\_\_HOST\_PORT} \\
+\texttt{opcua.create\_sample\_keypair} & bool & \texttt{false} & --- \\
+\texttt{opcua.certificate\_path} & path & --- & --- \\
+\texttt{opcua.private\_key\_path} & path & --- & --- \\
+\texttt{opcua.trust\_client\_cert} & bool & \texttt{false} & --- \\
+\texttt{opcua.check\_cert\_time} & bool & \texttt{true} & --- \\
+\texttt{opcua.pki\_dir} & path & \texttt{./pki} & --- \\
+\texttt{opcua.user\_name} & string & --- & \texttt{OPCGW\_OPCUA\_\_USER\_NAME} \\
+\texttt{opcua.user\_password} & string & --- & \texttt{OPCGW\_OPCUA\_\_USER\_PASSWORD} \\
+\texttt{opcua.stale\_threshold\_seconds} & seconds & \texttt{120} & \texttt{OPCGW\_OPCUA\_\_STALE\_THRESHOLD\_SECONDS} \\
+\texttt{opcua.max\_connections} & int & \texttt{10} & \texttt{OPCGW\_OPCUA\_\_MAX\_CONNECTIONS} \\
+\texttt{opcua.max\_subscriptions\_per\_session} & int & \texttt{10} & \texttt{OPCGW\_OPCUA\_\_MAX\_SUBSCRIPTIONS\_PER\_SESSION} \\
+\texttt{opcua.max\_monitored\_items\_per\_sub} & int & \texttt{1000} & \texttt{OPCGW\_OPCUA\_\_MAX\_MONITORED\_ITEMS\_PER\_SUB} \\
+\texttt{opcua.max\_message\_size} & bytes & \texttt{327675} & \texttt{OPCGW\_OPCUA\_\_MAX\_MESSAGE\_SIZE} \\
+\texttt{opcua.max\_chunk\_count} & int & \texttt{5} & \texttt{OPCGW\_OPCUA\_\_MAX\_CHUNK\_COUNT} \\
+\texttt{opcua.max\_history\_data\_results\_per\_node} & int & \texttt{10000} & \texttt{OPCGW\_OPCUA\_\_MAX\_HISTORY\_DATA\_RESULTS\_PER\_NODE} \\
+\texttt{web.enabled} & bool & \texttt{false} & \texttt{OPCGW\_WEB\_\_ENABLED} \\
+\texttt{web.port} & port & \texttt{8080} & \texttt{OPCGW\_WEB\_\_PORT} \\
+\texttt{web.bind\_address} & IP & \texttt{0.0.0.0} & \texttt{OPCGW\_WEB\_\_BIND\_ADDRESS} \\
+\texttt{web.auth\_realm} & string & \texttt{opcgw} & \texttt{OPCGW\_WEB\_\_AUTH\_REALM} \\
+\texttt{web.allowed\_origins} & list of URLs & \texttt{{[}"http://\textless{}bind\textgreater{}:\textless{}port\textgreater{}"{]}} & --- \\
+\texttt{command\_delivery.status\_poll\_interval\_secs} & seconds & \texttt{5} & --- \\
+\texttt{command\_delivery.confirmation\_timeout\_secs} & seconds & \texttt{60} & --- \\
+\texttt{command\_delivery.timeout\_check\_interval\_secs} & seconds & \texttt{10} & --- \\
+\texttt{command\_delivery.history\_retention\_days} & days & \texttt{7} & --- \\
+\end{longtable}
+
+\chapter{Environment Variable Reference}\label{app-env-reference}
+
+All environment variables use the \texttt{OPCGW\_} prefix, with \texttt{\_\_} (double underscore) separating nested configuration keys. They are set in the \texttt{.env} file and override the corresponding configuration value --- environment variables always win.
+
+\begin{longtable}[]{@{}lll@{}}
+\caption{Environment variables}\tabularnewline
+\toprule\noalign{}
+Variable & Purpose & Default \\
+\midrule\noalign{}
+\endfirsthead
+\toprule\noalign{}
+Variable & Purpose & Default \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+\multicolumn{3}{@{}c@{}}{%
+\textbf{Required (secrets)}} \\
+\texttt{OPCGW\_CHIRPSTACK\_\_API\_TOKEN} & ChirpStack API token (list/read permissions for your tenant) & required, no default \\
+\texttt{OPCGW\_OPCUA\_\_USER\_PASSWORD} & OPC UA + web UI login password & required, no default \\
+\multicolumn{3}{@{}c@{}}{%
+\textbf{ChirpStack}} \\
+\texttt{OPCGW\_CHIRPSTACK\_\_SERVER\_ADDRESS} & ChirpStack gRPC endpoint (host:port) & --- \\
+\texttt{OPCGW\_CHIRPSTACK\_\_LIST\_PAGE\_SIZE} & page size for paged ChirpStack list calls & 100 \\
+\texttt{OPCGW\_CHIRPSTACK\_\_INVENTORY\_CACHE\_TTL\_SECONDS} & how long discovered inventory is cached & 60 \\
+\texttt{OPCGW\_CHIRPSTACK\_\_INVENTORY\_UPLINK\_MAX\_WAIT\_SECONDS} & max wait for a device uplink during discovery & 5 \\
+\multicolumn{3}{@{}c@{}}{%
+\textbf{OPC UA}} \\
+\texttt{OPCGW\_OPCUA\_\_USER\_NAME} & OPC UA + web UI login user name & opcua-user \\
+\texttt{OPCGW\_OPCUA\_\_HOST\_PORT} & OPC UA listen port (if you change it, publish the same port in \texttt{docker-compose.yml}) & 4840 \\
+\texttt{OPCGW\_OPCUA\_\_MAX\_CONNECTIONS} & max concurrent OPC UA sessions & 10 \\
+\texttt{OPCGW\_OPC\_UA\_STALE\_THRESHOLD\_SECONDS} & age after which a value is flagged stale & 120 \\
+\texttt{OPCGW\_OPCUA\_\_MAX\_HISTORY\_DATA\_RESULTS\_PER\_NODE} & cap on rows returned per HistoryRead call & 10000 \\
+\texttt{OPCGW\_OPCUA\_\_MAX\_SUBSCRIPTIONS\_PER\_SESSION} & subscription shaping limit & 10 \\
+\texttt{OPCGW\_OPCUA\_\_MAX\_MONITORED\_ITEMS\_PER\_SUB} & subscription shaping limit & 1000 \\
+\texttt{OPCGW\_OPCUA\_\_MAX\_MESSAGE\_SIZE} & OPC UA message-size limit & 327675 \\
+\texttt{OPCGW\_OPCUA\_\_MAX\_CHUNK\_COUNT} & OPC UA chunk-count limit & 5 \\
+\multicolumn{3}{@{}c@{}}{%
+\textbf{Web UI}} \\
+\texttt{OPCGW\_WEB\_\_ENABLED} & enable the web UI & true \\
+\texttt{OPCGW\_WEB\_\_PORT} & web UI port & 8080 \\
+\texttt{OPCGW\_WEB\_\_BIND\_ADDRESS} & web UI bind address & 0.0.0.0 \\
+\texttt{OPCGW\_WEB\_\_AUTH\_REALM} & HTTP Basic auth realm string & opcgw \\
+\multicolumn{3}{@{}c@{}}{%
+\textbf{Logging / general}} \\
+\texttt{OPCGW\_LOG\_LEVEL} & log verbosity: error\textbar warn\textbar info\textbar debug\textbar trace & info \\
+\texttt{OPCGW\_LOG\_DIR} & directory for log files & ./log \\
+\texttt{OPCGW\_CONFIG\_PATH} & path to the bootstrap config.toml & config/config.toml \\
+\end{longtable}
+
+The two required secret values are never written to SQLite; they are read only from the environment (or from \texttt{config/secrets.toml}).
+
+\chapter{OPC UA Address Space}\label{app-opcua-address-space}
+
+Browsing the configured root yields:
+
+\begin{lstlisting}
+Objects/
+└── opcgw/
+    ├── Gateway/
+    │   ├── LastPollTimestamp     (String, RFC 3339 or NULL)
+    │   ├── error_count           (Int32)
+    │   └── chirpstack_available  (Boolean)
+    └── <application_name>/        (one folder per [[application]])
+        └── <device_name>/         (one folder per [[application.device]])
+            ├── <metric_name>       (Variant per [[..read_metric]].metric_type)
+            └── <command_name>      (writable, per [[..command]])
+\end{lstlisting}
+
+Every read returns a \texttt{StatusCode}. For uplink metrics it is derived from the metric\textquotesingle s age (Good / Uncertain / Bad). For Gateway-folder reads it is always \texttt{Good}, except that \texttt{LastPollTimestamp} may be \texttt{NULL} (still reported with \texttt{Good} status --- the \texttt{NULL} value itself is the signal).
+
+\chapter{Operation Names}\label{app-operation-names}
+
+Routine operational log lines carry an \texttt{operation\ =\ "\textless{}name\textgreater{}"} field. The table below is a quick lookup of the most common names and where they come from.
+
+\begin{longtable}[]{@{}lll@{}}
+\caption{Common operation names}\tabularnewline
+\toprule\noalign{}
+Operation & Emitted by & Level \\
+\midrule\noalign{}
+\endfirsthead
+\toprule\noalign{}
+Operation & Emitted by & Level \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+\texttt{poll\_cycle\_start} & poller, every cycle & \texttt{info} \\
+\texttt{device\_polled} & poller, per device & \texttt{debug} \\
+\texttt{device\_poll} & poller, on per-device failure & \texttt{warn} \\
+\texttt{chirpstack\_connect} & poller, gRPC channel and probe paths & \texttt{info} / \texttt{warn} \\
+\texttt{chirpstack\_request} & poller, on transport errors (deadline / unavailable / cancelled) & \texttt{warn} \\
+\texttt{chirpstack\_outage} & poller, first per-cycle ChirpStack failure & \texttt{warn} \\
+\texttt{error\_spike} & poller, when error\_count delta ≥ 5 & \texttt{warn} \\
+\texttt{retry\_schedule} & poller, on TCP probe retry & \texttt{info} \\
+\texttt{metric\_parse} & poller, invalid boolean encoding & \texttt{warn} \\
+\texttt{batch\_write} & poller, every batch flush & \texttt{debug} / \texttt{warn} \\
+\texttt{storage\_query} & storage layer, every query & \texttt{debug} / \texttt{warn} \\
+\texttt{txn\_begin}, \texttt{txn\_commit}, \texttt{txn\_rollback} & storage layer, transaction boundaries & \texttt{trace} \\
+\texttt{opc\_ua\_read} & OPC UA server, every metric read & \texttt{info} span \\
+\texttt{staleness\_check} & OPC UA server, every metric read & \texttt{debug} \\
+\texttt{staleness\_transition} & OPC UA server, on status code change & \texttt{info} (\texttt{debug} on first observation) \\
+\texttt{staleness\_boundary} & OPC UA server, ±5 s of threshold & \texttt{debug} \\
+\texttt{health\_metric\_read} & OPC UA server, Gateway folder reads & \texttt{debug} (\texttt{warn} on no-data-yet) \\
+\texttt{gateway\_status\_init} & OPC UA server, first uninitialised read & \texttt{info} (once per process) \\
+\end{longtable}
+
+The complete reference, including expected fields and remediation tips, lives in \texttt{docs/logging.md}.
+
+Reserved operation names (planned for a future release, not yet emitted):
+
+\begin{itemize}
+\item
+  \texttt{recovery\_attempt}, \texttt{recovery\_complete}, \texttt{recovery\_failed} --- auto-recovery from ChirpStack outages.
+\end{itemize}
+
+\chapter{Audit and Diagnostic Events}\label{app-audit-events}
+
+Security-relevant audit lines and one-shot diagnostic lines carry an \texttt{event=} field (rather than the \texttt{operation=} field used by routine operational lines), which makes them easy to filter with \texttt{grep\ \textquotesingle{}event="..."\textquotesingle{}\ log/*.log}. The table below indexes the event names; the full reference (per-event \texttt{reason=} values, field schemas, and severity) lives in \texttt{docs/logging.md} and \texttt{docs/security.md}.
+
+\begin{longtable}[]{@{}lll@{}}
+\caption{Audit and diagnostic events}\tabularnewline
+\toprule\noalign{}
+event= & Level & Meaning \\
+\midrule\noalign{}
+\endfirsthead
+\toprule\noalign{}
+event= & Level & Meaning \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+\texttt{opcua\_auth\_failed} & warn (audit) & OPC UA authentication failure \\
+\texttt{opcua\_session\_count} & info (diag) & session-count gauge, every 5 s \\
+\texttt{opcua\_session\_count\_at\_limit} & warn (audit) & session rejected at the configured cap \\
+\texttt{opcua\_limits\_configured} & info (diag) & startup echo of subscription / message-size limits \\
+\texttt{nfr12\_correlation\_check} & warn (one-shot) & log level below info weakens source-IP correlation for auth failures \\
+\texttt{web\_server\_started} & info (diag) & web server bound and listening \\
+\texttt{web\_auth\_failed} & warn (audit) & web UI Basic-auth failure (\texttt{reason} ∈ missing, malformed\_scheme, malformed\_base64, missing\_colon, user\_mismatch, password\_mismatch) \\
+\texttt{application\_*} / \texttt{device\_*} / \texttt{command\_*} (created / updated / deleted / \texttt{*\_crud\_rejected}) & info / warn (audit) & configuration CRUD mutations and validation rejections \\
+\texttt{topology\_change\_detected} & info (diag) & a change that adds or removes applications / devices / metrics / commands \\
+\texttt{address\_space\_mutation\_succeeded} / \texttt{address\_space\_mutation\_failed} & info / warn (audit) & OPC UA address-space runtime mutation outcome \\
+\texttt{metric\_parse} & warn & poller-side payload conversion (\texttt{reason} ∈ invalid\_bool, non\_finite, int\_overflow) \\
+\texttt{metric\_read} & info / warn & OPC UA read value narrowing (\texttt{reason} ∈ no\_payload, narrowing\_overflow, narrowing\_underflow) \\
+\texttt{metric\_history\_read} & warn & OPC UA HistoryRead per-row conversion (\texttt{reason} ∈ schema\_drift, unparseable\_timestamp, narrowing\_overflow, narrowing\_underflow) \\
+\texttt{metric\_history\_summary} & trace & aggregate skip counts per HistoryRead call \\
+\texttt{metric\_view\_serialize} & debug / warn / info & web-layer JSON serialization (\texttt{reason} ∈ non\_finite, int\_precision\_lossy) \\
+\texttt{picker\_opened} / \texttt{picker\_manual\_fallback} / \texttt{picker\_audit\_rejected} & info / warn (audit) & web-UI inventory picker activity and fallbacks \\
+\texttt{drift\_view\_opened} / \texttt{drift\_action} / \texttt{drift\_dismissed} & info (audit) & inventory drift view activity and operator decisions \\
+\texttt{config\_toml\_unused\_warning} & warn (diag) & config.toml present on disk but SQLite is now authoritative \\
+\end{longtable}
+
+The response returned to a client never depends on whether an audit event fired --- a failure that records \texttt{event="...\_failed"} returns the same status and headers regardless of the internal \texttt{reason}. The distinction exists only in the audit log, for forensic purposes.
+
+\chapter{Glossary}\label{app-glossary}
+
+\begin{description}
+\item[ChirpStack]
+Open-source LoRaWAN Network Server that manages devices and collects metrics.
+\item[DashMap]
+Sharded concurrent hash map used by opcgw\textquotesingle s OPC UA server to track per-metric staleness state without serialising reads on a single mutex.
+\item[DevEUI]
+Globally unique 64-bit identifier for a LoRaWAN end-device, used as the \texttt{device\_id} in opcgw configuration.
+\item[Gateway folder]
+Synthetic OPC UA folder under the configured root containing the gateway\textquotesingle s own health metrics (\texttt{LastPollTimestamp}, \texttt{error\_count}, \texttt{chirpstack\_available}).
+\item[gRPC]
+Remote-procedure-call framework built on HTTP/2 used by ChirpStack\textquotesingle s API.
+\item[LoRaWAN]
+Long-Range Wide-Area Network protocol for low-power IoT devices.
+\item[OPC UA]
+OPC Unified Architecture, a machine-to-machine communication standard for industrial automation.
+\item[\texttt{request\_id}]
+Per-OPC-UA-read UUID v4 emitted as a tracing-span field; all log lines emitted while the span is active inherit it, enabling end-to-end correlation by simple \texttt{grep}.
+\item[SCADA]
+Supervisory Control and Data Acquisition system for monitoring and controlling industrial processes.
+\item[SQLite WAL mode]
+Write-Ahead Logging journaling mode that allows multiple readers to operate concurrently with a single writer. opcgw enables WAL at startup; it is the foundation of the lock-free read path.
+\item[\texttt{StatusCode}]
+OPC UA per-read status indicator. opcgw maps metric freshness to \texttt{Good}, \texttt{Uncertain}, or \texttt{Bad}.
+\item[\texttt{tracing}]
+The Rust crate providing structured, span-aware logging. opcgw emits all log output through it.
+\item[WAL]
+Write-Ahead Log --- see SQLite WAL mode.
+\end{description}

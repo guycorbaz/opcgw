@@ -1,0 +1,35 @@
+% main.tex — opcgw User Manual (LaTeX edition). Build with: lualatex (via build.sh / latexmk).
+% Migrated from DocBook (GH #145). Body is generated into body.tex by build.sh (pandoc).
+\documentclass[11pt,a4paper,twoside,openright,parskip=half,DIV=12,numbers=noenddot]{scrbook}
+
+\input{preamble}
+\input{version} % defines \opcgwversion (generated from Cargo.toml by build.sh)
+\providecommand{\opcgwversion}{}
+
+\begin{document}
+\frontmatter
+
+% ---- Title page -----------------------------------------------------------
+\begin{titlepage}
+  \centering
+  \vspace*{2.2cm}
+  \IfFileExists{figures/opcgw-horizontal.pdf}
+    {\includegraphics[width=0.55\textwidth]{figures/opcgw-horizontal.pdf}}{}\\[2.4cm]
+  {\sffamily\bfseries\fontsize{40}{44}\selectfont\color{opcgwprimary} opcgw User Manual\par}
+  \vspace{0.7cm}
+  {\sffamily\Large\color{opcgwdark} A ChirpStack\,$\rightarrow$\,OPC UA Gateway for Industrial Automation\par}
+  \vspace{1.6cm}
+  {\color{opcgwaccent}\rule{0.5\textwidth}{1.5pt}}\\[1.2cm]
+  {\sffamily\large Version~\opcgwversion\par}
+  \vfill
+  {\sffamily\large Guy Corbaz\par}
+  \vspace{0.3cm}
+  {\sffamily\color{rulegray} \today\par}
+\end{titlepage}
+
+\tableofcontents
+
+\mainmatter
+\input{body}
+
+\end{document}

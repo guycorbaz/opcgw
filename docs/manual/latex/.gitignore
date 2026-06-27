@@ -1,0 +1,13 @@
+# Generated at build time (do not commit) — figures derive from ../../images & ../../logo
+version.tex
+figures/
+# LaTeX build artifacts
+*.aux
+*.log
+*.toc
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+main.pdf
+opcgw-user-manual.pdf

@@ -37,5 +37,16 @@ config/secrets.toml
 # PKI (can be regenerated)
 pki/
 
-# DocBook manual rendered outputs — regeneratable via `make` in docs/manual/
+# User-manual build artifacts — regeneratable via `make pdf` in docs/manual/
+# (LaTeX edition; per-dir rules also in docs/manual/latex/.gitignore)
 docs/manual/out/
+docs/manual/latex/figures/
+docs/manual/latex/version.tex
+docs/manual/latex/*.aux
+docs/manual/latex/*.log
+docs/manual/latex/*.toc
+docs/manual/latex/*.out
+docs/manual/latex/*.fls
+docs/manual/latex/*.fdb_latexmk
+docs/manual/latex/main.pdf
+docs/manual/latex/opcgw-user-manual.pdf

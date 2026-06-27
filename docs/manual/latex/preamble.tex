@@ -1,0 +1,175 @@
+% preamble.tex — modern LaTeX style for the opcgw User Manual (LuaLaTeX + KOMA-Script).
+% Part of the DocBook → LaTeX migration (GH #145). Engine: lualatex.
+
+% ---------------------------------------------------------------------------
+% Fonts (fontspec / LuaLaTeX): modern sans headings + serif body + JetBrains mono.
+% ---------------------------------------------------------------------------
+\usepackage{fontspec}
+\usepackage{amssymb}
+\usepackage{microtype}
+\defaultfontfeatures{Ligatures=TeX}
+\setmainfont{Noto Serif}[Scale=1.0]
+\setsansfont{Lato}[Scale=1.02]
+\setmonofont{DejaVu Sans Mono}[Scale=0.82]
+
+% ---------------------------------------------------------------------------
+% Brand palette.
+% ---------------------------------------------------------------------------
+\usepackage{xcolor}
+\definecolor{opcgwprimary}{HTML}{0B5FA5} % deep blue
+\definecolor{opcgwaccent}{HTML}{12A594}  % teal accent
+\definecolor{opcgwdark}{HTML}{1B2733}    % near-black slate
+\definecolor{codeback}{HTML}{F6F8FA}     % light code background
+\definecolor{codeframe}{HTML}{D0D7DE}    % code border
+\definecolor{rulegray}{HTML}{8C959F}     % table rules
+\definecolor{admnote}{HTML}{0969DA}      % note  (blue)
+\definecolor{admwarn}{HTML}{CF222E}      % warning (red)
+\definecolor{admimp}{HTML}{BC4C00}       % important (amber)
+
+% ---------------------------------------------------------------------------
+% Heading styles — sans, coloured, modern. (KOMA-native, no titlesec.)
+% ---------------------------------------------------------------------------
+\addtokomafont{disposition}{\sffamily}
+\setkomafont{chapter}{\sffamily\bfseries\Huge\color{opcgwprimary}}
+\setkomafont{section}{\sffamily\bfseries\Large\color{opcgwdark}}
+\setkomafont{subsection}{\sffamily\bfseries\large\color{opcgwdark}}
+\setkomafont{subsubsection}{\sffamily\bfseries\normalsize\color{opcgwdark}}
+\setkomafont{descriptionlabel}{\sffamily\bfseries\color{opcgwdark}}
+\KOMAoptions{chapterprefix=false}
+\renewcommand*{\chapterformat}{%
+  {\fontsize{54}{54}\selectfont\color{opcgwaccent}\thechapter}\hspace{0.4em}}
+\renewcommand*{\chapterlinesformat}[3]{%
+  #2#3%
+  \par\nobreak\vspace{0.3em}%
+  {\color{opcgwaccent}\rule{\linewidth}{1.2pt}}}
+
+% Running headers / footers.
+\usepackage[automark,headsepline]{scrlayer-scrpage}
+\clearpairofpagestyles
+\automark[section]{chapter}
+\setkomafont{pagehead}{\small\sffamily\color{opcgwdark}}
+\setkomafont{pagenumber}{\sffamily\bfseries\color{opcgwprimary}}
+\ohead{\pagemark}
+\ihead{\headmark}
+
+% ---------------------------------------------------------------------------
+% Lists.
+% ---------------------------------------------------------------------------
+\usepackage{enumitem}
+\setlist{itemsep=2pt,topsep=4pt,parsep=0pt}
+
+% ---------------------------------------------------------------------------
+% Tables (pandoc emits longtable + booktabs).
+% ---------------------------------------------------------------------------
+\usepackage{longtable,booktabs,array,calc,colortbl}
+\renewcommand{\arraystretch}{1.25}
+\arrayrulecolor{rulegray}
+
+% ---------------------------------------------------------------------------
+% Code listings (pandoc --listings → lstlisting).
+% ---------------------------------------------------------------------------
+\usepackage{listings}
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codeback},
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color{codeframe},
+  framesep=7pt,
+  xleftmargin=11pt,
+  xrightmargin=4pt,
+  breaklines=true,
+  breakatwhitespace=false,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  upquote=true,
+  extendedchars=true,
+  aboveskip=1em,belowskip=1em,
+  % Box-drawing chars kept as real glyphs (DejaVu Sans Mono has them); other
+  % non-ASCII mapped to safe equivalents so listings never chokes (GH #145).
+  literate=%
+    {─}{{\char"2500}}1 {│}{{\char"2502}}1 {├}{{\char"251C}}1 {└}{{\char"2514}}1
+    {→}{{$\rightarrow$}}1 {∈}{{$\in$}}1 {≈}{{$\approx$}}1 {×}{{$\times$}}1
+    {≤}{{$\leq$}}1 {≥}{{$\geq$}}1 {±}{{$\pm$}}1 {…}{{\ldots}}1
+    {↻}{{$\circlearrowright$}}1 {§}{{\S}}1 {µ}{{$\mu$}}1
+    {—}{{---}}1 {–}{{--}}1
+}
+
+% ---------------------------------------------------------------------------
+% Captions.
+% ---------------------------------------------------------------------------
+\usepackage[font=small,labelfont={sf,bf,color=opcgwprimary}]{caption}
+
+% ---------------------------------------------------------------------------
+% Admonitions (tcolorbox). One environment, colour + title passed in.
+% ---------------------------------------------------------------------------
+\usepackage{tcolorbox}
+\tcbuselibrary{skins,breakable,listings}
+\newtcolorbox{admonition}[2]{%
+  enhanced,breakable,
+  colback=#1!4,colframe=#1,coltitle=white,
+  fonttitle=\sffamily\bfseries\small,
+  title={#2},
+  boxrule=0.9pt,arc=2pt,
+  left=9pt,right=9pt,top=8pt,bottom=8pt,
+  attach boxed title to top left={xshift=10pt,yshift=-\tcboxedtitleheight/2},
+  boxed title style={colback=#1,arc=1pt,boxrule=0pt,left=5pt,right=5pt},
+  before skip=12pt,after skip=12pt,
+}
+
+% ---------------------------------------------------------------------------
+% Graphics + pandoc shims.
+% ---------------------------------------------------------------------------
+\usepackage{graphicx}
+\usepackage{etoolbox}
+\newcommand{\passthrough}[1]{#1}
+\providecommand{\tightlist}{\setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\providecommand{\real}[1]{#1}
+\makeatletter
+\newsavebox\pandoc@box
+\newcommand*\pandocbounded[1]{% scale to fit text height/width, never upscale
+  \sbox\pandoc@box{#1}%
+  \Gscale@div\@tempa{\textheight}{\dimexpr\ht\pandoc@box+\dp\pandoc@box\relax}%
+  \Gscale@div\@tempb{\linewidth}{\wd\pandoc@box}%
+  \ifdim\@tempb\p@<\@tempa\p@\let\@tempa\@tempb\fi
+  \ifdim\@tempa\p@<\p@\scalebox{\@tempa}{\usebox\pandoc@box}%
+  \else\usebox\pandoc@box\fi}
+\makeatother
+
+% ---------------------------------------------------------------------------
+% Hyperlinks (load late) + PDF bookmarks.
+% ---------------------------------------------------------------------------
+\usepackage{xurl}
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=opcgwprimary,
+  urlcolor=opcgwaccent,
+  citecolor=opcgwprimary,
+  bookmarksnumbered=true,
+  pdftitle={opcgw User Manual},
+  pdfauthor={Guy Corbaz},
+  pdfsubject={ChirpStack to OPC UA Gateway},
+}
+\usepackage{bookmark}
+
+% ---------------------------------------------------------------------------
+% Unicode symbols in prose (mapped to glyphs the body font may lack).
+% ---------------------------------------------------------------------------
+\usepackage{newunicodechar}
+\newunicodechar{→}{\ensuremath{\rightarrow}}
+\newunicodechar{←}{\ensuremath{\leftarrow}}
+\newunicodechar{∈}{\ensuremath{\in}}
+\newunicodechar{≈}{\ensuremath{\approx}}
+\newunicodechar{×}{\ensuremath{\times}}
+\newunicodechar{≤}{\ensuremath{\leq}}
+\newunicodechar{≥}{\ensuremath{\geq}}
+\newunicodechar{±}{\ensuremath{\pm}}
+\newunicodechar{↻}{\ensuremath{\circlearrowright}}
+\newunicodechar{…}{\ldots}
+\newunicodechar{µ}{\textmu}
+\newunicodechar{─}{\char"2500}
+\newunicodechar{│}{\char"2502}
+\newunicodechar{├}{\char"251C}
+\newunicodechar{└}{\char"2514}

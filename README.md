@@ -177,15 +177,14 @@ docker compose up -d
 
 ### Documentation
 
-The complete operator-facing user manual lives at [`docs/manual/opcgw-user-manual.xml`](./docs/manual/opcgw-user-manual.xml) (DocBook 4.5 XML). Build it to HTML or PDF via the bundled Makefile:
+The complete operator-facing user manual is authored in **LaTeX** under [`docs/manual/latex/`](./docs/manual/latex/) (edit `body.tex` for content, `preamble.tex` for styling). Build the polished PDF via the bundled Makefile:
 
 ```bash
 cd docs/manual
-make html     # → docs/manual/out/html/index.html
-make pdf      # → docs/manual/out/opcgw-user-manual.pdf
+make pdf      # → docs/manual/latex/opcgw-user-manual.pdf
 ```
 
-Prerequisites: `xsltproc` for HTML; `dblatex` (or `fop`) for PDF. See [`docs/manual/README.md`](./docs/manual/README.md) for build details.
+Prerequisites: a LuaLaTeX TeX Live install plus `graphviz` and `mupdf-tools` for the figures. See [`docs/manual/README.md`](./docs/manual/README.md) for build details. (The manual was migrated from DocBook to LaTeX in 2026-06; LaTeX is now the canonical format.)
 
 Additional reference docs:
 
