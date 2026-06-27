@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] — unreleased — Web UX & Usability (Epic G, in progress)
+
+> **Status:** in development. `v2.4.0-rc1` is an early release candidate cut to
+> trial the new drill-down configuration UI in production; Docker image
+> `gcorbaz/opcgw:2.4.0-rc1` (multi-arch, GHCR mirror) is published from the rc
+> tag and does **not** move the `:2.4` / `:latest` tags. Further Epic G stories
+> (G-1..G-4) land before the stable `2.4.0` tag.
+
+### Added / changed
+- **G-0 — Drill-down configuration UI** ([#139](https://github.com/guycorbaz/opcgw/issues/139)).
+  The three flat web pages (Applications, Devices configuration, Commands) are
+  consolidated into a single **Configuration** page (`/config.html`) that
+  presents the setup as a hierarchy — **Application → Device → Metrics/Commands**
+  — with a breadcrumb and deep-linkable, reload-safe `location.hash` routing.
+  The top navigation collapses those three links into one **Configuration**
+  entry; the retired pages become redirect stubs (existing bookmarks and drift
+  deep-links still resolve). Frontend-only: every create/read/update/delete
+  reuses the existing staged-apply endpoints unchanged (no API or schema
+  change), and the ChirpStack inventory pickers / "Apply changes" affordance
+  carry over. No build step / framework / `node_modules` added.
+
 ## [2.3.2] — 2026-06-26 — storage hardening
 
 > **Status:** release prep — version bumped and notes finalized; `v2.3.2` tag
