@@ -1,6 +1,6 @@
 # Story G.0: Drill-Down Configuration Navigation
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -147,3 +147,27 @@ claude-opus-4-8[1m] (Opus 4.8, 1M context)
 ### Change Log
 
 - 2026-06-27: Implemented G-0 — consolidated applications/devices-config/commands flat pages into the `/config.html` drill-down (Application → Device → Metrics/Commands), frontend-only, reusing existing staged-apply endpoints + opcgwPicker. Status → review.
+- 2026-06-27: Code review (3 adversarial layers + mandatory iter-2). 0 HIGH. iter-1 fixed 3 MEDIUM + 3 LOW (see review section); iter-2 verified all six fixes correct, no new defects, only 2 harmless LOW remain. Loop terminated (LOW-only). Gates re-run green. Status → done.
+
+## Senior Developer Review (AI)
+
+**Date:** 2026-06-27 · **Reviewer model:** claude-opus-4-8[1m] (3 parallel layers: Blind Hunter / Edge Case Hunter / Acceptance Auditor) · **Outcome:** Approved (loop terminated — only LOW findings remain).
+
+**Acceptance Auditor:** all 10 ACs MET; every named anti-pattern avoided (0 `src/web/*.rs` changes; `/api/config/apply` never called from config.js; Live Metrics not folded in; no `<nav` in static/*.html; no package.json/node_modules). One MEDIUM = the AC-7 test-deviation (served-asset smoke tests in the 3 CRUD suites retargeted to config.{html,js} because the old pages became redirect stubs) — assessed unavoidable + inherent to client-rendering; the `.js` asset tests still assert their resource endpoints; **accepted** (test-only, no production risk).
+
+**iter-1 fixes (3 MEDIUM + 3 LOW):**
+- [Med] Command create/edit/delete called global `render()` → discarded unsaved Metrics-panel edits on the shared device-detail screen → threaded a `refreshCmds` callback that re-renders ONLY the commands table.
+- [Med] Command-edit `<dialog>` leaked on Escape and orphaned over the view on hash-nav → added a `close`-event remover + a `render()` teardown of any open `dialog.modal[open]`.
+- [Med] App deep-link prefill re-fired on every picker reload (refresh/toggle/post-create) → duplicate-create risk → consume-once via module flag `appPrefillConsumed`.
+- [Low] `parseHash` could throw `URIError` on a malformed hash → `safeDecode` wrapper.
+- [Low] Stale breadcrumb on a failed load → provisional breadcrumb set before the awaits.
+- [Low] Dead `prefill.name` reference removed; command create-form now clears its fields after success.
+
+**iter-2 re-review (mandatory — iter-1 added new flow-control):** all six fixes verified correct (self-referential `refreshCmds` has no TDZ/hoist hazard; dialog teardown can't double-free — `close` event is async, `remove()` on a detached node is a no-op; `appPrefillConsumed` set only after a real prefill, boot order traced for both picker/manual modes; metric Save's `render()` retained intentionally). No new defects.
+
+**Accepted LOW (not blocking, no patch):** double-submit guard (pre-existing pattern); command-edit edits a fresh table snapshot rather than re-fetching; picker/command sub-fetches resolving after navigation write to detached DOM (harmless) and may emit a late audit / flip persisted picker mode; `render()` dialog teardown uses `querySelector` (single) — only matters for the legacy non-`showModal` stacking path; the retargeted CRUD asset tests are thinner than the originals (client-rendered tables can't be asserted in served HTML).
+
+### Review Follow-ups (AI)
+
+- [ ] (LOW, optional) Add a double-submit guard to the config.js CRUD forms.
+- [ ] (LOW, optional) Guard picker/command sub-fetch side-effects (audit emit + mode persistence) against post-navigation resolution.

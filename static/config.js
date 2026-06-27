@@ -33,6 +33,11 @@
   // by construction regardless of operator-supplied ids (devices-config iter-2).
   var _metricCheckboxIdSeq = 0;
 
+  // Drift-view deep-link prefill is consumed exactly once per page session
+  // (review iter-1: location.search persists across hash changes, so without
+  // this the app prefill re-fired on every picker reload / post-create render).
+  var appPrefillConsumed = false;
+
   // -----------------------------------------------------------------------
   // DOM + fetch helpers (ported from the retired controllers).
   // -----------------------------------------------------------------------
@@ -92,17 +97,23 @@
   // -----------------------------------------------------------------------
   // Router.
   // -----------------------------------------------------------------------
+  // Tolerate a malformed percent-sequence in a hand-typed/corrupted hash
+  // (review iter-1: a bare decodeURIComponent threw URIError out of render()).
+  function safeDecode(s) {
+    try { return decodeURIComponent(s); } catch (e) { return s; }
+  }
+
   function parseHash() {
     var h = window.location.hash || '';
     if (h.charAt(0) === '#') h = h.slice(1);
     // Forms: "/", "/app/<id>", "/app/<id>/device/<id>"
     var m = h.match(/^\/app\/([^/]+)\/device\/([^/]+)\/?$/);
     if (m) {
-      return { level: 'device', appId: decodeURIComponent(m[1]), devId: decodeURIComponent(m[2]) };
+      return { level: 'device', appId: safeDecode(m[1]), devId: safeDecode(m[2]) };
     }
     m = h.match(/^\/app\/([^/]+)\/?$/);
     if (m) {
-      return { level: 'devices', appId: decodeURIComponent(m[1]) };
+      return { level: 'devices', appId: safeDecode(m[1]) };
     }
     return { level: 'apps' };
   }
@@ -128,6 +139,14 @@
 
   async function render() {
     clearError(rootError());
+    // Tear down any open command-edit dialog before switching views, so a
+    // browser Back/Forward can't leave a modal orphaned over the new view
+    // (review iter-1).
+    var strayDialog = document.querySelector('dialog.modal[open]');
+    if (strayDialog) {
+      if (typeof strayDialog.close === 'function') { try { strayDialog.close(); } catch (_) { strayDialog.removeAttribute('open'); } }
+      strayDialog.remove();
+    }
     var route = parseHash();
     var myToken = ++renderToken;
     var root = document.getElementById('config-root');
@@ -281,7 +300,11 @@
     }
 
     function applyAppPrefill() {
-      if (!prefill.appId && !prefill.devName && !prefill.name) return;
+      // Consume once per page session — refresh / mode-toggle / post-create
+      // re-renders must not re-select the prefilled app (review iter-1).
+      if (appPrefillConsumed) return;
+      if (!prefill.appId && !prefill.devName) return;
+      appPrefillConsumed = true;
       if (prefill.devName && !picker.editedFlag.has(nameInput)) {
         nameInput.value = prefill.devName;
         picker.editedFlag.recordPickerPopulation(nameInput, prefill.devName);
@@ -420,6 +443,9 @@
   async function mountDevices(root, appId, stillCurrent) {
     var prefill = parsePrefill();
     var appName = appId;
+    // Provisional breadcrumb (id) before any await, refined to the friendly
+    // name below — so a failed load doesn't leave the previous view's trail.
+    setBreadcrumb([{ label: 'Applications', href: '#/' }, { label: appId }]);
     // Resolve a friendly app name for the breadcrumb (best-effort).
     var appsRes = await fetchJson('/api/applications');
     if (!stillCurrent()) return;
@@ -818,6 +844,13 @@
   // VIEW 3 — Device detail: Metrics + Commands.
   // =======================================================================
   async function mountDeviceDetail(root, appId, deviceId, stillCurrent) {
+    // Provisional breadcrumb (ids) before any await; refined to friendly names
+    // below — a failed load won't leave the previous view's trail (iter-1).
+    setBreadcrumb([
+      { label: 'Applications', href: '#/' },
+      { label: appId, href: '#/app/' + encodeURIComponent(appId) },
+      { label: deviceId },
+    ]);
     var devUrl = '/api/applications/' + encodeURIComponent(appId) + '/devices/' + encodeURIComponent(deviceId);
     var res = await fetchJson(devUrl);
     if (!stillCurrent()) return;
@@ -884,10 +917,14 @@
     cmdSection.appendChild(cmdError);
     var cmdTableWrap = el('div', { text: 'Loading commands…' });
     cmdSection.appendChild(cmdTableWrap);
-    cmdSection.appendChild(buildCommandCreateForm(appId, deviceId, cmdError));
+    // Command mutations refresh ONLY the commands table — never the whole
+    // device-detail view — so unsaved edits in the Metrics panel survive
+    // (review iter-1: render() here discarded in-progress metric edits).
+    var refreshCmds = function () { return refreshCommandsTable(appId, deviceId, cmdTableWrap, cmdError, refreshCmds); };
+    cmdSection.appendChild(buildCommandCreateForm(appId, deviceId, cmdError, refreshCmds));
 
     root.replaceChildren(metricsSection, cmdSection);
-    await refreshCommandsTable(appId, deviceId, cmdTableWrap, cmdError);
+    await refreshCmds();
   }
 
   var CMD_CLASS_OPTIONS = [
@@ -895,7 +932,7 @@
     { value: 'valve', label: 'valve' },
   ];
 
-  function buildCommandCreateForm(appId, deviceId, banner) {
+  function buildCommandCreateForm(appId, deviceId, banner, refreshCmds) {
     var form = el('form', { class: 'crud-form' });
     form.appendChild(el('h3', { text: 'Create command' }));
     var idInput = el('input', { type: 'number', min: '1', required: 'required' });
@@ -929,13 +966,14 @@
           var b = await r.json().catch(function () { return {}; });
           showError(banner, 'Create failed: ' + (b.error || ('HTTP ' + r.status))); return;
         }
-        render();
+        idInput.value = ''; nameInput.value = ''; portInput.value = ''; confirmedInput.checked = false; classSelect.value = '';
+        refreshCmds();
       } catch (e) { showError(banner, 'Create failed: ' + (e.message || e)); }
     });
     return form;
   }
 
-  async function refreshCommandsTable(appId, deviceId, container, banner) {
+  async function refreshCommandsTable(appId, deviceId, container, banner, refreshCmds) {
     container.replaceChildren(document.createTextNode('Loading commands…'));
     var url = '/api/applications/' + encodeURIComponent(appId) + '/devices/' + encodeURIComponent(deviceId) + '/commands';
     var res = await fetchJson(url);
@@ -952,9 +990,9 @@
     var tbody = el('tbody');
     commands.forEach(function (c) {
       var editBtn = el('button', { type: 'button', class: 'btn-edit', text: 'Edit',
-        onclick: function () { openCommandEdit(appId, deviceId, c, banner); } });
+        onclick: function () { openCommandEdit(appId, deviceId, c, banner, refreshCmds); } });
       var delBtn = el('button', { type: 'button', class: 'btn-delete', text: 'Delete',
-        onclick: function () { deleteCommand(appId, deviceId, c.command_id, banner); } });
+        onclick: function () { deleteCommand(appId, deviceId, c.command_id, banner, refreshCmds); } });
       tbody.appendChild(el('tr', null, [
         el('td', { text: String(c.command_id) }),
         el('td', { text: c.command_name }),
@@ -973,7 +1011,7 @@
     ]));
   }
 
-  function openCommandEdit(appId, deviceId, cmd, banner) {
+  function openCommandEdit(appId, deviceId, cmd, banner, refreshCmds) {
     var dialog = el('dialog', { class: 'modal' });
     var errBanner = el('div', { class: 'error-banner', hidden: 'hidden' });
     var nameInput = el('input', { type: 'text', required: 'required', value: cmd.command_name || '' });
@@ -999,6 +1037,10 @@
     dialog.appendChild(content);
     document.body.appendChild(dialog);
 
+    // Remove the dialog from the DOM whenever it closes — including the native
+    // Escape-key close, which bypasses our Cancel/Save buttons (review iter-1:
+    // orphaned dialogs accumulated on Escape and survived hash navigation).
+    dialog.addEventListener('close', function () { dialog.remove(); });
     function close() {
       if (typeof dialog.close === 'function') { try { dialog.close(); } catch (_) { dialog.removeAttribute('open'); } }
       else dialog.removeAttribute('open');
@@ -1021,14 +1063,14 @@
           var b = await r.json().catch(function () { return {}; });
           showError(errBanner, 'Edit failed: ' + (b.error || ('HTTP ' + r.status))); return;
         }
-        close(); render();
+        close(); refreshCmds();
       } catch (e) { showError(errBanner, 'Edit failed: ' + (e.message || e)); }
     });
     if (typeof dialog.showModal === 'function') { try { dialog.showModal(); } catch (_) { dialog.setAttribute('open', 'open'); } }
     else dialog.setAttribute('open', 'open');
   }
 
-  async function deleteCommand(appId, deviceId, commandId, banner) {
+  async function deleteCommand(appId, deviceId, commandId, banner, refreshCmds) {
     if (!window.confirm('Delete command ' + commandId + '?')) return;
     var url = '/api/applications/' + encodeURIComponent(appId) + '/devices/' + encodeURIComponent(deviceId) + '/commands/' + commandId;
     try {
@@ -1037,7 +1079,7 @@
         var b = await r.json().catch(function () { return {}; });
         showError(banner, 'Delete failed: ' + (b.error || ('HTTP ' + r.status))); return;
       }
-      render();
+      refreshCmds();
     } catch (e) { showError(banner, 'Delete failed: ' + (e.message || e)); }
   }
 
