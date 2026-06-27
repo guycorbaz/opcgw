@@ -1567,3 +1567,99 @@ So that I can back up, version, share, or reproduce a setup (useful for demos).
 - Live, zero-disruption hot-mutation of devices/metrics without any soft restart — explicitly rejected in favour of the staged-apply soft-restart model; revisit only if operators report the brief apply-time blip is unacceptable.
 - SPA framework / build pipeline adoption — explicitly rejected to preserve the no-build, auditable deployment story.
 - Encrypted-secrets-in-SQLite and other unrelated v2.x carry-forwards.
+
+## Epic G: Web UX & Usability
+
+**Tracking:** GitHub milestone [v2.4.0 — Web UX & Usability](https://github.com/guycorbaz/opcgw/milestones) (#4). Literal name `Epic G` in `sprint-status.yaml`, continuing the lettered convention (A/B/C/D/E/F → G). Stories use sprint-status keys `G-0`..`G-4`, each mapping to an existing GitHub issue: G-0 → [#139](https://github.com/guycorbaz/opcgw/issues/139), G-1 → [#124](https://github.com/guycorbaz/opcgw/issues/124), G-2 → [#142](https://github.com/guycorbaz/opcgw/issues/142), G-3 → [#132](https://github.com/guycorbaz/opcgw/issues/132), G-4 → [#127](https://github.com/guycorbaz/opcgw/issues/127).
+
+**Why it exists:** opcgw was **announced to the ChirpStack community on 2026-06-27** (Epic F delivered the onboarding/first-run polish that gated the announcement). The audience now arriving from the forum judges the gateway by its **web UI** — and the post-Epic-F UI, while functional and unified under the F-1 shell, still has rough edges a newcomer hits within minutes: the configuration screens are **flat** (separate Applications / Devices / Metrics / Commands pages rather than a navigable hierarchy), config fields carry **no inline explanation** of what they mean or what values are valid, metrics can only be chosen from **recently-observed uplink keys** (not the device's declared ChirpStack profile), the OPC UA stale threshold is **global-only** (slow LoRaWAN sensors flap to `Uncertain` between uplinks), and the dashboard shows an **error count with no way to see the actual errors**. Epic G is the first post-announcement release (**v2.4.0**) and turns these into a coherent, self-explanatory configuration experience — at the moment of maximum new-user attention.
+
+**Starting point (verified 2026-06-27):** builds entirely on Epic F. The **F-1 vanilla shell** (`static/shell.js` + component CSS in `dashboard.css`) is the layout substrate; the **C-1/C-2 inventory query layer + pickers** (`/api/inventory/*`, `static/inventory-picker.js`) are the data substrate G-1 extends; the **F-0 staged-apply** model is the write contract every config edit flows through; the **F-3 dashboard** (`/api/status` + `/api/devices`, client-derived health) is what G-4 extends. Two facts from the F-3 story-creation analysis shape G-3/G-4: (1) the per-device stale threshold was **descoped from F-3 to global-only** — G-3 finishes it; (2) **no recent-errors store exists** — `gateway_status.error_count` is a single cumulative `i32` with no event table/ring-buffer, so G-4's error list **requires new storage** (its heaviest piece, and the natural defer candidate if v2.4.0 scope tightens).
+
+**Design principles (carried from Epic F):** vanilla + shared shell, **no build step / framework / `node_modules`**; every config write goes through the **F-0 staged-apply** path (no per-save restart, no live hot-mutation); **no new aggregation** in the gateway (#130 — display last-known values + status only); secrets stay in `secrets.toml`, web-auth + log path stay in `.env`.
+
+**FRs covered:** none from the original PRD (Epic G is a post-PRD, CR-driven addition; the functional contract is the five GitHub issues above + the per-story scope below).
+
+**Sequencing:** **G-0 → G-1 → G-2 → G-3 → G-4.** G-0 is foundational — it restructures the config UI into the Application → Device → Metrics/Commands hierarchy that G-1 (metric picker lives in the device→metrics view) and G-2 (help attaches to the restructured forms) build on. G-3 is small and largely independent. G-4 is the heaviest (new error-event storage) and last; it may be deferred to a later release if v2.4.0 scope tightens. Per-story full Acceptance Criteria are drafted when `bmad-create-story G-N` is invoked.
+
+### Story G.0: Drill-Down Configuration Navigation
+
+As an **operator configuring opcgw from the web UI**,
+I want to navigate my configuration as a hierarchy (Application → Device → Metrics/Commands) instead of flat, separate pages,
+So that I can see and edit the structure of my deployment in context, the way it actually maps to ChirpStack.
+
+**Scope summary (full ACs at `bmad-create-story G-0`):**
+
+- Restructure the config UI on the F-1 shell into a navigable hierarchy: pick an Application → see/edit its Devices → drill into a Device to see/edit its Metrics and Commands. Replaces the flat `applications` / `devices-config` / `metrics` / `commands` page model with in-context drill-down.
+- All writes continue to flow through the F-0 staged-apply path (no per-save restart); existing CRUD endpoints and validation reused.
+- No-regression invariant: served-HTML DOM-ID markers and `/api/*` interactions the server-side tests assert must be preserved (shell decorates, doesn't relocate content).
+- No build step, no framework, no `node_modules`.
+- Tests / checks: each level renders and round-trips its CRUD; navigation reflects the current SQLite config; existing API contracts unchanged.
+
+### Story G.1: Device-Profile Metric Picker
+
+As an **operator adding metrics to a device**,
+I want to choose from the measurements declared in the device's ChirpStack device profile,
+So that I can configure metrics that haven't been observed in a recent uplink yet (and avoid typos / guessing keys).
+
+**Scope summary (full ACs at `bmad-create-story G-1`):**
+
+- Extend the C-2 inventory metric picker to source candidate metrics from the **ChirpStack device-profile measurements**, not only recently-observed uplink keys; surface both, clearly distinguished. Reuse the C-1 inventory query layer + TTL cache + `?refresh=true` bypass.
+- Wire-type inference carried over from C-2; manual-entry fallback preserved.
+- Lives in the device → metrics view introduced by G-0.
+- Tests / checks: profile-declared measurements appear as choices with no recent uplink; manual fallback still works; cache + refresh behave per C-1.
+
+### Story G.2: Contextual Field Help
+
+As a **newcomer configuring opcgw**,
+I want inline help on each configuration field explaining what it does and what values are valid,
+So that I can configure the gateway correctly without leaving the UI to read the manual.
+
+**Scope summary (full ACs at `bmad-create-story G-2`):**
+
+- Add contextual/online help (tooltips / inline hints) to each config field across the G-0 restructured forms — what the field means, valid range/format, and the consequence of changing it.
+- Help content is static, shipped with the page (no build step); consistent component on the F-1 shell.
+- Where useful, link to the relevant section of the LaTeX user manual / docs.
+- Tests / checks: help is present and associated with each documented field; accessible (keyboard/screen-reader reachable); no new runtime dependency.
+
+### Story G.3: Per-Device OPC UA Stale Threshold
+
+As an **operator with slow-reporting LoRaWAN sensors**,
+I want to set the OPC UA stale threshold per device (not just globally),
+So that infrequent sensors don't read `Uncertain` between their normal uplinks while fast devices still flag genuine staleness quickly.
+
+**Scope summary (full ACs at `bmad-create-story G-3`):**
+
+- Add a per-device `stale_threshold_seconds` (overriding the global default, currently 120 s) — finishes the work descoped from F-3. Persisted in SQLite via the existing device config; edited in the G-0 device view; applied via F-0 staged-apply.
+- The OPC UA status-code derivation (Good/Uncertain/Bad) honours the per-device threshold; falls back to the global default when unset. `/api/devices` already carries `stale_threshold_seconds` (F-3 pass-through) — extend to per-device.
+- Tests / checks: a device with a long threshold stays `Good` past the global window; unset devices use the global default; threshold validated.
+
+### Story G.4: Dashboard Error Drill-Down
+
+As an **operator seeing an error count on the dashboard**,
+I want to drill into the actual list of recent errors,
+So that I can diagnose what's failing instead of only knowing how many failures occurred.
+
+**Scope summary (full ACs at `bmad-create-story G-4`):**
+
+- Replace the cumulative `error_count` integer on the F-3 dashboard with a drill-down to a list of **recent actual errors** (timestamp, category, message). **Requires NEW storage** — today only a single cumulative `i32` exists in `gateway_status`; G-4 adds a bounded error-event store (event table or ring-buffer) plus an endpoint to read it.
+- Consistent with #130: surface recorded events, no new aggregation. Bounded retention (cap + prune) like the existing metric-history / command-history stores.
+- **Heaviest story; defer candidate** if v2.4.0 scope tightens (the rest of Epic G ships without it).
+- Tests / checks: errors are recorded and capped; the dashboard lists them newest-first; the store prunes; degraded states surface clearly.
+
+### Epic G — Story Acceptance Criteria
+
+**Given** an operator arriving from the ChirpStack community to a running opcgw,
+**When** they open the web UI to configure the gateway,
+**Then** they navigate their configuration as an Application → Device → Metrics/Commands hierarchy (G-0), choose metrics from the device's ChirpStack profile rather than only observed uplinks (G-1), and understand each field from inline contextual help (G-2).
+**And** slow sensors can be given a per-device stale threshold so they don't flap to `Uncertain` between uplinks (G-3), and the dashboard error count drills down to the actual recent errors (G-4).
+**And** all of it builds on the F-1 shell and the F-0 staged-apply model, adding no build step, framework, or `node_modules`.
+
+**Vision capture reference:** GitHub milestone #4 (v2.4.0); CRs [#139](https://github.com/guycorbaz/opcgw/issues/139) / [#124](https://github.com/guycorbaz/opcgw/issues/124) / [#142](https://github.com/guycorbaz/opcgw/issues/142) / [#132](https://github.com/guycorbaz/opcgw/issues/132) / [#127](https://github.com/guycorbaz/opcgw/issues/127); the 2026-06-27 post-announcement planning dialogue (AskUserQuestion: theme = Web UX & onboarding; verify-and-close stale issues).
+
+**Deferred / out-of-scope:**
+
+- G-4 (dashboard error drill-down) may slip to a later release if v2.4.0 scope tightens — it is the only story needing new storage.
+- Logging configuration in the DB/UI — stays file-based (Epic F decision).
+- SPA framework / build pipeline — still rejected.
+- #137 (multi-manufacturer device-class registry) and #136 (decouple downlink dispatch) — device-abstraction work, a separate future epic, not part of the Web UX release.
