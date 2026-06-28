@@ -2364,11 +2364,26 @@ impl crate::storage::StorageBackend for SqliteBackend {
             OpcGwError::Storage(format!("Failed to prepare error-event query: {}", e))
         })?;
 
-        let rows = stmt.query_map(params![limit as i64], |row| {
+        // Review (edge LOW): clamp to i64 range so a `usize::MAX` (which casts to
+        // -1 = "no limit" in SQLite) can never be requested via the trait.
+        let limit_i64 = limit.min(i64::MAX as usize) as i64;
+        let rows = stmt.query_map(params![limit_i64], |row| {
+            let ts_str: String = row.get::<_, String>(0)?;
+            // Review (blind+edge LOW): a malformed stored timestamp falls back to
+            // now() so the row is still returned, but emit a warn so DB
+            // corruption is visible rather than silently mis-dated.
+            let ts = DateTime::parse_from_rfc3339(&ts_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| {
+                    warn!(
+                        event = "error_event_bad_timestamp",
+                        raw = %ts_str,
+                        "recent_error_events: unparseable ts, substituting now()"
+                    );
+                    Utc::now()
+                });
             Ok(ErrorEvent {
-                ts: DateTime::parse_from_rfc3339(&row.get::<_, String>(0)?)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now()),
+                ts,
                 category: row.get::<_, String>(1)?,
                 device_id: row.get::<_, Option<String>>(2)?,
                 application_id: row.get::<_, Option<String>>(3)?,

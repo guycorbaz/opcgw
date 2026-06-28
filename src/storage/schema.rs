@@ -592,6 +592,11 @@ mod tests {
             "devices",
             "metrics",
             "commands",
+            // Post-v009 tables previously missing from this guard (review EC-4).
+            "meta",
+            "singleton_config",
+            // Story G-4 (#127): the error-event feed table (migration v013).
+            "error_events",
         ];
 
         for table in expected_tables {

@@ -501,8 +501,6 @@ pub struct MetricView {
 
 /// Default number of error events returned when `?limit` is omitted.
 pub const ERRORS_LIMIT_DEFAULT: usize = 100;
-/// Maximum allowed `?limit` for `/api/errors` (over-cap → 400).
-pub const ERRORS_LIMIT_CAP: usize = 500;
 
 #[derive(Debug, Deserialize, Default)]
 pub struct ErrorsQuery {
@@ -527,12 +525,17 @@ pub async fn api_errors(
     Query(query): Query<ErrorsQuery>,
 ) -> Response {
     let limit = query.limit.unwrap_or(ERRORS_LIMIT_DEFAULT);
-    if limit > ERRORS_LIMIT_CAP {
+    // Review (MED): cap the response at the RUNTIME store cap, not a stale
+    // compile-time constant — otherwise raising OPCGW_ERROR_EVENT_CAP above 500
+    // would make the extra events permanently unreachable and the 400 body
+    // would report the wrong cap.
+    let cap = crate::utils::error_event_cap();
+    if limit > cap {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "error": "limit_out_of_range",
-                "cap": ERRORS_LIMIT_CAP,
+                "cap": cap,
                 "received": limit
             })),
         )

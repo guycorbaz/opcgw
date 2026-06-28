@@ -1,6 +1,6 @@
 # Story G.4: Dashboard Error Drill-Down
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -128,3 +128,20 @@ Opus 4.8 (1M context) — claude-opus-4-8[1m]
 ## Change Log
 
 - 2026-06-28 — Implementation complete (all 7 tasks). Dashboard error drill-down: bounded error-event store (migration v013 + ring buffer), poller capture, `GET /api/errors`, `errors.html` view + dashboard link. Status ready-for-dev → review.
+- 2026-06-28 — Code review (3 adversarial layers Blind/Edge/Auditor on Sonnet + mandatory iter-2). AC#1–8 MET. Loop terminated LOW-only. Status review → done.
+
+### Review Findings (2026-06-28)
+
+- [x] [Review][Patch] **MED**: `/api/errors` `?limit` cap used a compile-time const (500) that diverged from the runtime `OPCGW_ERROR_EVENT_CAP` → events beyond 500 unreachable + wrong 400 body. Now uses `error_event_cap()` at request time. [src/web/api.rs] (Blind#1 + Edge EC-5)
+- [x] [Review][Patch] **MED**: AC#4 named 4 categories; only 3 shipped. Added `classify_poll_error` mapping the cycle-level error to `chirpstack_connect` / `chirpstack_auth` / `chirpstack_poll`. [src/chirpstack.rs] (Auditor F1)
+- [x] [Review][Patch] **MED**: AC#5's mandated token-bearing test was absent. Added `Bearer <token>` redaction to `sanitize_error_message` (byte-safe via `to_ascii_lowercase`) + the redaction test. [src/utils.rs] (Auditor F2)
+- [x] [Review][Patch] RFC3339 parse failure now `warn!`s before the `Utc::now()` fallback [src/storage/sqlite.rs] — LOW (Blind#5/Edge EC-3).
+- [x] [Review][Patch] `recent_error_events` clamps `limit` to i64 range (no `LIMIT -1`) [src/storage/sqlite.rs] — LOW (Edge EC-2).
+- [x] [Review][Patch] `sanitize_error_message` doc corrected re: tab preservation [src/utils.rs] — LOW (Blind#3).
+- [x] [Review][Patch] Added `error_events` (+ `meta`, `singleton_config`) to `test_migrations_create_all_tables` [src/storage/schema.rs] — LOW (Edge EC-4).
+- [x] [Review][Defer] Blocking `pool.checkout` from async (pre-existing, #73) — LOW, deferred-work.md.
+- [x] [Review][Defer] INSERT+prune-DELETE not in one transaction (race converges to cap) — LOW, deferred-work.md.
+- [x] [Review][Dismiss] Double-record device errors (Blind#6) — false positive; the device loop captures `device_poll` and **continues**, so per-device errors never reach the cycle-level catch-all.
+- [x] [Review][Dismiss] `?limit=0` → empty — acceptable semantics.
+
+iter-2 re-review (fresh Sonnet agent, on the patch delta) **caught 2 issues introduced by the iter-1 patches** (the iter-N+1 rule earning its keep): (a) **MED** — the web cap test still hardcoded `?limit=501` + `cap==500`, now environment-sensitive → fixed to derive `error_event_cap()`; (b) **LOW** — `classify_poll_error` checked "auth" before "connect" so a connect error citing an `auth…` hostname could misclassify → reordered connect-first + added a regression test. Confirmed `redact_bearer_tokens` byte-safe (all edges), `warn!` imported, no dangling `ERRORS_LIMIT_CAP`. Gates: full `cargo test` 0-fail, `cargo clippy --all-targets -- -D warnings` clean.

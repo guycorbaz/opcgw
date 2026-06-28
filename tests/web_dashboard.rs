@@ -1388,20 +1388,22 @@ async fn api_errors_endpoint_envelope_auth_and_limit_cap() {
     assert!(body["items"].is_array(), "items is an array");
     assert_eq!(body["count"], 0, "fresh backend has no errors");
 
-    // ?limit over the cap → 400.
+    // ?limit over the cap → 400. The cap is the RUNTIME error_event_cap()
+    // (OPCGW_ERROR_EVENT_CAP), so derive it rather than hardcoding 500.
+    let cap = opcgw::utils::error_event_cap();
     let resp = client
-        .get(format!("http://{addr}/api/errors?limit=501"))
+        .get(format!("http://{addr}/api/errors?limit={}", cap + 1))
         .header(
             header::AUTHORIZATION,
             build_basic_auth(TEST_USER, TEST_PASSWORD),
         )
         .send()
         .await
-        .expect("GET /api/errors?limit=501");
+        .expect("GET /api/errors over cap");
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body: serde_json::Value = resp.json().await.expect("json body");
     assert_eq!(body["error"], "limit_out_of_range");
-    assert_eq!(body["cap"], 500);
+    assert_eq!(body["cap"], cap);
 
     cancel.cancel();
     handle

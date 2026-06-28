@@ -295,6 +295,31 @@ pub(crate) fn maybe_emit_chirpstack_outage(
     true
 }
 
+/// Classify a cycle-level `poll_metrics` failure into the error-feed category
+/// the spec names (Story G-4, #127, AC#4). A connectivity failure becomes
+/// `chirpstack_connect`, an auth failure `chirpstack_auth`, and anything else
+/// the generic `chirpstack_poll`. Substring matching mirrors
+/// `web::inventory::chirpstack_failure_reason`.
+pub(crate) fn classify_poll_error(error: &OpcGwError) -> &'static str {
+    let s = error.to_string().to_lowercase();
+    let is_connect =
+        s.contains("connect") || s.contains("transport") || s.contains("unreachable");
+    // Connectivity is checked FIRST: a connect-layer error whose text embeds an
+    // "auth…" token (e.g. a hostname like `auth.example.com`) must not be
+    // misclassified as an auth failure (review iter-2 LOW).
+    if is_connect {
+        "chirpstack_connect"
+    } else if s.contains("unauthenticated")
+        || s.contains("permission")
+        || s.contains("credential")
+        || s.contains("auth")
+    {
+        "chirpstack_auth"
+    } else {
+        "chirpstack_poll"
+    }
+}
+
 /// (Story 6-3 AC#6 — iter-3 review pending #1 helper extraction) Classify a
 /// raw boolean metric value. On the only-`0.0`-or-`1.0` invariant violation,
 /// emits the canonical `metric_parse` warn and returns `None`. Tests can
@@ -1127,8 +1152,9 @@ impl ChirpstackPoller {
             // Polling metrics (AC#1: poll_once equivalent)
             if let Err(e) = self.poll_metrics().await {
                 error!(error = ?e, "Error polling chirpstack devices");
-                // Story G-4 (#127): cycle-level poll failure into the error feed.
-                self.capture_error_event("chirpstack_poll", None, None, format!("{}", e));
+                // Story G-4 (#127): cycle-level poll failure into the error feed,
+                // classified into chirpstack_connect / chirpstack_auth / chirpstack_poll.
+                self.capture_error_event(classify_poll_error(&e), None, None, format!("{}", e));
             }
 
             // Execute pruning after poll_metrics completes (AC#1: sequential, not parallel)
@@ -3129,6 +3155,38 @@ mod tests {
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
     use tracing_test::traced_test;
+
+    // Story G-4 (#127): the cycle-level poll error is classified into the
+    // spec-named error-feed categories (AC#4).
+    #[test]
+    fn classify_poll_error_maps_named_categories() {
+        assert_eq!(
+            classify_poll_error(&OpcGwError::ChirpStack(
+                "connect failed: transport error".to_string()
+            )),
+            "chirpstack_connect"
+        );
+        assert_eq!(
+            classify_poll_error(&OpcGwError::ChirpStack(
+                "status: Unauthenticated — invalid authentication credentials".to_string()
+            )),
+            "chirpstack_auth"
+        );
+        assert_eq!(
+            classify_poll_error(&OpcGwError::ChirpStack(
+                "some other gRPC failure".to_string()
+            )),
+            "chirpstack_poll"
+        );
+        // iter-2 LOW: a connect error mentioning an "auth…" hostname must
+        // classify as connect, not auth (connectivity is checked first).
+        assert_eq!(
+            classify_poll_error(&OpcGwError::ChirpStack(
+                "connect failed: transport error to auth.example.com".to_string()
+            )),
+            "chirpstack_connect"
+        );
+    }
 
     /// Story 6-3, AC#7: `device_poll` warn fires for a single device's
     /// failure inside a poll cycle, complementing the existing per-cycle

@@ -649,13 +649,55 @@ pub fn init_error_event_cap_from_env() {
     }
 }
 
+/// Redact any `Bearer <token>` sequence (case-insensitive) in a string,
+/// replacing the token that follows the keyword with `[REDACTED]`.
+///
+/// Defence-in-depth for the error-event feed (Story G-4, #127): the capture
+/// sites format error *Display* strings that do not currently embed the
+/// ChirpStack `api_token`, but if a future error string ever carried an
+/// `Authorization: Bearer …` header this scrub prevents the credential from
+/// reaching the feed. Operates on `to_ascii_lowercase` for matching (byte-length
+/// identical to the input, so byte offsets stay aligned and slicing is
+/// char-boundary-safe).
+fn redact_bearer_tokens(raw: &str) -> String {
+    let hay = raw.to_ascii_lowercase();
+    let needle = "bearer";
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len());
+    let mut start = 0;
+    while let Some(rel) = hay[start..].find(needle) {
+        let after_kw = start + rel + needle.len();
+        out.push_str(&raw[start..after_kw]);
+        // Copy the ASCII whitespace immediately after the keyword verbatim.
+        let mut i = after_kw;
+        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+        // Redact the following non-whitespace run (the token), if present.
+        let tok_start = i;
+        while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i > tok_start {
+            out.push_str("[REDACTED]");
+        }
+        start = i;
+    }
+    out.push_str(&raw[start..]);
+    out
+}
+
 /// Sanitize an error-event message before it is stored/surfaced (Story G-4,
-/// #127, AC#5). Strips control characters (log-injection / display hazards) and
-/// bounds the length. Never store raw secrets — callers must not pass tokens;
-/// this is the defence-in-depth scrub matching the audit-log discipline.
+/// #127, AC#5). Redacts `Bearer <token>` sequences, replaces non-tab control
+/// characters with spaces (log-injection / display hazards; a tab is preserved
+/// as benign whitespace), and bounds the length. Callers must not pass raw
+/// secrets — this is the defence-in-depth scrub matching the audit-log
+/// discipline.
 pub fn sanitize_error_message(raw: &str) -> String {
     const MAX_LEN: usize = 1024;
-    let cleaned: String = raw
+    let redacted = redact_bearer_tokens(raw);
+    let cleaned: String = redacted
         .chars()
         .map(|c| if c.is_control() && c != '\t' { ' ' } else { c })
         .collect();
@@ -921,6 +963,22 @@ mod tests {
     fn sanitize_error_message_passes_through_normal_text() {
         let raw = "get_device: device not found (dev-eui a84041b8a1867e20)";
         assert_eq!(sanitize_error_message(raw), raw);
+    }
+
+    #[test]
+    fn sanitize_error_message_redacts_bearer_token() {
+        // AC#5: a token-bearing error string must NOT surface the token.
+        let raw = "connect failed: authorization: Bearer s3cr3t-token-abc123XYZ. expired";
+        let out = sanitize_error_message(raw);
+        assert!(
+            !out.contains("s3cr3t-token-abc123XYZ"),
+            "the bearer token must not appear in the sanitized output: {out}"
+        );
+        assert!(out.contains("[REDACTED]"), "redaction marker present: {out}");
+        // Case-insensitive keyword match, mid-string.
+        let out2 = sanitize_error_message("BEARER mytoken123");
+        assert!(!out2.contains("mytoken123"));
+        assert!(out2.contains("[REDACTED]"));
     }
 
     /// GH-144: a positive integer is accepted as the budget value.
