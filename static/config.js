@@ -47,6 +47,9 @@
       Object.keys(attrs).forEach(function (k) {
         if (k === 'class') node.className = attrs[k];
         else if (k === 'text') node.textContent = attrs[k];
+        // DANGER (Epic G security review LOW-1): `html:` sets innerHTML. Only
+        // ever pass trusted static markup here — NEVER ChirpStack- or
+        // user-supplied data (use `text:` for that, which is XSS-safe).
         else if (k === 'html') node.innerHTML = attrs[k];
         else if (k.slice(0, 2) === 'on') node.addEventListener(k.slice(2), attrs[k]);
         else node.setAttribute(k, attrs[k]);
