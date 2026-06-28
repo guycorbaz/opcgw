@@ -567,7 +567,7 @@
     // Metric picker
     var metricPickerWrap = el('div');
     var metricPickerToolbar = el('div', { class: 'picker-toolbar' });
-    var metricPickerRefresh = el('button', { type: 'button', text: '↻ Refresh metric picker', title: 'Re-fetch recent uplinks for the selected device' });
+    var metricPickerRefresh = el('button', { type: 'button', text: '↻ Refresh metric picker', title: 'Re-fetch the device profile + recent uplinks (cache bypass)' });
     var metricToManual = el('a', { role: 'button', tabindex: '0', text: 'Switch to manual metric entry' });
     metricPickerToolbar.appendChild(metricPickerRefresh); metricPickerToolbar.appendChild(metricToManual);
     metricPickerWrap.appendChild(metricPickerToolbar);
@@ -589,7 +589,7 @@
       onclick: function () { buildMetricRow(null, metricContainer); },
     }));
 
-    form.appendChild(el('h4', { text: 'Metrics from recent uplinks (picker)' }));
+    form.appendChild(el('h4', { text: 'Metrics from device profile + recent uplinks (picker)' }));
     form.appendChild(metricPickerWrap); form.appendChild(metricManualWrap);
 
     var submitBtn = el('button', { type: 'submit', text: 'Create device' });
@@ -697,7 +697,43 @@
       state.prefillDevEui = ''; state.prefillDevName = '';
     }
 
-    async function loadMetricPicker(devEui) {
+    // Story G-1 — the metric picker draws candidates from TWO sources:
+    // the device's ChirpStack device-profile measurements (available with
+    // no recent traffic) and recently-observed uplink keys. They are
+    // merged + de-duplicated by key and each row is tagged with its
+    // source (profile / observed / both).
+    function appendMetricCandidate(cand, prefillMetricKey) {
+      var row = el('div', { class: 'metric-pick-row' });
+      var checkboxId = 'mk-' + (_metricCheckboxIdSeq++);
+      // data-key / data-inferred are read verbatim by readPickerMetrics().
+      var checkbox = el('input', { type: 'checkbox', id: checkboxId, 'data-key': cand.key, 'data-inferred': cand.inferred });
+      if (prefillMetricKey && cand.key === prefillMetricKey) checkbox.checked = true;
+      var label = el('label', { for: checkboxId, text: cand.key });
+      var sourceTag = el('span', { class: 'metric-source-tag', text: cand.source });
+      var typeSelect = el('select');
+      METRIC_TYPES.forEach(function (t) {
+        var opt = el('option', { value: t, text: t });
+        if (t === cand.inferred) opt.selected = true;
+        typeSelect.appendChild(opt);
+      });
+      typeSelect.dataset.role = 'wire-type';
+      row.appendChild(checkbox); row.appendChild(label); row.appendChild(sourceTag); row.appendChild(typeSelect);
+      var detail;
+      if (cand.hasSample) {
+        var rawSample = JSON.stringify(cand.sample);
+        var sampleText = rawSample.length > 200 ? rawSample.slice(0, 200) + '…' : rawSample;
+        detail = 'sample: ' + sampleText;
+      } else if (cand.kind) {
+        detail = 'profile kind: ' + cand.kind;
+      } else {
+        detail = '';
+      }
+      if (detail) row.appendChild(el('span', { class: 'sample-cell', text: detail }));
+      metricPickerRows.appendChild(row);
+    }
+
+    async function loadMetricPicker(devEui, opts) {
+      var refresh = !!(opts && opts.refresh);
       state.currentDevEui = devEui;
       metricPickerRows.replaceChildren();
       setMetricBanner('');
@@ -705,49 +741,64 @@
       if (!devEui) { setMetricStatus('Choose a device above first.'); return; }
       var controller = new AbortController();
       state.uplinkFetchController = controller;
-      setMetricStatus('Loading recent uplinks…');
-      try {
-        var data = await picker.fetchUplinks(devEui, { limit: 10 });
-        if (controller.signal.aborted) return;
-        picker.auditEvent('picker_opened', { picker_resource: 'uplink', application_id: appId, dev_eui: devEui, cache_status: 'bypassed' });
-        if (!data.observed_keys || data.observed_keys.length === 0) {
-          setMetricStatus('No recent uplinks for this device. Either wait for it to send and refresh, or add metrics manually below.');
-          applyMetricsMode('manual');
-          picker.auditEvent('picker_manual_fallback', { picker_resource: 'uplink', reason: 'no_recent_uplinks' });
-          return;
+      setMetricStatus('Loading device profile + recent uplinks…');
+
+      // Fetch both sources; tolerate either failing (degraded mode).
+      var measResult = null, upResult = null, measErr = null, upErr = null;
+      try { measResult = await picker.fetchMeasurements(devEui, { refresh: refresh }); }
+      catch (e) { measErr = e; }
+      if (controller.signal.aborted) return;
+      try { upResult = await picker.fetchUplinks(devEui, { limit: 10 }); }
+      catch (e) { upErr = e; }
+      if (controller.signal.aborted) return;
+
+      picker.auditEvent('picker_opened', {
+        picker_resource: 'metric', application_id: appId, dev_eui: devEui,
+        profile_status: measErr ? 'error' : 'ok', uplink_status: upErr ? 'error' : 'ok',
+        cache_status: (measResult && measResult.cache_status) || 'unknown',
+      });
+
+      // Merge by key — profile candidates first (declarative source), then
+      // fold in observed uplink keys, upgrading shared keys to 'both'.
+      var byKey = {};
+      ((measResult && measResult.items) || []).forEach(function (m) {
+        byKey[m.key] = { key: m.key, inferred: m.metric_type, source: 'profile', kind: m.kind, hasSample: false };
+      });
+      ((upResult && upResult.observed_keys) || []).forEach(function (k) {
+        if (byKey[k.key]) {
+          byKey[k.key].source = 'profile + observed';
+          byKey[k.key].sample = k.sample_value; byKey[k.key].hasSample = true;
+        } else {
+          byKey[k.key] = { key: k.key, inferred: k.wire_type, source: 'observed', sample: k.sample_value, hasSample: true };
         }
-        setMetricStatus('Tick metric keys to include; override wire type per row if needed.');
-        var prefillMetricKey = state.prefillMetricKey || ''; state.prefillMetricKey = '';
-        data.observed_keys.forEach(function (k) {
-          var row = el('div', { class: 'metric-pick-row' });
-          var checkboxId = 'mk-' + (_metricCheckboxIdSeq++);
-          var checkbox = el('input', { type: 'checkbox', id: checkboxId, 'data-key': k.key, 'data-inferred': k.wire_type });
-          if (prefillMetricKey && k.key === prefillMetricKey) checkbox.checked = true;
-          var label = el('label', { for: checkboxId, text: k.key });
-          var typeSelect = el('select');
-          METRIC_TYPES.forEach(function (t) {
-            var opt = el('option', { value: t, text: t });
-            if (t === k.wire_type) opt.selected = true;
-            typeSelect.appendChild(opt);
-          });
-          typeSelect.dataset.role = 'wire-type';
-          var rawSample = JSON.stringify(k.sample_value);
-          var sampleText = rawSample.length > 200 ? rawSample.slice(0, 200) + '…' : rawSample;
-          row.appendChild(checkbox); row.appendChild(label); row.appendChild(typeSelect);
-          row.appendChild(el('span', { class: 'sample-cell', text: 'sample: ' + sampleText }));
-          metricPickerRows.appendChild(row);
-        });
-      } catch (err) {
-        if (controller.signal.aborted) return;
-        setMetricStatus('Could not fetch recent uplinks.');
-        setMetricBanner('You can still add metrics manually below.');
+      });
+      var cands = Object.keys(byKey).map(function (k) { return byKey[k]; })
+        .sort(function (a, b) { return a.key < b.key ? -1 : (a.key > b.key ? 1 : 0); });
+
+      if (cands.length === 0) {
+        if (measErr || upErr) {
+          setMetricStatus('Could not fetch the device profile or recent uplinks.');
+          setMetricBanner('You can still add metrics manually below.');
+        } else {
+          setMetricStatus('No device-profile measurements and no recent uplinks for this device. Add metrics manually below.');
+        }
         applyMetricsMode('manual');
         picker.auditEvent('picker_manual_fallback', {
-          picker_resource: 'uplink',
-          reason: err && err.status === 502 ? 'chirpstack_unreachable' : 'chirpstack_error',
-          error_detail: err && err.message ? String(err.message).slice(0, 200) : '',
+          picker_resource: 'metric',
+          reason: (measErr || upErr) ? ((measErr && measErr.status === 502) || (upErr && upErr.status === 502) ? 'chirpstack_unreachable' : 'chirpstack_error') : 'no_candidates',
         });
+        return;
       }
+
+      // Partial-degraded notice when one source failed but the other gave data.
+      var notes = [];
+      if (measErr) notes.push('device profile unavailable');
+      if (upErr) notes.push('recent uplinks unavailable');
+      if (notes.length) setMetricBanner('Partial data — ' + notes.join(', ') + '. Showing what is available; add others manually if needed.');
+
+      setMetricStatus('Tick metric keys to include; override wire type per row if needed.');
+      var prefillMetricKey = state.prefillMetricKey || ''; state.prefillMetricKey = '';
+      cands.forEach(function (cand) { appendMetricCandidate(cand, prefillMetricKey); });
     }
 
     function readPickerMetrics() {
@@ -792,11 +843,11 @@
       if (!state.currentDevEui) {
         var opt = devPickerSelect.options[devPickerSelect.selectedIndex];
         var eui = opt && opt.dataset ? opt.dataset.devEui : '';
-        if (eui) { loadMetricPicker(eui).catch(picker.warnUnlessAbort('metric picker refresh')); }
+        if (eui) { loadMetricPicker(eui, { refresh: true }).catch(picker.warnUnlessAbort('metric picker refresh')); }
         else { setMetricStatus(state.mode === 'manual' ? 'Type a DevEUI in the device-id field first.' : 'Select a device first.'); }
         return;
       }
-      loadMetricPicker(state.currentDevEui).catch(picker.warnUnlessAbort('metric picker refresh'));
+      loadMetricPicker(state.currentDevEui, { refresh: true }).catch(picker.warnUnlessAbort('metric picker refresh'));
     });
     metricToManual.addEventListener('click', function () {
       applyMetricsMode('manual');

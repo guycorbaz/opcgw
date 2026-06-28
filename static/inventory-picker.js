@@ -109,6 +109,20 @@
     return fetchJson(buildUrl('/api/inventory/uplinks', params));
   }
 
+  // Story G-1 — device-profile measurement source. Returns
+  // { items:[{ key, name, kind, metric_type }], count, cache_status,
+  //   dev_eui, device_profile_id, fetched_at }. Like fetchUplinks it
+  // throws an Error with .status on a non-2xx (the caller degrades to a
+  // banner / manual entry).
+  async function fetchMeasurements(devEui, opts) {
+    if (!devEui) {
+      throw new Error('fetchMeasurements requires dev_eui');
+    }
+    const params = { dev_eui: devEui };
+    if (opts && opts.refresh) params.refresh = true;
+    return fetchJson(buildUrl('/api/inventory/measurements', params));
+  }
+
   // -------------------------------------------------------------------
   // Audit-event helper — POST /api/audit/picker-event.
   //
@@ -237,6 +251,7 @@
     fetchApplications: fetchApplications,
     fetchDevices: fetchDevices,
     fetchUplinks: fetchUplinks,
+    fetchMeasurements: fetchMeasurements,
     auditEvent: auditEvent,
     mode: {
       get: getMode,

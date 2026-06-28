@@ -29,9 +29,10 @@ use crate::chirpstack_internal_proto::api::{LogItem, StreamDeviceEventsRequest};
 use crate::config::AppConfig;
 use crate::utils::OpcGwError;
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
+use chirpstack_api::api::device_profile_service_client::DeviceProfileServiceClient;
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
 use chirpstack_api::api::{
-    ListApplicationsRequest, ListDevicesRequest,
+    GetDeviceProfileRequest, GetDeviceRequest, ListApplicationsRequest, ListDevicesRequest,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -185,10 +186,13 @@ pub struct CacheResult<T> {
 /// linger forever.
 type ApplicationsCacheMap = HashMap<String, CacheEntry<Vec<InventoryApplication>>>;
 type DevicesCacheMap = HashMap<(String, String), CacheEntry<Vec<InventoryDevice>>>;
+/// Story G-1: device-profile measurements keyed by `(tenant_id, dev_eui)`.
+type MeasurementsCacheMap = HashMap<(String, String), CacheEntry<DeviceProfileMeasurements>>;
 
 pub struct InventoryCache {
     applications: Mutex<ApplicationsCacheMap>,
     devices: Mutex<DevicesCacheMap>,
+    measurements: Mutex<MeasurementsCacheMap>,
     ttl: Duration,
 }
 
@@ -197,6 +201,7 @@ impl InventoryCache {
         Self {
             applications: Mutex::new(HashMap::new()),
             devices: Mutex::new(HashMap::new()),
+            measurements: Mutex::new(HashMap::new()),
             ttl: Duration::from_secs(ttl_seconds),
         }
     }
@@ -279,6 +284,66 @@ impl InventoryCache {
     {
         let key = (tenant_id.to_string(), application_id.to_string());
         let mut guard = self.devices.lock().await;
+
+        if self.ttl.is_zero() {
+            let fresh = fetch().await?;
+            let entry = CacheEntry::new(fresh.clone());
+            let rfc = entry.fetched_at_rfc3339.clone();
+            guard.insert(key, entry);
+            return Ok(CacheResult {
+                value: fresh,
+                cache_status: CacheStatus::Bypassed,
+                fetched_at: rfc,
+            });
+        }
+
+        if !force_refresh {
+            if let Some(entry) = guard.get(&key) {
+                if entry.is_fresh(self.ttl) {
+                    return Ok(CacheResult {
+                        value: entry.value.clone(),
+                        cache_status: CacheStatus::Hit,
+                        fetched_at: entry.fetched_at_rfc3339.clone(),
+                    });
+                }
+            }
+        }
+
+        let fresh = fetch().await?;
+        let entry = CacheEntry::new(fresh.clone());
+        let rfc = entry.fetched_at_rfc3339.clone();
+        let cache_status = if force_refresh {
+            CacheStatus::Refresh
+        } else {
+            CacheStatus::Miss
+        };
+        guard.insert(key, entry);
+        Ok(CacheResult {
+            value: fresh,
+            cache_status,
+            fetched_at: rfc,
+        })
+    }
+
+    /// Get device-profile measurements for `(tenant, dev_eui)` with the
+    /// same caching semantics as `get_or_fetch_devices` (Story G-1).
+    ///
+    /// Keyed by `dev_eui` (not `device_profile_id`) so a cache hit skips
+    /// BOTH ChirpStack round-trips (device lookup + profile lookup); the
+    /// resolved `device_profile_id` rides inside the cached value.
+    pub async fn get_or_fetch_measurements<F, Fut>(
+        &self,
+        tenant_id: &str,
+        dev_eui: &str,
+        force_refresh: bool,
+        fetch: F,
+    ) -> Result<CacheResult<DeviceProfileMeasurements>, OpcGwError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<DeviceProfileMeasurements, OpcGwError>>,
+    {
+        let key = (tenant_id.to_string(), dev_eui.to_string());
+        let mut guard = self.measurements.lock().await;
 
         if self.ttl.is_zero() {
             let fresh = fetch().await?;
@@ -995,6 +1060,147 @@ pub async fn fetch_devices(
 }
 
 // ---------------------------------------------------------------------------
+// Story G-1: device-profile measurement picker source.
+// ---------------------------------------------------------------------------
+
+/// One measurement declared in a ChirpStack device profile (Story G-1).
+///
+/// `key` is the `measurements` map key — i.e. the candidate
+/// `chirpstack_metric_name`. `name` is the user-defined label (display
+/// only — NEVER substituted for `key`). `kind` is the `MeasurementKind`
+/// proto label; `metric_type` is the suggested opcgw metric type derived
+/// from `kind` (see [`measurement_kind_mapping`]).
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfileMeasurement {
+    pub key: String,
+    pub name: String,
+    pub kind: &'static str,
+    pub metric_type: &'static str,
+}
+
+/// A device's resolved profile id plus its declared measurements (Story G-1).
+///
+/// Cached as a unit keyed by `(tenant_id, dev_eui)` so a cache hit skips
+/// BOTH ChirpStack round-trips (device lookup + profile lookup).
+#[derive(Debug, Clone, Serialize)]
+pub struct DeviceProfileMeasurements {
+    pub device_profile_id: String,
+    pub measurements: Vec<ProfileMeasurement>,
+}
+
+/// Map a ChirpStack `MeasurementKind` (proto enum integer) to a stable
+/// `(kind_label, suggested_metric_type)` pair (Story G-1 AC#4).
+///
+/// `MeasurementKind`: `UNKNOWN=0, COUNTER=1, ABSOLUTE=2, GAUGE=3, STRING=4`.
+/// COUNTER/ABSOLUTE are integer accumulators → `Int`; GAUGE is a
+/// continuous reading (e.g. temperature) → `Float`; STRING → `String`;
+/// UNKNOWN (and any unrecognised value) → `String`, the conservative
+/// default the operator can override per-row in the picker. The returned
+/// `metric_type` strings match the storage metric types the device-CRUD
+/// validator accepts (same vocabulary as [`WireType::as_str`]).
+pub fn measurement_kind_mapping(kind: i32) -> (&'static str, &'static str) {
+    match kind {
+        1 => ("COUNTER", "Int"),
+        2 => ("ABSOLUTE", "Int"),
+        3 => ("GAUGE", "Float"),
+        4 => ("STRING", "String"),
+        _ => ("UNKNOWN", "String"),
+    }
+}
+
+/// Resolve a device's profile id from its `dev_eui`, fetch the profile,
+/// and return the declared measurements (Story G-1, issue #124).
+///
+/// Two chained gRPC calls: `DeviceService.Get(dev_eui)` →
+/// `device.device_profile_id`, then `DeviceProfileService.Get(id)` →
+/// `device_profile.measurements`. The `InventoryDevice` list deliberately
+/// drops `device_profile_id`, so the id is resolved freshly here rather
+/// than threaded through the devices cache.
+///
+/// Errors map to the same degraded-mode path as the other inventory
+/// fetchers (the web handler returns `502` + the picker UI degrades to a
+/// banner / manual entry — never a hard crash).
+pub async fn fetch_device_profile_measurements(
+    config: &AppConfig,
+    dev_eui: &str,
+    cancel_token: &CancellationToken,
+) -> Result<DeviceProfileMeasurements, OpcGwError> {
+    if cancel_token.is_cancelled() {
+        return Err(OpcGwError::ChirpStack(
+            "cancelled during shutdown".to_string(),
+        ));
+    }
+    let channel = build_channel(&config.chirpstack.server_address).await?;
+
+    // 1. Resolve device_profile_id from dev_eui.
+    let mut device_client = DeviceServiceClient::with_interceptor(
+        channel.clone(),
+        BearerInterceptor {
+            token: config.chirpstack.api_token.clone(),
+        },
+    );
+    let device = device_client
+        .get(Request::new(GetDeviceRequest {
+            dev_eui: dev_eui.to_string(),
+        }))
+        .await
+        .map_err(|e| OpcGwError::ChirpStack(format!("get_device: {}", e)))?
+        .into_inner()
+        .device
+        .ok_or_else(|| OpcGwError::ChirpStack("get_device: device not found".to_string()))?;
+    let device_profile_id = device.device_profile_id;
+    if device_profile_id.is_empty() {
+        return Err(OpcGwError::ChirpStack(
+            "get_device: device has no device_profile_id".to_string(),
+        ));
+    }
+
+    // 2. Fetch the profile and extract its measurements map.
+    let mut profile_client = DeviceProfileServiceClient::with_interceptor(
+        channel,
+        BearerInterceptor {
+            token: config.chirpstack.api_token.clone(),
+        },
+    );
+    let measurements_map = profile_client
+        .get(Request::new(GetDeviceProfileRequest {
+            id: device_profile_id.clone(),
+        }))
+        .await
+        .map_err(|e| OpcGwError::ChirpStack(format!("get_device_profile: {}", e)))?
+        .into_inner()
+        .device_profile
+        .map(|p| p.measurements)
+        .unwrap_or_default();
+
+    let mut measurements: Vec<ProfileMeasurement> = measurements_map
+        .into_iter()
+        .map(|(key, m)| {
+            let (kind, metric_type) = measurement_kind_mapping(m.kind);
+            ProfileMeasurement {
+                key,
+                name: m.name,
+                kind,
+                metric_type,
+            }
+        })
+        .collect();
+    // Deterministic order for stable picker rendering + audit trails.
+    measurements.sort_by(|a, b| a.key.cmp(&b.key));
+
+    debug!(
+        dev_eui = %dev_eui,
+        device_profile_id = %device_profile_id,
+        measurement_count = measurements.len(),
+        "fetch_device_profile_measurements completed"
+    );
+    Ok(DeviceProfileMeasurements {
+        device_profile_id,
+        measurements,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests.
 // ---------------------------------------------------------------------------
 
@@ -1016,6 +1222,37 @@ mod tests {
         assert_eq!(inv.id, "app-123");
         assert_eq!(inv.name, "Arrosage");
         assert_eq!(inv.description, "Watering system");
+    }
+
+    // ---- Story G-1: MeasurementKind → metric_type mapping --------------
+
+    #[test]
+    fn measurement_kind_mapping_covers_all_variants() {
+        // MeasurementKind: UNKNOWN=0, COUNTER=1, ABSOLUTE=2, GAUGE=3, STRING=4.
+        assert_eq!(measurement_kind_mapping(0), ("UNKNOWN", "String"));
+        assert_eq!(measurement_kind_mapping(1), ("COUNTER", "Int"));
+        assert_eq!(measurement_kind_mapping(2), ("ABSOLUTE", "Int"));
+        assert_eq!(measurement_kind_mapping(3), ("GAUGE", "Float"));
+        assert_eq!(measurement_kind_mapping(4), ("STRING", "String"));
+    }
+
+    #[test]
+    fn measurement_kind_mapping_unknown_value_falls_back_to_string() {
+        // Any out-of-range / future proto value → conservative String
+        // default the operator can override in the picker.
+        assert_eq!(measurement_kind_mapping(99), ("UNKNOWN", "String"));
+        assert_eq!(measurement_kind_mapping(-1), ("UNKNOWN", "String"));
+    }
+
+    #[test]
+    fn measurement_kind_mapping_metric_types_are_valid_storage_types() {
+        // Every mapped metric_type must be a type the device-CRUD
+        // validator accepts (same vocabulary as WireType::as_str).
+        let valid = ["Float", "Int", "Bool", "String"];
+        for kind in [0, 1, 2, 3, 4, 99] {
+            let (_label, mt) = measurement_kind_mapping(kind);
+            assert!(valid.contains(&mt), "metric_type {} not a valid storage type", mt);
+        }
     }
 
     #[test]

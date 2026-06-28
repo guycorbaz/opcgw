@@ -17,8 +17,9 @@
 //! query-parameter parsing + response shape + audit events.
 
 use crate::chirpstack_inventory::{
-    compute_observed_keys, fetch_applications, fetch_devices, stream_recent_device_uplinks,
-    CacheStatus, InventoryApplication, InventoryDevice, InventoryUplink,
+    compute_observed_keys, fetch_applications, fetch_device_profile_measurements, fetch_devices,
+    stream_recent_device_uplinks, CacheStatus, DeviceProfileMeasurements, InventoryApplication,
+    InventoryDevice, InventoryUplink, ProfileMeasurement,
 };
 use crate::web::AppState;
 use axum::extract::{Query, State};
@@ -99,6 +100,30 @@ pub struct UplinksQuery {
     pub dev_eui: Option<String>,
     #[serde(default)]
     pub limit: Option<u32>,
+}
+
+/// Story G-1: response envelope for device-profile measurements.
+#[derive(Debug, Serialize)]
+pub struct InventoryMeasurementsResponse {
+    pub items: Vec<ProfileMeasurement>,
+    pub count: usize,
+    pub cache_status: &'static str,
+    pub fetched_at: String,
+    pub dev_eui: String,
+    pub device_profile_id: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct MeasurementsQuery {
+    pub dev_eui: Option<String>,
+    #[serde(default)]
+    pub refresh: Option<String>,
+}
+
+impl MeasurementsQuery {
+    fn force_refresh(&self) -> bool {
+        matches!(self.refresh.as_deref(), Some("true") | Some("1"))
+    }
 }
 
 /// Maximum allowed `?limit` value for `/api/inventory/uplinks` (AC#3).
@@ -413,6 +438,118 @@ pub async fn inventory_uplinks(
                 error = %e,
                 duration_ms = started.elapsed().as_millis() as u64,
                 "inventory_uplinks: ChirpStack stream failed"
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": "chirpstack_error", "reason": chirpstack_failure_reason(&e)})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// GET `/api/inventory/measurements?dev_eui=…&refresh=…` — list the
+/// measurements declared in the device's ChirpStack device profile
+/// (Story G-1, issue #124).
+///
+/// Mirrors `inventory_devices`: `dev_eui` validation, TTL cache (keyed by
+/// `(tenant, dev_eui)`) with `?refresh=true` bypass, audit event, and a
+/// `502` + structured-error degraded path the picker UI turns into a
+/// fallback banner (never a hard error).
+pub async fn inventory_measurements(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<MeasurementsQuery>,
+) -> Response {
+    let started = std::time::Instant::now();
+    let force_refresh = query.force_refresh();
+
+    let dev_eui_raw = match query.dev_eui {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "missing_query_param", "param": "dev_eui"})),
+            )
+                .into_response();
+        }
+    };
+    let dev_eui = match normalise_dev_eui(&dev_eui_raw) {
+        Some(d) => d,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_dev_eui",
+                    "hint": "DevEUI must be 16 hex characters (colons / dashes accepted as separators)"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let config = state.config_reload.subscribe().borrow().clone();
+    let tenant_id = config.chirpstack.tenant_id.clone();
+    let cancel_token = state.shutdown_token.clone();
+    let cfg_clone = config.clone();
+    let dev_eui_for_fetch = dev_eui.clone();
+
+    let result = state
+        .inventory_cache
+        .get_or_fetch_measurements(&tenant_id, &dev_eui, force_refresh, || async move {
+            fetch_device_profile_measurements(&cfg_clone, &dev_eui_for_fetch, &cancel_token).await
+        })
+        .await;
+
+    match result {
+        Ok(cache_result) => {
+            let chirpstack_response = if cache_result.value.measurements.is_empty() {
+                "empty"
+            } else {
+                "ok"
+            };
+            if cache_result.cache_status != CacheStatus::Hit {
+                info!(
+                    event = "inventory_query",
+                    resource = "measurements",
+                    cache_status = cache_result.cache_status.as_str(),
+                    tenant_id = %tenant_id,
+                    dev_eui = %dev_eui,
+                    device_profile_id = %cache_result.value.device_profile_id,
+                    response_status = 200,
+                    chirpstack_response = chirpstack_response,
+                    item_count = cache_result.value.measurements.len(),
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    "inventory_measurements: ChirpStack fetch completed"
+                );
+            }
+            let DeviceProfileMeasurements {
+                device_profile_id,
+                measurements,
+            } = cache_result.value;
+            let count = measurements.len();
+            (
+                StatusCode::OK,
+                Json(InventoryMeasurementsResponse {
+                    items: measurements,
+                    count,
+                    cache_status: cache_result.cache_status.as_str(),
+                    fetched_at: cache_result.fetched_at,
+                    dev_eui,
+                    device_profile_id,
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            warn!(
+                event = "inventory_query_failed",
+                resource = "measurements",
+                reason = chirpstack_failure_reason(&e),
+                tenant_id = %tenant_id,
+                dev_eui = %dev_eui,
+                error = %e,
+                duration_ms = started.elapsed().as_millis() as u64,
+                "inventory_measurements: ChirpStack fetch failed"
             );
             (
                 StatusCode::BAD_GATEWAY,

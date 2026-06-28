@@ -211,3 +211,67 @@ async fn inventory_uplinks_limit_over_cap_returns_400() {
     cancel.cancel();
     let _ = handle.await;
 }
+
+// ---- Story G-1: /api/inventory/measurements ---------------------------
+
+#[tokio::test]
+async fn inventory_measurements_requires_auth() {
+    let (state, _dir) = build_test_app_state();
+    let (addr, handle, cancel) = spawn_web_server(state).await;
+
+    let resp = http_client()
+        .get(format!(
+            "http://{}/api/inventory/measurements?dev_eui=a84041b8a1867e20",
+            addr
+        ))
+        .send()
+        .await
+        .expect("GET /api/inventory/measurements");
+    // 401 (not 404) also proves the route is registered.
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    cancel.cancel();
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn inventory_measurements_missing_dev_eui_returns_400() {
+    let (state, _dir) = build_test_app_state();
+    let (addr, handle, cancel) = spawn_web_server(state).await;
+
+    let resp = http_client()
+        .get(format!("http://{}/api/inventory/measurements", addr))
+        .header(header::AUTHORIZATION, auth_header())
+        .send()
+        .await
+        .expect("GET /api/inventory/measurements");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"], "missing_query_param");
+    assert_eq!(body["param"], "dev_eui");
+
+    cancel.cancel();
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn inventory_measurements_invalid_dev_eui_returns_400() {
+    let (state, _dir) = build_test_app_state();
+    let (addr, handle, cancel) = spawn_web_server(state).await;
+
+    let resp = http_client()
+        .get(format!(
+            "http://{}/api/inventory/measurements?dev_eui=not-hex",
+            addr
+        ))
+        .header(header::AUTHORIZATION, auth_header())
+        .send()
+        .await
+        .expect("GET /api/inventory/measurements");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"], "invalid_dev_eui");
+
+    cancel.cancel();
+    let _ = handle.await;
+}

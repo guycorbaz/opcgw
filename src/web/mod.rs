@@ -560,6 +560,11 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
             "/api/inventory/uplinks",
             get(inventory::inventory_uplinks),
         )
+        // Story G-1: device-profile measurement picker source (issue #124).
+        .route(
+            "/api/inventory/measurements",
+            get(inventory::inventory_measurements),
+        )
         // Story C-4: drift view between opcgw config and ChirpStack
         // inventory. Read-only, GET-only, basic-auth gated, CSRF-exempt.
         // Forces ?refresh=true on every underlying C-1 fetch.
