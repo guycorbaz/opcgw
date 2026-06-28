@@ -420,6 +420,8 @@ The full add-flow follows the same hierarchy:
 
 \textbf{Manual-entry fallback (load-bearing).} Every picker carries a \emph{Switch to manual entry} toggle. The toggle also fires automatically when ChirpStack is unreachable, so the operator never gets trapped. The chosen mode is remembered per page in the browser, so an operator who prefers manual entry does not have to re-toggle on every page load.
 
+\textbf{Contextual field help.} Every configuration field across the web UI --- the first-run setup wizard, the gateway-settings editor, and the device / metric / command forms --- carries a small info-icon button. Activating it (click, or keyboard Enter / Space) reveals a short note explaining what the field means, its expected format / units / valid range, and the consequence of changing it; the help text is associated with the field for screen readers and dismissed with \texttt{Esc}. The help text is the same wording as the field reference in this manual, so the UI and the documentation stay in step.
+
 Three failure modes are covered:
 
 \begin{itemize}

@@ -81,6 +81,19 @@
       wrapper.appendChild(inp);
     }
 
+    // Story G-2 (#142): attach the shared contextual-help affordance,
+    // keyed {section}.{key}, wiring aria-describedby on the field control
+    // (or the secret badge). The added <button>/<span> are not matched by
+    // collectSection's `input, textarea, select` query, so read-back is
+    // unaffected.
+    if (window.opcgwHelp) {
+      const control =
+        wrapper.querySelector('input, select, textarea') ||
+        wrapper.querySelector('.field-secret');
+      const help = window.opcgwHelp.affordance(`${section}.${key}`, control);
+      if (help) wrapper.appendChild(help);
+    }
+
     wrapper.dataset.key = key;
     return wrapper;
   }

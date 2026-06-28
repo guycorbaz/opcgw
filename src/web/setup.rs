@@ -95,6 +95,11 @@ const WIZARD_BYPASS_EXACT: &[&str] = &[
     // the allowlist — leaving it would be a dead auth-exempt path.
     "/api/setup",
     "/dashboard.css",
+    // Story G-2 (#142): the first-run wizard's contextual field-help
+    // affordance is driven by this shared static module. Exact-match only
+    // (no suffix bypass) — a GET-only static asset, same minimal-surface
+    // rationale as /dashboard.css above.
+    "/field-help.js",
 ];
 
 /// Returns true if the request path is exempt from the first-run
@@ -1377,6 +1382,8 @@ mod tests {
         // Story F-2: the submit route is now exactly "/api/setup".
         assert!(is_wizard_bypass_path("/api/setup"));
         assert!(is_wizard_bypass_path("/dashboard.css"));
+        // Story G-2 (#142): the wizard's field-help module.
+        assert!(is_wizard_bypass_path("/field-help.js"));
         // Story F-2: the OLD "/api/setup/password" path must NO LONGER
         // bypass — leaving it would be a dead auth-exempt path.
         assert!(!is_wizard_bypass_path("/api/setup/password"));

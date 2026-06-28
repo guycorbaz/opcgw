@@ -59,6 +59,19 @@
   function showError(banner, msg) { banner.textContent = msg; banner.hidden = false; }
   function clearError(banner) { banner.textContent = ''; banner.hidden = true; }
 
+  // Story G-2 (#142): contextual field-help affordance (shared catalog in
+  // field-help.js). Returns a node to place next to a field, or null when
+  // field-help.js isn't loaded / the key is unknown.
+  function fieldHelp(key, inputEl) {
+    return (window.opcgwHelp && window.opcgwHelp.affordance(key, inputEl)) || null;
+  }
+  // Safe append: a null affordance (field-help.js absent / unknown key) is
+  // a no-op rather than an appendChild(null) TypeError.
+  function appendHelp(parent, key, inputEl) {
+    var h = fieldHelp(key, inputEl);
+    if (h) parent.appendChild(h);
+  }
+
   var rootError = function () { return document.getElementById('config-error'); };
 
   // Distinguish a real parse failure (HTML 500 page, proxy interstitial) from a
@@ -944,6 +957,8 @@
         ? '' : String(dev.stale_threshold_seconds),
     });
     mForm.appendChild(staleInput);
+    var staleHelp = fieldHelp('device.stale_threshold_seconds', staleInput);
+    if (staleHelp) mForm.appendChild(staleHelp);
     mForm.appendChild(el('h3', { text: 'Metric mappings' }));
     var metricContainer = el('div');
     (dev.read_metric_list || []).forEach(function (m) { buildMetricRow(m, metricContainer); });
@@ -1019,11 +1034,12 @@
     var confirmedInput = el('input', { type: 'checkbox' });
     var classSelect = el('select');
     CMD_CLASS_OPTIONS.forEach(function (o) { classSelect.appendChild(el('option', { value: o.value, text: o.label })); });
-    form.appendChild(el('label', { text: 'command_id' })); form.appendChild(idInput);
-    form.appendChild(el('label', { text: 'command_name' })); form.appendChild(nameInput);
-    form.appendChild(el('label', { text: 'command_port (LoRaWAN f_port, 1–223)' })); form.appendChild(portInput);
-    form.appendChild(el('label', null, [confirmedInput, document.createTextNode(' Confirmed downlink')]));
-    form.appendChild(el('label', { text: 'command_class' })); form.appendChild(classSelect);
+    // Story G-2 (#142): contextual help on each command field.
+    form.appendChild(el('label', { text: 'command_id' })); appendHelp(form, 'command.command_id', idInput); form.appendChild(idInput);
+    form.appendChild(el('label', { text: 'command_name' })); appendHelp(form, 'command.command_name', nameInput); form.appendChild(nameInput);
+    form.appendChild(el('label', { text: 'command_port (LoRaWAN f_port, 1–223)' })); appendHelp(form, 'command.command_port', portInput); form.appendChild(portInput);
+    form.appendChild(el('label', null, [confirmedInput, document.createTextNode(' Confirmed downlink')])); appendHelp(form, 'command.command_confirmed', confirmedInput);
+    form.appendChild(el('label', { text: 'command_class' })); appendHelp(form, 'command.command_class', classSelect); form.appendChild(classSelect);
     form.appendChild(el('button', { type: 'submit', class: 'btn-add', text: 'Create command' }));
 
     form.addEventListener('submit', async function (ev) {
@@ -1171,14 +1187,15 @@
       if (metric && metric.metric_type === t) opt.selected = true;
       typeSelect.appendChild(opt);
     });
+    var nameInput = el('input', { type: 'text', name: 'metric_name', value: (metric && metric.metric_name) || '', required: 'required' });
+    var csNameInput = el('input', { type: 'text', name: 'chirpstack_metric_name', value: (metric && metric.chirpstack_metric_name) || '', required: 'required' });
+    var unitInput = el('input', { type: 'text', name: 'metric_unit', value: (metric && metric.metric_unit) || '' });
+    // Story G-2 (#142): each metric field carries a contextual-help affordance.
     var row = el('div', { class: 'metric-row' }, [
-      el('div', null, [el('label', { text: 'metric_name' }),
-        el('input', { type: 'text', name: 'metric_name', value: (metric && metric.metric_name) || '', required: 'required' })]),
-      el('div', null, [el('label', { text: 'chirpstack_metric_name' }),
-        el('input', { type: 'text', name: 'chirpstack_metric_name', value: (metric && metric.chirpstack_metric_name) || '', required: 'required' })]),
-      el('div', null, [el('label', { text: 'metric_type' }), typeSelect]),
-      el('div', null, [el('label', { text: 'metric_unit (optional)' }),
-        el('input', { type: 'text', name: 'metric_unit', value: (metric && metric.metric_unit) || '' })]),
+      el('div', null, [el('label', { text: 'metric_name' }), fieldHelp('metric.metric_name', nameInput), nameInput]),
+      el('div', null, [el('label', { text: 'chirpstack_metric_name' }), fieldHelp('metric.chirpstack_metric_name', csNameInput), csNameInput]),
+      el('div', null, [el('label', { text: 'metric_type' }), fieldHelp('metric.metric_type', typeSelect), typeSelect]),
+      el('div', null, [el('label', { text: 'metric_unit (optional)' }), fieldHelp('metric.metric_unit', unitInput), unitInput]),
       el('button', { type: 'button', class: 'btn-remove-metric', text: '×', title: 'Remove this metric',
         onclick: function () { row.remove(); } }),
     ]);

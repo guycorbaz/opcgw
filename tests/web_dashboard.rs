@@ -137,6 +137,8 @@ async fn build_production_static_dir() -> TempDir {
         // Story G-0: the consolidated drill-down configuration page + controller.
         "config.html",
         "config.js",
+        // Story G-2: the shared contextual field-help module.
+        "field-help.js",
     ] {
         let body = tokio::fs::read(src.join(name))
             .await
@@ -1256,6 +1258,81 @@ async fn config_html_is_served_with_drilldown_markup() {
     handle
         .await
         .expect("web::run task panicked or was cancelled abnormally");
+}
+
+/// Story G-2 (#142): the shared contextual field-help module is served
+/// through the auth middleware and linked from every config form page, and
+/// its catalog covers a representative field key from each surface (a
+/// coverage guard against silently shipping help-less fields).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn field_help_js_is_served_and_pages_reference_it() {
+    init_test_subscriber();
+
+    let (addr, cancel, handle, _static_tmp) = spawn_test_server(DashboardConfigSnapshot {
+        application_count: 0,
+        device_count: 0,
+        applications: vec![],
+    })
+    .await;
+
+    let client = common::build_http_client(Duration::from_secs(5));
+    let resp = client
+        .get(format!("http://{addr}/field-help.js"))
+        .header(
+            header::AUTHORIZATION,
+            build_basic_auth(TEST_USER, TEST_PASSWORD),
+        )
+        .send()
+        .await
+        .expect("GET /field-help.js (auth'd)");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.text().await.expect("field-help.js body");
+    assert!(
+        body.contains("window.opcgwHelp"),
+        "field-help.js must export window.opcgwHelp"
+    );
+    // Coverage guard: the catalog defines help for a representative field
+    // from every surface in AC#1. If a key is renamed in the page scripts
+    // without updating the catalog, this list is the canary.
+    for key in [
+        "setup.server_address",
+        "setup.password",
+        "global.command_delivery_timeout_secs",
+        "chirpstack.polling_frequency",
+        "chirpstack.stream_all_devices",
+        "opcua.host_port",
+        "opcua.stale_threshold_seconds",
+        "web.allowed_origins",
+        "device.stale_threshold_seconds",
+        "metric.chirpstack_metric_name",
+        "metric.metric_type",
+        "command.command_port",
+        "command.command_class",
+    ] {
+        assert!(
+            body.contains(key),
+            "field-help.js catalog must define help for {key}"
+        );
+    }
+
+    cancel.cancel();
+    handle
+        .await
+        .expect("web::run task panicked or was cancelled abnormally");
+
+    // File-level: each of the three form pages loads /field-help.js.
+    // setup.html is a first-run page (returns 410 post-first-run), so assert
+    // its content from disk rather than over HTTP.
+    let static_src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
+    for page in ["config.html", "singleton-config.html", "setup.html"] {
+        let html = std::fs::read_to_string(static_src.join(page))
+            .unwrap_or_else(|e| panic!("read static/{page}: {e}"));
+        assert!(
+            html.contains("/field-help.js"),
+            "{page} must load /field-help.js"
+        );
+    }
 }
 
 /// Story 9-3 AC#4: metrics.js is served with a JS Content-Type and

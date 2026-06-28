@@ -374,6 +374,49 @@ footer button:hover {
   color: #991b1b;
 }
 
+/* Story G-2 (#142): contextual field-help affordance (shared by config.js,
+ * singleton-config.js, and setup.html via field-help.js). An info-icon
+ * toggle button reveals an accessible help note. */
+.field-help {
+  display: inline-block;
+  margin-left: 0.35rem;
+  position: relative;
+}
+.field-help-toggle {
+  border: 1px solid #c3ccd4;
+  background: #eef2f5;
+  color: #2563eb;
+  border-radius: 50%;
+  width: 1.25rem;
+  height: 1.25rem;
+  line-height: 1;
+  font-size: 0.8rem;
+  padding: 0;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.field-help-toggle:hover { background: #e0e7ee; }
+.field-help-toggle:focus-visible { outline: 2px solid #2563eb; outline-offset: 1px; }
+.field-help-text {
+  display: block;
+  margin: 0.3rem 0 0;
+  padding: 0.4rem 0.6rem;
+  background: #f3f6f9;
+  border-left: 3px solid #93b4d6;
+  border-radius: 3px;
+  font-size: 0.85rem;
+  font-weight: normal;
+  color: #334155;
+  max-width: 38rem;
+}
+.field-help-text[hidden] { display: none; }
+
+@media (prefers-color-scheme: dark) {
+  .field-help-toggle { background: #1e293b; border-color: #334155; color: #93c5fd; }
+  .field-help-toggle:hover { background: #273449; }
+  .field-help-text { background: #1e293b; border-left-color: #3b5b80; color: #cbd5e1; }
+}
+
 @media (prefers-color-scheme: dark) {
   .btn {
     background: #1e293b;

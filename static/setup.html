@@ -121,36 +121,34 @@
     <div class="field">
       <label for="server-address">Server address</label>
       <input id="server-address" name="server_address" type="text" required
-             autocomplete="off" placeholder="http://chirpstack:8080">
-      <span class="hint">Full URL including scheme and port, e.g. <code>http://chirpstack:8080</code> or <code>https://cs.example.com:8080</code>.</span>
+             autocomplete="off" placeholder="http://chirpstack:8080" data-help="setup.server_address">
     </div>
     <div class="field">
       <label for="tenant-id">Tenant ID</label>
       <input id="tenant-id" name="tenant_id" type="text" required
-             autocomplete="off" placeholder="00000000-0000-0000-0000-000000000000">
-      <span class="hint">The ChirpStack tenant whose devices this gateway exposes.</span>
+             autocomplete="off" placeholder="00000000-0000-0000-0000-000000000000" data-help="setup.tenant_id">
     </div>
     <div class="field">
       <label for="api-token">API token</label>
-      <input id="api-token" name="api_token" type="password" required autocomplete="new-password">
-      <span class="hint">A ChirpStack API key with read access to the tenant's applications and devices. Stored as a secret.</span>
+      <input id="api-token" name="api_token" type="password" required autocomplete="new-password" data-help="setup.api_token">
     </div>
 
     <h2>OPC UA server</h2>
     <div class="field">
       <label for="password">OPC UA password</label>
-      <input id="password" name="password" type="password" required autocomplete="new-password">
-      <span class="hint">Used by your SCADA clients to connect. Must not be empty; no leading or trailing whitespace; no control characters; not a placeholder string; up to 256 characters.</span>
+      <input id="password" name="password" type="password" required autocomplete="new-password" data-help="setup.password">
     </div>
     <div class="field">
       <label for="password-confirm">Confirm password</label>
-      <input id="password-confirm" name="password_confirm" type="password" required autocomplete="new-password">
-      <span class="hint">Re-type the same password.</span>
+      <input id="password-confirm" name="password_confirm" type="password" required autocomplete="new-password" data-help="setup.password_confirm">
     </div>
     <button id="submit-btn" type="submit">Save and continue</button>
   </form>
 </section>
 
+<!-- Story G-2 (#142): shared contextual field-help (catalog + affordance).
+     Auto-attaches to [data-help] inputs on DOMContentLoaded. -->
+<script src="/field-help.js"></script>
 <script>
 (function () {
   'use strict';
