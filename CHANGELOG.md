@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] — 2026-06-28 — Web UX & Usability (Epic G complete)
+
+> **Status:** release candidate `v2.5.0-rc1`. Completes **Epic G** — the remaining
+> Web-UX stories on top of v2.4.0's drill-down config (G-0). Each story went
+> through the full three-layer adversarial code review (different model) plus a
+> mandatory second iteration; the epic security review was CLEAN (0 HIGH / 0 MED
+> / 2 LOW). Promotion to stable `v2.5.0` follows a real-world onboarding / web-UX
+> smoke against a live ChirpStack. The `-rc1` tag publishes
+> `gcorbaz/opcgw:2.5.0-rc1` (multi-arch amd64+arm64) + GHCR mirror; stable tags
+> (`:2.5` / `:latest`) are untouched until promotion.
+
+### Added / changed
+- **G-1 — Device-profile metric picker** ([#124](https://github.com/guycorbaz/opcgw/issues/124)).
+  The web metric picker can now source candidates from the device's **ChirpStack
+  device-profile measurements** — available even when the device hasn't
+  transmitted a decoded uplink yet — merged with the recently-observed uplink
+  keys and de-duplicated, each row tagged with its source. New read-only endpoint
+  `GET /api/inventory/measurements?dev_eui=…` (resolves the device profile via
+  gRPC); the measurement kind maps to a suggested metric type. No write-path
+  change.
+- **G-2 — Contextual field help** ([#142](https://github.com/guycorbaz/opcgw/issues/142)).
+  Every configuration field across the first-run wizard, the gateway-settings
+  editor, and the device/metric/command forms gains an accessible info-icon
+  affordance (`aria-describedby`, keyboard + screen-reader reachable) whose text
+  comes from one shared catalog (`static/field-help.js`) derived from
+  `docs/configuration.md` so the UI and docs stay in step.
+- **G-3 — Per-device OPC UA stale threshold** ([#132](https://github.com/guycorbaz/opcgw/issues/132)).
+  The per-device `stale_threshold_seconds` override (existing SQLite column) is
+  now settable from the web UI; slow LoRaWAN sensors can be given a longer
+  threshold so they don't read `Uncertain` between uplinks while fast devices
+  still flag genuine staleness quickly.
+- **G-4 — Dashboard error drill-down** ([#127](https://github.com/guycorbaz/opcgw/issues/127)).
+  The dashboard "Errors" tile drills down to a new **Errors** view
+  (`/errors.html`) listing recent error events (time, category, device,
+  sanitized message), newest-first. Backed by a new bounded error-event store
+  (schema migration **v013**, ring-buffer capped by `OPCGW_ERROR_EVENT_CAP`,
+  default 500), captured at the poller's existing error sites and exposed at
+  `GET /api/errors?limit=…`. Messages are sanitized (control-character stripping,
+  `Bearer`-token redaction, length bound); no aggregation
+  ([#130](https://github.com/guycorbaz/opcgw/issues/130)).
+
+### Notes
+- New env knob: **`OPCGW_ERROR_EVENT_CAP`** (default 500) bounds the error-event
+  feed; see [`docs/configuration.md`](./docs/configuration.md).
+- Schema advances to **v13** (adds the `error_events` table); the migration is
+  additive and idempotent.
+
 ## [2.4.0] — 2026-06-27 — Web UX: drill-down configuration
 
 > **Status:** released. Validated as `v2.4.0-rc1` in production (clean boot,
