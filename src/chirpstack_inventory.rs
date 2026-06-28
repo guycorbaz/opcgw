@@ -1155,6 +1155,15 @@ pub async fn fetch_device_profile_measurements(
         ));
     }
 
+    // Review (blind LOW): honour a shutdown that fires between the two
+    // chained RPCs — mirrors the pre-call guard, avoids a wasted second
+    // round-trip whose result the caller would discard.
+    if cancel_token.is_cancelled() {
+        return Err(OpcGwError::ChirpStack(
+            "cancelled during shutdown".to_string(),
+        ));
+    }
+
     // 2. Fetch the profile and extract its measurements map.
     let mut profile_client = DeviceProfileServiceClient::with_interceptor(
         channel,
@@ -1162,6 +1171,13 @@ pub async fn fetch_device_profile_measurements(
             token: config.chirpstack.api_token.clone(),
         },
     );
+    // Review (edge MED): a successful response with `device_profile = None`
+    // (profile deleted between the two calls, or an upstream serialisation
+    // gap) must NOT be silently cached as an empty measurement set —
+    // that's indistinguishable from a profile legitimately declaring zero
+    // measurements and would be served stale for the whole TTL. Treat it
+    // as an error, symmetric with the `device = None` guard above, so it
+    // routes to the 502 + reason path operators can see.
     let measurements_map = profile_client
         .get(Request::new(GetDeviceProfileRequest {
             id: device_profile_id.clone(),
@@ -1170,8 +1186,10 @@ pub async fn fetch_device_profile_measurements(
         .map_err(|e| OpcGwError::ChirpStack(format!("get_device_profile: {}", e)))?
         .into_inner()
         .device_profile
-        .map(|p| p.measurements)
-        .unwrap_or_default();
+        .ok_or_else(|| {
+            OpcGwError::ChirpStack("get_device_profile: profile not found".to_string())
+        })?
+        .measurements;
 
     let mut measurements: Vec<ProfileMeasurement> = measurements_map
         .into_iter()

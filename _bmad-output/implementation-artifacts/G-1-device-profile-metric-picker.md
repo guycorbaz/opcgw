@@ -1,6 +1,6 @@
 # Story G.1: Device-Profile Metric Picker
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -117,3 +117,19 @@ Opus 4.8 (1M context) — claude-opus-4-8[1m]
 ## Change Log
 
 - 2026-06-28 — Implementation complete (all 7 tasks). Device-profile metric picker: new `GET /api/inventory/measurements` endpoint sourcing candidates from ChirpStack device-profile measurements, merged with observed uplink keys in the picker UI. Status ready-for-dev → review.
+- 2026-06-28 — Code review (3 adversarial layers Blind/Edge/Auditor on Sonnet + mandatory iter-2). AC#1–8 MET. Loop terminated LOW-only. Status review → done. Addressed review findings (4 patches resolved + 1 MED deferred-as-LOW with Guy's explicit accept).
+
+### Review Findings (2026-06-28)
+
+- [x] [Review][Patch] `GetDeviceProfileResponse.device_profile == None` cached as empty → now returns Err (symmetric with `device == None`) [src/chirpstack_inventory.rs] — edge MED, fixed.
+- [x] [Review][Patch] No cancel check between the two chained gRPC calls → added [src/chirpstack_inventory.rs] — blind LOW, fixed.
+- [x] [Review][Patch] Missing degraded-mode 502 integration test → added `inventory_measurements_chirpstack_unreachable_returns_502` [tests/web_inventory.rs] — auditor MED, fixed.
+- [x] [Review][Patch] `MeasurementsQuery.force_refresh()` had no unit test → added 2 tests [src/web/inventory.rs] — auditor LOW, fixed.
+- [x] [Review][Patch] Module doc comment said "Story C-1 … three handlers" → updated to four [src/web/inventory.rs] — auditor LOW, fixed.
+- [x] [Review][Defer] Happy-path 200 + audit-event integration tests need a mock ChirpStack gRPC server (no inventory handler has this infra) — **MED accepted-as-LOW by Guy** (success-path logic unit-tested, degraded path now integration-tested, no token in audit scope); see deferred-work.md.
+- [x] [Review][Defer] `profile/device not found` → `chirpstack_grpc_error` bucket (classifier vocabulary; full message in audit) — LOW, deferred.
+- [x] [Review][Defer] InventoryCache mutex-across-fetch / channel-per-miss / TTL=0 insert — pre-existing systemic pattern across all three cache methods, LOW, deferred.
+- [x] [Review][Defer] Picker `fetch*` helpers don't thread `AbortSignal` into `fetch()` — pre-existing pattern, LOW, deferred.
+- [x] [Review][Dismiss] "Stale controller not aborted" (blind) — false positive; `loadMetricPicker` aborts the prior controller at its top.
+
+iter-2 re-review (fresh Sonnet agent, on the patch delta): patches clean, 0 HIGH / 0 MED, distinguishes `device_profile=None` (Err) from `Some(empty measurements)` (Ok 200) correctly. Gates: full `cargo test` 0-fail, `cargo clippy --all-targets -- -D warnings` clean.

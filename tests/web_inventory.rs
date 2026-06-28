@@ -275,3 +275,30 @@ async fn inventory_measurements_invalid_dev_eui_returns_400() {
     cancel.cancel();
     let _ = handle.await;
 }
+
+// Story G-1 review (auditor MED): degraded mode. A valid dev_eui with an
+// unreachable ChirpStack (the test config points at 127.0.0.1:18080, where
+// nothing listens) must return 502 + a structured error — never a 500 or a
+// hung request — so the picker UI can degrade to a banner / manual entry.
+#[tokio::test]
+async fn inventory_measurements_chirpstack_unreachable_returns_502() {
+    let (state, _dir) = build_test_app_state();
+    let (addr, handle, cancel) = spawn_web_server(state).await;
+
+    let resp = http_client()
+        .get(format!(
+            "http://{}/api/inventory/measurements?dev_eui=a84041b8a1867e20",
+            addr
+        ))
+        .header(header::AUTHORIZATION, auth_header())
+        .send()
+        .await
+        .expect("GET /api/inventory/measurements");
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"], "chirpstack_error");
+    assert!(body["reason"].is_string(), "reason classifier present");
+
+    cancel.cancel();
+    let _ = handle.await;
+}

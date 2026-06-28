@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) [2024] Guy Corbaz
 
-//! Story C-1: web handlers for the `/api/inventory/*` endpoints.
+//! Story C-1 / G-1: web handlers for the `/api/inventory/*` endpoints.
 //!
-//! Three GET-only handlers:
-//! - `inventory_applications` (`GET /api/inventory/applications`)
-//! - `inventory_devices`      (`GET /api/inventory/devices?application_id=…`)
-//! - `inventory_uplinks`      (`GET /api/inventory/uplinks?dev_eui=…&limit=…`)
+//! Four GET-only handlers:
+//! - `inventory_applications`  (`GET /api/inventory/applications`)
+//! - `inventory_devices`       (`GET /api/inventory/devices?application_id=…`)
+//! - `inventory_uplinks`       (`GET /api/inventory/uplinks?dev_eui=…&limit=…`)
+//! - `inventory_measurements`  (`GET /api/inventory/measurements?dev_eui=…`, Story G-1)
 //!
-//! All three are basic-auth gated (same middleware stack as the rest of
+//! All are basic-auth gated (same middleware stack as the rest of
 //! `/api/*`) and CSRF-exempt (GET-only, read-only — matches the existing
 //! API convention).
 //!
@@ -675,6 +676,33 @@ mod tests {
     #[test]
     fn applications_query_force_refresh_defaults_false() {
         let q = ApplicationsQuery::default();
+        assert!(!q.force_refresh());
+    }
+
+    // Story G-1 review (auditor LOW): mirror the ApplicationsQuery
+    // coverage for the new MeasurementsQuery.force_refresh().
+    #[test]
+    fn measurements_query_force_refresh_recognises_true_variants() {
+        let q = MeasurementsQuery {
+            dev_eui: Some("a84041b8a1867e20".to_string()),
+            refresh: Some("true".to_string()),
+        };
+        assert!(q.force_refresh());
+        let q = MeasurementsQuery {
+            dev_eui: None,
+            refresh: Some("1".to_string()),
+        };
+        assert!(q.force_refresh());
+        let q = MeasurementsQuery {
+            dev_eui: None,
+            refresh: Some("foo".to_string()),
+        };
+        assert!(!q.force_refresh());
+    }
+
+    #[test]
+    fn measurements_query_force_refresh_defaults_false() {
+        let q = MeasurementsQuery::default();
         assert!(!q.force_refresh());
     }
 
