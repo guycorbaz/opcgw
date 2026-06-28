@@ -546,6 +546,8 @@ pub fn build_router(app_state: Arc<AppState>, static_dir: PathBuf) -> Router {
         .route("/api/health", get(api_health))
         .route("/api/status", get(api::api_status))
         .route("/api/devices", get(api::api_devices))
+        // Story G-4 (#127): recent error-event feed for the dashboard drill-down.
+        .route("/api/errors", get(api::api_errors))
         // Story C-1: ChirpStack inventory query layer. GET-only, basic-auth
         // gated, CSRF-exempt (matches existing /api/* GET convention).
         .route(

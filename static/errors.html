@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>opcgw — Recent Errors</title>
+<link rel="stylesheet" href="/dashboard.css">
+</head>
+<body>
+<!-- The unified nav/header bar is injected by /shell.js (Story F-1). -->
+<header class="page-header">
+  <h1>opcgw</h1>
+  <p class="subtitle">Recent errors (Story G-4, #127)</p>
+  <p class="header-controls">
+    <span>Last refreshed: <span id="last-refresh">never</span></span>
+    <button type="button" id="refresh-now">Refresh now</button>
+  </p>
+</header>
+
+<main id="errors-main">
+  <p id="errors-status">Loading&hellip;</p>
+  <table id="errors-table" class="rows" hidden>
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Category</th>
+        <th>Device / Application</th>
+        <th>Message</th>
+      </tr>
+    </thead>
+    <tbody id="errors-tbody"></tbody>
+  </table>
+</main>
+
+<footer>
+  <p id="error-banner" class="banner is-error hidden" role="alert"></p>
+</footer>
+
+<script src="/shell.js"></script>
+<script src="/errors.js"></script>
+<script src="/apply-bar.js"></script>
+</body>
+</html>

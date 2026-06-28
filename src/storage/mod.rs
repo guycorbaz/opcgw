@@ -67,7 +67,7 @@ pub mod migrate_config;
 pub mod migrate_singleton_config;
 pub mod sqlite_singleton_provider;
 
-pub use types::{ChirpstackStatus, Command, CommandFilter, CommandStatus, DeviceCommand, MetricType, MetricValue, MAX_LORA_PAYLOAD_SIZE};
+pub use types::{ChirpstackStatus, Command, CommandFilter, CommandStatus, DeviceCommand, ErrorEvent, MetricType, MetricValue, MAX_LORA_PAYLOAD_SIZE};
 pub use sqlite::SqliteBackend;
 pub use pool::ConnectionPool;
 pub use sqlite_singleton_provider::SqliteSingletonProvider;
@@ -753,6 +753,17 @@ pub trait StorageBackend: Send + Sync {
         error_count: i32,
         chirpstack_available: bool,
     ) -> Result<(), OpcGwError>;
+
+    /// Record one error event into the bounded error-event feed (Story G-4,
+    /// #127). Inserts the event and prunes the store back to
+    /// [`crate::utils::error_event_cap`] (ring-buffer discipline). The caller
+    /// passes an already-[sanitized](crate::utils::sanitize_error_message)
+    /// message. Best-effort: callers treat a returned error as non-fatal and
+    /// never let it break a poll cycle.
+    fn record_error_event(&self, event: &ErrorEvent) -> Result<(), OpcGwError>;
+
+    /// Return up to `limit` most-recent error events, newest-first (Story G-4).
+    fn recent_error_events(&self, limit: usize) -> Result<Vec<ErrorEvent>, OpcGwError>;
 
     /// Retrieves a gateway health metric value by name.
     ///

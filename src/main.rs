@@ -624,6 +624,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // captured. These only tune the storage_query / batch_write WARN
     // thresholds; defaults are NAS-realistic.
     crate::utils::init_storage_budgets_from_env();
+    // Story G-4 (#127): resolve the error-event feed cap from the environment
+    // once at startup (OPCGW_ERROR_EVENT_CAP); defaults to DEFAULT_ERROR_EVENT_CAP.
+    crate::utils::init_error_event_cap_from_env();
     // Epic 7 retrospective action item (issue #91): Stories 7-2 and 7-3
     // satisfy NFR12 (source-IP in failed-auth audit logs) via two-event
     // correlation against async-opcua's `info!`-level

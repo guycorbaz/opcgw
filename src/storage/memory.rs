@@ -11,7 +11,8 @@
 // today, so clippy flags it as unused — allow at module scope.
 #![allow(dead_code)]
 
-use crate::storage::types::{ChirpstackStatus, CommandStatus, DeviceCommand, MetricType, MetricValue, Command, CommandFilter};
+use crate::storage::types::{ChirpstackStatus, CommandStatus, DeviceCommand, ErrorEvent, MetricType, MetricValue, Command, CommandFilter};
+use std::collections::VecDeque;
 use crate::storage::StorageBackend;
 use crate::command_validation::CommandValidator;
 use crate::utils::OpcGwError;
@@ -49,6 +50,9 @@ pub struct InMemoryBackend {
     status: Arc<Mutex<ChirpstackStatus>>,
     /// Gateway health metrics (Story 5-3)
     health_metrics: Arc<Mutex<GatewayHealthMetrics>>,
+    /// Bounded error-event feed (Story G-4, #127). Newest pushed to the back;
+    /// oldest popped from the front once the cap is exceeded.
+    error_events: Arc<Mutex<VecDeque<ErrorEvent>>>,
     /// Optional command validator (Story 3-2)
     validator: Option<Arc<CommandValidator>>,
 }
@@ -64,6 +68,7 @@ impl InMemoryBackend {
             command_id_counter: Arc::new(Mutex::new(0)),
             status: Arc::new(Mutex::new(ChirpstackStatus::default())),
             health_metrics: Arc::new(Mutex::new(GatewayHealthMetrics::default())),
+            error_events: Arc::new(Mutex::new(VecDeque::new())),
             validator: None,
         }
     }
@@ -94,6 +99,7 @@ impl InMemoryBackend {
             command_id_counter: Arc::new(Mutex::new(0)),
             status: Arc::new(Mutex::new(ChirpstackStatus::default())),
             health_metrics: Arc::new(Mutex::new(GatewayHealthMetrics::default())),
+            error_events: Arc::new(Mutex::new(VecDeque::new())),
             validator,
         }
     }
@@ -554,6 +560,25 @@ impl StorageBackend for InMemoryBackend {
         metrics.chirpstack_available = chirpstack_available;
 
         Ok(())
+    }
+
+    fn record_error_event(&self, event: &ErrorEvent) -> Result<(), OpcGwError> {
+        let mut events = self.error_events.lock()
+            .map_err(|_| OpcGwError::Storage("Failed to acquire lock on error_events".to_string()))?;
+        events.push_back(event.clone());
+        // Ring-buffer bound: drop oldest beyond the cap.
+        let cap = crate::utils::error_event_cap();
+        while events.len() > cap {
+            events.pop_front();
+        }
+        Ok(())
+    }
+
+    fn recent_error_events(&self, limit: usize) -> Result<Vec<ErrorEvent>, OpcGwError> {
+        let events = self.error_events.lock()
+            .map_err(|_| OpcGwError::Storage("Failed to acquire lock on error_events".to_string()))?;
+        // Newest-first, capped at `limit`.
+        Ok(events.iter().rev().take(limit).cloned().collect())
     }
 
     fn get_gateway_health_metrics(&self) -> Result<(Option<DateTime<Utc>>, i32, bool), OpcGwError> {

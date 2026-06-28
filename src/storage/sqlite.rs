@@ -36,7 +36,7 @@
 
 use rusqlite::{Connection, params, OptionalExtension};
 use crate::utils::OpcGwError;
-use crate::storage::{ChirpstackStatus, Command, CommandFilter, CommandStatus, DeviceCommand, MetricType, ConnectionPool, MetricValue};
+use crate::storage::{ChirpstackStatus, Command, CommandFilter, CommandStatus, DeviceCommand, ErrorEvent, MetricType, ConnectionPool, MetricValue};
 use crate::command_validation::CommandValidator;
 use crate::config::{ChirpStackApplications, ChirpstackDevice, ReadMetric, DeviceCommandCfg, OpcMetricTypeConfig};
 use chrono::{DateTime, Utc};
@@ -2319,6 +2319,73 @@ impl crate::storage::StorageBackend for SqliteBackend {
             "Updated gateway health status"
         );
         Ok(())
+    }
+
+    fn record_error_event(&self, event: &ErrorEvent) -> Result<(), OpcGwError> {
+        let mut __op = StorageOpLog::start("record_error_event");
+        let conn = self.pool.checkout(std::time::Duration::from_secs(5)).map_err(|e| {
+            OpcGwError::Storage(format!("Failed to get database connection for error event: {}", e))
+        })?;
+
+        let ts_str = format_rfc3339(&event.ts);
+        conn.execute(
+            "INSERT INTO error_events (ts, category, device_id, application_id, message) \
+             VALUES (?, ?, ?, ?, ?)",
+            params![ts_str, event.category, event.device_id, event.application_id, event.message],
+        ).map_err(|e| {
+            OpcGwError::Storage(format!("Failed to insert error event: {}", e))
+        })?;
+
+        // Ring-buffer prune: keep only the newest `cap` rows by id. Using
+        // `NOT IN (… ORDER BY id DESC LIMIT cap)` (not `id <= MAX(id) - cap`)
+        // is correct even when ids are non-contiguous after earlier prunes.
+        let cap = crate::utils::error_event_cap() as i64;
+        conn.execute(
+            "DELETE FROM error_events WHERE id NOT IN \
+             (SELECT id FROM error_events ORDER BY id DESC LIMIT ?)",
+            params![cap],
+        ).map_err(|e| {
+            OpcGwError::Storage(format!("Failed to prune error events: {}", e))
+        })?;
+        __op.ok();
+        Ok(())
+    }
+
+    fn recent_error_events(&self, limit: usize) -> Result<Vec<ErrorEvent>, OpcGwError> {
+        let mut __op = StorageOpLog::start("recent_error_events");
+        let conn = self.pool.checkout(std::time::Duration::from_secs(5)).map_err(|e| {
+            OpcGwError::Storage(format!("Failed to get database connection for error events: {}", e))
+        })?;
+
+        let mut stmt = conn.prepare(
+            "SELECT ts, category, device_id, application_id, message \
+             FROM error_events ORDER BY id DESC LIMIT ?",
+        ).map_err(|e| {
+            OpcGwError::Storage(format!("Failed to prepare error-event query: {}", e))
+        })?;
+
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(ErrorEvent {
+                ts: DateTime::parse_from_rfc3339(&row.get::<_, String>(0)?)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                category: row.get::<_, String>(1)?,
+                device_id: row.get::<_, Option<String>>(2)?,
+                application_id: row.get::<_, Option<String>>(3)?,
+                message: row.get::<_, String>(4)?,
+            })
+        }).map_err(|e| {
+            OpcGwError::Storage(format!("Failed to query error events: {}", e))
+        })?;
+
+        let mut events = Vec::new();
+        for r in rows {
+            events.push(r.map_err(|e| {
+                OpcGwError::Storage(format!("Failed to read error-event row: {}", e))
+            })?);
+        }
+        __op.ok();
+        Ok(events)
     }
 
     fn get_gateway_health_metrics(&self) -> Result<(Option<DateTime<Utc>>, i32, bool), OpcGwError> {

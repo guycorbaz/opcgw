@@ -272,6 +272,29 @@ pub struct ChirpstackStatus {
     pub error_count: i32,
 }
 
+/// One recorded error event for the dashboard error drill-down (Story G-4, #127).
+///
+/// Captured at the poller's existing error sites and stored in a bounded ring
+/// buffer (the `error_events` table, migration v013) so the cumulative
+/// `error_count` can drill down to *what* the recent errors actually were.
+/// `message` is sanitized before storage (see
+/// [`crate::utils::sanitize_error_message`]) — no secrets, no control
+/// characters. Records discrete events only (#130).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ErrorEvent {
+    /// When the error occurred (server-side timestamp).
+    pub ts: DateTime<Utc>,
+    /// Stable category, e.g. `device_poll`, `chirpstack_connect`,
+    /// `chirpstack_auth`, `metric_write`.
+    pub category: String,
+    /// The offending device (DevEUI), when the error is device-scoped.
+    pub device_id: Option<String>,
+    /// The offending application, when known.
+    pub application_id: Option<String>,
+    /// Sanitized human-readable message (control-char-stripped, length-bounded).
+    pub message: String,
+}
+
 // A-5 Task 9 (AC#7) + P1 iter-1 review fix: compile-time field-shape pin
 // for MetricValue. The transitional `value: String` field was removed in
 // A-5; this destructure (without `..`) surfaces a compile error if a

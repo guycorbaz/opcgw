@@ -139,6 +139,9 @@ async fn build_production_static_dir() -> TempDir {
         "config.js",
         // Story G-2: the shared contextual field-help module.
         "field-help.js",
+        // Story G-4: the error drill-down view + controller.
+        "errors.html",
+        "errors.js",
     ] {
         let body = tokio::fs::read(src.join(name))
             .await
@@ -1344,6 +1347,135 @@ async fn field_help_js_is_served_and_pages_reference_it() {
             "{page} must load /field-help.js"
         );
     }
+}
+
+/// Story G-4 (#127): GET /api/errors is auth-gated, returns the envelope on a
+/// fresh (empty) backend, and rejects an over-cap ?limit with 400.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn api_errors_endpoint_envelope_auth_and_limit_cap() {
+    init_test_subscriber();
+
+    let (addr, cancel, handle, _static_tmp) = spawn_test_server(DashboardConfigSnapshot {
+        application_count: 0,
+        device_count: 0,
+        applications: vec![],
+    })
+    .await;
+
+    let client = common::build_http_client(Duration::from_secs(5));
+
+    // Unauthenticated → 401.
+    let resp = client
+        .get(format!("http://{addr}/api/errors"))
+        .send()
+        .await
+        .expect("GET /api/errors (no auth)");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Authenticated, fresh backend → 200 with an empty, well-shaped envelope.
+    let resp = client
+        .get(format!("http://{addr}/api/errors"))
+        .header(
+            header::AUTHORIZATION,
+            build_basic_auth(TEST_USER, TEST_PASSWORD),
+        )
+        .send()
+        .await
+        .expect("GET /api/errors (auth'd)");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert!(body["items"].is_array(), "items is an array");
+    assert_eq!(body["count"], 0, "fresh backend has no errors");
+
+    // ?limit over the cap → 400.
+    let resp = client
+        .get(format!("http://{addr}/api/errors?limit=501"))
+        .header(
+            header::AUTHORIZATION,
+            build_basic_auth(TEST_USER, TEST_PASSWORD),
+        )
+        .send()
+        .await
+        .expect("GET /api/errors?limit=501");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"], "limit_out_of_range");
+    assert_eq!(body["cap"], 500);
+
+    cancel.cancel();
+    handle
+        .await
+        .expect("web::run task panicked or was cancelled abnormally");
+}
+
+/// Story G-4 (#127): errors.html is served on the shell and the dashboard tile
+/// links to it; errors.js is served and references /api/errors.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn errors_view_is_served_and_linked_from_dashboard() {
+    init_test_subscriber();
+
+    let (addr, cancel, handle, _static_tmp) = spawn_test_server(DashboardConfigSnapshot {
+        application_count: 0,
+        device_count: 0,
+        applications: vec![],
+    })
+    .await;
+
+    let client = common::build_http_client(Duration::from_secs(5));
+
+    // errors.html served on the shell.
+    let resp = client
+        .get(format!("http://{addr}/errors.html"))
+        .header(
+            header::AUTHORIZATION,
+            build_basic_auth(TEST_USER, TEST_PASSWORD),
+        )
+        .send()
+        .await
+        .expect("GET /errors.html");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let html = resp.text().await.expect("errors.html body");
+    assert!(html.contains(r#"src="/shell.js""#), "errors.html uses the shell");
+    assert!(html.contains(r#"src="/errors.js""#), "errors.html loads errors.js");
+    assert!(html.contains(r#"id="errors-tbody""#), "errors.html has the table body errors.js binds to");
+
+    // errors.js served and references the endpoint.
+    let resp = client
+        .get(format!("http://{addr}/errors.js"))
+        .header(
+            header::AUTHORIZATION,
+            build_basic_auth(TEST_USER, TEST_PASSWORD),
+        )
+        .send()
+        .await
+        .expect("GET /errors.js");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let js = resp.text().await.expect("errors.js body");
+    assert!(js.contains("/api/errors"), "errors.js fetches /api/errors");
+
+    // The dashboard tile drills down to the errors view.
+    let resp = client
+        .get(format!("http://{addr}/index.html"))
+        .header(
+            header::AUTHORIZATION,
+            build_basic_auth(TEST_USER, TEST_PASSWORD),
+        )
+        .send()
+        .await
+        .expect("GET /index.html");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let index = resp.text().await.expect("index.html body");
+    assert!(
+        index.contains(r#"href="/errors.html""#),
+        "dashboard error tile must link to the errors view"
+    );
+
+    cancel.cancel();
+    handle
+        .await
+        .expect("web::run task panicked or was cancelled abnormally");
 }
 
 /// Story 9-3 AC#4: metrics.js is served with a JS Content-Type and

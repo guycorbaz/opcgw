@@ -585,6 +585,89 @@ fn resolve_budget_env(env_key: &str, slot: &AtomicU64, default_ms: u64) {
     }
 }
 
+// Error-event feed cap (Story G-4, #127)
+//
+// The dashboard error drill-down keeps a bounded ring buffer of recent error
+// events. The cap bounds both the SQLite table and the in-memory backend so the
+// feed can never grow without limit. Like the storage budgets above, it is a
+// process-global atomic resolved once from the environment at startup.
+
+/// Default error-event feed cap (used when `OPCGW_ERROR_EVENT_CAP` is unset or
+/// invalid). ~500 recent events is plenty to diagnose a fault without bloating
+/// the DB.
+pub const DEFAULT_ERROR_EVENT_CAP: usize = 500;
+
+/// Env var overriding the error-event feed cap (positive integer).
+pub const ERROR_EVENT_CAP_ENV: &str = "OPCGW_ERROR_EVENT_CAP";
+
+static ERROR_EVENT_CAP: AtomicU64 = AtomicU64::new(DEFAULT_ERROR_EVENT_CAP as u64);
+
+/// Current error-event feed cap. Reads a process-global atomic — cheap enough to
+/// call on every `record_error_event`; never re-reads the environment.
+pub fn error_event_cap() -> usize {
+    ERROR_EVENT_CAP.load(Ordering::Relaxed) as usize
+}
+
+/// Resolve the error-event cap from `OPCGW_ERROR_EVENT_CAP` exactly once at
+/// startup (call after the tracing subscriber is initialised). A valid positive
+/// integer is applied with an `info!`; an invalid/zero value falls back to the
+/// default with a single `warn!`.
+pub fn init_error_event_cap_from_env() {
+    match std::env::var(ERROR_EVENT_CAP_ENV) {
+        Ok(raw) => match parse_budget_value(&raw) {
+            Ok(cap) => {
+                ERROR_EVENT_CAP.store(cap, Ordering::Relaxed);
+                tracing::info!(
+                    operation = "error_event_cap_init",
+                    env_key = ERROR_EVENT_CAP_ENV,
+                    cap = cap,
+                    source = "env",
+                    "Error-event feed cap resolved from environment"
+                );
+            }
+            Err(reason) => {
+                tracing::warn!(
+                    operation = "error_event_cap_init",
+                    env_key = ERROR_EVENT_CAP_ENV,
+                    rejected_value = %raw,
+                    reason = reason,
+                    cap = DEFAULT_ERROR_EVENT_CAP,
+                    source = "default",
+                    "Invalid error-event cap override; using default"
+                );
+            }
+        },
+        Err(_) => {
+            tracing::info!(
+                operation = "error_event_cap_init",
+                env_key = ERROR_EVENT_CAP_ENV,
+                cap = DEFAULT_ERROR_EVENT_CAP,
+                source = "default",
+                "Error-event feed cap using built-in default"
+            );
+        }
+    }
+}
+
+/// Sanitize an error-event message before it is stored/surfaced (Story G-4,
+/// #127, AC#5). Strips control characters (log-injection / display hazards) and
+/// bounds the length. Never store raw secrets — callers must not pass tokens;
+/// this is the defence-in-depth scrub matching the audit-log discipline.
+pub fn sanitize_error_message(raw: &str) -> String {
+    const MAX_LEN: usize = 1024;
+    let cleaned: String = raw
+        .chars()
+        .map(|c| if c.is_control() && c != '\t' { ' ' } else { c })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.chars().count() > MAX_LEN {
+        let truncated: String = trimmed.chars().take(MAX_LEN - 1).collect();
+        format!("{}…", truncated)
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Maximum number of daily-rolling log files retained on disk (CR #143).
 ///
 /// opcgw writes a single application log (`opcgw.log.<date>`) that rotates
@@ -810,6 +893,35 @@ pub fn print_type_of<T>(_: &T) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Story G-4 (#127): error-message sanitization (AC#5).
+
+    #[test]
+    fn sanitize_error_message_strips_control_chars() {
+        // Newlines / carriage returns / other control chars (log-injection
+        // hazards) are replaced with spaces; a tab is preserved.
+        let raw = "line1\nline2\r\u{0007}end\tcol";
+        let out = sanitize_error_message(raw);
+        assert!(!out.contains('\n'), "newline stripped");
+        assert!(!out.contains('\r'), "carriage return stripped");
+        assert!(!out.contains('\u{0007}'), "BEL stripped");
+        assert!(out.contains('\t'), "tab preserved");
+        assert!(out.contains("line1") && out.contains("end"));
+    }
+
+    #[test]
+    fn sanitize_error_message_bounds_length() {
+        let raw = "x".repeat(5000);
+        let out = sanitize_error_message(&raw);
+        assert!(out.chars().count() <= 1024, "message length bounded");
+        assert!(out.ends_with('…'), "truncation marker appended");
+    }
+
+    #[test]
+    fn sanitize_error_message_passes_through_normal_text() {
+        let raw = "get_device: device not found (dev-eui a84041b8a1867e20)";
+        assert_eq!(sanitize_error_message(raw), raw);
+    }
 
     /// GH-144: a positive integer is accepted as the budget value.
     #[test]

@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -495,6 +495,69 @@ pub struct MetricView {
     pub value: Option<serde_json::Value>,
     pub unit: Option<String>,
     pub timestamp: Option<String>,
+}
+
+// ---- Story G-4 (#127): dashboard error drill-down ----------------------
+
+/// Default number of error events returned when `?limit` is omitted.
+pub const ERRORS_LIMIT_DEFAULT: usize = 100;
+/// Maximum allowed `?limit` for `/api/errors` (over-cap → 400).
+pub const ERRORS_LIMIT_CAP: usize = 500;
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ErrorsQuery {
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Response envelope for `GET /api/errors`. `items` are newest-first;
+/// `ErrorEvent` serializes `ts` as an RFC3339 string.
+#[derive(Debug, Serialize)]
+pub struct ErrorsResponse {
+    pub items: Vec<crate::storage::ErrorEvent>,
+    pub count: usize,
+}
+
+/// `GET /api/errors?limit=…` — the recent error-event feed backing the
+/// dashboard error drill-down (Story G-4, #127). Newest-first, capped.
+/// Auth-gated like the rest of `/api/*`. Messages are already sanitized at
+/// capture time (no secrets / control chars).
+pub async fn api_errors(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ErrorsQuery>,
+) -> Response {
+    let limit = query.limit.unwrap_or(ERRORS_LIMIT_DEFAULT);
+    if limit > ERRORS_LIMIT_CAP {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "limit_out_of_range",
+                "cap": ERRORS_LIMIT_CAP,
+                "received": limit
+            })),
+        )
+            .into_response();
+    }
+
+    match state.backend.recent_error_events(limit) {
+        Ok(events) => {
+            let count = events.len();
+            (StatusCode::OK, Json(ErrorsResponse { items: events, count })).into_response()
+        }
+        Err(e) => {
+            // NFR7: log the detail to the operator log; generic body to client.
+            warn!(
+                event = "api_errors_storage_error",
+                error = %e,
+                "GET /api/errors: failed to read error_events table"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "storage_error" })),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// `GET /api/devices` handler (Story 9-3, FR37).
@@ -5212,6 +5275,22 @@ mod tests {
             _chirpstack_available: bool,
         ) -> Result<(), OpcGwError> {
             panic!("FailingBackendForApiTests: this method is unreachable from api_status / api_devices; if a future test path reaches it, either return Err for an intentional failure-path test OR rename this fake to something more specific")
+        }
+        fn record_error_event(
+            &self,
+            _event: &crate::storage::ErrorEvent,
+        ) -> Result<(), OpcGwError> {
+            Err(OpcGwError::Storage(
+                "FailingBackendForApiTests: record_error_event always fails".to_string(),
+            ))
+        }
+        fn recent_error_events(
+            &self,
+            _limit: usize,
+        ) -> Result<Vec<crate::storage::ErrorEvent>, OpcGwError> {
+            Err(OpcGwError::Storage(
+                "FailingBackendForApiTests: recent_error_events always fails".to_string(),
+            ))
         }
         fn get_gateway_health_metrics(
             &self,

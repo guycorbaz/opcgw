@@ -90,6 +90,10 @@ Story D-1 (2026-05-27) introduced a web-UI editor for the four non-secret single
 
 The `singleton_config_updated` event records `section` + `field_count` + `auth_user` only — **never** the per-field VALUES. This is an explicit operator-data-protection contract: an operator updating a `[chirpstack].server_address` to a sensitive internal hostname must not have that hostname leak into the audit trail. The audit event surfaces the WHO + WHAT-SECTION + HOW-MANY-FIELDS, not the data itself.
 
+### Error-event feed sanitization (Story G-4, #127)
+
+The dashboard error drill-down (`GET /api/errors` → `/errors.html`) surfaces recent error messages. Every message is passed through `utils::sanitize_error_message` before storage: control characters are stripped (log-injection / display hazard) and the length is bounded (≤ 1 KiB). The capture sites in the poller record the **error's Display string** (e.g. a tonic `Status` or an `OpcGwError::ChirpStack(...)`), never the ChirpStack `api_token` or any credential — the token lives only inside the gRPC interceptor, not in the error values that reach the feed. The feed stores discrete events only (no aggregation, #130) in a bounded ring buffer (`OPCGW_ERROR_EVENT_CAP`, default 500).
+
 ### Secret-store boundary
 
 Per the Epic D scoping decision (2026-05-26), secrets stay in `config/secrets.toml`. They are NOT migrated to SQLite even though the non-secret singleton fields are. Rationale:

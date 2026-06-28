@@ -863,6 +863,30 @@ impl ChirpstackPoller {
         matches!(error, OpcGwError::ChirpStack(_)) && self.check_server_availability().is_err()
     }
 
+    /// Best-effort capture of an error into the bounded error-event feed for the
+    /// dashboard drill-down (Story G-4, #127). The message is sanitized (no
+    /// secrets / control chars) before storage. A storage failure here is logged
+    /// and swallowed — recording is observability and must NEVER break the poll
+    /// cycle.
+    fn capture_error_event(
+        &self,
+        category: &str,
+        device_id: Option<&str>,
+        application_id: Option<&str>,
+        message: String,
+    ) {
+        let event = crate::storage::ErrorEvent {
+            ts: Utc::now(),
+            category: category.to_string(),
+            device_id: device_id.map(str::to_string),
+            application_id: application_id.map(str::to_string),
+            message: crate::utils::sanitize_error_message(&message),
+        };
+        if let Err(e) = self.backend.record_error_event(&event) {
+            warn!(error = %e, category = category, "Failed to record error event (non-fatal)");
+        }
+    }
+
     /// Extracts the IP address from the ChirpStack server address.
     ///
     /// Parses the configured server address as a URL and extracts the host portion
@@ -1103,6 +1127,8 @@ impl ChirpstackPoller {
             // Polling metrics (AC#1: poll_once equivalent)
             if let Err(e) = self.poll_metrics().await {
                 error!(error = ?e, "Error polling chirpstack devices");
+                // Story G-4 (#127): cycle-level poll failure into the error feed.
+                self.capture_error_event("chirpstack_poll", None, None, format!("{}", e));
             }
 
             // Execute pruning after poll_metrics completes (AC#1: sequential, not parallel)
@@ -1393,6 +1419,13 @@ impl ChirpstackPoller {
                         error = %e,
                         status = "failed"
                     );
+                    // Story G-4 (#127): surface this in the dashboard error feed.
+                    self.capture_error_event(
+                        "device_poll",
+                        Some(&dev_id.to_string()),
+                        None,
+                        format!("{}", e),
+                    );
                     // Review patch P15: saturate at i32::MAX so the gateway
                     // health-metric overflow check (`error_count >= i32::MAX`
                     // in opc_ua.rs) actually fires reliably. Plain `+= 1`
@@ -1512,6 +1545,8 @@ impl ChirpstackPoller {
                         );
                         if attempt >= max_retries {
                             error!(error = %e, attempt, "Failed to batch write metrics after {} retries", max_retries);
+                            // Story G-4 (#127): record the give-up into the error feed.
+                            self.capture_error_event("metric_write", None, None, format!("{}", e));
                             // Storage errors don't affect ChirpStack availability flag (they're local issues, not remote)
                             // Only set unavailability on ChirpStack connectivity errors (handled in device fetch loop)
                             break;

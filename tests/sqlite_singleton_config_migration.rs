@@ -135,7 +135,7 @@ fn singleton_fresh_db_populated_toml_returns_migrated() {
     let version: u32 = raw
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("read user_version");
-    assert_eq!(version, 12, "fresh DB after migration must be at the latest schema (v012)");
+    assert_eq!(version, 13, "fresh DB after migration must be at the latest schema (v013)");
 }
 
 /// Test 2 — Already-migrated DB → second call is no-op via primary guard.
