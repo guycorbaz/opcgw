@@ -1296,18 +1296,29 @@ async fn field_help_js_is_served_and_pages_reference_it() {
     // from every surface in AC#1. If a key is renamed in the page scripts
     // without updating the catalog, this list is the canary.
     for key in [
+        // Setup wizard (all 5 data-help fields in setup.html).
         "setup.server_address",
+        "setup.tenant_id",
+        "setup.api_token",
         "setup.password",
+        "setup.password_confirm",
+        // Representative singleton keys (one per [section]).
         "global.command_delivery_timeout_secs",
         "chirpstack.polling_frequency",
         "chirpstack.stream_all_devices",
         "opcua.host_port",
         "opcua.stale_threshold_seconds",
         "web.allowed_origins",
+        // Device / metric / command fields wired in config.js (all of them).
         "device.stale_threshold_seconds",
+        "metric.metric_name",
         "metric.chirpstack_metric_name",
         "metric.metric_type",
+        "metric.metric_unit",
+        "command.command_id",
+        "command.command_name",
         "command.command_port",
+        "command.command_confirmed",
         "command.command_class",
     ] {
         assert!(

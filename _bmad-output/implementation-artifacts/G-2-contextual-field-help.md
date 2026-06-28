@@ -1,6 +1,6 @@
 # Story G.2: Contextual Field Help
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -111,3 +111,21 @@ Opus 4.8 (1M context) — claude-opus-4-8[1m]
 ## Change Log
 
 - 2026-06-28 — Implementation complete (all 6 tasks). Contextual field help across the setup wizard, singleton-config editor, and device/metric/command forms via a shared `static/field-help.js` catalog + accessible affordance. Status ready-for-dev → review.
+- 2026-06-28 — Code review (3 adversarial layers Blind/Edge/Auditor on Sonnet + mandatory iter-2). AC#1–8 MET. Loop terminated LOW-only. Status review → done.
+
+### Review Findings (2026-06-28)
+
+- [x] [Review][Patch] **a11y MED (3-layer convergence)**: `aria-describedby` pointed at a `hidden` note → dropped from the a11y tree, announced nothing. Fixed — note stays in the a11y tree, collapsed via a `.is-collapsed` clip/sr-only class so the description announces on field focus; toggle controls only visual disclosure. [static/field-help.js, static/dashboard.css]
+- [x] [Review][Patch] **docs-drift MED (Auditor F1)**: 12 catalog fields were absent from `docs/configuration.md`. Added all 12 to the `[global]/[chirpstack]/[opcua]` tables. [docs/configuration.md]
+- [x] [Review][Patch] aria-describedby now only wired to focusable form controls (skips the singleton secret badge `<span>`) [static/field-help.js] — edge LOW.
+- [x] [Review][Patch] Escape handlers call `stopPropagation()` [static/field-help.js] — edge/blind LOW.
+- [x] [Review][Patch] Coverage canary expanded to all wired keys [tests/web_dashboard.rs] — auditor F2 LOW.
+- [x] [Review][Patch] Removed dead `.wizard .hint` CSS [static/setup.html] — auditor F3 LOW.
+- [x] [Review][Patch] Added first-run HTTP test asserting `GET /field-help.js` → 200 (bypass works end-to-end) [tests/web_setup_wizard.rs] — edge LOW.
+- [x] [Review][Defer] No static help fallback if field-help.js fails to load — LOW, accepted (single-source-of-truth design); deferred-work.md.
+- [x] [Review][Defer] `command_confirmed` help placement cosmetic — LOW, accepted; deferred-work.md.
+- [x] [Review][Defer] `_warned` set unbounded — LOW theoretical, accepted; deferred-work.md.
+- [x] [Review][Dismiss] `appendChild(null)` in buildMetricRow (blind) — false positive; `el()` filters null children (Auditor confirmed).
+- [x] [Review][Dismiss] aria-live not added (blind) — superseded by the always-in-a11y-tree describedby model.
+
+iter-2 re-review (fresh Sonnet agent, on the patch delta) **caught 2 doc-type errors I introduced** (the value of the iter-N+1 rule): `prune_interval_minutes`/`history_retention_days` were typed `u64` but are `u32`; the 6 `opcua.max_*` were typed `u32` but are `Option<usize>` — both fixed against src/config.rs. Otherwise CLEAN (a11y refactor correct, no FOUC, toggle logic sound). Gates: full `cargo test` 0-fail, `cargo clippy --all-targets -- -D warnings` clean, `node --check` clean.

@@ -68,8 +68,11 @@ Global application settings.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `debug` | bool | false | Enable debug logging (more verbose) |
+| `prune_interval_minutes` | u32 | 60 | How often (minutes) opcgw prunes expired stored metric/command history. |
+| `history_retention_days` | u32 | 7 | How many days of metric/command history to keep before pruning. |
 | `command_delivery_poll_interval_secs` | u64 | 5 | How often opcgw polls ChirpStack for command delivery confirmations (must be >= 1). |
 | `command_delivery_timeout_secs` | u32 | 60 | A command left in the "sent" state longer than this is marked failed (must be >= 1). |
+| `command_timeout_check_interval_secs` | u64 | 10 | How often (seconds) opcgw sweeps for timed-out commands. |
 
 ### Example
 
@@ -97,6 +100,9 @@ Configuration for ChirpStack connection and polling behavior.
 | `retry` | u32 | ✓ | Maximum retry attempts on connection failure (must be > 0) |
 | `delay` | u64 | ✓ | Milliseconds to wait between retry attempts (must be > 0) |
 | `stream_all_devices` | bool | ✗ | Default `false`. When `true`, opcgw subscribes to the gRPC uplink event stream for **all** devices (not just command-class devices). The streamed device set is fixed at startup (restart-required). Env override: `OPCGW_CHIRPSTACK__STREAM_ALL_DEVICES`. |
+| `list_page_size` | u32 | ✗ | Page size for ChirpStack list calls (applications/devices). Tuning knob; default 100. |
+| `inventory_cache_ttl_seconds` | u64 | ✗ | How long (seconds) the web UI caches ChirpStack inventory (applications/devices/measurements) before refetching. Default 60. |
+| `inventory_uplink_max_wait_seconds` | u64 | ✗ | Maximum seconds the metric picker waits when reading recent uplinks for a device. Default 5. |
 
 ### Validation Rules
 
@@ -158,6 +164,12 @@ Configuration for OPC UA server.
 | `trust_client_cert` | bool | ✗ | false | Accept any client certificate |
 | `check_cert_time` | bool | ✗ | false | Validate certificate expiration |
 | `hello_timeout` | u64 | ✗ | 5 | Seconds to wait for hello message |
+| `max_connections` | usize | ✗ | - | Maximum concurrent OPC UA client sessions (optional cap). |
+| `max_subscriptions_per_session` | usize | ✗ | - | Maximum OPC UA subscriptions allowed per client session (optional cap). |
+| `max_monitored_items_per_sub` | usize | ✗ | - | Maximum monitored items per OPC UA subscription (optional cap). |
+| `max_message_size` | usize | ✗ | - | Maximum OPC UA message size in bytes (optional cap). |
+| `max_chunk_count` | usize | ✗ | - | Maximum number of chunks per OPC UA message (optional cap). |
+| `max_history_data_results_per_node` | usize | ✗ | - | Maximum history values returned per node in one OPC UA history read (optional cap). |
 
 ### Validation Rules
 

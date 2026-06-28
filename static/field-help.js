@@ -134,10 +134,16 @@
     btn.textContent = 'ⓘ'; // ⓘ
 
     var note = document.createElement('span');
-    note.className = 'field-help-text';
+    // Review (3-layer convergence, MED): the help region stays in the
+    // accessibility tree at ALL times (collapsed visually via the
+    // `is-collapsed` CSS class, NOT the HTML `hidden` attribute, which
+    // would drop it from the a11y tree and make the aria-describedby link
+    // below announce nothing). So a screen reader reads the help as the
+    // field's description on focus, while the toggle controls only the
+    // VISUAL disclosure for sighted users.
+    note.className = 'field-help-text is-collapsed';
     note.id = helpId;
     note.setAttribute('role', 'note');
-    note.hidden = true;
     note.appendChild(document.createTextNode(entry.text));
     if (entry.docHref) {
       note.appendChild(document.createTextNode(' '));
@@ -149,23 +155,29 @@
       note.appendChild(a);
     }
 
+    function isOpen() { return !note.classList.contains('is-collapsed'); }
     function setOpen(open) {
-      note.hidden = !open;
+      note.classList.toggle('is-collapsed', !open);
       btn.setAttribute('aria-expanded', open ? 'true' : 'false');
     }
     btn.addEventListener('click', function () {
-      setOpen(note.hidden);
+      setOpen(!isOpen());
     });
     note.addEventListener('keydown', function (ev) {
-      if (ev.key === 'Escape') { setOpen(false); btn.focus(); }
+      // Escape from inside the note (e.g. a "Learn more" link) closes it and
+      // returns focus to the toggle. stopPropagation so an ancestor Escape
+      // handler (modal / router) doesn't also fire.
+      if (ev.key === 'Escape') { ev.stopPropagation(); setOpen(false); btn.focus(); }
     });
     btn.addEventListener('keydown', function (ev) {
-      if (ev.key === 'Escape') { setOpen(false); }
+      if (ev.key === 'Escape') { ev.stopPropagation(); setOpen(false); }
     });
 
     // Link the help text to the input for assistive tech, preserving any
-    // existing aria-describedby (e.g. a wizard hint).
-    if (inputEl && inputEl.setAttribute) {
+    // existing aria-describedby. Only wire focusable form controls — a
+    // non-focusable target (e.g. the singleton-config secret badge <span>)
+    // gets no benefit from aria-describedby, so skip it there.
+    if (inputEl && inputEl.tagName && /^(INPUT|SELECT|TEXTAREA)$/.test(inputEl.tagName)) {
       var existing = inputEl.getAttribute('aria-describedby');
       inputEl.setAttribute('aria-describedby', existing ? existing + ' ' + helpId : helpId);
     }

@@ -251,6 +251,19 @@ async fn first_run_serves_static_assets() {
         "static asset must be served without redirect"
     );
 
+    // Story G-2 (#142): the wizard's contextual field-help module must also
+    // bypass the first-run gate (it's on the wizard page), not 303 → /setup.
+    let resp = client
+        .get(format!("http://{}/field-help.js", addr))
+        .send()
+        .await
+        .expect("GET /field-help.js");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "/field-help.js must be served in first-run mode (the wizard loads it)"
+    );
+
     cancel.cancel();
     let _ = handle.await;
 }
