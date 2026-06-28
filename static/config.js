@@ -906,12 +906,26 @@
     mForm.addEventListener('submit', async function (ev) {
       ev.preventDefault();
       clearError(metricsError);
+      // Story G-3 (#132): empty → null (global default). Otherwise require a
+      // whole number in (0, 86400]; reject decimals/out-of-range/non-numeric
+      // client-side rather than silently truncating or turning bad input into
+      // null. (Number() accepts exponent forms like "1e3" → 1000, which is a
+      // valid value.) The server re-validates the band regardless.
       var staleRaw = (staleInput.value || '').trim();
+      var staleVal = null;
+      if (staleRaw !== '') {
+        var n = Number(staleRaw);
+        if (!Number.isInteger(n) || n < 1 || n > 86400) {
+          showError(metricsError, 'Stale threshold must be a whole number of seconds between 1 and 86400 (or leave it empty to use the global default).');
+          return;
+        }
+        staleVal = n;
+      }
       var payload = {
         device_name: (devNameInput.value || '').trim(),
         read_metric_list: readMetricsFromContainer(metricContainer),
         // null clears the override (back to the global default); PUT-replace.
-        stale_threshold_seconds: staleRaw === '' ? null : parseInt(staleRaw, 10),
+        stale_threshold_seconds: staleVal,
       };
       try {
         var r = await fetch(devUrl, { method: 'PUT', credentials: 'include', headers: jsonHeaders(), body: JSON.stringify(payload) });

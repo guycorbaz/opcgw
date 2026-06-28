@@ -230,6 +230,18 @@
   }
 
   function renderDevice(device, asOfMs, staleThresholdSecs, badThresholdSecs) {
+    // Story G-3 (#132): honour the per-device stale threshold when set (and a
+    // valid positive number), else fall back to the global default — identical
+    // to dashboard.js so the two band models stay in lock-step. The bad
+    // boundary is widened to at least the per-device stale value so a large
+    // override never mislabels a still-fresh device as "bad" (if an override
+    // meets/exceeds the global bad boundary the uncertain band simply narrows).
+    var devStale =
+      typeof device.stale_threshold_seconds === "number" &&
+      device.stale_threshold_seconds > 0
+        ? device.stale_threshold_seconds
+        : staleThresholdSecs;
+    var devBad = Math.max(badThresholdSecs, devStale);
     var rows = [
       el("tr", null, [
         el("th", null, ["Metric"]),
@@ -241,7 +253,7 @@
     ];
     for (var i = 0; i < device.metrics.length; i++) {
       rows.push(
-        renderMetricRow(device.metrics[i], asOfMs, staleThresholdSecs, badThresholdSecs)
+        renderMetricRow(device.metrics[i], asOfMs, devStale, devBad)
       );
     }
 

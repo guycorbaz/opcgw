@@ -192,7 +192,10 @@
           devs[d].stale_threshold_seconds > 0
             ? devs[d].stale_threshold_seconds
             : staleSecs;
-        var band = deviceBand(devs[d], asOfMs, devStale, badSecs);
+        // Widen the bad boundary to at least the per-device stale value so a
+        // large override never mislabels a still-fresh device as "bad".
+        var devBad = Math.max(badSecs, devStale);
+        var band = deviceBand(devs[d], asOfMs, devStale, devBad);
         counts[band] += 1;
         counts.total += 1;
       }

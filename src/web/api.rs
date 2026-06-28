@@ -2550,7 +2550,7 @@ pub async fn update_device(
                             application_id = %application_id,
                             device_id = %device_id,
                             source_ip = %addr.ip(),
-                            "PUT body field 'stale_threshold_seconds' must be a non-negative integer or null"
+                            "PUT body field 'stale_threshold_seconds' must be a positive integer or null"
                         );
                         (
                             StatusCode::BAD_REQUEST,
@@ -2607,7 +2607,7 @@ pub async fn update_device(
                         // newlines into the response body (parallel
                         // to the iter-1 B-H5 fix in audit-log emission).
                         format!("PUT body contains unknown field {other:?}"),
-                        "PUT accepts only `device_name` and `read_metric_list`",
+                        "PUT accepts `device_name`, `read_metric_list`, and optional `stale_threshold_seconds` (PUT-replace: omit or send null to clear the per-device override back to the global default)",
                     )),
                 )
                     .into_response());

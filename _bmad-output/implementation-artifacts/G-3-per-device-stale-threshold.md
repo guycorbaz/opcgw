@@ -1,6 +1,6 @@
 # Story G.3: Per-Device OPC UA Stale Threshold
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -121,3 +121,21 @@ claude-opus-4-8[1m] (Opus 4.8, 1M context)
 ### Change Log
 
 - 2026-06-27: Implemented G-3 — per-device OPC UA stale threshold web write path (#132): device CRUD + storage column write (v012, no migration) + `/api/devices` per-device field + dashboard freshness + device-detail form input. Status → review.
+- 2026-06-27: Code review (3 adversarial layers + mandatory iter-2). 0 HIGH. iter-1 fixed 1 MEDIUM + LOWs (see review section); iter-2 verified all fixes correct, no new defects, LOW-only remains. Loop terminated. Status → done.
+
+## Senior Developer Review (AI)
+
+**Date:** 2026-06-27 · **Reviewer model:** claude-opus-4-8[1m] (3 parallel layers + mandatory iter-2) · **Outcome:** Approved (loop terminated — LOW-only).
+
+**Auditor:** 6/7 ACs fully MET; all "do NOT" constraints upheld (no migration, no OPC UA-derivation change, global semantics untouched, no new endpoint, band/clamp reused). AC4 partially met → the M1 fix below.
+
+**iter-1 fixes:**
+- **[MED] M1 — Live Metrics view (`metrics.js`) ignored the per-device threshold.** It reads the same `/api/devices` but computed per-metric status with the *global* threshold only, so slow sensors still showed `Uncertain`/`Bad` there (the exact #132 pain) and the metrics.js/dashboard.js band models — which must stay identical — had diverged. Fixed: `renderDevice` now derives `devStale` (per-device when a valid positive number, else global) and passes it down, lock-step with dashboard.js.
+- **[MED] uncertain-band collapse** when a per-device stale nears/exceeds the global bad boundary → both clients now use `devBad = max(globalBad, devStale)` so a large override never mislabels a fresh device as `bad`.
+- **[MED] stale PUT hint** — `update_device`'s unknown-field hint still said "PUT accepts only device_name and read_metric_list"; updated to list `stale_threshold_seconds` + document PUT-replace clear semantics.
+- **[LOW] config.js parse** — replaced `parseInt` (truncated `100.9`→100; `NaN`→null silent clear) with `Number()` + `Number.isInteger` + range guard that rejects bad input with an error.
+- **[LOW] test** — added a re-GET after the clear to confirm the SQLite column was actually nulled (not just the echoed response); **[LOW]** parse-failure log text "non-negative"→"positive".
+
+**iter-2 re-review (mandatory — iter-1 added new band logic):** all five fixes verified correct; metrics.js/dashboard.js per-device paths confirmed byte-identical; config.js band `[1,86400]` == server `(0,86400]` for integers; the test re-GET genuinely reads reloaded config. No new defects.
+
+**Accepted LOW (no patch):** create-vs-update error-shape asymmetry for a malformed threshold (typed extractor gives a generic 400 on create vs a structured 400 on PUT); `BAD_THRESHOLD_SECS` constant reused as the upper bound (named for a different concept but value-correct); pre-existing metrics.js-vs-dashboard.js divergence in the *global* fallback when the server sends a non-positive global (latent, predates G-3); F-4 export/import round-trip of the field verified by code-read (import_replace_all writes the column; `#[serde(default)]` import-safe), no test added.

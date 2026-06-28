@@ -698,6 +698,20 @@ async fn post_put_device_round_trips_per_device_stale_threshold() {
     let put_body: Value = put.json().await.expect("json");
     assert!(put_body["stale_threshold_seconds"].is_null());
 
+    // Re-GET confirms the column was actually nulled in SQLite (not just the
+    // handler echoing new_threshold) — exercises the UPDATE write path.
+    wait_until_listener_swap().await;
+    let after_clear: Value = client
+        .get(fix.url("/api/applications/app-1/devices/dev-slow"))
+        .header(header::AUTHORIZATION, build_basic_auth(TEST_USER, TEST_PASSWORD))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    assert!(after_clear["stale_threshold_seconds"].is_null());
+
     // Out-of-band (0) is rejected with 400.
     let bad = json_request(
         &client,
