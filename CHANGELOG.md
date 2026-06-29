@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.1] — 2026-06-29 — First-run wizard fix
+
+> **Status:** released. Patch release fixing a first-run onboarding regression
+> ([#146](https://github.com/guycorbaz/opcgw/issues/146)) that shipped in v2.5.0
+> stable, found by the post-release real-world onboarding smoke (the Epic-G
+> retrospective **AI-G-5** gate). The in-process web tests all used an *empty*
+> password and so never exercised the as-shipped *placeholder* boot path — only
+> running the real binary against the shipped config surfaced it.
+
+### Fixed
+- **First-run wizard unreachable with the shipped placeholder password**
+  ([#146](https://github.com/guycorbaz/opcgw/issues/146)). A fresh clone following
+  the documented quickstart aborted at config validation on the shipped
+  `REPLACE_ME_WITH_*` `[opcua].user_password` placeholder instead of booting into
+  the `/setup` wizard. `AppConfig::validate()` only carved out the first-run signal
+  for an *empty* OPC UA password; a *placeholder* (as actually shipped in
+  `config/config.toml`) was rejected — asymmetric with the ChirpStack token, which
+  already treats empty *or* placeholder as the first-run signal. The placeholder is
+  now accepted while in first-run mode and still rejected once a real ChirpStack
+  token is configured.
+- **Security (same fix, hardening).** The OPC UA auth gate (`OpcgwAuthManager`)
+  keyed its reject-all-in-first-run guard on the password being *empty*. With a
+  placeholder now accepted in first-run, the gate was extended to treat a
+  placeholder password as "not configured" too, so the well-known shipped
+  placeholder string can never become a live OPC UA credential. While in first-run
+  the OPC UA server continues to reject all authentication.
+- Doc-sync: `docs/security.md` and `README.md` corrected to describe the
+  placeholder-boots-the-wizard behavior.
+
+Docker images `gcorbaz/opcgw:2.5.1` / `:2.5` / `:latest` (multi-arch amd64+arm64) + GHCR mirror.
+
 ## [2.5.0] — 2026-06-29 — Web UX & Usability (Epic G complete)
 
 > **Status:** released. Completes **Epic G** — the remaining Web-UX stories on top
