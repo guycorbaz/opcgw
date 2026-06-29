@@ -114,13 +114,31 @@ impl OpcgwAuthManager {
         // open OPC UA to anonymous connections in first-run mode,
         // which is the security regression option-(a) was rejected
         // to prevent.
+        //
+        // GH #146: the first-run signal is "no REAL password configured",
+        // which means empty **OR** a `PLACEHOLDER_PREFIX` placeholder. This
+        // mirrors `AppConfig::validate`'s OPC UA password branch, which uses the
+        // same `contains(PLACEHOLDER_PREFIX)` matcher (the ChirpStack token uses
+        // the analogous notion via `chirpstack_token_missing`, on its own field).
+        // `validate()` now boots a pristine clone (shipped `config.toml` carries
+        // the `REPLACE_ME_WITH_*` placeholder password) into the wizard instead
+        // of aborting, so a NON-empty placeholder can now reach this constructor.
+        // Treating that placeholder as "configured" would publish the well-known
+        // literal string as a live OPC UA credential — the exact regression the
+        // block above warns against. Mirror the validator: a placeholder password
+        // is NOT a configured credential, so reject-all stays in force until the
+        // operator applies a real password via `/setup`.
         let mut hmac_key = [0u8; 32];
         getrandom::getrandom(&mut hmac_key)
             .expect("system RNG must produce 32 bytes for HMAC key");
         let user_digest = hmac_sha256(&hmac_key, config.opcua.user_name.as_bytes());
         let pass_digest = hmac_sha256(&hmac_key, config.opcua.user_password.as_bytes());
-        let is_configured =
-            !config.opcua.user_name.is_empty() && !config.opcua.user_password.is_empty();
+        let password_is_real = !config.opcua.user_password.is_empty()
+            && !config
+                .opcua
+                .user_password
+                .contains(crate::utils::PLACEHOLDER_PREFIX);
+        let is_configured = !config.opcua.user_name.is_empty() && password_is_real;
         Self {
             user_digest,
             pass_digest,
@@ -514,6 +532,72 @@ mod tests {
         let cfg = auth_test_config("opcua-user", "");
         let mgr = OpcgwAuthManager::new(&cfg);
         assert!(!mgr.is_configured_for_test());
+    }
+
+    #[test]
+    fn new_sets_is_configured_false_when_password_is_placeholder() {
+        // GH #146: a NON-empty `REPLACE_ME_WITH_*` placeholder is the first-run
+        // signal — it must NOT be treated as a configured credential, otherwise
+        // the well-known shipped literal would become a live OPC UA password.
+        // `AppConfig::validate` now accepts this placeholder in first-run mode
+        // (so a pristine clone boots the wizard), so it can reach this
+        // constructor; reject-all must stay in force.
+        let cfg = auth_test_config(
+            "opcua-user",
+            "REPLACE_ME_WITH_OPCGW_OPCUA__USER_PASSWORD_ENV_VAR",
+        );
+        let mgr = OpcgwAuthManager::new(&cfg);
+        assert!(
+            !mgr.is_configured_for_test(),
+            "placeholder password must not count as a configured credential",
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticate_rejects_placeholder_password_in_first_run() {
+        // GH #146: presenting the well-known shipped placeholder string as the
+        // password must be rejected while in first-run mode (reject-all).
+        //
+        // Positive control (iter-2 review): a manager configured with a REAL
+        // password admits its matching credential — proving the rejection below
+        // is specifically caused by the placeholder being treated as "not
+        // configured", NOT a blanket reject that would pass regardless of the
+        // placeholder logic (a false-guard test).
+        use opcua::server::ServerEndpoint;
+        let endpoint = ServerEndpoint::new_none("/", &[OPCUA_USER_TOKEN_ID.to_string()]);
+
+        // Positive control: real password → configured → matching credential is admitted.
+        let configured = OpcgwAuthManager::new(&auth_test_config("opcua-user", "real-pass"));
+        assert!(configured.is_configured_for_test());
+        let admitted = configured
+            .authenticate_username_identity_token(
+                &endpoint,
+                "opcua-user",
+                &Password::new("real-pass".to_string()),
+            )
+            .await;
+        assert!(
+            admitted.is_ok(),
+            "control: a configured manager must admit the correct credential",
+        );
+
+        // Actual assertion: with the placeholder as the configured password
+        // (first-run), the manager is NOT configured and even the matching
+        // placeholder string is rejected.
+        let placeholder = "REPLACE_ME_WITH_OPCGW_OPCUA__USER_PASSWORD_ENV_VAR";
+        let mgr = OpcgwAuthManager::new(&auth_test_config("opcua-user", placeholder));
+        assert!(!mgr.is_configured_for_test());
+        let result = mgr
+            .authenticate_username_identity_token(
+                &endpoint,
+                "opcua-user",
+                &Password::new(placeholder.to_string()),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "the public placeholder string must never authenticate in first-run mode",
+        );
     }
 
     #[tokio::test]

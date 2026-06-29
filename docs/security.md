@@ -32,7 +32,7 @@ walk into nested TOML keys).
 | Field                          | Env var                              | Required for new deployments? |
 |--------------------------------|--------------------------------------|-------------------------------|
 | `chirpstack.api_token`         | `OPCGW_CHIRPSTACK__API_TOKEN`        | **yes** — but Story F-2: an empty/placeholder token + no env-var triggers the first-run wizard (which collects it) instead of aborting; env-var-set-but-empty is still rejected |
-| `opcua.user_password`          | `OPCGW_OPCUA__USER_PASSWORD`         | **yes** — empty + no env-var triggers the first-run wizard; placeholder still rejected |
+| `opcua.user_password`          | `OPCGW_OPCUA__USER_PASSWORD`         | **yes** — GH #146: an empty *or* placeholder password + no env-var triggers the first-run wizard (symmetric with `api_token`); a placeholder is rejected once a real ChirpStack token is configured (i.e. past first-run); env-var-set-but-empty is still rejected. While in first-run the OPC UA server rejects all auth, so the placeholder never becomes a live credential |
 | `chirpstack.tenant_id`         | `OPCGW_CHIRPSTACK__TENANT_ID`        | optional — placeholder UUID is a valid format; ChirpStack will reject calls until set |
 | `chirpstack.server_address`    | `OPCGW_CHIRPSTACK__SERVER_ADDRESS`   | optional |
 | `opcua.host_port`              | `OPCGW_OPCUA__HOST_PORT`             | optional |
@@ -146,12 +146,22 @@ user_password = "REPLACE_ME_WITH_OPCGW_OPCUA__USER_PASSWORD_ENV_VAR"
 
 `AppConfig::validate` runs **after** the env-merge step, so:
 
-- If the TOML still has a `REPLACE_ME_WITH_*` value **and** no env var
-  override is supplied, the gateway exits with an actionable error like:
+- If **both** secrets are still `REPLACE_ME_WITH_*` placeholders **and** no
+  env vars override them (the as-shipped, never-configured state), the
+  gateway treats this as the **first-run signal**: validation passes and the
+  gateway boots into the `/setup` wizard instead of exiting (GH #146; symmetric
+  for `api_token` and `user_password`). While in first-run the OPC UA server
+  starts but **rejects all authentication** until the operator applies a real
+  password, so the well-known placeholder string never becomes a live
+  credential.
+- If a `REPLACE_ME_WITH_*` placeholder remains for one secret **after** the
+  gateway is otherwise configured (e.g. a real `OPCGW_CHIRPSTACK__API_TOKEN`
+  is set but `user_password` is left as the placeholder — i.e. **past**
+  first-run), the gateway exits with an actionable error like:
   ```
   Configuration validation failed:
-    - chirpstack.api_token: placeholder value detected (starts with "REPLACE_ME_WITH_").
-      Set OPCGW_CHIRPSTACK__API_TOKEN to inject the real secret. See docs/security.md.
+    - opcua.user_password: placeholder value detected (contains "REPLACE_ME_WITH_").
+      Set OPCGW_OPCUA__USER_PASSWORD to inject the real secret. See docs/security.md.
   ```
   The error names the field, the env var to set, and points back here. The
   operator's literal value is never echoed back into the error message
@@ -160,8 +170,9 @@ user_password = "REPLACE_ME_WITH_OPCGW_OPCUA__USER_PASSWORD_ENV_VAR"
   to a real secret, validation passes — env precedence beats the
   placeholder check.
 
-This means the placeholder is a **red flag for "operator forgot to set the
-env var"**, not a blanket ban on the literal string ever appearing.
+This means the placeholder is a **red flag for "operator forgot to finish
+configuring"** once past first-run, not a blanket ban on the literal string
+ever appearing, and not an abort during the as-shipped first-run boot.
 
 ---
 

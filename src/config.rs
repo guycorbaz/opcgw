@@ -1946,12 +1946,29 @@ impl AppConfig {
             // migration's Guard 3 (`contains(PLACEHOLDER_MARKER)`) so a password
             // carrying the placeholder fragment can't slip through and block the
             // migration (code review iter-2 H1).
-            errors.push(format!(
-                "opcua.user_password: placeholder value detected (contains \"{}\"). \
-                 Set OPCGW_OPCUA__USER_PASSWORD to inject the real secret. \
-                 See docs/security.md.",
-                crate::utils::PLACEHOLDER_PREFIX
-            ));
+            //
+            // GH #146: carve out the placeholder while the gateway is in
+            // first-run mode, symmetric with the ChirpStack-token branch above
+            // (`cs_first_run`) and with the empty-password carve-out just above.
+            // The shipped `config/config.toml` ships BOTH secrets as
+            // `REPLACE_ME_WITH_*` placeholders; without this carve-out a pristine
+            // clone aborts here instead of booting into the `/setup` wizard
+            // (docs/quickstart.md promises the shipped placeholder config boots
+            // the wizard). In this branch the password is a NON-empty placeholder,
+            // so `is_first_run()` reduces exactly to `chirpstack_token_missing()`
+            // (== `cs_first_run`): gating on it accepts the placeholder during
+            // first-run yet STILL rejects a leftover placeholder once a real
+            // ChirpStack token is configured (env-var or secrets.toml) — at that
+            // point the operator is past onboarding and the placeholder is a
+            // misconfiguration worth surfacing.
+            if !cs_first_run {
+                errors.push(format!(
+                    "opcua.user_password: placeholder value detected (contains \"{}\"). \
+                     Set OPCGW_OPCUA__USER_PASSWORD to inject the real secret. \
+                     See docs/security.md.",
+                    crate::utils::PLACEHOLDER_PREFIX
+                ));
+            }
         } else if self.opcua.user_password.trim() != self.opcua.user_password {
             // P10: same rationale as user_name above.
             errors.push(
@@ -3146,6 +3163,97 @@ mod tests {
                 "token-missing must be true when api_token empty AND no env-var",
             );
         });
+    }
+
+    /// GH #146: the as-shipped `config/config.toml` ships BOTH secrets as
+    /// `REPLACE_ME_WITH_*` placeholders with no env-vars. A pristine clone must
+    /// validate cleanly and enter first-run mode so the gateway boots into the
+    /// `/setup` wizard instead of aborting (regression: pre-fix it aborted on
+    /// `opcua.user_password: placeholder value detected`).
+    #[test]
+    #[serial_test::serial]
+    fn test_validation_as_shipped_placeholders_is_first_run_not_error() {
+        temp_env::with_vars(
+            [
+                ("OPCGW_OPCUA__USER_PASSWORD", None::<&str>),
+                ("OPCGW_CHIRPSTACK__API_TOKEN", None::<&str>),
+            ],
+            || {
+                let mut config = get_config();
+                config.chirpstack.api_token =
+                    "REPLACE_ME_WITH_OPCGW_CHIRPSTACK__API_TOKEN_ENV_VAR".to_string();
+                config.opcua.user_password =
+                    "REPLACE_ME_WITH_OPCGW_OPCUA__USER_PASSWORD_ENV_VAR".to_string();
+
+                assert!(
+                    config.validate().is_ok(),
+                    "as-shipped placeholder secrets must pass validation (first-run), got: {:?}",
+                    config.validate().err(),
+                );
+                assert!(
+                    config.is_first_run(),
+                    "as-shipped placeholder secrets must signal first-run mode",
+                );
+            },
+        );
+    }
+
+    /// GH #146: the placeholder carve-out is gated on first-run. Once a real
+    /// ChirpStack token is configured (here via the in-memory value, i.e. past
+    /// onboarding) a leftover placeholder OPC UA password is a misconfiguration
+    /// and MUST still be rejected — the security guard stays intact.
+    #[test]
+    #[serial_test::serial]
+    fn test_validation_placeholder_password_rejected_when_not_first_run() {
+        temp_env::with_vars(
+            [
+                ("OPCGW_OPCUA__USER_PASSWORD", None::<&str>),
+                ("OPCGW_CHIRPSTACK__API_TOKEN", None::<&str>),
+            ],
+            || {
+                let mut config = get_config();
+                // Real CS token in-memory => chirpstack_token_missing() is false
+                // => the gateway is NOT in first-run mode.
+                config.chirpstack.api_token = "a-real-chirpstack-token".to_string();
+                config.opcua.user_password =
+                    "REPLACE_ME_WITH_OPCGW_OPCUA__USER_PASSWORD_ENV_VAR".to_string();
+
+                let result = config.validate();
+                assert!(
+                    result.is_err(),
+                    "placeholder opcua password must be rejected once a real CS token is set",
+                );
+                let err_msg = format!("{:?}", result.err().unwrap());
+                assert!(
+                    err_msg.contains("opcua.user_password: placeholder value detected"),
+                    "expected the opcua placeholder error, got: {}",
+                    err_msg,
+                );
+            },
+        );
+    }
+
+    /// GH #146 regression guard: the original Epic C C-0 empty-password
+    /// first-run carve-out must remain — an empty `user_password` with no
+    /// env-var still validates (independent of the placeholder carve-out).
+    #[test]
+    #[serial_test::serial]
+    fn test_validation_empty_password_no_envvar_still_ok() {
+        temp_env::with_vars(
+            [
+                ("OPCGW_OPCUA__USER_PASSWORD", None::<&str>),
+                ("OPCGW_CHIRPSTACK__API_TOKEN", None::<&str>),
+            ],
+            || {
+                let mut config = get_config();
+                config.opcua.user_password = String::new();
+                assert!(
+                    config.validate().is_ok(),
+                    "empty password + no env-var must remain a valid first-run state, got: {:?}",
+                    config.validate().err(),
+                );
+            },
+        );
     }
 
     /// Story F-2: a seed placeholder token (the `config.toml` default) is
@@ -4733,29 +4841,26 @@ mod tests {
         std::fs::write(&path, toml).expect("write temp toml");
         let path_str = path.to_str().expect("temp path is utf-8").to_string();
 
-        // Story F-2: without env vars, the ChirpStack placeholder token is now
-        // ACCEPTED as the first-run signal (boots into the wizard), but the
-        // OPC UA placeholder password is STILL rejected — the OPC UA first-run
-        // carve-out accepts only an EMPTY password, not a placeholder. So
-        // from_path still fails, and the error now names only the OPC UA
-        // env-var (not the ChirpStack one).
+        // GH #146: without env vars, this fixture is the as-shipped fresh-clone
+        // state — BOTH the ChirpStack token AND the OPC UA password are
+        // `REPLACE_ME_WITH_*` placeholders. The ChirpStack placeholder makes
+        // `chirpstack_token_missing()` true (first-run), which now also carves
+        // out the OPC UA password placeholder (symmetric with the CS-token
+        // branch). So `from_path` must SUCCEED and the loaded config must signal
+        // first-run, letting the gateway boot into the `/setup` wizard instead
+        // of aborting. (Pre-fix this branch wrongly aborted on the OPC UA
+        // placeholder; cf. docs/quickstart.md L53-77.)
         temp_env::with_vars(
             vec![
                 ("OPCGW_CHIRPSTACK__API_TOKEN", None::<&str>),
                 ("OPCGW_OPCUA__USER_PASSWORD", None::<&str>),
             ],
             || {
-                let err = AppConfig::from_path(&path_str)
-                    .expect_err("placeholder OPC UA password with no env var must fail to load");
-                let msg = err.to_string();
+                let config = AppConfig::from_path(&path_str)
+                    .expect("as-shipped placeholder secrets must load cleanly (first-run)");
                 assert!(
-                    msg.contains("OPCGW_OPCUA__USER_PASSWORD"),
-                    "error must mention opcua env var, got: {msg}"
-                );
-                assert!(
-                    !msg.contains("OPCGW_CHIRPSTACK__API_TOKEN"),
-                    "ChirpStack placeholder is now first-run-accepted; error must NOT \
-                     mention the chirpstack env var, got: {msg}"
+                    config.is_first_run(),
+                    "as-shipped placeholder secrets must signal first-run mode"
                 );
             },
         );

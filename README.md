@@ -114,7 +114,7 @@ The `data/` bind mount is **required** so the SQLite database (and its 7-day met
 
 #### First-run wizard (Epic C C-0; zero-touch in Story F-2)
 
-**Story F-2 makes first boot zero-touch — no text-file editing required.** If you start the gateway from a fresh checkout (the shipped `config/config.toml` carries a placeholder ChirpStack token and an empty OPC UA password) and you have NOT set `OPCGW_CHIRPSTACK__API_TOKEN` / `OPCGW_OPCUA__USER_PASSWORD`, opcgw enters **first-run mode**: the OPC UA server rejects every authentication attempt while the web UI at `http://<host>:<web-port>/` serves a one-shot setup wizard at `/setup`. The wizard collects the **ChirpStack connection** (server address, tenant ID, API token) **and** the **OPC UA password**. On submit, opcgw will:
+**Story F-2 makes first boot zero-touch — no text-file editing required.** If you start the gateway from a fresh checkout (the shipped `config/config.toml` carries `REPLACE_ME_WITH_*` placeholders for both the ChirpStack token and the OPC UA password) and you have NOT set `OPCGW_CHIRPSTACK__API_TOKEN` / `OPCGW_OPCUA__USER_PASSWORD`, opcgw enters **first-run mode**: the OPC UA server rejects every authentication attempt while the web UI at `http://<host>:<web-port>/` serves a one-shot setup wizard at `/setup`. The wizard collects the **ChirpStack connection** (server address, tenant ID, API token) **and** the **OPC UA password**. On submit, opcgw will:
 
 1. Persist the two secrets (ChirpStack `api_token` + OPC UA `user_password`) to `config/secrets.toml` (file mode `0600`, gitignored), in a single atomic write.
 2. Persist the non-secret ChirpStack `server_address` + `tenant_id` to the gateway's SQLite database (secrets are never written to SQLite).
@@ -122,7 +122,7 @@ The `data/` bind mount is **required** so the SQLite database (and its 7-day met
 4. Be restarted automatically by Docker / systemd (per your restart policy).
 5. Boot in normal mode with the ChirpStack connection + password loaded via the figment provider stack (precedence: env-var > `secrets.toml`/SQLite > `config.toml`).
 
-The wizard does **not** touch the web-UI login credentials or the log-file location — those stay in `.env` by design (see below). A truly-empty `config.toml` now boots into the wizard too: in first-run mode the validator carves out the missing ChirpStack/OPC UA credentials so the gateway no longer aborts before the wizard is reachable.
+The wizard does **not** touch the web-UI login credentials or the log-file location — those stay in `.env` by design (see below). In first-run mode the validator carves out the missing ChirpStack/OPC UA credentials so the gateway no longer aborts before the wizard is reachable — this applies whether the credentials are **empty** or left as the shipped `REPLACE_ME_WITH_*` placeholders ([#146](https://github.com/guycorbaz/opcgw/issues/146)). Either way, while in first-run the OPC UA server rejects all authentication, so a placeholder password never becomes a live credential.
 
 You can still skip the wizard by pre-filling `config/config.toml` (or the `OPCGW_*` env-vars) before first boot:
 
