@@ -144,7 +144,7 @@ Notes:
 \item
   The \texttt{data} volume holds the SQLite database and \emph{must} persist. Without it, every \texttt{docker\ compose\ down} destroys your stored metrics, history, and configuration.
 \item
-  Prefer a pinned version tag over \texttt{:latest} for production --- use a minor line such as \texttt{:2.4} (latest patch within the line) or an exact release such as \texttt{:2.4.0}. The image runs as the non-root user \texttt{opcgw} (UID 10001).
+  Prefer a pinned version tag over \texttt{:latest} for production --- use a minor line such as \texttt{:2.5} (latest patch within the line) or an exact release such as \texttt{:2.5.0}. The image runs as the non-root user \texttt{opcgw} (UID 10001).
 \item
   To pull from the GitHub Container Registry mirror instead of Docker Hub, change the image to \texttt{ghcr.io/guycorbaz/opcgw:2.1}. Both registries carry identical multi-architecture (\texttt{amd64}/\texttt{arm64}) images.
 \end{itemize}

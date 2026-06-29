@@ -81,7 +81,7 @@ cargo make cover
 
 ### Configuration model (SQLite authoritative)
 
-From v2.x **SQLite is the authoritative configuration store** (the database lives in the mounted `data/` directory; schema migrations v001–v012 run automatically and forward-only on boot). The real configuration path for operators is the **SQLite-backed web UI** — first boot serves the browser `/setup` wizard, and configuration is edited live through the dashboard (no text-file editing required).
+From v2.x **SQLite is the authoritative configuration store** (the database lives in the mounted `data/` directory; schema migrations v001–v013 run automatically and forward-only on boot). The real configuration path for operators is the **SQLite-backed web UI** — first boot serves the browser `/setup` wizard, and configuration is edited live through the dashboard (no text-file editing required).
 
 - **`config/config.toml`** is a **bootstrap seed only** — read at boot to populate a fresh database, then overridden by SQLite for any key set through the web UI. Operators may delete it post-migration.
 - **`config/secrets.toml`** (chmod 0600) holds operator secrets (`[chirpstack].api_token`, `[opcua].user_password`); never mutated at runtime.

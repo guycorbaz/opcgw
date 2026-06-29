@@ -5,16 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.5.0] — 2026-06-28 — Web UX & Usability (Epic G complete)
+## [2.5.0] — 2026-06-29 — Web UX & Usability (Epic G complete)
 
-> **Status:** release candidate `v2.5.0-rc1`. Completes **Epic G** — the remaining
-> Web-UX stories on top of v2.4.0's drill-down config (G-0). Each story went
-> through the full three-layer adversarial code review (different model) plus a
-> mandatory second iteration; the epic security review was CLEAN (0 HIGH / 0 MED
-> / 2 LOW). Promotion to stable `v2.5.0` follows a real-world onboarding / web-UX
-> smoke against a live ChirpStack. The `-rc1` tag publishes
-> `gcorbaz/opcgw:2.5.0-rc1` (multi-arch amd64+arm64) + GHCR mirror; stable tags
-> (`:2.5` / `:latest`) are untouched until promotion.
+> **Status:** released. Completes **Epic G** — the remaining Web-UX stories on top
+> of v2.4.0's drill-down config (G-0). Each story went through the full three-layer
+> adversarial code review (different model) plus a mandatory second iteration; the
+> epic security review was CLEAN (0 HIGH / 0 MED / 2 LOW). Validated as
+> `v2.5.0-rc1` on the production NAS (clean boot, schema-v13 migration applied,
+> device edit → stage → Apply in-process soft-restart, inventory pickers, uplink
+> streams connected, zero-ERROR soak), then promoted to stable. Docker images
+> `gcorbaz/opcgw:2.5.0` / `:2.5` / `:latest` (multi-arch amd64+arm64) + GHCR
+> mirror.
 
 ### Added / changed
 - **G-1 — Device-profile metric picker** ([#124](https://github.com/guycorbaz/opcgw/issues/124)).

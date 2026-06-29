@@ -106,7 +106,7 @@ docker compose up -d
 
 From v2.x the gateway stores its configuration in **SQLite**, not in text files:
 
-- **SQLite** (in the mounted `data/` directory) is **authoritative** for all non-secret runtime configuration. Schema migrations v001–v012 run automatically and forward-only on boot.
+- **SQLite** (in the mounted `data/` directory) is **authoritative** for all non-secret runtime configuration. Schema migrations v001–v013 run automatically and forward-only on boot.
 - **`config/config.toml`** is a **bootstrap seed only** — read at boot to populate a fresh database, then overridden by SQLite for any key the operator has set through the web UI. Operators may delete it post-migration.
 - **`config/secrets.toml`** (chmod 0600) holds the operator secrets (`[chirpstack].api_token`, `[opcua].user_password`); the gateway never mutates this file at runtime.
 - **Precedence:** env (`OPCGW_*`) > SQLite > `config.toml` > built-in default.
@@ -145,7 +145,7 @@ Additional signals:
 
 > **Who this section is for:** operators upgrading an existing opcgw deployment from v2.0-rc (pre-Epic-A schema, v006) to v2.0 GA (post-Epic-A schema, v008). New deployments do not need this section — a fresh gateway creates the current-schema database on first startup.
 >
-> **Note (v2.1+):** the later migrations (v009–v012, covering SQLite-authoritative singleton config and Epic E/F additions) likewise run **automatically and forward-only** on boot — the same mechanism described below, no operator intervention.
+> **Note (v2.1+):** the later migrations (v009–v013, covering SQLite-authoritative singleton config and Epic E/F additions) likewise run **automatically and forward-only** on boot — the same mechanism described below, no operator intervention.
 
 [Issue #108](https://github.com/guycorbaz/opcgw/issues/108) shipped a payload-less `MetricType` enum across Phase A and Phase B that flattened every persisted metric value to its discriminant string (`"Float"`, `"Int"`, `"Bool"`, `"String"`) instead of the real measurement. Epic A (stories A-1 through A-7) re-shapes the storage layer to carry real measurement payloads end-to-end. The schema changes land in two SQLite migrations:
 

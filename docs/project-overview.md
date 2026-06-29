@@ -19,7 +19,7 @@ The project was born from a real-world need: controlling LoRa watering valves in
 | ChirpStack SDK | chirpstack_api | 4.17.0 | Generated API types |
 | OPC UA | async-opcua | 0.17.1 | Server feature enabled |
 | Web Framework | axum | 0.8 | Web UI + REST API |
-| Persistence | rusqlite | 0.38.0 | Bundled SQLite, schema migrations v001–v012 |
+| Persistence | rusqlite | 0.38.0 | Bundled SQLite, schema migrations v001–v013 |
 | Configuration | Figment | 0.10.19 | TOML + env var merging |
 | Serialization | Serde | 1.0.228 | Derive feature |
 | CLI | Clap | 4.6.0 | Derive feature |
@@ -53,7 +53,7 @@ The web layer (axum) stages configuration edits to SQLite; a single `POST /api/c
 - Real-time uplink ingestion via the gRPC `StreamDeviceEvents` stream, storing the RAW last value (no aggregation)
 - Downlink command path: OPC UA write on a command node → LoRaWAN downlink via ChirpStack `Enqueue`, with command lifecycle tracking (Pending → Sent → Confirmed/Failed)
 - Model-agnostic, class-aware device-class registry (`command_class`, e.g. `valve`); the Tonhe valve is the first driver
-- Persistent SQLite storage (authoritative), with forward-only migrations (v001–v012) applied automatically on boot, plus an in-memory cache; data survives restarts (verified by cold-start restore)
+- Persistent SQLite storage (authoritative), with forward-only migrations (v001–v013) applied automatically on boot, plus an in-memory cache; data survives restarts (verified by cold-start restore)
 - Typed metrics (Bool, Int, Float, String) and a dynamic OPC UA address space (Application > Device > Metric hierarchy)
 - OPC UA subscriptions / data-change notifications and HistoryRead
 - Zero-touch first-run wizard: configure ChirpStack server / tenant / API token and the OPC UA password entirely from the browser at `/setup` — no text-file editing
