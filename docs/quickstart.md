@@ -5,7 +5,7 @@ subtitle: Install opcgw and reach the web setup wizard in minutes
 permalink: /quickstart/
 ---
 
-> **opcgw is configured from the web UI (v2.3.2).** You provide a bootstrap
+> **opcgw is configured from the web UI (v2.5.0).** You provide a bootstrap
 > `config.toml` (or the matching `OPCGW_*` environment variables) for the first
 > boot; opcgw reads it once into its SQLite database and from then on you manage
 > everything — ChirpStack connection, OPC UA settings, and device/metric
@@ -49,7 +49,7 @@ docker pull docker.io/gcorbaz/opcgw:2.3
 
 ## Configuration
 
-opcgw is **zero-touch on first boot (v2.3.2)**: you do not edit a config file to
+opcgw is **zero-touch on first boot (v2.5.0)**: you do not edit a config file to
 get started. Start the container (or binary) with the shipped placeholder
 `config.toml`, open the web UI, and the setup wizard captures everything it needs.
 

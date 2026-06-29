@@ -46,9 +46,9 @@ The web layer (axum) stages configuration edits to SQLite; a single `POST /api/c
 
 **Monolith** — Single cohesive Rust crate (38 source files).
 
-## Current Status (v2.3.0)
+## Current Status (v2.5.0)
 
-**Implemented in v2.3.0:**
+**Implemented (through v2.5.0):**
 - ChirpStack gRPC polling with auth, retries, and server availability monitoring
 - Real-time uplink ingestion via the gRPC `StreamDeviceEvents` stream, storing the RAW last value (no aggregation)
 - Downlink command path: OPC UA write on a command node → LoRaWAN downlink via ChirpStack `Enqueue`, with command lifecycle tracking (Pending → Sent → Confirmed/Failed)
