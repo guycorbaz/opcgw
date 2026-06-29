@@ -1,0 +1,9 @@
+# Limit parallel compilation jobs (machine has 32 cores; cap to keep it responsive).
+[build]
+jobs = 8
+
+# Use the mold linker instead of GNU ld for faster link times.
+# Requires mold to be installed and a linker driver that supports -fuse-ld=mold
+# (GCC >= 12.1 or Clang >= 12). On this machine: gcc 15.2 + mold 2.40.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
