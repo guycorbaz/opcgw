@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.2] — 2026-06-30 — Async storage facade (runtime correctness)
+
+> **Status:** release candidate (`v2.5.2-rc1`). In pre-prod validation against a
+> live ChirpStack before promotion to stable — this change touches the data-plane
+> hot paths, the class of change the AI-G-5 real-binary smoke gate exists for
+> (unit tests + adversarial review do not catch runtime/concurrency regressions;
+> cf. the 2026-05-20 main-deadlock incident). First story of **Epic H — Runtime
+> Correctness & Tech-Debt**.
+
+### Fixed
+- **Synchronous storage backend blocked async runtime workers**
+  ([#73](https://github.com/guycorbaz/opcgw/issues/73)). The synchronous
+  `StorageBackend` trait (~30 blocking `rusqlite` methods, shared as
+  `Arc<dyn StorageBackend>`) was being called directly from ~30 async tokio call
+  sites (poller, gRPC event-stream ingestion, OPC UA history reads, web handlers,
+  command pollers), blocking a worker thread for the duration of each SQL call —
+  and on the two pool-exhaustion retry backoffs, blocking on `std::thread::sleep`.
+  Survivable only because the runtime is multi-threaded; it degrades sharply on
+  CPU-constrained deployments (small Docker containers with 1–2 vCPUs). A new
+  async facade (`src/storage/async_facade.rs`, `AsyncStorage`) now runs every such
+  call on the blocking pool via `tokio::task::spawn_blocking`, reached at call
+  sites through the `AsyncStorageExt::async_store()` extension; genuinely
+  synchronous async-opcua read/method callbacks (which cannot `.await`) use a
+  `run_blocking_storage()` helper that applies `tokio::task::block_in_place` on a
+  multi-threaded worker and runs inline otherwise. The two retry sleeps now run
+  inside `spawn_blocking`, off the async workers. **No behavioural change** —
+  identical return types, `OpcGwError` mapping, and ordering. Code review also
+  removed a pre-existing reentrant-`Mutex` self-deadlock in the prune
+  poison-recovery path surfaced while refactoring that function.
+
+### Internal
+- Opened **Epic H — Runtime Correctness & Tech-Debt** to host this and future
+  v2.x tech-debt work (candidate follow-ons: RunHandles `Drop`
+  [#110](https://github.com/guycorbaz/opcgw/issues/110), queue-capacity
+  enforcement [#79](https://github.com/guycorbaz/opcgw/issues/79)).
+
 ## [2.5.1] — 2026-06-29 — First-run wizard fix
 
 > **Status:** released. Patch release fixing a first-run onboarding regression
