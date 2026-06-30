@@ -29,11 +29,13 @@
   --cs-border:         #e8e8e8;
   --cs-border-strong:  #d9d9d9;
   --cs-text:           #262626;
-  --cs-text-muted:     #8c8c8c;
+  --cs-text-muted:     #666666;  /* AA-compliant on white AND the #f0f2f5 content bg (≥4.5:1) */
+  --cs-icon:           #096dd9;  /* interactive icon/glyph on light card surfaces (AA on card + card-alt) */
 
-  /* Semantic status */
-  --ok:         #389e0d;  --ok-bg:   #f6ffed;  --ok-border:   #b7eb8f;
-  --warn:       #d48806;  --warn-bg: #fffbe6;  --warn-border: #ffe58f;
+  /* Semantic status. Foreground values are darkened from antd's decorative
+   * icon shades so they meet WCAG AA (4.5:1) as TEXT on their pale tint bgs. */
+  --ok:         #237804;  --ok-bg:   #f6ffed;  --ok-border:   #b7eb8f;
+  --warn:       #874d00;  --warn-bg: #fffbe6;  --warn-border: #ffe58f;
   --bad:        #cf1322;  --bad-bg:  #fff1f0;  --bad-border:  #ffa39e;
   --neutral-bg: #f0f0f0;  --neutral-fg: #595959;
 
@@ -62,7 +64,8 @@
     --cs-border:         #303030;
     --cs-border-strong:  #434343;
     --cs-text:           #e6e6e6;
-    --cs-text-muted:     #8c8c8c;
+    --cs-text-muted:     #8c8c8c;  /* AA on the dark #1f1f1f card surface */
+    --cs-icon:           #69b1ff;  /* interactive icon/glyph on dark card surfaces */
 
     --ok:         #73d13d;  --ok-bg:   #162312;  --ok-border:   #274916;
     --warn:       #ffc53d;  --warn-bg: #2b2111;  --warn-border: #594214;
@@ -402,8 +405,8 @@ footer button:hover {
 }
 .field-help-toggle {
   border: 1px solid var(--cs-border-strong);
-  background: var(--cs-card-alt);
-  color: var(--cs-primary);
+  background: var(--cs-card-bg);
+  color: var(--cs-icon);
   border-radius: 50%;
   width: 1.25rem;
   height: 1.25rem;
@@ -413,8 +416,8 @@ footer button:hover {
   cursor: pointer;
   vertical-align: middle;
 }
-.field-help-toggle:hover { background: var(--cs-border); }
-.field-help-toggle:focus-visible { outline: 2px solid var(--cs-primary); outline-offset: 1px; }
+.field-help-toggle:hover { background: var(--cs-card-alt); }
+.field-help-toggle:focus-visible { outline: 2px solid var(--cs-icon); outline-offset: 1px; }
 .field-help-text {
   display: block;
   margin: 0.3rem 0 0;
@@ -500,7 +503,7 @@ footer button:hover {
 
 .header-controls a.back-link {
   margin-left: 0.75rem;
-  color: var(--cs-nav-active);
+  color: var(--cs-primary);
   text-decoration: none;
 }
 

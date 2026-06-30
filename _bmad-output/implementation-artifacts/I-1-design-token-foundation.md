@@ -1,6 +1,6 @@
 # Story I.1: Design-Token Foundation
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -97,3 +97,22 @@ claude-opus-4-8[1m] (Opus 4.8, 1M context)
 ## Change Log
 
 - 2026-06-30 — I-1 implemented: design-token foundation in `static/dashboard.css` (ChirpStack-v4/antd palette as CSS custom properties, token-driven dark mode, six per-component dark blocks collapsed to one). CSS-only; selectors + FR41 `min-width` marker preserved; clippy clean; web served-asset tests green. Refs #147.
+- 2026-06-30 — Code review (focused single-layer CSS review on Sonnet + iter-2 re-verify). 3 HIGH + 1 MED WCAG AA contrast regressions fixed (AC#6); iter-2 APPROVE, only accepted LOWs remain. Status review → done.
+
+## Senior Developer Review (AI)
+
+**Outcome:** Approve (iter-2). Loop terminated under CLAUDE.md condition 2 — only accepted LOW findings remain.
+
+**Layers run:** one focused CSS/front-end adversarial review (Sonnet, different model than the Opus implementer) + an iter-2 re-verification of the fixes. Right-sized for a CSS-only token refactor.
+
+**Action Items:**
+- [x] HIGH H-1 — `--ok` text on `--ok-bg` was 3.12:1 (AA fail) → darkened light `--ok` to `#237804` (5.44:1). Dark unchanged (7.87:1).
+- [x] HIGH H-2 — `--warn` text on `--warn-bg` was 2.59:1 → light `--warn` `#874d00` (6.53:1). Dark unchanged (8.87:1).
+- [x] HIGH H-3 — `--cs-text-muted` `#8c8c8c` was 3.34:1 on white / 2.99:1 on content-bg → light value `#666666` (5.74:1 / 5.12:1). Dark stays `#8c8c8c` (4.92:1).
+- [x] MED M-1 — field-help toggle icon `#1890ff` was 2.97:1 → new `--cs-icon` token (`#096dd9` light / `#69b1ff` dark), toggle bg→card, hover→card-alt (≥4.59:1 light, ≥6.38:1 dark).
+- [x] LOW L-2 — metrics back-link retoken `--cs-nav-active` → `--cs-primary` (semantic consistency; 5.76:1 on the dark bar).
+- [ ] LOW L-1 (accepted/deferred) — `--cs-primary-700` is lighter than `--cs-primary` in dark (intentional dark hover; name is the only wart).
+- [ ] LOW L-3 (deferred to I-2) — `--cs-sider-fg` is near-white (`#e6f0fa`) vs the mockup's muted `#a6adb4`; nav hierarchy is settled in I-2's nav refresh.
+- [ ] LOW L-4 (deferred) — `.field-help-text` 3px / mobile-row 4px radius not tokenized (out of AC#3 colour scope).
+
+**Note:** all status-dot glyphs and the decorative `--cs-primary` left-border on `.field-help-text` re-checked for non-text 3:1; only the decorative help stripe sits ~2.97:1 (purely decorative, not a regression — was lower before). iter-2 introduced no new findings.
