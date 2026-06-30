@@ -7,12 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.5.2] — 2026-06-30 — Async storage facade (runtime correctness)
 
-> **Status:** release candidate (`v2.5.2-rc1`). In pre-prod validation against a
-> live ChirpStack before promotion to stable — this change touches the data-plane
-> hot paths, the class of change the AI-G-5 real-binary smoke gate exists for
-> (unit tests + adversarial review do not catch runtime/concurrency regressions;
-> cf. the 2026-05-20 main-deadlock incident). First story of **Epic H — Runtime
-> Correctness & Tech-Debt**.
+> **Status:** released (stable). Promoted from `v2.5.2-rc1` after the real-binary
+> smoke/soak on the NAS — this change touches the data-plane hot paths, the class
+> of change the AI-G-5 real-binary smoke gate exists for (unit tests + adversarial
+> review do not catch runtime/concurrency regressions; cf. the 2026-05-20
+> main-deadlock incident). The rc survived two F-0 in-process soft restarts and a
+> 4× application-count increase with zero panics/deadlocks/errors, poll cycles
+> resuming cleanly and the OPC UA liveness gauge never skipping a beat. First
+> story of **Epic H — Runtime Correctness & Tech-Debt**.
 
 ### Fixed
 - **Synchronous storage backend blocked async runtime workers**
