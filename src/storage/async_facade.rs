@@ -28,6 +28,17 @@
 //! let pending = self.backend.async_store().get_pending_commands().await?;
 //! ```
 //!
+//! ## Trade-off (accepted)
+//!
+//! Each facade call is one `spawn_blocking` hop (a blocking-pool round-trip),
+//! so converting a hot, per-item path — e.g. the per-counter-metric
+//! `get_metric_value` in the poller's batch-preparation loop — adds round-trip
+//! overhead versus the prior inline synchronous call. This is the deliberate
+//! price of Strategy A (#73): correctness — never blocking an async worker — is
+//! worth more than shaving the hop, and SQLite point reads are sub-millisecond.
+//! Folding such per-item reads into a single batched call is a possible future
+//! optimization, not a correctness concern.
+//!
 //! Genuinely **synchronous** call sites that cannot `.await` — e.g. the
 //! async-opcua node-manager read callbacks, which are sync `Fn` closures — must
 //! NOT use this facade. They wrap the direct blocking call in
@@ -59,13 +70,26 @@ fn join_err(e: JoinError) -> OpcGwError {
 /// node-manager read / method callbacks, which are sync `Fn` closures
 /// (Story H-0/#73, AC#5).
 ///
-/// When called on a multi-threaded tokio worker, it uses
+/// When called on a multi-threaded tokio **worker** thread, it uses
 /// [`tokio::task::block_in_place`] so the runtime can move other tasks off this
 /// worker for the duration of the blocking SQL, instead of starving them. When
 /// there is no current runtime, or the runtime is single-threaded (e.g. a unit
 /// test calling the callback body directly), `block_in_place` is unavailable /
 /// would panic, so the closure is simply run inline. Either way the result is
 /// identical — this only affects *where* the blocking work runs.
+///
+/// # Caller invariant
+///
+/// `block_in_place` ALSO panics if called from within a `spawn_blocking` thread
+/// (the `Handle::try_current()` + [`RuntimeFlavor::MultiThread`] check below
+/// does NOT distinguish a worker thread from a `spawn_blocking` pool thread —
+/// both observe a multi-thread handle). So this helper is only safe to call
+/// from a tokio worker thread, a non-runtime context, or a single-threaded
+/// runtime — **never from inside a `spawn_blocking` closure**. Every current
+/// caller satisfies this: the async-opcua node-manager read/method callbacks
+/// run on the server's async worker threads, never on the blocking pool, and
+/// never inside an [`AsyncStorage`] `spawn_blocking` closure. Do not call this
+/// from `AsyncStorage` methods or any other `spawn_blocking` body.
 pub fn run_blocking_storage<T>(f: impl FnOnce() -> T) -> T {
     use tokio::runtime::{Handle, RuntimeFlavor};
     match Handle::try_current() {

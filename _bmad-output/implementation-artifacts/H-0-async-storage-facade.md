@@ -1,6 +1,6 @@
 # Story H.0: Async Storage Facade (spawn_blocking boundary)
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -164,6 +164,21 @@ claude-opus-4-8[1m] (Opus 4.8, 1M context)
 ## Change Log
 
 - 2026-06-30 — H-0 implemented: async storage facade (`spawn_blocking` boundary) over the synchronous `StorageBackend`; all production async call sites converted to `.await`; sync OPC UA callbacks wrapped in `block_in_place`-safe helper. 1803 tests pass, clippy `-D warnings` clean. Closes #73.
+- 2026-06-30 — Code review (iter-1 Blind Hunter on Sonnet; iter-2 focused re-review on Sonnet). Applied review fixes: removed a pre-existing reentrant-lock self-deadlock in `check_and_execute_prune`'s poison-recovery path (now resets backoff state in the `Err(poisoned)` arm); hardened the success-arm `last_prune_time` stamp to recover-and-stamp on a poisoned lock rather than report a false prune failure; corrected the `run_blocking_storage` docstring to document the `spawn_blocking`-thread `block_in_place` footgun + caller invariant; documented the per-call `spawn_blocking`-hop trade-off. iter-2 verified all three fixes correct/complete with no regressions. Re-ran gates: cargo test 1803/0/74, clippy `-D warnings` clean.
+
+## Senior Developer Review (AI)
+
+**Outcome:** Approve (loop terminated under CLAUDE.md condition 2 — only LOW / accepted-by-design findings remain).
+
+**Layers run:** Blind Hunter (iter-1, Sonnet) + focused patch re-review (iter-2, Sonnet). The Edge Case Hunter and Acceptance Auditor layers were stopped by the user before completing, so adversarial edge-case and AC-conformance coverage for this story is from the Blind Hunter layer only — a thinner pass than the three-layer doctrine.
+
+**Action Items:**
+- [x] HIGH — reentrant `prune_retry_state.lock()` self-deadlock in poison-recovery path → fixed (reset in `Err(poisoned)` arm; reentrant re-lock removed).
+- [x] HIGH/MED — success-arm `last_prune_time` false-failure on poisoned lock → fixed (recover + stamp, return Ok; documented `&mut self` exclusivity making it defensive-only).
+- [x] MED — `run_blocking_storage` docstring inaccurate re `block_in_place` inside `spawn_blocking` → fixed (docstring + caller invariant; all 4 call sites verified to be sync OPC UA worker-thread callbacks).
+- [x] MED — per-counter-metric `spawn_blocking` hop latency → accepted by design, documented in the facade module doc.
+- [ ] LOW (won't-fix) — `AsyncStorage` not re-exported by name (deliberate, avoids unused-import warning; reachable via `.async_store()` / full path).
+- [ ] LOW (won't-fix) — `record_error_event` takes owned `ErrorEvent` vs trait's `&ErrorEvent` (intentional for the `'static` closure).
 
 ## Completion Note (story creation)
 

@@ -1261,23 +1261,24 @@ impl ChirpstackPoller {
 
         // Exponential-backoff gate (guard scoped; not held across the await).
         {
-            // Recover from poisoned mutex if prior task panicked; reset state to safe defaults
+            // Recover from poisoned mutex if a prior task panicked. Recovery
+            // resets the backoff state to clean defaults — a panic mid-update
+            // could have left it half-written, so the safe move is to start the
+            // backoff machine fresh. (H-0 review: the prior implementation
+            // re-locked the same std Mutex while already holding its guard to
+            // detect poisoning — a guaranteed self-deadlock, since std Mutex is
+            // not reentrant. `into_inner()` already gives us the recovered guard,
+            // so we reset here directly with no second lock.)
             let mut retry_state = match self.prune_retry_state.lock() {
                 Ok(state) => state,
                 Err(poisoned) => {
                     warn!("Prune retry state mutex was poisoned; recovering with reset state");
-                    poisoned.into_inner()
+                    let mut state = poisoned.into_inner();
+                    state.failure_count = 0;
+                    state.first_failure_time = None;
+                    state
                 }
             };
-
-            // If we recovered from poisoning, reset to clean state
-            if (retry_state.failure_count > 0 || retry_state.first_failure_time.is_some())
-                && self.prune_retry_state.lock().is_err()
-            {
-                // Retry state is poisoned; reset it
-                retry_state.failure_count = 0;
-                retry_state.first_failure_time = None;
-            }
 
             if let Some(first_failure) = retry_state.first_failure_time {
                 if retry_state.failure_count > 0 {
@@ -1321,12 +1322,23 @@ impl ChirpstackPoller {
                     retry_state.failure_count = 0;
                     retry_state.first_failure_time = None;
                 }
-                // Update last_prune_time on successful prune
-                let mut last_prune = self.last_prune_time.lock()
-                    .map_err(|e| {
-                        OpcGwError::Storage(format!("Prune lock poisoned (prior panic): {}", e))
-                    })?;
-                *last_prune = Instant::now();
+                // Stamp last_prune_time so the next cycle waits a full interval.
+                // The prune itself already SUCCEEDED here, so a lock failure must
+                // not be reported as a prune failure (that would be a false
+                // negative and, with the timestamp un-stamped, trigger an
+                // immediate re-prune next cycle). In practice this is
+                // unreachable: `&mut self` makes this method exclusive per
+                // poller, and the interval gate above already locked
+                // `last_prune_time` successfully this call, so it cannot have
+                // become poisoned in between — but recover defensively rather
+                // than propagate (H-0 review hardening).
+                match self.last_prune_time.lock() {
+                    Ok(mut last_prune) => *last_prune = Instant::now(),
+                    Err(poisoned) => {
+                        warn!("last_prune_time mutex poisoned after a successful prune; recovering and stamping");
+                        *poisoned.into_inner() = Instant::now();
+                    }
+                }
                 Ok(())
             }
             Err(e) => {
