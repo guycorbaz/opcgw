@@ -47,7 +47,7 @@ use tonic::{transport::Channel, Request, Status};
 use url::Url;
 
 // Import generated types
-use crate::storage::{CommandStatus, DeviceCommand, MetricType, StorageBackend};
+use crate::storage::{AsyncStorageExt, CommandStatus, DeviceCommand, MetricType, StorageBackend};
 use chirpstack_api::api::application_service_client::ApplicationServiceClient;
 use chirpstack_api::api::device_service_client::DeviceServiceClient;
 use chirpstack_api::api::{
@@ -893,7 +893,7 @@ impl ChirpstackPoller {
     /// secrets / control chars) before storage. A storage failure here is logged
     /// and swallowed — recording is observability and must NEVER break the poll
     /// cycle.
-    fn capture_error_event(
+    async fn capture_error_event(
         &self,
         category: &str,
         device_id: Option<&str>,
@@ -907,7 +907,7 @@ impl ChirpstackPoller {
             application_id: application_id.map(str::to_string),
             message: crate::utils::sanitize_error_message(&message),
         };
-        if let Err(e) = self.backend.record_error_event(&event) {
+        if let Err(e) = self.backend.async_store().record_error_event(event).await {
             warn!(error = %e, category = category, "Failed to record error event (non-fatal)");
         }
     }
@@ -1154,11 +1154,11 @@ impl ChirpstackPoller {
                 error!(error = ?e, "Error polling chirpstack devices");
                 // Story G-4 (#127): cycle-level poll failure into the error feed,
                 // classified into chirpstack_connect / chirpstack_auth / chirpstack_poll.
-                self.capture_error_event(classify_poll_error(&e), None, None, format!("{}", e));
+                self.capture_error_event(classify_poll_error(&e), None, None, format!("{}", e)).await;
             }
 
             // Execute pruning after poll_metrics completes (AC#1: sequential, not parallel)
-            if let Err(e) = self.check_and_execute_prune() {
+            if let Err(e) = self.check_and_execute_prune().await {
                 error!(error = %e, "Pruning failed in poll cycle");
                 // Continue polling even if pruning fails per AC#5 (graceful degradation)
             }
@@ -1233,83 +1233,108 @@ impl ChirpstackPoller {
     ///
     /// Returns error only if database operations fail; missing retention_config is handled
     /// gracefully with error logging per AC#7.
-    fn check_and_execute_prune(&mut self) -> Result<(), OpcGwError> {
+    async fn check_and_execute_prune(&mut self) -> Result<(), OpcGwError> {
         // Return early if pruning is disabled (AC#1: 0 to disable)
         if self.config.global.prune_interval_minutes == 0 {
             return Ok(());
         }
 
         let prune_interval = Duration::from_secs(self.config.global.prune_interval_minutes as u64 * 60);
-        let mut last_prune = self.last_prune_time.lock()
-            .map_err(|e| {
-                // PoisonError indicates panic in prior prune task; convert to clear message
-                OpcGwError::Storage(format!("Prune lock poisoned (prior panic): {}", e))
-            })?;
 
-        // Check if interval has elapsed (AC#1)
-        if Instant::now().duration_since(*last_prune) < prune_interval {
-            return Ok(());
-        }
-
-        // Check exponential backoff for recent failures
-        // Recover from poisoned mutex if prior task panicked; reset state to safe defaults
-        let mut retry_state = match self.prune_retry_state.lock() {
-            Ok(state) => state,
-            Err(poisoned) => {
-                warn!("Prune retry state mutex was poisoned; recovering with reset state");
-                poisoned.into_inner()
-            }
-        };
-
-        // If we recovered from poisoning, reset to clean state
-        if (retry_state.failure_count > 0 || retry_state.first_failure_time.is_some())
-            && self.prune_retry_state.lock().is_err()
+        // Interval gate. Story H-0/#73: the std `MutexGuard` must NOT be held
+        // across the `spawn_blocking` await below (it is `!Send`, which would
+        // make the poller future non-`Send` and break `tokio::spawn`), so it is
+        // scoped here and dropped before the await. `&mut self` guarantees no
+        // concurrent prune runs, so re-locking after the await is safe.
         {
-            // Retry state is poisoned; reset it
-            retry_state.failure_count = 0;
-            retry_state.first_failure_time = None;
+            let last_prune = self.last_prune_time.lock()
+                .map_err(|e| {
+                    // PoisonError indicates panic in prior prune task; convert to clear message
+                    OpcGwError::Storage(format!("Prune lock poisoned (prior panic): {}", e))
+                })?;
+
+            // Check if interval has elapsed (AC#1)
+            if Instant::now().duration_since(*last_prune) < prune_interval {
+                return Ok(());
+            }
         }
 
-        if let Some(first_failure) = retry_state.first_failure_time {
-            if retry_state.failure_count > 0 {
-                // Exponential backoff: 1s, 5s, 30s, cap at 5 minutes
-                let backoff_secs = match retry_state.failure_count {
-                    1 => 1,
-                    2 => 5,
-                    3 => 30,
-                    _ => 300,
-                };
-                let backoff_duration = Duration::from_secs(backoff_secs);
+        // Exponential-backoff gate (guard scoped; not held across the await).
+        {
+            // Recover from poisoned mutex if prior task panicked; reset state to safe defaults
+            let mut retry_state = match self.prune_retry_state.lock() {
+                Ok(state) => state,
+                Err(poisoned) => {
+                    warn!("Prune retry state mutex was poisoned; recovering with reset state");
+                    poisoned.into_inner()
+                }
+            };
 
-                // Check elapsed time, handling clock regression gracefully (system time went backward)
-                match Instant::now().checked_duration_since(first_failure) {
-                    Some(elapsed) if elapsed < backoff_duration => {
-                        trace!(failure_count = retry_state.failure_count, backoff_secs, "Skipping prune due to exponential backoff");
-                        return Ok(());
+            // If we recovered from poisoning, reset to clean state
+            if (retry_state.failure_count > 0 || retry_state.first_failure_time.is_some())
+                && self.prune_retry_state.lock().is_err()
+            {
+                // Retry state is poisoned; reset it
+                retry_state.failure_count = 0;
+                retry_state.first_failure_time = None;
+            }
+
+            if let Some(first_failure) = retry_state.first_failure_time {
+                if retry_state.failure_count > 0 {
+                    // Exponential backoff: 1s, 5s, 30s, cap at 5 minutes
+                    let backoff_secs = match retry_state.failure_count {
+                        1 => 1,
+                        2 => 5,
+                        3 => 30,
+                        _ => 300,
+                    };
+                    let backoff_duration = Duration::from_secs(backoff_secs);
+
+                    // Check elapsed time, handling clock regression gracefully (system time went backward)
+                    match Instant::now().checked_duration_since(first_failure) {
+                        Some(elapsed) if elapsed < backoff_duration => {
+                            trace!(failure_count = retry_state.failure_count, backoff_secs, "Skipping prune due to exponential backoff");
+                            return Ok(());
+                        }
+                        None => {
+                            // Clock went backward; reset backoff state to prevent indefinite failures
+                            warn!("System clock regression detected; resetting prune backoff state");
+                            retry_state.failure_count = 0;
+                            retry_state.first_failure_time = None;
+                        }
+                        _ => {}
                     }
-                    None => {
-                        // Clock went backward; reset backoff state to prevent indefinite failures
-                        warn!("System clock regression detected; resetting prune backoff state");
-                        retry_state.failure_count = 0;
-                        retry_state.first_failure_time = None;
-                    }
-                    _ => {}
                 }
             }
         }
 
-        // Execute pruning via the storage backend
-        match self.backend.prune_metric_history() {
+        // Execute pruning via the storage backend, OFF the async worker thread
+        // (no lock held across this await — Story H-0/#73).
+        match self.backend.async_store().prune_metric_history().await {
             Ok(_deleted_count) => {
                 // Reset retry state on successful prune
-                retry_state.failure_count = 0;
-                retry_state.first_failure_time = None;
+                {
+                    let mut retry_state = match self.prune_retry_state.lock() {
+                        Ok(state) => state,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    retry_state.failure_count = 0;
+                    retry_state.first_failure_time = None;
+                }
                 // Update last_prune_time on successful prune
+                let mut last_prune = self.last_prune_time.lock()
+                    .map_err(|e| {
+                        OpcGwError::Storage(format!("Prune lock poisoned (prior panic): {}", e))
+                    })?;
                 *last_prune = Instant::now();
                 Ok(())
             }
             Err(e) => {
                 // Increment failure count and track first failure time
+                let mut retry_state = match self.prune_retry_state.lock() {
+                    Ok(state) => state,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
                 if retry_state.failure_count == 0 {
                     retry_state.first_failure_time = Some(Instant::now());
                 }
@@ -1417,7 +1442,7 @@ impl ChirpstackPoller {
                         trace!(metric = ?metric, "Metric details");
 
                         // Prepare metric for batch write (validate type and create BatchMetricWrite)
-                        if let Some(batch_metric) = self.prepare_metric_for_batch(&dev_id, metric) {
+                        if let Some(batch_metric) = self.prepare_metric_for_batch(&dev_id, metric).await {
                             batch_metrics.push(batch_metric);
                             dev_metric_count += 1;
                         }
@@ -1451,7 +1476,7 @@ impl ChirpstackPoller {
                         Some(&dev_id.to_string()),
                         None,
                         format!("{}", e),
-                    );
+                    ).await;
                     // Review patch P15: saturate at i32::MAX so the gateway
                     // health-metric overflow check (`error_count >= i32::MAX`
                     // in opc_ua.rs) actually fires reliably. Plain `+= 1`
@@ -1528,7 +1553,7 @@ impl ChirpstackPoller {
                 let batch_count = batch_metrics.len() as u32;
                 let batch_payload = batch_metrics.clone();
                 let batch_start = Instant::now();
-                let batch_result = self.backend.batch_write_metrics(batch_payload);
+                let batch_result = self.backend.async_store().batch_write_metrics(batch_payload).await;
                 let batch_latency_ms = batch_start.elapsed().as_millis() as u64;
                 match batch_result {
                     Ok(_) => {
@@ -1572,7 +1597,7 @@ impl ChirpstackPoller {
                         if attempt >= max_retries {
                             error!(error = %e, attempt, "Failed to batch write metrics after {} retries", max_retries);
                             // Story G-4 (#127): record the give-up into the error feed.
-                            self.capture_error_event("metric_write", None, None, format!("{}", e));
+                            self.capture_error_event("metric_write", None, None, format!("{}", e)).await;
                             // Storage errors don't affect ChirpStack availability flag (they're local issues, not remote)
                             // Only set unavailability on ChirpStack connectivity errors (handled in device fetch loop)
                             break;
@@ -1624,11 +1649,11 @@ impl ChirpstackPoller {
             chirpstack_available = chirpstack_available,
             "Updating gateway health status"
         );
-        if let Err(e) = self.backend.update_gateway_status(
+        if let Err(e) = self.backend.async_store().update_gateway_status(
             timestamp_for_update,
             error_count,
             chirpstack_available,
-        ) {
+        ).await {
             error!(error = %e, "Failed to update gateway health status (non-fatal)");
         }
 
@@ -1695,7 +1720,7 @@ impl ChirpstackPoller {
     /// - Metric has no datasets or data
     /// - Counter reset detected (new < previous)
     /// - Metric validation fails
-    fn prepare_metric_for_batch(&self, device_id: &str, metric: &Metric) -> Option<crate::storage::BatchMetricWrite> {
+    async fn prepare_metric_for_batch(&self, device_id: &str, metric: &Metric) -> Option<crate::storage::BatchMetricWrite> {
         let device_id_string = device_id.to_string();
         let metric_name = metric.name.clone();
         let now_ts = SystemTime::now();
@@ -1858,7 +1883,7 @@ impl ChirpstackPoller {
         // trace! on the reconfig window) would add noise without operator-
         // actionable value.
         if matches!(target_type, MetricType::Int(_)) && kind == ChirpStackMetricKind::Counter {
-            if let Ok(Some(prev_metric)) = self.backend.get_metric_value(&device_id_string, &metric_name) {
+            if let Ok(Some(prev_metric)) = self.backend.async_store().get_metric_value(device_id_string.clone(), metric_name.clone()).await {
                 if let MetricType::Int(prev_int) = prev_metric.data_type {
                     let new_int = raw_value as i64;
                     if new_int < prev_int {
@@ -2519,7 +2544,7 @@ impl ChirpstackPoller {
         // is logged and reflected in the command's status but never aborts the
         // batch — one undeliverable command must not block the others or the
         // metrics poll.
-        let pending = self.backend.get_pending_commands()?;
+        let pending = self.backend.async_store().get_pending_commands().await?;
         if pending.is_empty() {
             return Ok(());
         }
@@ -2732,7 +2757,7 @@ async fn deliver_one(
                 "Command mapping failed; marking command Failed"
             );
             if let Err(e2) =
-                backend.update_command_status(command.id, CommandStatus::Failed, Some(e.to_string()))
+                backend.async_store().update_command_status(command.id, CommandStatus::Failed, Some(e.to_string())).await
             {
                 error!(error = %e2, command_id = command.id, "Failed to mark command Failed");
             }
@@ -2767,7 +2792,7 @@ async fn deliver_one(
             // command (`mark_command_sent` also stamps `sent_at`, which the
             // timeout sweep keys on). Replaces the prior
             // `update_command_status(.., Sent, None)` that dropped the id.
-            if let Err(e) = backend.mark_command_sent(command.id, &result_id) {
+            if let Err(e) = backend.async_store().mark_command_sent(command.id, result_id.clone()).await {
                 error!(error = %e, command_id = command.id, "Failed to mark command Sent");
             }
         }
@@ -2779,7 +2804,7 @@ async fn deliver_one(
                 "Failed to enqueue command; marking command Failed"
             );
             if let Err(e2) =
-                backend.update_command_status(command.id, CommandStatus::Failed, Some(e.to_string()))
+                backend.async_store().update_command_status(command.id, CommandStatus::Failed, Some(e.to_string())).await
             {
                 error!(error = %e2, command_id = command.id, "Failed to mark command Failed");
             }
@@ -3015,7 +3040,7 @@ impl CommandStatusPoller {
             // Observe the confirmation backlog. Confirmations are applied by the
             // event stream; a persistently non-zero backlog here signals the
             // stream may be stalled (commands will eventually time out).
-            match self.storage.find_pending_confirmations() {
+            match self.storage.async_store().find_pending_confirmations().await {
                 Ok(pending_commands) => {
                     if !pending_commands.is_empty() {
                         debug!(
@@ -3101,11 +3126,11 @@ impl CommandTimeoutHandler {
 
         loop {
             // Find commands that have timed out
-            match self.storage.find_timed_out_commands(ttl_secs) {
+            match self.storage.async_store().find_timed_out_commands(ttl_secs).await {
                 Ok(timed_out_commands) => {
                     for cmd in timed_out_commands {
                         let reason = format!("Confirmation timeout after {}s", ttl_secs);
-                        match self.storage.mark_command_failed(cmd.id, &reason) {
+                        match self.storage.async_store().mark_command_failed(cmd.id, reason.clone()).await {
                             Ok(()) => warn!(
                                 event = "command_timeout",
                                 command_id = cmd.id,
@@ -3377,7 +3402,7 @@ mod tests {
         // Step 4: call the production code path. Must return None because
         // the typed-path monotonic check at chirpstack.rs:1717-1729 detects
         // the reset (50 < 100) via prev_metric.data_type == Int(100).
-        let result = poller.prepare_metric_for_batch(device_id, &reset_metric);
+        let result = poller.prepare_metric_for_batch(device_id, &reset_metric).await;
         assert!(
             result.is_none(),
             "A-4 AC#9: Counter reset (50 < 100) must be detected via typed-path \

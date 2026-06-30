@@ -1663,3 +1663,47 @@ So that I can diagnose what's failing instead of only knowing how many failures 
 - Logging configuration in the DB/UI — stays file-based (Epic F decision).
 - SPA framework / build pipeline — still rejected.
 - #137 (multi-manufacturer device-class registry) and #136 (decouple downlink dispatch) — device-abstraction work, a separate future epic, not part of the Web UX release.
+
+## Epic H: Runtime Correctness & Tech-Debt
+
+**Tracking:** Literal name `Epic H` in `sprint-status.yaml`, continuing the lettered convention (A/B/C/D/E/F/G → H). Stories use sprint-status keys `H-0`, `H-1`, …, each mapping to an existing GitHub issue: H-0 → [#73](https://github.com/guycorbaz/opcgw/issues/73). This is the **v2.x tech-debt epic** flagged as a candidate direction at the close of the Epic G retrospective (2026-06-28).
+
+**Why it exists:** with the feature epics (1–9, A–G) all delivered and opcgw public-facing on the ChirpStack forum, the next risk is no longer missing features — it is **latent runtime-correctness defects** that the test suite and adversarial code review structurally cannot catch (cf. the 2026-05-20 main-deadlock incident and the #146 onboarding bug — both surfaced only by running the real binary). Epic H is the home for that class of work: blocking I/O on the async runtime, resource-lifecycle leaks, and codification of recurring review findings. It carries no new user-facing feature; its deliverable is a gateway that behaves correctly under load and on CPU-constrained deployments.
+
+**Starting point (verified 2026-06-29):** the `StorageBackend` trait (`src/storage/mod.rs:182`) is a **fully synchronous** ~30-method trait (blocking rusqlite), shared as `Arc<dyn StorageBackend>` and invoked from ~30–50 **async** call sites across `src/chirpstack.rs`, `src/chirpstack_events.rs`, `src/opc_ua.rs`, `src/opc_ua_history.rs`, `src/web/api.rs`, and `src/main.rs`. Every such call blocks a tokio worker thread on SQL; two deliberate `std::thread::sleep` backoffs (`src/storage/sqlite.rs:1265`, `:1346`) block on pool-exhaustion retry. This has been survivable only because `#[tokio::main]` defaults to the multi-threaded runtime (~32 workers on the dev host) — it degrades sharply on CPU-limited Docker deployments. G-4's code review explicitly deferred "blocking `pool.checkout` #73" as a LOW pointing here.
+
+**Design principles:** correctness first; **no behavioural change** to storage semantics (same return types, same error mapping, same ordering); prefer a **centralised async facade** over scattering `spawn_blocking` at every call site, so the blocking boundary is in exactly one place and call sites read idiomatically; reuse the existing `Arc<dyn StorageBackend>` so both `SqliteBackend` and `InMemoryBackend` are covered without per-backend changes; keep the test suite green at every step (no regression in the 1700+ existing tests).
+
+**FRs covered:** none (Epic H is a post-PRD, tech-debt-driven addition; the contract is the GitHub issues above + the per-story scope below).
+
+**Sequencing:** **H-0 first** (foundational — establishes the async-facade boundary every other storage-touching fix builds on). Later stories (candidates: #110 RunHandles `Drop`, #79 queue-capacity enforcement, substring-matcher / error-classification codification) are added via `correct-course` when scoped. Per-story full Acceptance Criteria are drafted when `bmad-create-story H-N` is invoked.
+
+### Story H.0: Async Storage Facade (spawn_blocking boundary)
+
+As an **operator running opcgw on a CPU-constrained host (e.g. a small Docker container)**,
+I want the gateway's database access to never block the async runtime's worker threads,
+So that the poller, OPC UA server, and web UI stay responsive under load instead of stalling on SQL.
+
+**Scope summary (full ACs at `bmad-create-story H-0`):**
+
+- Introduce an **async facade** that wraps `Arc<dyn StorageBackend>` and runs every backend call via `tokio::task::spawn_blocking` (the multi-threaded runtime is already in use). The synchronous `StorageBackend` trait and both backend impls (`SqliteBackend`, `InMemoryBackend`) stay unchanged — the facade is the only new abstraction.
+- Convert all ~30–50 async call sites (`chirpstack.rs`, `chirpstack_events.rs`, `opc_ua.rs`, `opc_ua_history.rs`, `web/api.rs`, `main.rs`) from direct blocking `backend.method(...)` calls to `facade.method(...).await`. Args crossing the `spawn_blocking` boundary must be owned / `Send + 'static`.
+- The two deliberate `std::thread::sleep` pool-retry backoffs (`sqlite.rs:1265`, `:1346`) now run inside `spawn_blocking`, off the async executor — acceptable as-is once moved off the runtime (a blocking sleep inside `spawn_blocking` is correct).
+- **No behavioural change:** identical return types, error mapping (`OpcGwError`), and result ordering; purely an execution-context change. Synchronous (non-async) call sites — e.g. tests, startup migration — may continue calling the backend directly.
+- Tests / checks: existing 1700+ tests stay green; add coverage proving storage calls run off the runtime worker threads (e.g. a blocking-detection or concurrency test); `cargo clippy --all-targets -- -D warnings` clean. Closes #73.
+
+### Epic H — Story Acceptance Criteria
+
+**Given** opcgw running on a multi-threaded tokio runtime with a synchronous SQLite backend,
+**When** any async task (poller, event stream, OPC UA server, web handler) reads or writes storage,
+**Then** the blocking SQL and pool-retry sleeps execute on the `spawn_blocking` pool via the async facade (H-0), never on an async worker thread,
+**And** storage semantics — return values, error mapping, and ordering — are byte-for-byte unchanged, with the full existing test suite green.
+
+**Vision capture reference:** GH issue [#73](https://github.com/guycorbaz/opcgw/issues/73) (rescoped 2026-06-29 from a mis-aimed one-liner to the real sync-on-async bug); the Epic G retrospective "NEXT" note (2026-06-28) naming a v2.x tech-debt epic with #73 as the headline item; the 2026-06-29 owner decision (Strategy A = async facade, full BMad story flow).
+
+**Deferred / out-of-scope:**
+
+- #110 (RunHandles lacks `Drop` impl — gauge task leak) — candidate future H-story; not in H-0.
+- #79 (queue-capacity enforcement, 10 000 max) — candidate future H-story.
+- Substring-matcher / error-classification codification (recurring review-finding class) — candidate future H-story.
+- Migrating `StorageBackend` to a natively-`async` trait or an async SQLite driver — explicitly rejected for H-0 (far larger blast radius; the `spawn_blocking` facade achieves correctness without rewriting the backends).

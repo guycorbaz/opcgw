@@ -2,7 +2,7 @@
 // Copyright (c) [2024] [Guy Corbaz]
 
 use crate::config::{AppConfig, DeviceCommandCfg};
-use crate::storage::{CommandStatus, StorageBackend};
+use crate::storage::{run_blocking_storage, CommandStatus, StorageBackend};
 use crate::utils::*;
 use chrono::Utc;
 use tracing::{debug, error, info, trace, warn};
@@ -1344,7 +1344,12 @@ impl OpcUa {
         );
 
         let storage_start = std::time::Instant::now();
-        let result = storage.get_metric_value(&device_id, &metric_name);
+        // Story H-0/#73 (AC#5): this runs inside a synchronous async-opcua read
+        // callback that cannot `.await`. `run_blocking_storage` offloads the
+        // blocking SQL via `block_in_place` when on a multi-thread worker so the
+        // read does not starve other tasks; it runs inline in non-runtime/sync
+        // test contexts (where `get_value` is called directly).
+        let result = run_blocking_storage(|| storage.get_metric_value(&device_id, &metric_name));
         let storage_latency_ms = storage_start.elapsed().as_millis() as u64;
         span.record("storage_latency_ms", storage_latency_ms);
 
@@ -1555,7 +1560,9 @@ impl OpcUa {
         const COMMAND_STATUS_MAX: usize = 100;
         // E-3 review: bound at the query layer — the `command_queue` table is
         // never pruned, so loading it whole on every OPC UA read would be O(n).
-        let json = match storage.recent_commands(COMMAND_STATUS_MAX) {
+        // Story H-0/#73 (AC#5): sync OPC UA callback — offload blocking SQL off
+        // the async worker via `run_blocking_storage` (see get_value above).
+        let json = match run_blocking_storage(|| storage.recent_commands(COMMAND_STATUS_MAX)) {
             Ok(commands) => {
                 // Storage already returned the newest COMMAND_STATUS_MAX, newest-first.
                 let entries: Vec<serde_json::Value> = commands
@@ -1652,7 +1659,9 @@ impl OpcUa {
         );
 
         let storage_start = std::time::Instant::now();
-        let storage_result = storage.get_gateway_health_metrics();
+        // Story H-0/#73 (AC#5): sync OPC UA callback — offload blocking SQL off
+        // the async worker via `run_blocking_storage` (see get_value above).
+        let storage_result = run_blocking_storage(|| storage.get_gateway_health_metrics());
         let storage_latency_ms = storage_start.elapsed().as_millis() as u64;
         span.record("storage_latency_ms", storage_latency_ms);
 
@@ -2071,8 +2080,10 @@ impl OpcUa {
                     // storage so the queued row is self-describing.
                     command_name: Some(command.command_name.clone()),
                 };
-                // Queue command to storage (no lock needed, StorageBackend handles concurrency)
-                match storage.queue_command(command_to_send) {
+                // Queue command to storage (no lock needed, StorageBackend handles concurrency).
+                // Story H-0/#73 (AC#5): sync OPC UA method callback — offload the
+                // blocking write off the async worker via `run_blocking_storage`.
+                match run_blocking_storage(|| storage.queue_command(command_to_send)) {
                     Ok(()) => {
                         debug!(device_id = %device_id, f_port = %f_port, "Command queued successfully");
                         opcua::types::StatusCode::Good

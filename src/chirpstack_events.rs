@@ -26,7 +26,7 @@
 use crate::config::{AppConfig, ReadMetric};
 use crate::chirpstack_internal_proto::api::internal_service_client::InternalServiceClient;
 use crate::chirpstack_internal_proto::api::{LogItem, StreamDeviceEventsRequest};
-use crate::storage::{BatchMetricWrite, MetricType, StorageBackend};
+use crate::storage::{AsyncStorageExt, BatchMetricWrite, MetricType, StorageBackend};
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -631,7 +631,7 @@ fn is_fresher(candidate: SystemTime, stored: Option<DateTime<Utc>>) -> bool {
 /// can deliver events older than the stored last-value. This guard makes the
 /// whole value path monotonic by device-report time — no replayed or
 /// out-of-order event ever regresses a last-known value.
-fn filter_fresher_writes(
+async fn filter_fresher_writes(
     backend: &Arc<dyn StorageBackend>,
     device_id: &str,
     candidates: Vec<BatchMetricWrite>,
@@ -642,7 +642,11 @@ fn filter_fresher_writes(
     // cross-metric transaction tie observable by readers mid-batch).
     let mut writes = Vec::with_capacity(candidates.len());
     for write in candidates {
-        let stored_ts = match backend.get_metric_value(device_id, &write.metric_name) {
+        let stored_ts = match backend
+            .async_store()
+            .get_metric_value(device_id.to_string(), write.metric_name.clone())
+            .await
+        {
             Ok(stored) => stored.map(|v| v.timestamp),
             Err(e) => {
                 // Fail OPEN, audibly: if the stored timestamp can't be read,
@@ -707,7 +711,7 @@ async fn backfill_device(
     };
 
     let candidate_writes = map_uplink_to_writes(device_id, metrics, &event.object, event.event_time);
-    let writes = filter_fresher_writes(backend, device_id, candidate_writes);
+    let writes = filter_fresher_writes(backend, device_id, candidate_writes).await;
     if writes.is_empty() {
         debug!(
             event = "uplink_backfill_skipped",
@@ -717,7 +721,7 @@ async fn backfill_device(
         return;
     }
     let n = writes.len();
-    match backend.batch_write_metrics(writes) {
+    match backend.async_store().batch_write_metrics(writes).await {
         Ok(()) => info!(
             event = "uplink_backfill",
             device_id = %device_id,
@@ -738,7 +742,7 @@ async fn backfill_device(
 /// last-value writes stamped with the device event time. Shared by the live
 /// stream pump (factored out of the pre-E-1b inline loop body, unchanged in
 /// behaviour).
-fn ingest_event(
+async fn ingest_event(
     device_id: &str,
     metrics: &[ReadMetric],
     event: &UplinkEvent,
@@ -793,7 +797,7 @@ fn ingest_event(
     // Freshness guard on the LIVE path too: ChirpStack replays recent event
     // history on every stream (re)connect, so the pump regularly sees events
     // older than the stored last-value — they must not regress it.
-    let writes = filter_fresher_writes(backend, device_id, candidates);
+    let writes = filter_fresher_writes(backend, device_id, candidates).await;
     if writes.len() < candidate_count {
         debug!(
             event = "uplink_replay_skipped",
@@ -804,7 +808,7 @@ fn ingest_event(
     }
     if !writes.is_empty() {
         let n = writes.len();
-        if let Err(e) = backend.batch_write_metrics(writes) {
+        if let Err(e) = backend.async_store().batch_write_metrics(writes).await {
             error!(
                 event = "uplink_store_failed",
                 device_id = %device_id,
@@ -830,8 +834,12 @@ fn ingest_event(
 /// stream reconnect and acks for commands we did not send must never error or
 /// regress state (idempotent, relying on the storage layer's
 /// `status IN ('Sent','Pending')` guard).
-fn handle_ack(backend: &Arc<dyn StorageBackend>, device_id: &str, ack: &AckInfo) {
-    let cmd = match backend.find_command_by_result_id(&ack.queue_item_id) {
+async fn handle_ack(backend: &Arc<dyn StorageBackend>, device_id: &str, ack: &AckInfo) {
+    let cmd = match backend
+        .async_store()
+        .find_command_by_result_id(ack.queue_item_id.clone())
+        .await
+    {
         Ok(Some(c)) => c,
         Ok(None) => {
             debug!(
@@ -870,7 +878,7 @@ fn handle_ack(backend: &Arc<dyn StorageBackend>, device_id: &str, ack: &AckInfo)
     }
 
     if ack.acknowledged {
-        match backend.mark_command_confirmed(cmd.id) {
+        match backend.async_store().mark_command_confirmed(cmd.id).await {
             Ok(()) => {
                 // confirmed_at is set inside mark_command_confirmed; now() is a
                 // tight upper bound for it, so latency ≈ confirmed_at - sent_at.
@@ -896,7 +904,9 @@ fn handle_ack(backend: &Arc<dyn StorageBackend>, device_id: &str, ack: &AckInfo)
         }
     } else {
         match backend
-            .mark_command_failed(cmd.id, "Device did not acknowledge confirmed downlink (NACK / max retries)")
+            .async_store()
+            .mark_command_failed(cmd.id, "Device did not acknowledge confirmed downlink (NACK / max retries)".to_string())
+            .await
         {
             Ok(()) => warn!(
                 event = "command_confirm_failed",
@@ -973,11 +983,11 @@ async fn connect_and_stream(
                         seen,
                         warned,
                         events_seen,
-                    ),
+                    ).await,
                     // Story E-3: downlink delivery confirmation rides the same
                     // stream. An ack confirms (or NACK-fails) the queued
                     // command; a txack is a transmit diagnostic only.
-                    Ok(Some(DeviceEvent::Ack(ack))) => handle_ack(backend, device_id, &ack),
+                    Ok(Some(DeviceEvent::Ack(ack))) => handle_ack(backend, device_id, &ack).await,
                     Ok(Some(DeviceEvent::TxAck(txack))) => debug!(
                         event = "command_txack",
                         device_id = %device_id,
@@ -1749,46 +1759,46 @@ mod tests {
         assert!(parse_device_event(&bad).is_none());
     }
 
-    #[test]
-    fn ack_acknowledged_true_confirms_command() {
+    #[tokio::test]
+    async fn ack_acknowledged_true_confirms_command() {
         let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
         let id = sent_command(&backend, "qid-confirm");
-        handle_ack(&backend, "dev1", &AckInfo { queue_item_id: "qid-confirm".into(), acknowledged: true });
+        handle_ack(&backend, "dev1", &AckInfo { queue_item_id: "qid-confirm".into(), acknowledged: true }).await;
         let cmd = backend.find_command_by_result_id("qid-confirm").unwrap().unwrap();
         assert_eq!(cmd.id, id);
         assert_eq!(cmd.status, CommandStatus::Confirmed, "ack(true) must confirm");
         assert!(cmd.confirmed_at.is_some(), "confirmed_at must be stamped");
     }
 
-    #[test]
-    fn ack_acknowledged_false_fails_command() {
+    #[tokio::test]
+    async fn ack_acknowledged_false_fails_command() {
         let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
         sent_command(&backend, "qid-nack");
-        handle_ack(&backend, "dev1", &AckInfo { queue_item_id: "qid-nack".into(), acknowledged: false });
+        handle_ack(&backend, "dev1", &AckInfo { queue_item_id: "qid-nack".into(), acknowledged: false }).await;
         let cmd = backend.find_command_by_result_id("qid-nack").unwrap().unwrap();
         assert_eq!(cmd.status, CommandStatus::Failed, "NACK must fail the command");
         assert!(cmd.error_message.is_some(), "Failed command must carry an error message");
     }
 
-    #[test]
-    fn ack_unmatched_queue_item_id_is_ignored() {
+    #[tokio::test]
+    async fn ack_unmatched_queue_item_id_is_ignored() {
         let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
         let id = sent_command(&backend, "qid-real");
         // Ack for a DIFFERENT queue id: must not touch the real command, must not panic.
-        handle_ack(&backend, "dev1", &AckInfo { queue_item_id: "qid-ghost".into(), acknowledged: true });
+        handle_ack(&backend, "dev1", &AckInfo { queue_item_id: "qid-ghost".into(), acknowledged: true }).await;
         let cmd = backend.find_command_by_result_id("qid-real").unwrap().unwrap();
         assert_eq!(cmd.id, id);
         assert_eq!(cmd.status, CommandStatus::Sent, "unmatched ack must leave the command Sent");
     }
 
-    #[test]
-    fn duplicate_ack_is_idempotent_noop() {
+    #[tokio::test]
+    async fn duplicate_ack_is_idempotent_noop() {
         let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
         sent_command(&backend, "qid-dup");
-        handle_ack(&backend, "dev1", &AckInfo { queue_item_id: "qid-dup".into(), acknowledged: true });
+        handle_ack(&backend, "dev1", &AckInfo { queue_item_id: "qid-dup".into(), acknowledged: true }).await;
         // ChirpStack replays events on reconnect — a second identical ack must
         // be a benign no-op (still Confirmed, no panic, no regression).
-        handle_ack(&backend, "dev1", &AckInfo { queue_item_id: "qid-dup".into(), acknowledged: true });
+        handle_ack(&backend, "dev1", &AckInfo { queue_item_id: "qid-dup".into(), acknowledged: true }).await;
         let cmd = backend.find_command_by_result_id("qid-dup").unwrap().unwrap();
         assert_eq!(cmd.status, CommandStatus::Confirmed);
     }

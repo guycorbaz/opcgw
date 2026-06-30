@@ -58,6 +58,7 @@
 //! }
 //! ```
 
+pub mod async_facade;
 pub mod types;
 pub mod memory;
 pub mod sqlite;
@@ -67,6 +68,7 @@ pub mod migrate_config;
 pub mod migrate_singleton_config;
 pub mod sqlite_singleton_provider;
 
+pub use async_facade::{run_blocking_storage, AsyncStorageExt};
 pub use types::{ChirpstackStatus, Command, CommandFilter, CommandStatus, DeviceCommand, ErrorEvent, MetricType, MetricValue, MAX_LORA_PAYLOAD_SIZE};
 pub use sqlite::SqliteBackend;
 pub use pool::ConnectionPool;

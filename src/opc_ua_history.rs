@@ -56,7 +56,7 @@ use opcua::types::{
 };
 use tracing::{debug, error, info, trace, warn};
 
-use crate::storage::{HistoricalMetricRow, MetricType, StorageBackend};
+use crate::storage::{AsyncStorageExt, HistoricalMetricRow, MetricType, StorageBackend};
 
 /// Type alias for the wrapped node manager: an `InMemoryNodeManager`
 /// parameterised over our HistoryRead-aware impl.
@@ -317,13 +317,13 @@ impl InMemoryNodeManagerImpl for OpcgwHistoryNodeManagerImpl {
                 continue;
             };
 
-            match self.backend.query_metric_history(
-                &device_id,
-                &metric_name,
+            match self.backend.async_store().query_metric_history(
+                device_id.clone(),
+                metric_name.clone(),
                 start_st,
                 end_st,
                 max_results,
-            ) {
+            ).await {
                 Ok(rows) => {
                     let row_count = rows.len();
                     let data_values = build_data_values(&rows, &device_id, &metric_name);

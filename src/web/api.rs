@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::config::OpcMetricTypeConfig;
+use crate::storage::AsyncStorageExt;
 use crate::web::AppState;
 
 /// Shape returned by `GET /api/status` on success (Story 9-2 AC#2).
@@ -181,7 +182,7 @@ pub async fn api_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<StatusResponse>, Response> {
     let (last_poll, error_count, available) =
-        match state.backend.get_gateway_health_metrics() {
+        match state.backend.async_store().get_gateway_health_metrics().await {
             Ok(triple) => triple,
             Err(e) => {
                 // NFR7: log the full error to the operator log; return
@@ -542,7 +543,7 @@ pub async fn api_errors(
             .into_response();
     }
 
-    match state.backend.recent_error_events(limit) {
+    match state.backend.async_store().recent_error_events(limit).await {
         Ok(events) => {
             let count = events.len();
             (StatusCode::OK, Json(ErrorsResponse { items: events, count })).into_response()
@@ -591,7 +592,7 @@ pub async fn api_devices(
     // operator's request hit the server, not after the storage delay.
     let as_of = Utc::now().to_rfc3339();
 
-    let metrics = match state.backend.load_all_metrics() {
+    let metrics = match state.backend.async_store().load_all_metrics().await {
         Ok(rows) => rows,
         Err(e) => {
             // NFR7: log the full error to the operator log; return a
