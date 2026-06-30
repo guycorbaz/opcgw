@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<!--
+  Epic I / Story I-0 — Web UI Refresh visual-target MOCKUP (NOT production code).
+  Self-contained, no build step, no framework, no node_modules — exactly the
+  constraint locked for #147 direction (a). Targets the ChirpStack v4 (Ant
+  Design) look: dark navy sider, white top header, #1890ff primary, light-grey
+  content, white cards. Toggle light/dark with the button top-right.
+  The CSS custom properties in :root are the proposed I-1 design tokens.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>opcgw — Dashboard (Epic I mockup)</title>
+<style>
+  /* ───────── I-1 design tokens (proposed) ───────── */
+  :root {
+    --cs-primary:      #1890ff;   /* ChirpStack antd blue */
+    --cs-primary-700:  #096dd9;
+    --cs-sider-bg:     #001529;   /* dark navy sider */
+    --cs-sider-fg:     #a6adb4;
+    --cs-sider-fg-act: #ffffff;
+    --cs-content-bg:   #f0f2f5;   /* antd light content */
+    --cs-card-bg:      #ffffff;
+    --cs-border:       #e8e8e8;
+    --cs-text:         #262626;
+    --cs-text-muted:   #8c8c8c;
+    --ok:    #52c41a;  --ok-bg:#f6ffed;
+    --warn:  #faad14;  --warn-bg:#fffbe6;
+    --bad:   #ff4d4f;  --bad-bg:#fff1f0;
+    --radius: 8px;
+    --shadow: 0 1px 2px rgba(0,0,0,.06), 0 2px 8px rgba(0,0,0,.06);
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --space: 16px;
+  }
+  [data-theme="dark"] {
+    --cs-sider-bg:#000c17; --cs-content-bg:#141414; --cs-card-bg:#1f1f1f;
+    --cs-border:#303030; --cs-text:#e6e6e6; --cs-text-muted:#8c8c8c;
+    --ok-bg:#162312; --warn-bg:#2b2111; --bad-bg:#2a1215; --shadow:0 1px 2px rgba(0,0,0,.4);
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:var(--font); color:var(--cs-text); background:var(--cs-content-bg); }
+  .app { display:grid; grid-template-columns: 232px 1fr; min-height:100vh; }
+
+  /* ───────── sider (left nav) ───────── */
+  .sider { background:var(--cs-sider-bg); color:var(--cs-sider-fg); padding:0; }
+  .brand { display:flex; align-items:center; gap:10px; height:56px; padding:0 20px;
+           color:#fff; font-weight:600; font-size:16px; letter-spacing:.3px; }
+  .brand .dot { width:22px;height:22px;border-radius:6px;background:var(--cs-primary);
+                display:grid;place-items:center;font-size:13px;font-weight:700; }
+  .nav a { display:flex; align-items:center; gap:12px; height:44px; padding:0 20px;
+           color:var(--cs-sider-fg); text-decoration:none; font-size:14px; border-left:3px solid transparent; }
+  .nav a:hover { color:#fff; background:rgba(255,255,255,.04); }
+  .nav a.active { color:var(--cs-sider-fg-act); background:var(--cs-primary); border-left-color:#fff; }
+  .nav .ico { width:18px; text-align:center; opacity:.9; }
+
+  /* ───────── header ───────── */
+  .header { display:flex; align-items:center; justify-content:space-between;
+            height:56px; padding:0 24px; background:var(--cs-card-bg);
+            border-bottom:1px solid var(--cs-border); position:sticky; top:0; z-index:5; }
+  .header h1 { font-size:18px; font-weight:600; margin:0; }
+  .header .right { display:flex; align-items:center; gap:14px; color:var(--cs-text-muted); font-size:14px; }
+  .toggle { cursor:pointer; border:1px solid var(--cs-border); background:transparent; color:var(--cs-text);
+            border-radius:6px; padding:6px 12px; font-size:13px; }
+  .health { display:inline-flex; align-items:center; gap:7px; font-weight:600; color:var(--ok); }
+  .health .pulse{width:9px;height:9px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px var(--ok-bg);}
+
+  /* ───────── content ───────── */
+  .content { padding:24px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:var(--space); }
+  .card { background:var(--cs-card-bg); border:1px solid var(--cs-border); border-radius:var(--radius);
+          box-shadow:var(--shadow); padding:18px 20px; }
+  .card .label { color:var(--cs-text-muted); font-size:13px; margin:0 0 8px; }
+  .card .value { font-size:28px; font-weight:600; margin:0; line-height:1.1; }
+  .card .sub { color:var(--cs-text-muted); font-size:12px; margin-top:6px; }
+  .badge { display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600;
+           padding:3px 10px; border-radius:20px; }
+  .badge.ok   { color:var(--ok);   background:var(--ok-bg); }
+  .badge.warn { color:var(--warn); background:var(--warn-bg); }
+  .badge.bad  { color:var(--bad);  background:var(--bad-bg); }
+
+  .section-title { font-size:15px; font-weight:600; margin:28px 0 14px; }
+  table { width:100%; border-collapse:collapse; background:var(--cs-card-bg);
+          border:1px solid var(--cs-border); border-radius:var(--radius); overflow:hidden; box-shadow:var(--shadow); }
+  th,td { text-align:left; padding:12px 16px; font-size:14px; border-bottom:1px solid var(--cs-border); }
+  th { color:var(--cs-text-muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.4px;
+       background:color-mix(in srgb, var(--cs-content-bg) 60%, var(--cs-card-bg)); }
+  tr:last-child td { border-bottom:none; }
+  .btn { background:var(--cs-primary); color:#fff; border:none; border-radius:6px; padding:8px 16px;
+         font-size:14px; cursor:pointer; }
+  .btn:hover { background:var(--cs-primary-700); }
+  @media (max-width:720px){ .app{grid-template-columns:1fr;} .sider{display:none;} }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sider">
+    <div class="brand"><span class="dot">⚙</span> opcgw</div>
+    <nav class="nav">
+      <a class="active" href="#"><span class="ico">▦</span> Dashboard</a>
+      <a href="#"><span class="ico">⚙</span> Configuration</a>
+      <a href="#"><span class="ico">▤</span> Errors</a>
+      <a href="#"><span class="ico">ⓘ</span> About</a>
+    </nav>
+  </aside>
+
+  <main>
+    <header class="header">
+      <h1>Dashboard</h1>
+      <div class="right">
+        <span class="health"><span class="pulse"></span> Healthy</span>
+        <button class="toggle" onclick="t()">◐ Theme</button>
+      </div>
+    </header>
+
+    <div class="content">
+      <div class="grid">
+        <div class="card"><p class="label">ChirpStack</p><p class="value">Connected</p><span class="badge ok">● available</span></div>
+        <div class="card"><p class="label">Last poll</p><p class="value">12s</p><p class="sub">ago · 60s interval</p></div>
+        <div class="card"><p class="label">Errors (cumulative)</p><p class="value">0</p><p class="sub">view recent →</p></div>
+        <div class="card"><p class="label">Applications</p><p class="value">4</p></div>
+        <div class="card"><p class="label">Devices</p><p class="value">7</p></div>
+        <div class="card"><p class="label">Uptime</p><p class="value">2h 14m</p></div>
+      </div>
+
+      <h2 class="section-title">Device freshness</h2>
+      <table>
+        <thead><tr><th>Device</th><th>Application</th><th>Last value</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td>Tonhe valve 01</td><td>Irrigation</td><td>8s ago</td><td><span class="badge ok">fresh</span></td></tr>
+          <tr><td>Soil sensor A3</td><td>Field North</td><td>3m ago</td><td><span class="badge ok">fresh</span></td></tr>
+          <tr><td>Tank level 02</td><td>Reservoir</td><td>41m ago</td><td><span class="badge warn">stale</span></td></tr>
+          <tr><td>Gateway probe</td><td>Diagnostics</td><td>—</td><td><span class="badge bad">never</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+</div>
+<script>
+  function t(){ const b=document.body; b.dataset.theme = b.dataset.theme==='dark' ? '' : 'dark'; }
+</script>
+</body>
+</html>

@@ -1707,3 +1707,95 @@ So that the poller, OPC UA server, and web UI stay responsive under load instead
 - #79 (queue-capacity enforcement, 10 000 max) — candidate future H-story.
 - Substring-matcher / error-classification codification (recurring review-finding class) — candidate future H-story.
 - Migrating `StorageBackend` to a natively-`async` trait or an async SQLite driver — explicitly rejected for H-0 (far larger blast radius; the `spawn_blocking` facade achieves correctness without rewriting the backends).
+
+## Epic I: Web UI Refresh
+
+**Tracking:** Literal name `Epic I` in `sprint-status.yaml`, continuing the lettered convention (A–H → I). Target release **v2.6.0** (minor — user-facing UI improvement). Maps to CR [#147](https://github.com/guycorbaz/opcgw/issues/147).
+
+**Why it exists:** opcgw was announced to the ChirpStack community (2026-06-27); newcomers judge it by its **web UI**. The post-Epic-G UI is functional and coherent but visually dated next to ChirpStack's modern Material-style interface. Epic I refreshes the look & feel to be **visually adjacent to ChirpStack** — the network server operators already run — so opcgw reads as a natural companion. This is the first **purely cosmetic** epic: no new features, no endpoint or behavioural change; the deliverable is a modern, consistent, accessible presentation layer.
+
+**Direction (LOCKED on #147, owner decision 2026-06-30): (a) modern vanilla design system.** A hand-written CSS design-token layer on the existing F-1 shell — **no React/MUI, no build step, no framework, no `node_modules`** (the standing Epic F/G principle stays). Goal is "same visual family as ChirpStack," **not** a pixel-literal MUI clone.
+
+**Starting point (verified 2026-06-30):** builds entirely on the **F-1 shell** (`static/shell.js` + `static/dashboard.css` component classes: `.app-shell` / `.btn` / `.status-badge` / `.banner` / `.page-header`) and the **G-0** unified `config.html` (Application → Device → Metrics/Commands drill-down). Pages: `index.html` (dashboard), `config.html`, first-run wizard, gateway-settings editor, `errors.html`, plus `dashboard.js` / `metrics.js` / `field-help.js` / `inventory-picker.js`. Dark mode partially supported via `prefers-color-scheme`.
+
+**Design principles:** vanilla + shared shell, **no build step / framework / `node_modules`**; **pure presentation** — zero changes to `/api/*`, the F-0 staged-apply write model, or any data path; **no new aggregation** (#130 stays); **no served-HTML regression** — the DOM-ID markers the server-side tests assert (`tests/web_*.rs`) must be preserved (the refresh decorates, it does not relocate content); **accessibility preserved** — the G-2 `aria-describedby` field-help affordances and keyboard/screen-reader reachability must survive.
+
+**FRs covered:** none (post-PRD, CR-driven; the contract is #147 + the per-story scope below).
+
+**Sequencing:** **I-0 → I-1 → I-2 → I-3 → I-4.** I-0 agrees the *visual target* before any production CSS changes (a refresh is risky to do blind); I-1 lays the token substrate; I-2/I-3 apply it to nav then components; I-4 rolls out across all pages and QAs responsive/dark-mode/accessibility. Per-story full ACs are drafted when `bmad-create-story I-N` is invoked.
+
+### Story I.0: Visual Design & Mockup (agree the target)
+
+As the **product owner**,
+I want a concrete visual target (palette, typography, layout, component look) agreed before any production CSS changes,
+so that the refresh implements a decided design rather than being iterated blind in the live UI.
+
+**Scope summary (full ACs at `bmad-create-story I-0`):**
+
+- Produce a **standalone, self-contained HTML/CSS mockup** (no build step) of one or two representative screens (the dashboard, and a config screen) in the proposed ChirpStack-adjacent style — openable directly in a browser for review, light **and** dark mode.
+- Capture the agreed **design tokens** on paper: colour palette (ChirpStack-family Material blue + semantic status colours), typography scale, spacing/radius/elevation, nav layout (app-bar + side-drawer).
+- Reference the actual ChirpStack screens being emulated; record what is "same family" vs deliberately different.
+- Output is a design reference + mockup artifact (not production code). No `static/` production page is changed in I-0.
+
+### Story I.1: Design-Token Foundation
+
+As an **operator**,
+I want the UI built on a single coherent set of design tokens,
+so that the look is consistent across every page and dark mode is first-class.
+
+**Scope summary (full ACs at `bmad-create-story I-1`):**
+
+- Implement the I-0 tokens as CSS custom properties (`:root` + `prefers-color-scheme: dark`) in the shared stylesheet; refactor `dashboard.css` to consume them (no hard-coded colours/spacing left in components).
+- Full light + dark parity from the tokens.
+- No visual regression beyond the intended refresh; served-HTML markers untouched.
+
+### Story I.2: Navigation & Shell Refresh
+
+As a **newcomer arriving from ChirpStack**,
+I want navigation that feels like ChirpStack's,
+so that the gateway is immediately familiar.
+
+**Scope summary (full ACs at `bmad-create-story I-2`):**
+
+- Restyle the F-1 shell (`shell.js` + CSS) toward ChirpStack's layout — app-bar + side-drawer navigation, active-link state, responsive collapse on mobile. **Visual only**: the G-0 Application → Device hierarchy and link set are unchanged.
+- Shell continues to host the F-0 Apply bar consistently; first-run wizard stays standalone.
+
+### Story I.3: Component Refresh
+
+As an **operator**,
+I want cards, tables, forms, buttons, badges and banners to look modern and consistent,
+so that every screen feels like one polished product.
+
+**Scope summary (full ACs at `bmad-create-story I-3`):**
+
+- Restyle the component set on the I-1 tokens and apply across the dashboard, `config.html`, `errors.html`, the wizard, and the settings editor. Consistent buttons/inputs/tables/cards/status-badges.
+- The G-2 field-help info-icon affordance is restyled but keeps its `aria-describedby` semantics.
+
+### Story I.4: Rollout, Dark-Mode & Accessibility QA
+
+As the **product owner**,
+I want the refresh applied everywhere and verified,
+so that no page is left half-styled and nothing regressed.
+
+**Scope summary (full ACs at `bmad-create-story I-4`):**
+
+- Apply the refreshed styles to all remaining pages; cross-page consistency pass.
+- Verify responsive behaviour (mobile/tablet/desktop) and full dark-mode parity.
+- Preserve every served-HTML DOM-ID marker asserted by `tests/web_*.rs`; preserve G-2 accessibility (keyboard + screen-reader reachable, `aria-describedby` intact).
+- **Heaviest story; defer candidate** if v2.6.0 scope tightens.
+
+### Epic I — Story Acceptance Criteria
+
+**Given** a newcomer arriving from the ChirpStack community to a running opcgw,
+**When** they open the web UI,
+**Then** it presents a modern, ChirpStack-adjacent look — a coherent token-based design (I-1), familiar app-bar + side-drawer navigation (I-2), and consistent refreshed components (I-3) — agreed against a mockup first (I-0) and verified across all pages in light/dark/responsive with accessibility intact (I-4),
+**And** it adds no build step, framework, or `node_modules`, and changes no `/api/*` endpoint, write model, or data path.
+
+**Vision capture reference:** CR [#147](https://github.com/guycorbaz/opcgw/issues/147) (direction (a) locked 2026-06-30); the 2026-06-30 planning dialogue (decrease open issues + theme = Web UX refresh; mockup-first kickoff).
+
+**Deferred / out-of-scope:**
+
+- React / MUI / any framework + build step — explicitly rejected (direction (a)).
+- Any `/api/*`, F-0 apply-model, or data-path change — out of scope (pure presentation).
+- Functional UX changes (new screens, new flows) — this is a visual refresh, not a redesign of behaviour.
+- I-4 may slip to a later release if v2.6.0 scope tightens.
