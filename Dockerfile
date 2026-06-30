@@ -14,7 +14,11 @@ ARG APP_NAME=opcgw
 # Builder stage — compiles the gateway binary against the pinned Rust toolchain.
 # ─────────────────────────────────────────────────────────────────────────────
 FROM rust:${RUST_VERSION} AS builder
-RUN apt-get update && apt-get install protobuf-compiler -y
+# protobuf-compiler: build.rs compiles the ChirpStack .proto definitions.
+# mold: the repo's .cargo/config.toml pins `-fuse-ld=mold` as the linker, so the
+# builder image must provide mold (available in the rust image's Debian base for
+# both amd64 and arm64).
+RUN apt-get update && apt-get install -y protobuf-compiler mold
 WORKDIR /usr/src/opcgw
 COPY . .
 # Build the application

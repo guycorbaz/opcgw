@@ -25,8 +25,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protobuf compiler and mold linker
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler mold
 
       - name: Run tests
         run: cargo test --verbose
@@ -44,8 +44,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protobuf compiler and mold linker
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler mold
 
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -62,8 +62,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protobuf compiler and mold linker
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler mold
 
       - name: Build (debug)
         run: cargo build --verbose
@@ -83,8 +83,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protobuf compiler and mold linker
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler mold
 
       - name: Check for hardcoded credentials
         run: |
