@@ -1142,6 +1142,18 @@ async fn shell_js_is_served_and_owns_the_nav() {
             "shell.js nav definition must include the {label:?} entry"
         );
     }
+    // Story I-2 (#147): the responsive drawer toggle must be accessible.
+    // No headless browser in CI, so pin the ARIA wiring at the source level:
+    // the shell must set aria-expanded (kept in sync by the toggle handler)
+    // and mark content pages via the body class the sider layout is gated on.
+    assert!(
+        shell.contains("aria-expanded"),
+        "shell.js must wire aria-expanded on the nav drawer toggle (Story I-2 AC#3)"
+    );
+    assert!(
+        shell.contains("has-shell"),
+        "shell.js must tag <body> with the has-shell layout class (Story I-2 AC#1)"
+    );
     // The pages include the shell and no longer hard-code a <nav> (Story F-1
     // AC#3/#7; Story G-0 adds config.html). Check the pages copied into the
     // test static dir.

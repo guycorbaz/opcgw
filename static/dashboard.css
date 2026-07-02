@@ -22,7 +22,12 @@
   --cs-sider-bg:       #001529;
   --cs-sider-fg:       #e6f0fa;
   --cs-sider-fg-muted: #a6adb4;
-  --cs-nav-active:     #40a9ff;
+  /* Story I-2: sider/app-bar chrome. --cs-nav-active-bg is deliberately the
+   * darker primary-700 shade in BOTH modes — white text on --cs-primary
+   * (#1890ff) is only 3.27:1 (AA fail); on #096dd9 it is ≥5:1. */
+  --cs-sider-width:    232px;
+  --cs-sider-hover-bg: rgba(255, 255, 255, 0.06);
+  --cs-nav-active-bg:  #096dd9;
   --cs-content-bg:     #f0f2f5;
   --cs-card-bg:        #ffffff;
   --cs-card-alt:       #f5f5f5;
@@ -57,7 +62,8 @@
     --cs-sider-bg:       #000c17;
     --cs-sider-fg:       #e6f0fa;
     --cs-sider-fg-muted: #8c8c8c;
-    --cs-nav-active:     #40a9ff;
+    /* --cs-sider-width / --cs-sider-hover-bg / --cs-nav-active-bg inherit
+     * from :root — the navy chrome is dark in both modes by design. */
     --cs-content-bg:     #141414;
     --cs-card-bg:        #1f1f1f;
     --cs-card-alt:       #2a2a2a;
@@ -89,46 +95,9 @@ html, body {
   background: var(--cs-content-bg);
 }
 
-header {
-  padding: 1.25rem 1rem;
-  background: var(--cs-sider-bg);
-  color: var(--cs-sider-fg);
-}
-
-header h1 {
-  margin: 0;
-  font-size: 1.5rem;
-  letter-spacing: 0.02em;
-}
-
-header .subtitle {
-  margin: 0.2rem 0 0;
-  font-size: 0.9rem;
-  opacity: 0.8;
-}
-
-header nav {
-  margin: 0.6rem 0 0;
-  font-size: 0.9rem;
-}
-
-header nav a {
-  color: var(--cs-sider-fg);
-  text-decoration: underline;
-}
-
-header nav a:hover {
-  color: var(--cs-primary-fg);
-}
-
-header nav a:visited {
-  color: var(--cs-sider-fg);
-}
-
-header nav strong {
-  color: var(--cs-nav-active);
-  font-weight: 600;
-}
+/* Story I-2: the generic dark `header {}` element rules (pre-F-1 page bars)
+ * were retired — every shell page titles itself with .page-header (light
+ * strip, below) and the injected .app-shell owns all of its own styling. */
 
 main {
   display: grid;
@@ -236,25 +205,33 @@ footer button:hover {
 
 /* ============================================================
  * Story F-1 — Unified web shell (shared nav/header) + component
- * primitives. The header bar is injected by static/shell.js on every
- * operator page; the per-page hand-written <nav> was removed. The
- * component classes below (.btn, .status-badge, .banner) are shared
- * primitives pages can adopt for a consistent look.
+ * primitives; Story I-2 (#147) — restyled to ChirpStack-adjacent
+ * chrome. The shell is injected by static/shell.js on every operator
+ * page. Narrow viewports (default, mobile-first): a navy top app-bar
+ * with a hamburger-toggled drawer. Wide viewports (≥ 992px): a fixed
+ * navy left sider; page content is offset via body.has-shell (the
+ * class shell.js adds), so the shell-less first-run wizard keeps its
+ * normal layout. The component classes further below (.btn,
+ * .status-badge, .banner) are shared primitives pages can adopt.
  * ============================================================ */
 
 .app-shell {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.4rem 1.1rem;
-  padding: 0.85rem 1rem;
+  align-items: center;
+  gap: 0 0.75rem;
+  min-height: 56px;
+  padding: 0 1rem;
   background: var(--cs-sider-bg);
   color: var(--cs-sider-fg);
+  /* Above page content; well below the F-0 apply bar (z-index 2000). */
+  z-index: 100;
 }
 
 .app-shell__brand {
-  font-size: 1.25rem;
-  font-weight: 700;
+  margin-right: auto; /* pushes the toggle to the right edge of the app-bar */
+  font-size: 1.2rem;
+  font-weight: 600;
   letter-spacing: 0.02em;
   color: var(--cs-sider-fg);
   text-decoration: none;
@@ -264,48 +241,131 @@ footer button:hover {
   color: var(--cs-sider-fg);
 }
 
+.app-shell__toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  border: 1px solid var(--cs-sider-fg-muted);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--cs-sider-fg);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.app-shell__toggle:hover {
+  background: var(--cs-sider-hover-bg);
+}
+
+.app-shell__toggle:focus-visible {
+  outline: 2px solid var(--cs-primary);
+  outline-offset: 2px;
+}
+
+/* Collapsed drawer (narrow viewports); .app-shell--open reveals it. */
 .app-shell__nav {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.3rem 0.9rem;
+  display: none;
+  flex-basis: 100%;
+  flex-direction: column;
+  margin: 0;
+  padding: 0.25rem 0 0.5rem;
   font-size: 0.9rem;
+}
+
+.app-shell--open .app-shell__nav {
+  display: flex;
 }
 
 .app-shell__nav a,
 .app-shell__nav a:visited {
-  color: var(--cs-sider-fg);
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 1.25rem;
+  color: var(--cs-sider-fg-muted);
   text-decoration: none;
-  padding: 0.1rem 0;
-  border-bottom: 2px solid transparent;
+  border-left: 3px solid transparent;
 }
 
 .app-shell__nav a:hover {
   color: var(--cs-primary-fg);
-  border-bottom-color: var(--cs-sider-fg-muted);
+  background: var(--cs-sider-hover-bg);
+}
+
+.app-shell__nav a:focus-visible {
+  outline: 2px solid var(--cs-primary);
+  outline-offset: -2px;
 }
 
 .app-shell__nav a.is-active {
-  color: var(--cs-nav-active);
+  color: var(--cs-primary-fg);
   font-weight: 600;
-  border-bottom-color: var(--cs-nav-active);
+  background: var(--cs-nav-active-bg);
+  border-left-color: var(--cs-primary-fg);
 }
 
-/* Per-page title block. Story F-1 review (P1): the unified dark bar is the
- * injected .app-shell; a page's own <header> is now an in-content title strip,
- * NOT a second dark bar. Without these rules the generic `header {}` element
- * rule above would paint .page-header dark too, stacking two dark bars. */
+/* Wide viewports: the app-bar becomes the ChirpStack-style fixed left
+ * sider — nav always visible, toggle hidden, content offset. */
+@media (min-width: 992px) {
+  .app-shell {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: var(--cs-sider-width);
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    padding: 0;
+    overflow-y: auto;
+  }
+
+  .app-shell__brand {
+    display: flex;
+    align-items: center;
+    min-height: 56px;
+    margin-right: 0;
+    padding: 0 1.25rem;
+    font-size: 1.25rem;
+  }
+
+  .app-shell__toggle {
+    display: none;
+  }
+
+  .app-shell__nav {
+    display: flex;
+    padding: 0;
+  }
+
+  body.has-shell {
+    padding-left: var(--cs-sider-width);
+  }
+}
+
+/* Per-page title block (Story F-1); Story I-2 restyles it as the mockup's
+ * light top strip — card surface with a bottom hairline — sitting at the top
+ * of the content area next to the sider. */
 .page-header {
-  background: transparent;
+  background: var(--cs-card-bg);
   color: inherit;
-  padding: 1rem 1rem 0.25rem;
+  padding: 0.9rem 1.5rem;
+  border-bottom: 1px solid var(--cs-border);
 }
 
 .page-header h1 {
   margin: 0;
-  font-size: 1.4rem;
+  font-size: 1.25rem;
+  font-weight: 600;
 }
 
 .page-header .subtitle {
+  margin: 0.2rem 0 0;
+  font-size: 0.9rem;
   color: var(--cs-text-muted);
   opacity: 1;
 }
