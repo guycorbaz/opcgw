@@ -1,6 +1,6 @@
 # Story I.2: Navigation & Shell Refresh
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -100,8 +100,19 @@ Visual target: `_bmad-output/implementation-artifacts/I-0-mockup.html` (owner-ap
 - [Source: static/apply-bar.js — fixed bottom bar, z-index 2000, self-contained styles (do not restyle)]
 - [Source: CR #147 — direction (a): vanilla, no build step, pure presentation]
 
+## Senior Developer Review (AI)
+
+**Outcome:** Approve. Loop terminated under CLAUDE.md condition 2 — only accepted LOW findings remain. Single independent adversarial review layer (fresh context / different model than the Fable 5 implementer), right-sized for a small CSS + shell.js cosmetic diff. No patches were applied (clean), so no re-review round was required.
+
+**Verified correct:** retired token `--cs-nav-active` has zero remaining `var()` consumers; **all introduced text/bg pairs pass WCAG AA in both light and dark** (default link 8.1:1 / 5.9:1; active white-on-`#096dd9` 5.0:1 both modes — the `#096dd9`-not-`#1890ff` choice is what makes it pass; brand/toggle 16:1; page-header title 15:1/13:1; subtitle 5.7:1 / 4.9:1 — dark subtitle is the tightest and still clears 4.5:1); ARIA toggle wiring correct (`aria-expanded` flips in lockstep, `aria-controls="app-shell-nav"` matches `nav.id`, `aria-label` names the ☰ glyph, focus-visible outlines present); `setup.html` isolation holds (no `/shell.js` include → never gets `has-shell`; offset gated in the ≥992px query, padding uses the same `--cs-sider-width` token); test contract intact (5 labels+hrefs verbatim, pinned class names preserved, idempotence guard + DOMContentLoaded fallback untouched, `dashboard_css_contains_responsive_media_query` still satisfied by the 601px+992px `min-width` queries, no served HTML gains a literal `<nav>`); AC#5 removed generic `header {}` rules have no surviving dependents; AC#6 apply bar (z2000) renders above the sider (z100) and is untouched; no new hex literals in component rules.
+
+**Action Items:**
+- [ ] LOW L-1 (accepted / follow-up) — on ≥992px config pages with pending changes, the full-width F-0 apply bar (`apply-bar.js`, `left:0;right:0`) overlays the bottom ~55px of the 232px navy sider. Functionally fine (apply bar fully usable; AC#6 "not obscure the apply bar" holds). Restyling/offsetting the apply bar is **explicitly out of I-2 scope**; deferred — candidate offset (`#apply-bar` left by `--cs-sider-width` under `body.has-shell` at ≥992px) for I-3/I-4 or an apply-bar shell-integration follow-up.
+- [ ] LOW L-2 (accepted) — `.app-shell--open` + `aria-expanded="true"` persist across a narrow→wide→narrow resize (toggle is `display:none` when wide; nav force-shown regardless, so state stays self-consistent). Harmless; a `matchMedia` reset would be tidier if revisited.
+
 ## Change Log
 
+- 2026-07-02 — I-2 code review (single independent adversarial layer, fresh context / different model). Outcome APPROVE; zero HIGH/MED; 2 LOW accepted (apply-bar overlap out-of-scope; resize-state persistence harmless). Loop terminated CLAUDE.md condition 2. Gates re-confirmed green (cargo test 1803/0, clippy -D warnings, build). Status review → done. Refs #147.
 - 2026-07-02 — I-2 implemented: F-1 shell restyled to ChirpStack-adjacent chrome (fixed 232px navy sider ≥992px, mobile app-bar + accessible hamburger drawer, `body.has-shell` layout gate, `.page-header` light strip, 3 new tokens + `--cs-nav-active` retired, legacy generic `header` rules removed). TDD marker assertions added (`aria-expanded`, `has-shell`). Gates: full cargo test 1803/0, clippy `-D warnings` clean, build clean. Refs #147. Status → review.
 
 ## Dev Agent Record
