@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] — 2026-07-04 — Web UI refresh, first slice (Epic I)
+
+> **Status:** released (stable). Promoted from `v2.6.0-rc1` after a clean
+> multi-day soak on the panoramix NAS: ~42 h of continuous uptime with zero
+> restarts, zero ERROR/WARN-level lines on Jul 2–4, no panics, the OPC UA server
+> steadily listening on `:4855`, and poll cycles running every cycle. The only
+> ongoing WARN traffic is a pre-existing device-side config mismatch on one dev
+> unit (four fields configured `String` but the codec emits numeric/bool →
+> those fields are skipped), owner-deferred and not an opcgw defect. A
+> **partial-epic release**: it ships the first three stories of **Epic I — Web
+> UI Refresh** (I-0/I-1/I-2); I-3 (component refresh) and I-4 (cross-page rollout
+> + QA) remain and will land in a later 2.6.x / 2.7 cut.
+
+### Changed
+- **First slice of the ChirpStack-adjacent web-UI refresh** — pure presentation,
+  with **no `/api`, write-model, or behavioural change**, and still **no build
+  step / framework / `node_modules`** (hand-written vanilla CSS on the existing
+  F-1 shell). Served-HTML DOM-ID test markers and G-2 accessibility (field-help
+  `aria-describedby`) are preserved throughout; WCAG AA contrast verified in both
+  light and dark modes. Tracks CR
+  [#147](https://github.com/guycorbaz/opcgw/issues/147).
+  - **I-1 — Design-token foundation.** `static/dashboard.css` refactored onto a
+    single set of `:root` CSS custom properties (ChirpStack-v4 / Ant Design
+    palette) with fully token-driven dark mode — six per-component dark blocks
+    collapsed to one `@media (prefers-color-scheme: dark)` block; all component
+    colours now resolve through `var(--token)`.
+  - **I-2 — Navigation & shell refresh.** The shared shell (`shell.js` + CSS)
+    restyled into a fixed navy left sider on desktop (≥992px) and a top app-bar
+    with an accessible hamburger drawer (`aria-expanded` / `aria-controls`,
+    keyboard-operable) on mobile; page titles now sit in a light top strip. The
+    sider layout is gated on a `has-shell` body class so the shell-less first-run
+    wizard is unaffected. Nav link set and served-HTML markers unchanged.
+
+### Internal
+- Epic I remains **in progress** (3/5 stories done). I-3 is `ready-for-dev`; I-4
+  is backlog. No epic retrospective yet — that follows the last story.
+
 ## [2.5.2] — 2026-06-30 — Async storage facade (runtime correctness)
 
 > **Status:** released (stable). Promoted from `v2.5.2-rc1` after the real-binary
