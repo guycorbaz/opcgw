@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.1] — 2026-07-08 — Storage-latency budget fix
+
+> **Status:** released. Patch release fixing a regression found during the
+> Ignition SCADA go-live soak-check log review on panoramix (~700
+> `exceeded_budget=true` WARNs/day, mostly `batch_write_metrics`).
+
+### Fixed
+- **`batch_write_metrics` checked against the wrong latency budget**
+  ([#149](https://github.com/guycorbaz/opcgw/issues/149)). `StorageOpLog::Drop`
+  compared every storage-query `query_type`'s elapsed time against the generic
+  `storage_query_budget_ms()` (default 250 ms), even for `batch_write_metrics`,
+  which already has its own higher `batch_write_budget_ms()` (default 2000 ms,
+  [#144](https://github.com/guycorbaz/opcgw/issues/144)) correctly consulted by
+  its caller in `chirpstack.rs`. This reopened the WARN-noise complaint #144 was
+  meant to close. `batch_write_metrics` now resolves to the batch-write budget
+  in the `Drop`-based log too; regression tests pin the budget-selection logic
+  directly. Pure observability fix — no functional or data-loss impact.
+
+Docker images `gcorbaz/opcgw:2.6.1` / `:2.6` / `:latest` (multi-arch amd64+arm64) + GHCR mirror.
+
 ## [2.6.0] — 2026-07-04 — Web UI refresh, first slice (Epic I)
 
 > **Status:** released (stable). Promoted from `v2.6.0-rc1` after a clean
