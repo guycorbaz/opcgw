@@ -133,6 +133,52 @@
         );
     }
 
+    /// GH-149: `batch_write_metrics` must resolve to the batch-write budget
+    /// (default 2000 ms), not the generic storage-query budget (default
+    /// 250 ms) that every other query_type uses. Asserted directly on the
+    /// pure selector function — no sleeping required, and the two budgets
+    /// are distinct defaults (250 vs 2000) so a regressed selector that
+    /// always returns one budget cannot pass both assertions.
+    #[test]
+    fn batch_write_metrics_maps_to_batch_write_budget() {
+        assert_eq!(
+            budget_ms_for_query_type("batch_write_metrics"),
+            crate::utils::batch_write_budget_ms()
+        );
+    }
+
+    /// GH-149 companion: every other query_type still resolves to the
+    /// generic storage-query budget.
+    #[test]
+    fn other_query_types_map_to_storage_query_budget() {
+        for query_type in ["update_gateway_status", "prune_metric_history", "get_metric"] {
+            assert_eq!(
+                budget_ms_for_query_type(query_type),
+                crate::utils::storage_query_budget_ms(),
+                "query_type {query_type} should use the generic storage-query budget"
+            );
+        }
+    }
+
+    /// GH-149 end-to-end: a `batch_write_metrics` op that runs past the
+    /// generic 250ms storage-query budget but well under the 2000ms
+    /// batch-write budget must NOT warn. Before the fix this incorrectly
+    /// warned because `Drop` always checked the 250ms budget.
+    #[test]
+    #[traced_test]
+    fn batch_write_metrics_op_log_uses_batch_budget_not_storage_query_budget() {
+        let query_budget = crate::utils::DEFAULT_STORAGE_QUERY_BUDGET_MS;
+        {
+            let mut op = StorageOpLog::start("batch_write_metrics");
+            op.ok();
+            std::thread::sleep(Duration::from_millis(query_budget + 20));
+        }
+        assert!(
+            !logs_contain("exceeded_budget"),
+            "batch_write_metrics latency just over the 250ms storage-query budget must not warn"
+        );
+    }
+
     fn temp_backend_path() -> String {
         format!(
             "/tmp/opcgw_test_sqlite_{}.db",

@@ -114,13 +114,28 @@ fn log_sqlite_busy_if_applicable(
     }
 }
 
+/// GH-149: `batch_write_metrics` already has its own, higher
+/// `batch_write_budget_ms()` (default 2000 ms, GH-144) — correctly consulted
+/// by the caller in `chirpstack.rs` — but `StorageOpLog::Drop` was comparing
+/// every `query_type` against the generic `storage_query_budget_ms()`
+/// (default 250 ms) instead, so batch writes kept tripping the tight budget
+/// the GH-144 fix was meant to exempt them from.
+fn budget_ms_for_query_type(query_type: &str) -> u64 {
+    if query_type == "batch_write_metrics" {
+        crate::utils::batch_write_budget_ms()
+    } else {
+        crate::utils::storage_query_budget_ms()
+    }
+}
+
 impl Drop for StorageOpLog {
-    /// Story 6-3, AC#3: when a storage query crosses the configurable
-    /// storage-query budget (`crate::utils::storage_query_budget_ms()`,
-    /// default 250 ms, override via `OPCGW_STORAGE_QUERY_BUDGET_MS` — GH-144),
-    /// upgrade the routine `debug!` to a `warn!` carrying `exceeded_budget=true`.
-    /// Tells the operator "this query was unusually slow" without spamming on
-    /// every cycle.
+    /// Story 6-3, AC#3: when a storage query crosses its budget — the
+    /// configurable storage-query budget (`crate::utils::storage_query_budget_ms()`,
+    /// default 250 ms, override via `OPCGW_STORAGE_QUERY_BUDGET_MS` — GH-144)
+    /// for most query types, or the higher batch-write budget (GH-149) for
+    /// `batch_write_metrics` — upgrade the routine `debug!` to a `warn!`
+    /// carrying `exceeded_budget=true`. Tells the operator "this query was
+    /// unusually slow" without spamming on every cycle.
     fn drop(&mut self) {
         // Review patch P18: skip emitting during panic unwind. A `Drop`
         // on a panicking thread would emit a misleading `success=false`
@@ -131,7 +146,7 @@ impl Drop for StorageOpLog {
             return;
         }
         let latency_ms = self.start.elapsed().as_millis() as u64;
-        let budget_ms = crate::utils::storage_query_budget_ms();
+        let budget_ms = budget_ms_for_query_type(self.query_type);
         if latency_ms > budget_ms {
             warn!(
                 operation = "storage_query",
