@@ -1,0 +1,12 @@
+-- SPDX-License-Identifier: MIT OR Apache-2.0
+-- (c) [2026] Guy Corbaz
+--
+-- Migration v014 — Issue #153: per-device OPC UA SourceTimestamp mode.
+--
+-- Adds an optional per-device flag. When 0 (default) each served metric value
+-- carries the device's real report time as its OPC UA SourceTimestamp (strict
+-- semantics). When 1, opcgw stamps the value with the gateway's current time
+-- (now()) so SCADA clients that overlay a stale quality on old source
+-- timestamps (e.g. Ignition on slow-cadence LoRaWAN tags) keep the tag Good.
+-- The staleness StatusCode model is unaffected.
+ALTER TABLE devices ADD COLUMN source_timestamp_server INTEGER NOT NULL DEFAULT 0;

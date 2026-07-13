@@ -502,6 +502,7 @@ fn migration_large_inventory_completes_in_time() {
                     device_id: format!("app-{app_i:03}-dev-{dev_j:02}"),
                     device_name: format!("Device {dev_j}"),
                     stale_threshold_seconds: None,
+                    source_timestamp_server: false,
                     read_metric_list: (0..3)
                         .map(|met_k| ReadMetric {
                             metric_name: format!("metric-{met_k}"),
@@ -599,6 +600,7 @@ fn migration_duplicate_application_id_is_rejected() {
             device_id: format!("dev-{id}"),
             device_name: "Dev".to_string(),
             stale_threshold_seconds: None,
+            source_timestamp_server: false,
             read_metric_list: vec![ReadMetric {
                 metric_name: "m".to_string(),
                 chirpstack_metric_name: "m".to_string(),

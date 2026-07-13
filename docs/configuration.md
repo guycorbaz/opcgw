@@ -296,6 +296,7 @@ Define devices under an application.
 | `device_name` | string | ✓ | Display name in OPC UA |
 | `device_id` | string | ✓ | ChirpStack device ID |
 | `stale_threshold_seconds` | u64 | ✗ | Per-device override of `[opcua].stale_threshold_seconds`. Range `(0, 86400]`. Set above the device's report period so a slow-but-healthy LoRaWAN sensor reads `Good` between uplinks. `None` = use the global. Restart-required. |
+| `source_timestamp_server` | bool | ✗ | Issue #153: per-device OPC UA `SourceTimestamp` mode. `false` (default) stamps served values with the device's real report time (strict OPC UA semantics). `true` stamps the gateway's current time (`now()`) so SCADA clients (e.g. Ignition) that flag old source timestamps keep the tag `Good` — common on slow-cadence LoRaWAN devices. Does **not** change the staleness `StatusCode` (a genuinely dead device still reads `Uncertain`). Settable from the web UI checkbox. Restart-required (Apply). |
 
 ### Validation Rules
 

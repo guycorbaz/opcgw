@@ -88,6 +88,7 @@
 
     // Device / metric / command forms (config.js).
     'device.stale_threshold_seconds': { text: 'Optional per-device override of the global OPC UA stale threshold. Whole seconds in (0, 86400]. Leave empty to use the global [opcua].stale_threshold_seconds (default 120 s). Useful for slow sensors that would otherwise read Uncertain between uplinks.' },
+    'device.source_timestamp_server': { text: 'When checked, opcgw stamps this device\'s OPC UA values with the gateway\'s current time (now()) instead of the device\'s real report time. Leave unchecked (default) for strict OPC UA semantics. Check it only for SCADA clients (e.g. Ignition) that mark a tag Uncertain/Stale when the source timestamp is older than their window — common on slow-cadence LoRaWAN devices. The staleness quality still flips to Uncertain if the device genuinely stops reporting past its stale threshold.' },
     'metric.metric_name': { text: 'Display name of the variable in the OPC UA address space (what SCADA clients see).' },
     'metric.chirpstack_metric_name': { text: 'The exact field name from the ChirpStack decoded uplink (or device-profile measurement) to read. Must match ChirpStack exactly.' },
     'metric.metric_type': { text: 'OPC UA data type the value is exposed as: Float, Int, Bool, or String. The picker can infer this from the device profile or recent uplinks.' },

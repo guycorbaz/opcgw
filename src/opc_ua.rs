@@ -1046,6 +1046,14 @@ impl OpcUa {
                         .stale_threshold_seconds
                         .or(self.config.opcua.stale_threshold_seconds)
                         .unwrap_or(DEFAULT_STALE_THRESHOLD_SECS);
+                    // Issue #153: per-device source-timestamp mode. When set,
+                    // the served value carries `now()` as its SourceTimestamp
+                    // instead of the device's real report time — for SCADA
+                    // clients that flag old source timestamps as stale (e.g.
+                    // Ignition on slow-cadence LoRaWAN tags). Captured once at
+                    // address-space build time (same lifecycle as
+                    // `stale_threshold`).
+                    let source_timestamp_server = device.source_timestamp_server;
                     // Story 8-3: register the NodeId → (device_id, chirpstack_metric_name)
                     // mapping so HistoryRead requests can resolve back to the
                     // storage layer. This is the same pair the read callback
@@ -1067,6 +1075,7 @@ impl OpcUa {
                                 device_id.clone().to_string(),
                                 chirpstack_metric_name.clone().to_string(),
                                 stale_threshold,
+                                source_timestamp_server,
                             )
                         })
                 }
@@ -1317,6 +1326,7 @@ impl OpcUa {
         device_id: String,
         metric_name: String,
         stale_threshold: u64,
+        source_timestamp_server: bool,
     ) -> Result<DataValue, opcua::types::StatusCode> {
         // Story 6-1, AC#2: every OPC UA read gets a fresh correlation ID. Wrapping
         // in an info_span causes downstream logs (storage, staleness) to inherit
@@ -1468,12 +1478,26 @@ impl OpcUa {
                 // tag is a value + its source timestamp + quality, and aggregation
                 // is the SCADA's job. The *server* timestamp stays `now()` (when
                 // the gateway produced this response).
+                //
+                // Issue #153: `[opcua].source_timestamp = "server"` overrides the
+                // source timestamp to `now()` for SCADA clients (e.g. Ignition)
+                // that overlay a stale quality on old source timestamps — a
+                // slow-cadence LoRaWAN value is legitimately many minutes old and
+                // does not advance between uplinks. The staleness `StatusCode`
+                // above is computed from the real age regardless, so a genuinely
+                // dead device still reports `Uncertain`.
+                let server_now = DateTime::now();
+                let source_timestamp = if source_timestamp_server {
+                    server_now
+                } else {
+                    DateTime::from(metric_value.timestamp)
+                };
                 let data_value = DataValue {
                     value: Some(variant),
                     status: Some(status_code.bits().into()),
-                    source_timestamp: Some(DateTime::from(metric_value.timestamp)),
+                    source_timestamp: Some(source_timestamp),
                     source_picoseconds: None,
-                    server_timestamp: Some(DateTime::now()),
+                    server_timestamp: Some(server_now),
                     server_picoseconds: None,
                 };
 
@@ -2191,6 +2215,7 @@ mod tests {
             device_id.clone(),
             metric_name.clone(),
             stale_threshold_secs,
+            false,
         );
         assert!(r1.is_ok(), "fresh read should succeed");
 
@@ -2211,6 +2236,7 @@ mod tests {
             device_id.clone(),
             metric_name.clone(),
             stale_threshold_secs,
+            false,
         );
         assert!(r2.is_ok(), "stale read should still return Ok with Uncertain status");
 
@@ -2248,7 +2274,7 @@ mod tests {
             }])
             .expect("seed device-stamped metric");
 
-        let dv = OpcUa::get_value(&backend, &last_status, device_id, metric_name, 60)
+        let dv = OpcUa::get_value(&backend, &last_status, device_id, metric_name, 60, false)
             .expect("read should succeed");
 
         let src = dv
@@ -2264,6 +2290,48 @@ mod tests {
             delta_secs >= 4,
             "source_timestamp must be the ~5s-old device event time, not server now \
              (server - source = {delta_secs}s)"
+        );
+    }
+
+    /// Issue #153: with the per-device `source_timestamp_server` flag ON, the
+    /// OPC UA `source_timestamp` must be the server's `now()` (≈ the
+    /// `server_timestamp`), NOT the ~5 s-old device event time — the opt-in
+    /// behaviour that keeps SCADA clients (e.g. Ignition) from flagging
+    /// slow-cadence tags as stale. The stored value itself is unchanged.
+    #[test]
+    fn source_timestamp_is_server_now_when_flag_set() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let last_status = make_status_cache();
+        let device_id = "dev-ts-server".to_string();
+        let metric_name = "state".to_string();
+
+        let event_time = SystemTime::now() - Duration::from_secs(5);
+        backend
+            .batch_write_metrics(vec![BatchMetricWrite {
+                device_id: device_id.clone(),
+                metric_name: metric_name.clone(),
+                data_type: MetricType::Int(195),
+                timestamp: event_time,
+            }])
+            .expect("seed device-stamped metric");
+
+        // source_timestamp_server = true → source ≈ server now.
+        let dv = OpcUa::get_value(&backend, &last_status, device_id, metric_name, 60, true)
+            .expect("read should succeed");
+
+        let src = dv
+            .source_timestamp
+            .expect("source_timestamp present")
+            .as_chrono();
+        let srv = dv
+            .server_timestamp
+            .expect("server_timestamp present")
+            .as_chrono();
+        let delta_secs = (srv - src).num_seconds().abs();
+        assert!(
+            delta_secs <= 1,
+            "with source_timestamp_server=true the source timestamp must be server now(), \
+             not the ~5s-old device time (|server - source| = {delta_secs}s)"
         );
     }
 
@@ -2402,6 +2470,7 @@ mod tests {
             device_id.clone(),
             metric_name.clone(),
             stale_threshold_secs,
+            false,
         );
         assert!(
             logs_contain("operation=\"staleness_boundary\""),
@@ -2487,6 +2556,7 @@ mod tests {
             "dev-e2e".to_string(),
             "pressure".to_string(),
             60,
+            false,
         );
 
         logs_assert(|lines: &[&str]| {
@@ -2560,6 +2630,7 @@ mod tests {
             "dev-corr".to_string(),
             "humidity".to_string(),
             60,
+            false,
         );
 
         // logs_assert panics if the closure returns Err. We do the actual
@@ -2611,6 +2682,7 @@ mod tests {
             "dev-fields".to_string(),
             "pressure".to_string(),
             60,
+            false,
         );
 
         for canonical_field in [
@@ -2656,6 +2728,7 @@ mod tests {
             "dev-sec".to_string(),
             "secret_marker".to_string(),
             60,
+            false,
         );
 
         assert!(
@@ -2716,6 +2789,7 @@ mod tests {
                 DEVICE_ID.to_string(),
                 METRIC_NAME.to_string(),
                 60,
+                false,
             );
         }
 
@@ -2729,6 +2803,7 @@ mod tests {
                 DEVICE_ID.to_string(),
                 METRIC_NAME.to_string(),
                 60,
+                false,
             );
             samples.push(t0.elapsed().as_micros());
             assert!(r.is_ok(), "every iteration must succeed");
@@ -3256,6 +3331,7 @@ mod tests {
             "ir10_stale_device".to_string(),
             "ir10_stale_metric".to_string(),
             60u64,
+            false,
         )
         .expect("get_value must succeed for stale-but-not-bad typed row");
         // The Variant must carry the REAL payload (12.3), not a zero-default.
@@ -3325,6 +3401,7 @@ mod tests {
             "dev1".to_string(),
             "temp".to_string(),
             3600u64, // IR11: wall-clock-flake-immune threshold
+            false,
         );
         let dv = result.expect("get_value should succeed for typed row");
         let variant = dv.value.expect("DataValue must carry a Variant");

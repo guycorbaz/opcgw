@@ -1522,6 +1522,7 @@ mod tests {
             device_id: "dev-dup".to_string(),
             device_name: "Dup".to_string(),
             stale_threshold_seconds: None,
+            source_timestamp_server: false,
             read_metric_list: metrics,
             device_command_list: None,
         };

@@ -962,6 +962,18 @@
     mForm.appendChild(staleInput);
     var staleHelp = fieldHelp('device.stale_threshold_seconds', staleInput);
     if (staleHelp) mForm.appendChild(staleHelp);
+    // Issue #153: per-device OPC UA SourceTimestamp mode. Checked = opcgw stamps
+    // served values with the gateway's current time (now()) so SCADA clients
+    // (e.g. Ignition) that flag old source timestamps keep the tag Good.
+    var srcTsLabel = el('label', { class: 'checkbox-label' });
+    var srcTsInput = el('input', { type: 'checkbox' });
+    if (dev.source_timestamp_server) srcTsInput.checked = true;
+    srcTsLabel.appendChild(srcTsInput);
+    srcTsLabel.appendChild(document.createTextNode(
+      ' Use server time as OPC UA source timestamp (fixes stale/Uncertain quality in SCADA clients like Ignition for slow-cadence devices)'));
+    mForm.appendChild(srcTsLabel);
+    var srcTsHelp = fieldHelp('device.source_timestamp_server', srcTsInput);
+    if (srcTsHelp) mForm.appendChild(srcTsHelp);
     mForm.appendChild(el('h3', { text: 'Metric mappings' }));
     var metricContainer = el('div');
     (dev.read_metric_list || []).forEach(function (m) { buildMetricRow(m, metricContainer); });
@@ -995,6 +1007,8 @@
         read_metric_list: readMetricsFromContainer(metricContainer),
         // null clears the override (back to the global default); PUT-replace.
         stale_threshold_seconds: staleVal,
+        // Issue #153: per-device SourceTimestamp mode (checkbox).
+        source_timestamp_server: srcTsInput.checked,
       };
       try {
         var r = await fetch(devUrl, { method: 'PUT', credentials: 'include', headers: jsonHeaders(), body: JSON.stringify(payload) });

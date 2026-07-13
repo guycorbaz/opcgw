@@ -2673,14 +2673,17 @@ impl SqliteBackend {
         let now = format_rfc3339(&Utc::now());
         conn.execute(
             "INSERT INTO devices \
-             (application_id, device_id, device_name, stale_threshold_seconds, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (application_id, device_id, device_name, stale_threshold_seconds, \
+              source_timestamp_server, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 application_id,
                 device.device_id,
                 device.device_name,
                 // Story E-1 (E-1b, #132): persist the per-device stale threshold.
                 device.stale_threshold_seconds.map(|v| v as i64),
+                // Issue #153: persist the per-device SourceTimestamp mode.
+                device.source_timestamp_server as i64,
                 now,
                 now
             ],
@@ -3116,11 +3119,12 @@ impl SqliteBackend {
         // ── devices ─────────────────────────────────────────────────────────
         let mut stmt = conn
             .prepare(
-                "SELECT application_id, device_id, device_name, stale_threshold_seconds \
+                "SELECT application_id, device_id, device_name, stale_threshold_seconds, \
+                 source_timestamp_server \
                  FROM devices ORDER BY application_id, device_id",
             )
             .map_err(|e| OpcGwError::Database(format!("prepare devices: {}", e)))?;
-        let dev_rows: Vec<(String, String, String, Option<u64>)> = stmt
+        let dev_rows: Vec<(String, String, String, Option<u64>, bool)> = stmt
             .query_map([], |row| {
                 let application_id = row.get::<_, String>(0)?;
                 let device_id = row.get::<_, String>(1)?;
@@ -3142,7 +3146,16 @@ impl SqliteBackend {
                         None
                     }
                 });
-                Ok((application_id, device_id, device_name, stale_threshold))
+                // Issue #153: per-device SourceTimestamp mode (0 = device time,
+                // 1 = server now). Column is NOT NULL DEFAULT 0 (v014).
+                let source_timestamp_server = row.get::<_, i64>(4)? != 0;
+                Ok((
+                    application_id,
+                    device_id,
+                    device_name,
+                    stale_threshold,
+                    source_timestamp_server,
+                ))
             })
             .map_err(|e| OpcGwError::Database(format!("query devices: {}", e)))?
             .collect::<Result<_, _>>()
@@ -3205,7 +3218,7 @@ impl SqliteBackend {
         for (app_id, app_name) in app_rows {
             let mut devices: Vec<ChirpstackDevice> = Vec::new();
 
-            for (dev_app_id, dev_id, dev_name, dev_stale) in &dev_rows {
+            for (dev_app_id, dev_id, dev_name, dev_stale, dev_source_ts_server) in &dev_rows {
                 if dev_app_id != &app_id {
                     continue;
                 }
@@ -3241,6 +3254,7 @@ impl SqliteBackend {
                     device_id: dev_id.clone(),
                     device_name: dev_name.clone(),
                     stale_threshold_seconds: *dev_stale,
+                    source_timestamp_server: *dev_source_ts_server,
                     read_metric_list: metrics,
                     device_command_list: if commands.is_empty() {
                         None
@@ -3652,6 +3666,9 @@ impl SqliteBackend {
         // None → NULL column → device uses the global [opcua] default.
         // Persisted in the v012 `devices.stale_threshold_seconds` column.
         stale_threshold_seconds: Option<u64>,
+        // Issue #153: per-device SourceTimestamp mode. Persisted in the v014
+        // `devices.source_timestamp_server` column (0 = device time, 1 = now()).
+        source_timestamp_server: bool,
     ) -> Result<(), OpcGwError> {
         let conn = self.pool.checkout(Duration::from_secs(5)).map_err(|e| {
             error!(error = %e, "Pool checkout timeout for insert_device_with_metrics");
@@ -3664,13 +3681,15 @@ impl SqliteBackend {
             let now = format_rfc3339(&Utc::now());
             conn.execute(
                 "INSERT INTO devices \
-                 (application_id, device_id, device_name, stale_threshold_seconds, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (application_id, device_id, device_name, stale_threshold_seconds, \
+                  source_timestamp_server, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     application_id,
                     device_id,
                     device_name,
                     stale_threshold_seconds.map(|v| v as i64),
+                    source_timestamp_server as i64,
                     now,
                     now
                 ],
@@ -3734,6 +3753,8 @@ impl SqliteBackend {
         // Story G-3 (#132): per-device stale threshold (seconds); None → NULL
         // (use the global [opcua] default). Written in the same EXCLUSIVE txn.
         stale_threshold_seconds: Option<u64>,
+        // Issue #153: per-device SourceTimestamp mode (v014 column).
+        source_timestamp_server: bool,
     ) -> Result<(), OpcGwError> {
         let conn = self.pool.checkout(Duration::from_secs(5)).map_err(|e| {
             error!(error = %e, "Pool checkout timeout for update_device_name_and_metrics");
@@ -3745,11 +3766,13 @@ impl SqliteBackend {
         let result: Result<(), OpcGwError> = (|| {
             let now = format_rfc3339(&Utc::now());
             conn.execute(
-                "UPDATE devices SET device_name = ?1, stale_threshold_seconds = ?2, updated_at = ?3 \
-                 WHERE application_id = ?4 AND device_id = ?5",
+                "UPDATE devices SET device_name = ?1, stale_threshold_seconds = ?2, \
+                 source_timestamp_server = ?3, updated_at = ?4 \
+                 WHERE application_id = ?5 AND device_id = ?6",
                 params![
                     new_name,
                     stale_threshold_seconds.map(|v| v as i64),
+                    source_timestamp_server as i64,
                     now,
                     application_id,
                     device_id
@@ -3856,14 +3879,17 @@ impl SqliteBackend {
                 for device in &app.device_list {
                     conn.execute(
                         "INSERT INTO devices \
-                         (application_id, device_id, device_name, stale_threshold_seconds, created_at, updated_at) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                         (application_id, device_id, device_name, stale_threshold_seconds, \
+                          source_timestamp_server, created_at, updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                         params![
                             app.application_id,
                             device.device_id,
                             device.device_name,
                             // Story E-1 (E-1b, #132): persist a TOML-seeded per-device threshold.
                             device.stale_threshold_seconds.map(|v| v as i64),
+                            // Issue #153: persist the TOML-seeded SourceTimestamp mode.
+                            device.source_timestamp_server as i64,
                             now,
                             now
                         ],
@@ -4090,13 +4116,16 @@ impl SqliteBackend {
                 for device in &app.device_list {
                     conn.execute(
                         "INSERT INTO devices \
-                         (application_id, device_id, device_name, stale_threshold_seconds, created_at, updated_at) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                         (application_id, device_id, device_name, stale_threshold_seconds, \
+                          source_timestamp_server, created_at, updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                         params![
                             app.application_id,
                             device.device_id,
                             device.device_name,
                             device.stale_threshold_seconds.map(|v| v as i64),
+                            // Issue #153: persist the imported SourceTimestamp mode.
+                            device.source_timestamp_server as i64,
                             now,
                             now
                         ],

@@ -34,6 +34,8 @@ const MIGRATION_V010: &str = include_str!("../../migrations/v010_singleton_confi
 const MIGRATION_V011: &str = include_str!("../../migrations/v011_command_class.sql");
 const MIGRATION_V012: &str = include_str!("../../migrations/v012_device_stale_threshold.sql");
 const MIGRATION_V013: &str = include_str!("../../migrations/v013_error_events.sql");
+const MIGRATION_V014: &str =
+    include_str!("../../migrations/v014_device_source_timestamp.sql");
 
 /// Run all pending migrations based on current schema version.
 ///
@@ -70,7 +72,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
 
     // Latest available schema version
     #[allow(dead_code)]
-    const LATEST_VERSION: u32 = 13;
+    const LATEST_VERSION: u32 = 14;
 
     // Apply migrations in order
     if current_version < 1 {
@@ -379,6 +381,28 @@ pub fn run_migrations(conn: &Connection) -> Result<(), OpcGwError> {
         info!(version = 13, "Applied migration v013_error_events");
     }
 
+    if current_version < 14 {
+        debug!("Applying migration v014_device_source_timestamp");
+
+        conn.execute_batch(MIGRATION_V014)
+            .map_err(|e| {
+                OpcGwError::Database(format!(
+                    "Failed to execute migration v014_device_source_timestamp: {}",
+                    e
+                ))
+            })?;
+
+        conn.pragma_update(None, "user_version", 14u32.to_string())
+            .map_err(|e| {
+                OpcGwError::Database(format!(
+                    "Failed to set schema version to 14: {}",
+                    e
+                ))
+            })?;
+
+        info!(version = 14, "Applied migration v014_device_source_timestamp");
+    }
+
     // Verify final version
     let final_version: u32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -486,7 +510,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read version");
-        assert_eq!(version, 13, "Schema version should be 13 (latest — G-4 error_events table)");
+        assert_eq!(version, 14, "Schema version should be 14 (latest — issue #153 source_timestamp_server)");
 
         // Verify tables were created (excluding sqlite_sequence which is created automatically for AUTOINCREMENT)
         let table_count: i32 = conn
@@ -515,7 +539,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read version");
-        assert_eq!(version, 13, "Version should still be 13 (latest)");
+        assert_eq!(version, 14, "Version should still be 14 (latest)");
 
         // Cleanup
         let _ = fs::remove_file(&path);
@@ -753,7 +777,7 @@ mod tests {
         let post_version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("Failed to read post-migration version");
-        assert_eq!(post_version, 13, "Post-upgrade version must be 13 (v006 → v007 → v008 → v009 → v010 → v011 → v012 → v013 in one pass)");
+        assert_eq!(post_version, 14, "Post-upgrade version must be 14 (v006 → … → v013 → v014 in one pass)");
 
         // Row counts preserved
         let mv_count: i32 = conn
@@ -1530,7 +1554,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13, "run_migrations must have advanced user_version to 13 (v008 + v009 + v010 + v011 + v012 + v013)");
+        assert_eq!(version, 14, "run_migrations must have advanced user_version to 14 (v008 + v009 + v010 + v011 + v012 + v013 + v014)");
 
         // Sanity: row counts preserved through the recreate
         let mv_count: i32 = conn
@@ -1664,8 +1688,8 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(
-            version, 13,
-            "run_migrations must advance v006 -> v013 in a single call (real \
+            version, 14,
+            "run_migrations must advance v006 -> v014 in a single call (real \
              operator upgrade path)"
         );
 
@@ -1804,7 +1828,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("read version");
-        assert_eq!(version, 13, "fresh DB must land at v013 (G-4 error_events table)");
+        assert_eq!(version, 14, "fresh DB must land at v014 (issue #153 source_timestamp_server)");
 
         for table in &["applications", "devices", "metrics", "commands"] {
             let exists: bool = conn
@@ -1834,7 +1858,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("read version");
-        assert_eq!(version, 13, "version must stay at 13 (latest) after second run");
+        assert_eq!(version, 14, "version must stay at 14 (latest) after second run");
 
         let _ = fs::remove_file(&path);
     }
@@ -1938,7 +1962,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("read version");
-        assert_eq!(version, 13, "version must stay at 13 (latest) after second run");
+        assert_eq!(version, 14, "version must stay at 14 (latest) after second run");
 
         let _ = fs::remove_file(&path);
     }

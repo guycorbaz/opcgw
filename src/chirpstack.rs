@@ -4760,6 +4760,7 @@ mod tests {
                 device_id: "dev-1".to_string(),
                 device_name: "Dev".to_string(),
                 stale_threshold_seconds: None,
+                source_timestamp_server: false,
                 read_metric_list: vec![],
                 device_command_list: Some(vec![crate::config::DeviceCommandCfg {
                     command_id: 1,

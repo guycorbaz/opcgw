@@ -254,6 +254,19 @@ application_name = "Example"
     [[application.device]]
     device_name = "WaterFlowSensor"
     device_id = "a84041b8a1867e20"
+    # Optional per-device staleness override (seconds). Absent = use the global
+    # [opcua].stale_threshold_seconds. Set it above the device's report period so
+    # a slow LoRaWAN sensor reads Good instead of Uncertain between uplinks.
+    #stale_threshold_seconds = 2700
+    # Issue #153: per-device OPC UA SourceTimestamp mode. false (default) stamps
+    # each served value with the device's real report time (strict OPC UA
+    # semantics). true stamps the gateway's current time (now()) so SCADA clients
+    # (e.g. Ignition) that mark a tag Uncertain/Stale when the source timestamp is
+    # older than their window keep it Good — common on slow-cadence LoRaWAN
+    # devices. The staleness status code is unaffected: a device that genuinely
+    # stops reporting past its stale threshold still flips to Uncertain. Also
+    # settable per device from the web UI (Config → device → checkbox).
+    #source_timestamp_server = false
 
         [[application.device.read_metric]]
         metric_name = "WaterFlow"

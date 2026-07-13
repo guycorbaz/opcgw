@@ -467,6 +467,11 @@ pub struct DeviceView {
     /// top-level `stale_threshold_secs` global. The client freshness band uses
     /// this when set, falling back to the global default otherwise.
     pub stale_threshold_seconds: Option<u64>,
+    /// Issue #153: per-device SourceTimestamp mode. `true` = opcgw stamps served
+    /// values with the gateway's current time (`now()`); `false` (default) = the
+    /// device's real report time. Fixes stale-quality overlays in SCADA clients
+    /// (e.g. Ignition) on slow-cadence tags.
+    pub source_timestamp_server: bool,
     pub metrics: Vec<MetricView>,
 }
 
@@ -726,6 +731,7 @@ pub async fn api_devices(
                         device_id: dev.device_id.clone(),
                         device_name: dev.device_name.clone(),
                         stale_threshold_seconds: dev.stale_threshold_seconds,
+                        source_timestamp_server: dev.source_timestamp_server,
                         metrics,
                     }
                 })
@@ -1973,6 +1979,11 @@ pub struct CreateDeviceRequest {
     /// Absent/null → use the global default. Validated to the band `(0, 86400]`.
     #[serde(default)]
     pub stale_threshold_seconds: Option<u64>,
+    /// Issue #153: per-device SourceTimestamp mode. `true` = stamp served values
+    /// with the gateway's current time (`now()`) so SCADA clients keep the tag
+    /// `Good`; `false`/absent (default) = the device's real report time.
+    #[serde(default)]
+    pub source_timestamp_server: bool,
 }
 
 /// `PUT /api/applications/:application_id/devices/:device_id` request body.
@@ -2129,6 +2140,9 @@ pub struct DeviceResponse {
     /// Story G-3 (#132): per-device stale threshold (seconds); `null` = the
     /// device uses the global `[opcua].stale_threshold_seconds` default.
     pub stale_threshold_seconds: Option<u64>,
+    /// Issue #153: per-device SourceTimestamp mode (`true` = server `now()`,
+    /// `false` = device report time).
+    pub source_timestamp_server: bool,
 }
 
 /// One row in [`DeviceResponse::read_metric_list`]. `metric_type` is
@@ -2278,6 +2292,7 @@ pub async fn get_device(
         device_name: dev.device_name.clone(),
         read_metric_list,
         stale_threshold_seconds: dev.stale_threshold_seconds,
+        source_timestamp_server: dev.source_timestamp_server,
     }))
 }
 
@@ -2432,6 +2447,7 @@ pub async fn create_device(
             &body.device_name,
             &read_metrics,
             body.stale_threshold_seconds,
+            body.source_timestamp_server,
         )
         .map_err(|e| sqlite_crud_error(e, "device", "create_device", &addr))?;
 
@@ -2505,6 +2521,7 @@ pub async fn create_device(
             device_name: body.device_name,
             read_metric_list,
             stale_threshold_seconds: body.stale_threshold_seconds,
+            source_timestamp_server: body.source_timestamp_server,
         }),
     ))
 }
@@ -2558,6 +2575,9 @@ pub async fn update_device(
     // Story G-3 (#132): PUT-replace semantics — absent or null clears the
     // per-device override (device falls back to the global default).
     let mut new_threshold: Option<u64> = None;
+    // Issue #153: PUT-replace semantics — absent/false = device report time,
+    // true = server now(). The web form always sends this field explicitly.
+    let mut new_source_ts_server = false;
     for (k, v) in obj {
         match k.as_str() {
             "device_name" => {
@@ -2631,6 +2651,28 @@ pub async fn update_device(
                     new_threshold = Some(n);
                 }
             }
+            "source_timestamp_server" => {
+                // Issue #153: boolean per-device SourceTimestamp mode.
+                new_source_ts_server = v.as_bool().ok_or_else(|| {
+                    warn!(
+                        event = "device_crud_rejected",
+                        reason = "validation",
+                        field = "source_timestamp_server",
+                        application_id = %application_id,
+                        device_id = %device_id,
+                        source_ip = %addr.ip(),
+                        "PUT body field 'source_timestamp_server' must be a boolean"
+                    );
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse::with_hint(
+                            "source_timestamp_server must be a boolean",
+                            "true = stamp served values with server now(); false/omit = device report time",
+                        )),
+                    )
+                        .into_response()
+                })?;
+            }
             "device_id" => {
                 warn!(
                     event = "device_crud_rejected",
@@ -2674,7 +2716,7 @@ pub async fn update_device(
                         // newlines into the response body (parallel
                         // to the iter-1 B-H5 fix in audit-log emission).
                         format!("PUT body contains unknown field {other:?}"),
-                        "PUT accepts `device_name`, `read_metric_list`, and optional `stale_threshold_seconds` (PUT-replace: omit or send null to clear the per-device override back to the global default)",
+                        "PUT accepts `device_name`, `read_metric_list`, and optional `stale_threshold_seconds` / `source_timestamp_server` (PUT-replace: omit or send null to clear the per-device override back to the global default)",
                     )),
                 )
                     .into_response());
@@ -2843,6 +2885,7 @@ pub async fn update_device(
             &device_name,
             &new_metrics,
             new_threshold,
+            new_source_ts_server,
         )
         .map_err(|e| sqlite_crud_error(e, "device", "update_device", &addr))?;
 
@@ -2908,6 +2951,7 @@ pub async fn update_device(
         device_name,
         read_metric_list: read_metric_list_resp,
         stale_threshold_seconds: new_threshold,
+        source_timestamp_server: new_source_ts_server,
     }))
 }
 
@@ -5057,6 +5101,7 @@ mod tests {
                         device_id: format!("dev-{i}-{j}"),
                         device_name: format!("Dev {i}-{j}"),
                         stale_threshold_seconds: None,
+                        source_timestamp_server: false,
                         metrics: vec![],
                     })
                     .collect();
@@ -5463,6 +5508,7 @@ mod tests {
             device_id: id.to_string(),
             device_name: name.to_string(),
             stale_threshold_seconds: None,
+            source_timestamp_server: false,
             metrics: metrics
                 .iter()
                 .map(|(n, t)| crate::web::MetricSpec {

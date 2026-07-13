@@ -138,6 +138,7 @@ fn baseline_app_config(port: u16, pki_dir: &std::path::Path) -> AppConfig {
                 device_id: APPLY_DEVICE_BASELINE.to_string(),
                 device_name: APPLY_DEVICE_BASELINE.to_string(),
                 stale_threshold_seconds: None,
+                source_timestamp_server: false,
                 read_metric_list: vec![ReadMetric {
                     metric_name: APPLY_METRIC_BASELINE.to_string(),
                     chirpstack_metric_name: APPLY_CHIRP_BASELINE.to_string(),
@@ -161,6 +162,7 @@ fn config_add_second_device(prev: &AppConfig) -> AppConfig {
         device_id: APPLY_DEVICE_NEW.to_string(),
         device_name: APPLY_DEVICE_NEW.to_string(),
         stale_threshold_seconds: None,
+        source_timestamp_server: false,
         read_metric_list: vec![ReadMetric {
             metric_name: APPLY_METRIC_NEW.to_string(),
             chirpstack_metric_name: APPLY_CHIRP_NEW.to_string(),

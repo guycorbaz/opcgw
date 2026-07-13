@@ -189,6 +189,7 @@ fn test_config(port: u16, pki_dir: &std::path::Path) -> AppConfig {
             device_list: vec![ChirpstackDevice {
                 device_name: "TestDevice".to_string(),
                 stale_threshold_seconds: None,
+                source_timestamp_server: false,
                 device_id: "0000000000000001".to_string(),
                 read_metric_list: vec![ReadMetric {
                     metric_name: "Temperature".to_string(),
