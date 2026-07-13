@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Per-device OPC UA `SourceTimestamp` mode**
+  ([#153](https://github.com/guycorbaz/opcgw/issues/153)). New per-device
+  `source_timestamp_server` flag (web-UI checkbox in Config → device,
+  `source_timestamp_server` in `config.toml`, and the `source_timestamp_server`
+  field on the device CRUD API). When `true`, opcgw stamps that device's served
+  values with the gateway's current time (`now()`) instead of the device's real
+  report time. This fixes SCADA clients (notably **Ignition**) that overlay a
+  *Stale / Uncertain* quality on any value whose OPC UA `SourceTimestamp` is
+  older than a client-side window — slow-cadence LoRaWAN devices (e.g. a 20-min
+  uplink interval) otherwise read Uncertain between uplinks even though opcgw
+  returns `Good`, and raising `stale_threshold_seconds` does not help because
+  that knob only governs opcgw's own `StatusCode`, not the client's timestamp
+  interpretation. Diagnosed live on the panoramix deployment against Ignition
+  8.3 by reading the OPC UA server directly (all nodes served `Good` on both
+  reads and subscriptions — the Uncertain was entirely client-side). Default is
+  `false` (strict OPC UA semantics; unchanged behaviour for every existing
+  device). The staleness `StatusCode` model is unaffected: a device that
+  genuinely stops reporting past its stale threshold still flips to `Uncertain`.
+  Schema migration **v014** adds the `devices.source_timestamp_server` column.
+
 ## [2.6.1] — 2026-07-08 — Storage-latency budget fix
 
 > **Status:** released. Patch release fixing a regression found during the

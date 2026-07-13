@@ -656,6 +656,7 @@ async fn api_devices_returns_json_with_expected_shape_when_authed() {
                     device_name: "Device One".to_string(),
                     // Story G-3 (#132): per-device override surfaced on /api/devices.
                     stale_threshold_seconds: Some(600),
+                    source_timestamp_server: false,
                     metrics: vec![opcgw::web::MetricSpec {
                         metric_name: "temperature".to_string(),
                         chirpstack_metric_name: "temperature".to_string(),
@@ -668,6 +669,7 @@ async fn api_devices_returns_json_with_expected_shape_when_authed() {
                     device_name: "Device Two".to_string(),
                     // No per-device override → null on the wire (uses global).
                     stale_threshold_seconds: None,
+                    source_timestamp_server: false,
                     metrics: vec![],
                 },
             ],
@@ -786,6 +788,7 @@ async fn api_devices_emits_typed_value_and_unit_per_variant() {
                 device_id: "dev-a6".to_string(),
                 device_name: "A-6 Device".to_string(),
                 stale_threshold_seconds: None,
+                source_timestamp_server: false,
                 metrics: vec![
                     opcgw::web::MetricSpec {
                         metric_name: "temperature".to_string(),

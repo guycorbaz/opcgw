@@ -329,6 +329,19 @@ appear as "Missing" rather than being silently omitted — operators
 spot mis-configured devices at a glance. Same 10 s refresh + responsive
 layout + dark mode as the dashboard. JSON contract at `GET /api/devices`.
 
+**Per-device OPC UA `SourceTimestamp` mode ([#153](https://github.com/guycorbaz/opcgw/issues/153)).**
+By default opcgw stamps each served value's OPC UA `SourceTimestamp` with the
+device's own report time (strict OPC UA semantics). Some SCADA clients (notably
+**Ignition**) overlay a *Stale / Uncertain* quality on any value whose source
+timestamp is older than a client-side window — so slow-cadence LoRaWAN devices
+(e.g. a 20-minute uplink interval) read Uncertain between uplinks even though
+opcgw returns `Good`. The per-device **"Use server time as source timestamp"**
+checkbox (Config → device, or `source_timestamp_server = true` in `config.toml`,
+or the `source_timestamp_server` field on the device CRUD API) makes opcgw stamp
+`now()` instead, keeping the tag Good in those clients. The staleness *status
+code* is unaffected — a device that genuinely stops reporting past its stale
+threshold still flips to Uncertain.
+
 **Story F-4 adds config export / import.** From the singleton-configuration
 page, **Export config** downloads the whole configuration — the `[global]` /
 `[chirpstack]` / `[opcua]` / `[web]` sections plus the application/device/metric/

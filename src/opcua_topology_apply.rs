@@ -624,12 +624,25 @@ pub fn apply_diff_to_address_space(
     // Now register callbacks + update node_to_metric. These take the
     // inner SimpleNodeManagerImpl's callback-registry lock, not the
     // address-space lock — disjoint from Phase 3's hold.
+    // Issue #153: per-device SourceTimestamp mode, resolved from the new config
+    // once for the whole batch (the incremental path has no per-metric device
+    // handle otherwise).
+    let source_ts_by_device: HashMap<&str, bool> = new
+        .application_list
+        .iter()
+        .flat_map(|app| app.device_list.iter())
+        .map(|d| (d.device_id.as_str(), d.source_timestamp_server))
+        .collect();
     for a in &diff.added_metrics {
         let metric_node = metric_node_id(ns, &a.device_id, &a.metric_name);
         let storage_clone = storage.clone();
         let last_status_clone = last_status.clone();
         let device_id = a.device_id.clone();
         let chirpstack_metric_name = a.chirpstack_metric_name.clone();
+        let source_timestamp_server = source_ts_by_device
+            .get(a.device_id.as_str())
+            .copied()
+            .unwrap_or(false);
         manager
             .inner()
             .simple()
@@ -640,6 +653,7 @@ pub fn apply_diff_to_address_space(
                     device_id.clone(),
                     chirpstack_metric_name.clone(),
                     stale_threshold,
+                    source_timestamp_server,
                 )
             });
         node_to_metric.write().insert(
@@ -1221,6 +1235,7 @@ mod tests {
                     device_id: "dev-1".to_string(),
                     device_name: "Dev 1".to_string(),
                     stale_threshold_seconds: None,
+                    source_timestamp_server: false,
                     read_metric_list: vec![ReadMetric {
                         metric_name: "temp".to_string(),
                         chirpstack_metric_name: "t".to_string(),
@@ -1243,6 +1258,7 @@ mod tests {
             device_id: id.to_string(),
             device_name: name.to_string(),
             stale_threshold_seconds: None,
+            source_timestamp_server: false,
             read_metric_list: metrics,
             device_command_list: commands,
         }

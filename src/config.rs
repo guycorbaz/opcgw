@@ -671,6 +671,19 @@ pub struct ChirpstackDevice {
     /// `Good` instead of `Uncertain` between uplinks. Restart-required.
     #[serde(default)]
     pub stale_threshold_seconds: Option<u64>,
+
+    /// Issue #153: per-device OPC UA `SourceTimestamp` mode.
+    ///
+    /// When `false` (default) each served value carries the device's real
+    /// report time as its `SourceTimestamp` — strict OPC UA semantics. When
+    /// `true`, opcgw stamps the value with the gateway's current time (`now()`,
+    /// the same instant as `ServerTimestamp`) so SCADA clients that overlay a
+    /// stale quality on old source timestamps (e.g. Ignition on slow-cadence
+    /// LoRaWAN tags) keep the tag `Good`. The staleness `StatusCode` model is
+    /// unaffected — a genuinely stale metric still reports `Uncertain` once its
+    /// age exceeds the threshold. Restart-required.
+    #[serde(default)]
+    pub source_timestamp_server: bool,
 }
 
 /// Data types supported for OPC UA metric values.

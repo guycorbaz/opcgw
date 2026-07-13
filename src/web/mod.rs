@@ -111,6 +111,10 @@ pub struct DeviceSummary {
     /// on the snapshot so `/api/devices` can surface it per device for the
     /// client freshness band.
     pub stale_threshold_seconds: Option<u64>,
+    /// Issue #153: per-device SourceTimestamp mode (`true` = server `now()`,
+    /// `false` = device report time). Surfaced per device so the config UI can
+    /// render the checkbox state.
+    pub source_timestamp_server: bool,
     /// Configured metric specs in TOML-declaration order. Adding a new
     /// metric to the bottom of the TOML list shows up at the bottom of
     /// the row in the dashboard — no random hashmap reordering.
@@ -229,6 +233,7 @@ impl DashboardConfigSnapshot {
                             device_id: dev.device_id.clone(),
                             device_name: dev.device_name.clone(),
                             stale_threshold_seconds: dev.stale_threshold_seconds,
+                            source_timestamp_server: dev.source_timestamp_server,
                             metrics,
                         }
                     })
@@ -972,6 +977,7 @@ mod tests {
                     device_id: format!("dev-{name}-{i}"),
                     device_name: format!("Device {i}"),
                     stale_threshold_seconds: None,
+                    source_timestamp_server: false,
                     read_metric_list: vec![ReadMetric {
                         metric_name: "temperature".to_string(),
                         chirpstack_metric_name: "temp".to_string(),
@@ -1025,6 +1031,7 @@ mod tests {
                 device_id: "dev-empty".to_string(),
                 device_name: "Empty Device".to_string(),
                 stale_threshold_seconds: None,
+                source_timestamp_server: false,
                 read_metric_list: vec![],
                 device_command_list: None,
             }],
@@ -1050,6 +1057,7 @@ mod tests {
                 device_id: "dev-1".to_string(),
                 device_name: "Device 1".to_string(),
                 stale_threshold_seconds: None,
+                source_timestamp_server: false,
                 read_metric_list: vec![
                     ReadMetric {
                         metric_name: "temperature".to_string(),
@@ -1090,6 +1098,7 @@ mod tests {
                 device_id: "dev-1".to_string(),
                 device_name: "Device 1".to_string(),
                 stale_threshold_seconds: None,
+                source_timestamp_server: false,
                 read_metric_list: vec![
                     // Empty string -> None.
                     ReadMetric {

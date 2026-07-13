@@ -3949,6 +3949,7 @@
             device_id: id.to_string(),
             device_name: name.to_string(),
             stale_threshold_seconds: None,
+            source_timestamp_server: false,
             read_metric_list: vec![],
             device_command_list: None,
         }
@@ -4210,6 +4211,48 @@
         assert_eq!(
             d2l.stale_threshold_seconds, None,
             "absent override must load as None (use global)"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_issue153_source_timestamp_server_roundtrip() {
+        let path = temp_backend_path();
+        let b = SqliteBackend::new(&path).unwrap();
+        b.insert_application(&make_app("app-1", "App")).unwrap();
+        // Device WITH the server-timestamp flag on.
+        let mut d1 = make_device("dev-1", "Dev1");
+        d1.source_timestamp_server = true;
+        b.insert_device("app-1", &d1).unwrap();
+        // Device without it → default false.
+        b.insert_device("app-1", &make_device("dev-2", "Dev2"))
+            .unwrap();
+
+        let loaded = b.load_all_applications_config().unwrap();
+        let devs = &loaded[0].device_list;
+        let d1l = devs.iter().find(|d| d.device_id == "dev-1").unwrap();
+        let d2l = devs.iter().find(|d| d.device_id == "dev-2").unwrap();
+        assert!(
+            d1l.source_timestamp_server,
+            "per-device source_timestamp_server=true must round-trip through SQLite (#153)"
+        );
+        assert!(
+            !d2l.source_timestamp_server,
+            "absent flag must load as false (device report time)"
+        );
+
+        // Flip it via the CRUD update path and re-load.
+        b.update_device_name_and_metrics("app-1", "dev-1", "Dev1", &d1.read_metric_list, None, false)
+            .unwrap();
+        let reloaded = b.load_all_applications_config().unwrap();
+        let d1r = reloaded[0]
+            .device_list
+            .iter()
+            .find(|d| d.device_id == "dev-1")
+            .unwrap();
+        assert!(
+            !d1r.source_timestamp_server,
+            "CRUD update must be able to clear the flag back to device time (#153)"
         );
         let _ = fs::remove_file(&path);
     }
