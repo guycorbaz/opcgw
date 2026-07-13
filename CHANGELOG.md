@@ -5,7 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.7.0-rc1] — 2026-07-13 — Per-device OPC UA SourceTimestamp mode
+
+> **Status:** release candidate. Cut from `main` after PR
+> [#154](https://github.com/guycorbaz/opcgw/pull/154) merged. Docker image
+> `gcorbaz/opcgw:2.7.0-rc1` + GHCR mirror (multi-arch amd64+arm64); **not**
+> tagged `:latest` / `:2.7`. Pull it on panoramix to soak before promoting to
+> stable. Motivated by the Ignition 8.3 go-live: slow-cadence building devices
+> read `Uncertain` in Ignition even though opcgw served `Good` on every node
+> (verified by reading the OPC UA server directly) — Ignition overlays a stale
+> quality on the old-but-real `SourceTimestamp`.
 
 ### Added
 - **Per-device OPC UA `SourceTimestamp` mode**
