@@ -127,15 +127,15 @@ fn singleton_fresh_db_populated_toml_returns_migrated() {
     let count = backend.count_singleton_config().expect("count");
     assert!(count > 0, "singleton_config must have rows after migration");
 
-    // I1-F9 (iter-1): verify PRAGMA user_version == 11 via a raw
-    // connection to the temp DB. The docstring promised this assertion;
-    // the body now delivers it.
+    // I1-F9 (iter-1): verify PRAGMA user_version via a raw connection to the
+    // temp DB. The docstring promised this assertion; the body delivers it.
+    // Tracks the latest schema version (#153 added v014 source_timestamp_server).
     let db_path = _dir.path().join("test.db");
     let raw = rusqlite::Connection::open(&db_path).expect("raw open");
     let version: u32 = raw
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("read user_version");
-    assert_eq!(version, 13, "fresh DB after migration must be at the latest schema (v013)");
+    assert_eq!(version, 14, "fresh DB after migration must be at the latest schema (v014)");
 }
 
 /// Test 2 — Already-migrated DB → second call is no-op via primary guard.
