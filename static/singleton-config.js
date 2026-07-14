@@ -99,16 +99,17 @@
   }
 
   function renderSection(section, data) {
-    const details = document.createElement('details');
-    details.className = 'section';
-    details.open = true;
-    const summary = document.createElement('summary');
-    summary.textContent = `[${section}]`;
-    details.appendChild(summary);
+    // #157: sections are now tab panels (a plain div with a header) rather
+    // than <details>, since the tab bar already selects which one is shown.
+    const panel = document.createElement('div');
+    panel.className = 'section';
+    const header = document.createElement('h2');
+    header.textContent = `[${section}]`;
+    panel.appendChild(header);
 
     const keys = Object.keys(data).sort();
     for (const k of keys) {
-      details.appendChild(renderField(section, k, data[k]));
+      panel.appendChild(renderField(section, k, data[k]));
     }
 
     const actions = document.createElement('div');
@@ -116,7 +117,7 @@
     const saveBtn = document.createElement('button');
     saveBtn.textContent = `Save [${section}]`;
     saveBtn.dataset.section = section;
-    saveBtn.addEventListener('click', () => onSaveClick(section, details));
+    saveBtn.addEventListener('click', () => onSaveClick(section, panel));
     actions.appendChild(saveBtn);
 
     const errBox = document.createElement('div');
@@ -124,8 +125,8 @@
     errBox.id = `err-${section}`;
     actions.appendChild(errBox);
 
-    details.appendChild(actions);
-    return details;
+    panel.appendChild(actions);
+    return panel;
   }
 
   // Read the form values back out into a JSON object suitable for PUT.
@@ -233,11 +234,41 @@
       const data = await r.json();
       const sectionsEl = document.getElementById('sections');
       sectionsEl.innerHTML = '';
+
+      // #157: render the four sections as tabs for clarity — a tab bar plus
+      // one panel per section, only the active panel visible.
+      const LABELS = { global: 'Global', chirpstack: 'ChirpStack', opcua: 'OPC UA', web: 'Web' };
+      const tabBar = document.createElement('div');
+      tabBar.className = 'tabs';
+      tabBar.setAttribute('role', 'tablist');
+      const panelWrap = document.createElement('div');
+      panelWrap.className = 'tab-panels';
+
+      let first = true;
       for (const s of SECTIONS) {
-        if (data[s]) {
-          sectionsEl.appendChild(renderSection(s, data[s]));
+        if (!data[s]) continue;
+        const panel = renderSection(s, data[s]);
+        panel.classList.add('tab-panel');
+        const btn = document.createElement('button');
+        btn.className = 'tab-btn';
+        btn.type = 'button';
+        btn.textContent = LABELS[s] || s;
+        btn.dataset.tab = s;
+        btn.setAttribute('role', 'tab');
+        if (first) {
+          btn.classList.add('active');
+          panel.classList.add('active');
+          first = false;
         }
+        btn.addEventListener('click', () => {
+          tabBar.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b === btn));
+          panelWrap.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p === panel));
+        });
+        tabBar.appendChild(btn);
+        panelWrap.appendChild(panel);
       }
+      sectionsEl.appendChild(tabBar);
+      sectionsEl.appendChild(panelWrap);
     } catch (e) {
       const sectionsEl = document.getElementById('sections');
       sectionsEl.innerHTML = `<div class="error">Failed to load config: ${e}</div>`;

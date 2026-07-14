@@ -415,11 +415,28 @@ pub struct OpcUaConfig {
     /// subscription (and mark its tags `Uncertain_LastKnownValue`) when
     /// keep-alives arrive too slowly for slow-changing / idle values.
     ///
-    /// `None` keeps async-opcua's default. Example: with a 1 s publishing
+    /// **`0` (default) keeps async-opcua's default** — a 0-sentinel (rather than
+    /// `Option`) so the value always serialises as a number and is directly
+    /// editable in the web Admin config editor. Example: with a 1 s publishing
     /// interval, `max_keep_alive_count = 5` bounds keep-alives to ≤ 5 s apart.
-    /// Override via env var `OPCGW_OPCUA__MAX_KEEP_ALIVE_COUNT`.
+    /// Range `[0, 1000]`. Override via env var
+    /// `OPCGW_OPCUA__MAX_KEEP_ALIVE_COUNT`.
     #[serde(default)]
-    pub max_keep_alive_count: Option<u32>,
+    pub max_keep_alive_count: u32,
+
+    /// Minimum OPC UA subscription publishing interval in milliseconds the
+    /// server will grant (issue #155).
+    ///
+    /// The publishing interval is *requested by the client* (in Ignition it is
+    /// the Tag Group Rate); the server can only enforce a **floor**. Raising
+    /// this floor slows the fastest a client can publish, indirectly bounding
+    /// keep-alive spacing together with `max_keep_alive_count`.
+    ///
+    /// **`0.0` (default) keeps async-opcua's default** (0-sentinel, for the same
+    /// web-editability reason as above). Range `[0, 3_600_000]` (≤ 1 h).
+    /// Override via env var `OPCGW_OPCUA__MIN_PUBLISHING_INTERVAL_MS`.
+    #[serde(default)]
+    pub min_publishing_interval_ms: f64,
 }
 
 /// Embedded Axum web server configuration parameters (Story 9-1).
@@ -612,6 +629,7 @@ impl std::fmt::Debug for OpcUaConfig {
                 &self.max_history_data_results_per_node,
             )
             .field("max_keep_alive_count", &self.max_keep_alive_count)
+            .field("min_publishing_interval_ms", &self.min_publishing_interval_ms)
             .finish()
     }
 }
@@ -2054,15 +2072,23 @@ impl AppConfig {
             }
         }
 
-        // Validate max_keep_alive_count (issue #155). A count of 0 would mean
-        // "keep-alive every 0 intervals" (invalid); an absurdly large value
-        // defeats the knob's purpose. Bound to a practical (0, 1000] band.
-        if let Some(kac) = self.opcua.max_keep_alive_count {
-            if kac == 0 || kac > 1000 {
-                errors.push(
-                    "opcua.max_keep_alive_count: must be in range (0, 1000]".to_string(),
-                );
-            }
+        // Validate max_keep_alive_count (issue #155). 0 = use library default;
+        // an absurdly large value defeats the knob's purpose. Bound to [0, 1000].
+        if self.opcua.max_keep_alive_count > 1000 {
+            errors.push(
+                "opcua.max_keep_alive_count: must be in range [0, 1000] (0 = library default)"
+                    .to_string(),
+            );
+        }
+
+        // Validate min_publishing_interval_ms (issue #155). 0 = use library
+        // default; must be finite and non-negative, capped at 1 h.
+        let mpi = self.opcua.min_publishing_interval_ms;
+        if !mpi.is_finite() || !(0.0..=3_600_000.0).contains(&mpi) {
+            errors.push(
+                "opcua.min_publishing_interval_ms: must be in range [0, 3600000] (0 = library default)"
+                    .to_string(),
+            );
         }
 
         // Validate per-device stale_threshold_seconds overrides (Story E-1
@@ -3025,22 +3051,26 @@ mod tests {
         assert!(config.validate().is_ok());
     }
 
-    /// Issue #155: `max_keep_alive_count` validates to the (0, 1000] band,
-    /// and `None`/in-band values pass.
+    /// Issue #155: `max_keep_alive_count` validates to [0, 1000] (0 = default),
+    /// and `min_publishing_interval_ms` to [0, 3_600_000].
     #[test]
-    fn test_validation_max_keep_alive_count() {
+    fn test_validation_subscription_keep_alive_knobs() {
         let mut config = get_config();
-        // Default (None) is valid.
+        // Defaults (0 / 0.0) are valid.
         assert!(config.validate().is_ok());
-        // In-band value is valid.
-        config.opcua.max_keep_alive_count = Some(5);
+        // In-band values are valid.
+        config.opcua.max_keep_alive_count = 5;
+        config.opcua.min_publishing_interval_ms = 1000.0;
         assert!(config.validate().is_ok());
-        // Zero is rejected.
-        config.opcua.max_keep_alive_count = Some(0);
+        // Above the keep-alive cap is rejected.
+        config.opcua.max_keep_alive_count = 1001;
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("max_keep_alive_count"));
-        // Above the cap is rejected.
-        config.opcua.max_keep_alive_count = Some(1001);
+        config.opcua.max_keep_alive_count = 5;
+        // Negative / non-finite publishing floor is rejected.
+        config.opcua.min_publishing_interval_ms = -1.0;
+        assert!(config.validate().is_err());
+        config.opcua.min_publishing_interval_ms = f64::INFINITY;
         assert!(config.validate().is_err());
     }
 
@@ -4991,7 +5021,8 @@ mod tests {
             trust_client_cert: false,
             check_cert_time: false,
             pki_dir: "pki".to_string(),
-            max_keep_alive_count: None,
+            max_keep_alive_count: 0,
+            min_publishing_interval_ms: 0.0,
             user_name: "u".to_string(),
             user_password: SENTINEL.to_string(),
             stale_threshold_seconds: None,

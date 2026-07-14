@@ -1138,7 +1138,7 @@ async fn shell_js_is_served_and_owns_the_nav() {
         "Configuration",
         "Live Metrics",
         "Inventory drift",
-        "Singleton config",
+        "Admin",
     ] {
         assert!(
             shell.contains(label),

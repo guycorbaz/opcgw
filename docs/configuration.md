@@ -170,7 +170,8 @@ Configuration for OPC UA server.
 | `max_message_size` | usize | ✗ | - | Maximum OPC UA message size in bytes (optional cap). |
 | `max_chunk_count` | usize | ✗ | - | Maximum number of chunks per OPC UA message (optional cap). |
 | `max_history_data_results_per_node` | usize | ✗ | - | Maximum history values returned per node in one OPC UA history read (optional cap). |
-| `max_keep_alive_count` | u32 | ✗ | - | Issue #155: caps the granted OPC UA subscription `KeepAliveCount`. An idle subscription sends a keep-alive every `KeepAliveCount × publishingInterval`; lowering this cap forces keep-alives more frequently, which SCADA clients (e.g. Ignition) may need to avoid marking slow-changing tags `Uncertain_LastKnownValue`. Range `(0, 1000]`. Unset = library default. |
+| `max_keep_alive_count` | u32 | ✗ | 0 | Issue #155: caps the granted OPC UA subscription `KeepAliveCount`. An idle subscription sends a keep-alive every `KeepAliveCount × publishingInterval`; lowering this cap forces keep-alives more frequently, which SCADA clients (e.g. Ignition) may need to avoid marking slow-changing tags `Uncertain_LastKnownValue`. Range `[0, 1000]`, `0` = library default. Editable from the web **Admin** page. |
+| `min_publishing_interval_ms` | f64 | ✗ | 0 | Issue #155: minimum OPC UA subscription publishing interval (ms) the server will grant — a *floor*; the client (e.g. Ignition Tag Group Rate) still requests the actual rate at or above it. Range `[0, 3600000]`, `0` = library default. Editable from the web **Admin** page. |
 
 ### Validation Rules
 

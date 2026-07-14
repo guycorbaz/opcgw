@@ -469,13 +469,21 @@ impl OpcUa {
             // send keep-alives more frequently — SCADA clients (Ignition) mark
             // tags Uncertain_LastKnownValue when keep-alives lag for
             // slow-changing values. Capping `max` bounds the client's request;
-            // aligning `default` covers clients that request 0. `None` leaves
-            // async-opcua's defaults untouched.
-            if let Some(kac) = self.config.opcua.max_keep_alive_count {
+            // aligning `default` covers clients that request 0. `0` (sentinel)
+            // leaves async-opcua's defaults untouched.
+            let kac = self.config.opcua.max_keep_alive_count;
+            if kac > 0 {
                 limits.subscriptions.max_keep_alive_count = kac;
                 if limits.subscriptions.default_keep_alive_count > kac {
                     limits.subscriptions.default_keep_alive_count = kac;
                 }
+            }
+            // Issue #155: raise the minimum publishing interval floor (ms). `0.0`
+            // leaves async-opcua's default; the client still picks the actual
+            // rate at or above this floor.
+            let mpi = self.config.opcua.min_publishing_interval_ms;
+            if mpi > 0.0 {
+                limits.subscriptions.min_publishing_interval_ms = mpi;
             }
         }
         server_builder

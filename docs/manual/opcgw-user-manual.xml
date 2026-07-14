@@ -1346,6 +1346,25 @@ stale_threshold_seconds = 120
             </listitem>
           </varlistentry>
           <varlistentry>
+            <term>max_keep_alive_count, min_publishing_interval_ms</term>
+            <listitem>
+              <para>Issue #155 subscription keep-alive tuning. An idle OPC UA
+              subscription (whose values are not changing) sends a keep-alive
+              every <literal>KeepAliveCount × publishingInterval</literal>;
+              <literal>max_keep_alive_count</literal> caps the granted count so
+              lowering it forces keep-alives more frequently — some SCADA
+              clients (e.g. Ignition) otherwise mark slow-cadence tags
+              <literal>Uncertain_LastKnownValue</literal>.
+              <literal>min_publishing_interval_ms</literal> raises the floor on
+              the publishing interval (the client still requests the actual
+              rate). Both use a <literal>0</literal> sentinel (= library
+              default) so they are editable as numbers on the web
+              <emphasis>Admin</emphasis> page, and take effect on
+              <emphasis>Apply changes</emphasis> (an in-process soft restart —
+              no container restart; the OPC UA endpoint briefly cycles).</para>
+            </listitem>
+          </varlistentry>
+          <varlistentry>
             <term>max_history_data_results_per_node</term>
             <listitem>
               <para>Per-NodeId HistoryRead response cap.

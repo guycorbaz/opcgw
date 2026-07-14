@@ -293,6 +293,36 @@ async fn d1_get_returns_snapshot_with_secret_placeholders() {
     fx.shutdown().await;
 }
 
+/// Issue #155: the GET backfills non-secret `[opcua]` knobs from the effective
+/// config even when they were never persisted to `singleton_config`, so the
+/// web Admin editor can surface them (and they render as numbers). Both new
+/// subscription knobs must appear as numeric fields.
+#[tokio::test]
+#[serial(captured_logs)]
+async fn issue155_get_backfills_subscription_knobs() {
+    let fx = spawn_fixture().await;
+    let auth = build_basic_auth(TEST_USER, TEST_PASSWORD);
+    let r = reqwest::Client::new()
+        .get(fx.url("/api/config/singleton"))
+        .header(header::AUTHORIZATION, &auth)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(r.status(), StatusCode::OK);
+    let body: Value = r.json().await.expect("json");
+    assert!(
+        body["opcua"]["max_keep_alive_count"].is_number(),
+        "max_keep_alive_count must be backfilled as a number, got {:?}",
+        body["opcua"].get("max_keep_alive_count")
+    );
+    assert!(
+        body["opcua"]["min_publishing_interval_ms"].is_number(),
+        "min_publishing_interval_ms must be backfilled as a number, got {:?}",
+        body["opcua"].get("min_publishing_interval_ms")
+    );
+    fx.shutdown().await;
+}
+
 /// Test 2 — GET requires Basic-auth.
 #[tokio::test]
 #[serial(captured_logs)]
