@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Configurable OPC UA subscription keep-alive** (`[opcua].max_keep_alive_count`,
+  [#155](https://github.com/guycorbaz/opcgw/issues/155)). Caps the `KeepAliveCount`
+  the server grants a subscription, so an idle (no-data-change) subscription emits
+  keep-alives more frequently. Motivated by Ignition marking slow-cadence tags
+  `Uncertain_LastKnownValue`: opcgw serves values correctly and *does* send
+  keep-alives, but Ignition wants a fresher heartbeat for values that don't change
+  between 20-min uplinks. This is a **tuning lever** — the definitive server-side
+  fix (periodic `ResendData` to re-push unchanged values, bypassing the client's
+  change filter) needs a session-enumeration API not exposed by async-opcua 0.17.1
+  and is tracked in #155. Immediate workaround: set the affected Ignition tags to
+  read/poll instead of subscribe (opcgw reads are always `Good` + fresh).
+
 ## [2.7.0-rc1] — 2026-07-13 — Per-device OPC UA SourceTimestamp mode
 
 > **Status:** release candidate. Cut from `main` after PR

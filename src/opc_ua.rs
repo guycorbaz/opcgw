@@ -465,6 +465,18 @@ impl OpcUa {
             let limits = server_builder.limits_mut();
             limits.subscriptions.max_subscriptions_per_session = max_subs_per_session;
             limits.subscriptions.max_monitored_items_per_sub = max_items_per_sub;
+            // Issue #155: cap the granted KeepAliveCount so idle subscriptions
+            // send keep-alives more frequently — SCADA clients (Ignition) mark
+            // tags Uncertain_LastKnownValue when keep-alives lag for
+            // slow-changing values. Capping `max` bounds the client's request;
+            // aligning `default` covers clients that request 0. `None` leaves
+            // async-opcua's defaults untouched.
+            if let Some(kac) = self.config.opcua.max_keep_alive_count {
+                limits.subscriptions.max_keep_alive_count = kac;
+                if limits.subscriptions.default_keep_alive_count > kac {
+                    limits.subscriptions.default_keep_alive_count = kac;
+                }
+            }
         }
         server_builder
     }

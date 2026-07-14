@@ -121,6 +121,7 @@ fn baseline_app_config(port: u16, pki_dir: &std::path::Path) -> AppConfig {
             trust_client_cert: true,
             check_cert_time: false,
             pki_dir: pki_dir.to_string_lossy().into_owned(),
+            max_keep_alive_count: None,
             user_name: TEST_USER.to_string(),
             user_password: TEST_PASSWORD.to_string(),
             stale_threshold_seconds: Some(120),

@@ -170,6 +170,15 @@ stale_threshold_seconds = 120
 #max_message_size = 327675
 #max_chunk_count = 5
 #
+# max_keep_alive_count — issue #155: caps the OPC UA subscription KeepAliveCount
+#   the server grants. An idle subscription (no data change) sends a keep-alive
+#   every KeepAliveCount * publishingInterval; lowering this cap forces keep-
+#   alives MORE frequently, which some SCADA clients (e.g. Ignition) need to
+#   avoid marking slow-changing tags Uncertain_LastKnownValue. Unset = library
+#   default. Range: 1-1000. Example: with a 1 s publishing interval, a value of
+#   5 bounds keep-alives to <= 5 s apart.
+#max_keep_alive_count = 5
+#
 # OPC UA HistoryRead per-call response cap (Story 8-3, FR22).
 # Caps the number of HistoryData rows returned for one NodeId in a single
 # HistoryRead call. SCADA clients that want more page via follow-up

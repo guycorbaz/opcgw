@@ -141,6 +141,7 @@ pub fn stub_app_config_with_apps(apps: &[crate::config::ChirpStackApplications])
             trust_client_cert: false,
             check_cert_time: false,
             pki_dir: "./pki".to_string(),
+            max_keep_alive_count: None,
             user_name: "opcua-user".to_string(),
             user_password: "secret".to_string(),
             stale_threshold_seconds: Some(120),
