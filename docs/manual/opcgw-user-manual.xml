@@ -2551,6 +2551,64 @@ chirpstack:8080 list</command>.</para>
           </orderedlist>
         </section>
 
+        <section id="sec-issue-ignition-stale-connection">
+          <title>Ignition (or other SCADA client) shows
+          <literal>Uncertain_LastKnownValue</literal>, or opcgw does not
+          appear when browsing to add tags</title>
+          <para><emphasis>Symptom:</emphasis> the SCADA gateway reports the
+          OPC UA connection to opcgw as <emphasis>connected / healthy</emphasis>,
+          yet subscribed tags read <literal>Uncertain_LastKnownValue</literal>
+          (or the values never update), and/or opcgw's address space does
+          <emphasis>not</emphasis> appear when you browse to create or edit
+          tags. Crucially, <emphasis>there is no corresponding error in the
+          opcgw log</emphasis>, and the metric values are present and current
+          on opcgw's own web <emphasis>Live Metrics</emphasis> page.</para>
+          <para><emphasis>Root cause:</emphasis> this is almost always a
+          <emphasis>client-side</emphasis> OPC UA connection fault, not opcgw.
+          opcgw serves every value with <literal>Good</literal> quality on
+          both plain reads <emphasis>and</emphasis> subscriptions. A SCADA
+          client's connection can get into a stale / half-open state where the
+          gateway still reports "connected" while its browse and subscription
+          paths are silently broken — so it falls back to the last cached value
+          and overlays <literal>Uncertain_LastKnownValue</literal>.</para>
+          <orderedlist>
+            <listitem>
+              <para><emphasis>Confirm opcgw is healthy</emphasis> with an
+              independent OPC UA client (e.g. UaExpert): connect to
+              <literal>opc.tcp://&lt;host&gt;:4855</literal>, browse the
+              address space, and read one of the affected nodes. If it browses
+              and reads <literal>Good</literal> there, opcgw is fine and the
+              problem is the other client's connection.</para>
+            </listitem>
+            <listitem>
+              <para><emphasis>Upgrade the SCADA client.</emphasis> On Ignition,
+              upgrade the Gateway to <emphasis>8.3.7 or later</emphasis> —
+              earlier 8.3.x releases exhibited exactly this OPC UA
+              client-connection defect (browse/subscribe broken while the
+              connection shows connected).</para>
+            </listitem>
+            <listitem>
+              <para><emphasis>Delete and recreate the OPC UA connection</emphasis>
+              in the client. On Ignition: Gateway web config →
+              <emphasis>Config → OPC Client → OPC Connections</emphasis> →
+              remove the opcgw connection and create it again. A fresh
+              connection re-establishes the browse and subscription state; tags
+              then read <literal>Good</literal> without warnings. (This was the
+              fix confirmed in the field on Ignition 8.3.)</para>
+            </listitem>
+          </orderedlist>
+          <para><emphasis>Tuning levers (rarely needed).</emphasis> If a client
+          is genuinely sensitive to keep-alive timing for slow-cadence
+          (idle) values, opcgw exposes <literal>[opcua].max_keep_alive_count</literal>
+          and <literal>[opcua].min_publishing_interval_ms</literal> (editable on
+          the web <emphasis>Admin</emphasis> page — see
+          <xref linkend="sec-opcua-config"/>), and a per-device
+          <literal>source_timestamp_server</literal> flag (see
+          <xref linkend="sec-source-timestamp"/>) presents an always-fresh
+          source timestamp. These are secondary — the primary fix for this
+          symptom is recreating the client-side connection above.</para>
+        </section>
+
         <section id="sec-issue-database-corruption">
           <title>Database integrity errors</title>
           <para><emphasis>Log signature:</emphasis>

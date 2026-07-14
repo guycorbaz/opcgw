@@ -342,6 +342,9 @@ or the `source_timestamp_server` field on the device CRUD API) makes opcgw stamp
 code* is unaffected — a device that genuinely stops reporting past its stale
 threshold still flips to Uncertain.
 
+> **Troubleshooting — Ignition (or another SCADA client) shows `Uncertain_LastKnownValue`, or opcgw doesn't appear when browsing to add tags.**
+> This is almost always a **client-side** OPC UA connection fault, *not* opcgw: the client's gateway reports the connection as "connected" while its browse/subscribe paths are silently stale, so it shows a cached value with an Uncertain overlay. opcgw serves every value `Good` on both reads and subscriptions — confirm with an independent client (e.g. UaExpert) browsing `opc.tcp://<host>:4855`. **Fix (confirmed on Ignition 8.3):** upgrade the Gateway to **8.3.7+**, then **delete and recreate** the opcgw OPC UA connection in Ignition (Config → OPC Client → OPC Connections). Values then read Good. The `max_keep_alive_count` / `min_publishing_interval_ms` (Admin page) and per-device `source_timestamp_server` knobs are secondary tuning levers, not the primary fix. See the manual's Troubleshooting chapter for the full procedure.
+
 **Story F-4 adds config export / import.** From the singleton-configuration
 page, **Export config** downloads the whole configuration — the `[global]` /
 `[chirpstack]` / `[opcua]` / `[web]` sections plus the application/device/metric/
