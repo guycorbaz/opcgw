@@ -5,7 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.7.1-rc1] — 2026-07-14 — Configurable OPC UA subscription keep-alive
+
+> **Status:** release candidate (PR [#156](https://github.com/guycorbaz/opcgw/pull/156)).
+> Docker `gcorbaz/opcgw:2.7.1-rc1` + GHCR mirror (multi-arch amd64+arm64); **not**
+> `:latest` / `:2.7`. Pull it on panoramix to try the keep-alive knob against
+> Ignition. Part of the ongoing [#155](https://github.com/guycorbaz/opcgw/issues/155)
+> investigation into Ignition's `Uncertain_LastKnownValue` on slow-cadence tags.
 
 ### Added
 - **Configurable OPC UA subscription keep-alive** (`[opcua].max_keep_alive_count`,
