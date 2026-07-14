@@ -36,7 +36,7 @@
     { href: '/config.html', label: 'Configuration' },
     { href: '/metrics.html', label: 'Live Metrics' },
     { href: '/inventory-drift.html', label: 'Inventory drift' },
-    { href: '/singleton-config.html', label: 'Singleton config' },
+    { href: '/singleton-config.html', label: 'Admin' },
   ];
 
   // Normalise the current path so "/" and "" resolve to the dashboard.

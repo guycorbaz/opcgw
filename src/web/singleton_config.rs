@@ -90,6 +90,52 @@ pub async fn get_singleton_config(
         }
     }
 
+    // Issue #155: backfill non-secret fields that exist in the effective config
+    // but were never persisted to `singleton_config` (e.g. knobs added after
+    // the initial D-0/D-1 migration, like `max_keep_alive_count`) so they still
+    // appear in the Admin config editor on existing deployments. Stored rows
+    // always win (we only insert absent keys); `serialize_section` already
+    // excludes secret fields and `None` values, and the secret-placeholder
+    // injection below still runs.
+    {
+        use crate::storage::migrate_singleton_config::{
+            secret_fields_for_section, serialize_section,
+        };
+        let cfg = state.config_reload.subscribe();
+        let cfg = cfg.borrow();
+        let per_section = [
+            (
+                "global",
+                serialize_section(&cfg.global, secret_fields_for_section("global")),
+            ),
+            (
+                "chirpstack",
+                serialize_section(&cfg.chirpstack, secret_fields_for_section("chirpstack")),
+            ),
+            (
+                "opcua",
+                serialize_section(&cfg.opcua, secret_fields_for_section("opcua")),
+            ),
+            (
+                "web",
+                serialize_section(&cfg.web, secret_fields_for_section("web")),
+            ),
+        ];
+        for (name, res) in per_section {
+            let Ok(fields) = res else { continue };
+            if let Some(Value::Object(obj)) = sections.get_mut(name) {
+                for (k, v_str) in fields {
+                    if obj.contains_key(&k) {
+                        continue;
+                    }
+                    if let Ok(v) = serde_json::from_str::<Value>(&v_str) {
+                        obj.insert(k, v);
+                    }
+                }
+            }
+        }
+    }
+
     // Inject secret placeholders so the UI can render a read-only field.
     for (section_name, fields) in
         crate::storage::migrate_singleton_config::SECRET_FIELDS_BY_SECTION

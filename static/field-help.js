@@ -78,6 +78,8 @@
     'opcua.max_message_size': { text: 'Maximum OPC UA message size in bytes (optional cap).' },
     'opcua.max_chunk_count': { text: 'Maximum number of chunks per OPC UA message (optional cap).' },
     'opcua.max_history_data_results_per_node': { text: 'Maximum history values returned per node in one OPC UA history read (optional cap).' },
+    'opcua.max_keep_alive_count': { text: 'Caps the OPC UA subscription KeepAliveCount the server grants. An idle subscription sends a keep-alive every KeepAliveCount x publishing interval; lowering this forces keep-alives more often, which some SCADA clients (e.g. Ignition) need to avoid marking slow-changing tags Uncertain_LastKnownValue. 0 = library default. Range 0-1000. Takes effect on Apply (brief OPC UA reconnect, no full restart).' },
+    'opcua.min_publishing_interval_ms': { text: 'Minimum OPC UA subscription publishing interval (ms) the server will grant. The client (e.g. Ignition Tag Group Rate) requests the actual interval; this is only a floor. 0 = library default. Range 0-3600000. Takes effect on Apply.' },
 
     // [web]
     'web.port': { text: 'TCP port the web configuration UI listens on. The server is HTTP-only — put a reverse proxy in front for TLS.' },

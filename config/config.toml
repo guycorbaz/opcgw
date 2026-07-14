@@ -174,10 +174,14 @@ stale_threshold_seconds = 120
 #   the server grants. An idle subscription (no data change) sends a keep-alive
 #   every KeepAliveCount * publishingInterval; lowering this cap forces keep-
 #   alives MORE frequently, which some SCADA clients (e.g. Ignition) need to
-#   avoid marking slow-changing tags Uncertain_LastKnownValue. Unset = library
-#   default. Range: 1-1000. Example: with a 1 s publishing interval, a value of
-#   5 bounds keep-alives to <= 5 s apart.
+#   avoid marking slow-changing tags Uncertain_LastKnownValue. 0 = library
+#   default. Range: 0-1000. Example: with a 1 s publishing interval, a value of
+#   5 bounds keep-alives to <= 5 s apart. Also editable from the web Admin page.
+# min_publishing_interval_ms — issue #155: minimum publishing interval (ms) the
+#   server will grant. The client (e.g. Ignition Tag Group Rate) requests the
+#   actual rate; this is only a floor. 0 = library default. Range: 0-3600000.
 #max_keep_alive_count = 5
+#min_publishing_interval_ms = 0
 #
 # OPC UA HistoryRead per-call response cap (Story 8-3, FR22).
 # Caps the number of HistoryData rows returned for one NodeId in a single

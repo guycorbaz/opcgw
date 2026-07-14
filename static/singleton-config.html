@@ -18,11 +18,18 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>opcgw — Singleton Configuration</title>
+  <title>opcgw — Admin</title>
   <link rel="stylesheet" href="/dashboard.css">
   <style>
-    .section { border: 1px solid var(--border, #ccc); border-radius: 4px; margin: 1em 0; padding: 0.5em 1em; }
-    .section summary { font-weight: bold; cursor: pointer; padding: 0.25em 0; }
+    /* #157: tabbed layout for the four config sections. */
+    .tabs { display: flex; gap: 0.25em; border-bottom: 2px solid var(--border, #ccc); margin: 1.25em 0 0; flex-wrap: wrap; }
+    .tab-btn { padding: 0.5em 1.1em; border: 1px solid var(--border, #ccc); border-bottom: none; background: transparent; color: inherit; cursor: pointer; border-radius: 6px 6px 0 0; font: inherit; }
+    .tab-btn:hover { background: var(--surface-hover, rgba(127,127,127,0.12)); }
+    .tab-btn.active { background: var(--accent, #1677ff); color: #fff; font-weight: 600; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    .section { border: 1px solid var(--border, #ccc); border-top: none; border-radius: 0 0 4px 4px; margin: 0 0 1em; padding: 0.5em 1em; }
+    .section > h2 { margin: 0.5em 0; font-size: 1.05em; font-family: monospace; }
     .field { display: grid; grid-template-columns: minmax(220px, 1fr) 2fr; gap: 0.5em; margin: 0.5em 0; align-items: center; }
     .field label { font-family: monospace; font-size: 0.95em; }
     .field input, .field textarea, .field select { width: 100%; padding: 0.3em; box-sizing: border-box; font-family: monospace; }
@@ -44,10 +51,11 @@
   <!-- The unified nav/header bar is injected by /shell.js (Story F-1). -->
 
   <main>
-    <h1>Singleton Configuration</h1>
+    <h1>Admin</h1>
     <p>
       Edit the gateway's <code>[global]</code> / <code>[chirpstack]</code> /
-      <code>[opcua]</code> / <code>[web]</code> configuration sections.
+      <code>[opcua]</code> / <code>[web]</code> configuration sections
+      (one tab each).
       <strong>Saving stages your change</strong> — it is written to the
       database but does not take effect until you click <em>Apply changes</em>
       in the bar at the bottom of the page, which performs one in-process soft

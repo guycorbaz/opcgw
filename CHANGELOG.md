@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **OPC UA subscription keep-alive / publishing floor editable from the web UI**
+  ([#155](https://github.com/guycorbaz/opcgw/issues/155)). `max_keep_alive_count`
+  is now a `u32` 0-sentinel (0 = library default) instead of `Option`, and a new
+  `[opcua].min_publishing_interval_ms` floor is added. Both render as number
+  fields in the web **Admin** config editor and take effect via **Apply changes**
+  (an in-process soft restart — no container restart; the OPC UA endpoint briefly
+  cycles). The singleton-config GET now backfills non-secret fields present in the
+  effective config but not yet persisted, so newly-added knobs appear in the
+  editor on existing deployments.
+
+### Changed
+- **Web "Singleton config" page renamed to "Admin" and reorganized into tabs**
+  ([#157](https://github.com/guycorbaz/opcgw/issues/157)) — one tab per section
+  (Global / ChirpStack / OPC UA / Web) for clarity. Same per-section Save +
+  staged Apply flow, CSRF, secret placeholders, and field-help.
+
 ## [2.7.1-rc1] — 2026-07-14 — Configurable OPC UA subscription keep-alive
 
 > **Status:** release candidate (PR [#156](https://github.com/guycorbaz/opcgw/pull/156)).
