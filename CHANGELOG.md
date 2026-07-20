@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.1-rc4] — 2026-07-20 — Dependency modernization + env-shadow guardrail
+
+> **Status:** release candidate. Docker `gcorbaz/opcgw:2.7.1-rc4` + GHCR mirror
+> (multi-arch amd64+arm64); **not** `:latest` / `:2.7`. Builds on `v2.7.1-rc3`.
+> To be soaked on panoramix before promotion to stable.
+
+### Changed — dependency refresh
+- **async-opcua 0.17.1 → 0.19.0** ([#165](https://github.com/guycorbaz/opcgw/issues/165)):
+  picks up the 0.18/0.19 keep-alive, subscription, and security fixes (keep-alive
+  ack correction + server keep-alive resend eliminated; `CreateSession` certificate
+  verification; `ActivateSession` nonce-reuse prevention; monitored-item creation
+  race; sequence-number desync). **Zero opcgw source changes** — the breaking client
+  API change does not intersect opcgw's usage.
+- **Dependency refresh** ([#159](https://github.com/guycorbaz/opcgw/issues/159)):
+  `rusqlite` 0.38 → 0.40.1 (bundled SQLite 3.53.2 + SAVEPOINT SQL-injection fix;
+  breaking changes are VTab-only, unused), `tower-http` 0.6 → 0.7, `reqwest`
+  0.12 → 0.13 (dev-only), and a compat sweep (tokio 1.53, tonic 0.14.6, etc.).
+- **Crypto refresh** (Batch B, #159): `getrandom` 0.2 → 0.4 (`getrandom()` → `fill()`),
+  `sha2` 0.10 → 0.11 + `hmac` 0.12 → 0.13 (digest 0.11; `KeyInit` import + explicit
+  hex-encode — content-hash output byte-identical), `constant_time_eq` 0.3 → 0.5.
+- **MSRV raised 1.94.0 → 1.95.0** across `Cargo.toml`, CI, the `Dockerfile`, and all
+  docs (required by `constant_time_eq` 0.5 / edition-2024 crypto crates).
+
+### Added
+- **Env-shadow guardrail** ([#169](https://github.com/guycorbaz/opcgw/issues/169) /
+  [#168](https://github.com/guycorbaz/opcgw/issues/168)): opcgw now emits a `WARN`
+  at startup (`event="env_shadows_singleton_config"`) naming any `OPCGW_*` env var
+  that shadows a web/SQLite-managed field, with both values. `OPCGW_*` env vars sit
+  at the top of the figment stack, so they silently override the Admin page — this
+  makes the conflict visible. Secrets and non-web-editable vars are exempt.
+
+### Documentation
+- Expanded the **"SCADA client opens and drops connections constantly"** manual
+  section ([#163](https://github.com/guycorbaz/opcgw/issues/163) /
+  [#155](https://github.com/guycorbaz/opcgw/issues/155)): the definitive
+  delete-and-recreate remedy for stale client connection state (churn or Fault after
+  a reboot/endpoint change), endpoint/security-policy selection guidance (`None` vs
+  the deprecated `Basic256` with a self-signed sample keypair), the
+  `OPCGW_OPCUA__HOST_IP_ADDRESS` env-shadow gotcha, and an Ignition + FUXA field note.
+
 ## [2.7.1-rc3] — 2026-07-20 — Advertised-endpoint-host warning + SCADA churn docs
 
 > **Status:** release candidate. Docker `gcorbaz/opcgw:2.7.1-rc3` + GHCR mirror
