@@ -28,7 +28,7 @@ chirpstack_api = "4.17.0"
 prost = "0.14"
 prost-types = "0.14"
 tonic-prost = "0.14"
-async-opcua = { version = "0.17.1", features = ["server"] }
+async-opcua = { version = "0.19.0", features = ["server"] }
 constant_time_eq = "0.3"
 hmac = "0.12"
 # Story 7-2 + 9-1: per-process HMAC keying via OS RNG. Pinned to 0.2
@@ -90,7 +90,7 @@ serial_test = "3"
 # release build) and shrink the release binary. Tests + examples have access
 # to dev-dependencies, so `cargo test` and `cargo build --examples`
 # transparently see both server + client features merged.
-async-opcua = { version = "0.17.1", features = ["client"] }
+async-opcua = { version = "0.19.0", features = ["client"] }
 # Story 9-1 integration tests: HTTP client for the embedded web server.
 # Dev-only — no inbound HTTP client in a release build.
 reqwest = { version = "0.12", default-features = false, features = ["http2", "json"] }
