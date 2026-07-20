@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.1-rc3] — 2026-07-20 — Advertised-endpoint-host warning + SCADA churn docs
+
+> **Status:** release candidate. Docker `gcorbaz/opcgw:2.7.1-rc3` + GHCR mirror
+> (multi-arch amd64+arm64); **not** `:latest` / `:2.7`. Builds on `v2.7.1-rc2`.
+> To be soaked on panoramix before promotion to stable.
+
+Diagnoses and documents the root cause of the Ignition **session-less connection
+churn** observed in production ([#161](https://github.com/guycorbaz/opcgw/issues/161),
+[#163](https://github.com/guycorbaz/opcgw/issues/163)): opcgw advertises its OPC UA
+endpoint/discovery URL from `[opcua].host_ip_address`, and async-opcua 0.17 uses that
+same value to bind the socket. With `host_ip_address = 0.0.0.0` (the Docker default)
+the server binds all interfaces (correct) but advertises `opc.tcp://0.0.0.0:4855`,
+which clients cannot reconnect to after `GetEndpoints` — they re-probe the advertised
+endpoints, never activate a session, and each is reaped at the ~60 s channel timeout,
+flooding the log with connect/disconnect churn (~99 % of INFO volume; ~4,250
+accepts/day in the field). The churning connections carry no session and lose no data
+(the real session is a single persistent connection).
+
+### Added
+- **Startup warning when the advertised OPC UA host is unroutable**
+  ([#163](https://github.com/guycorbaz/opcgw/issues/163)). `OpcUa::new` now emits
+  `warn!(event="opcua_advertise_host_unroutable", …)` whenever the effective advertised
+  host is `0.0.0.0` / an unspecified address / empty, with the remediation recipe. New
+  `is_unroutable_advertise_host()` helper + unit test.
+
+### Documentation
+- New/expanded troubleshooting section **"SCADA client opens and drops connections
+  constantly"** in the user manual, and a matching `README.md` note: the sessions-vs-accepts
+  diagnostic and the **fix** — set `host_ip_address` to a resolvable name and, in Docker,
+  add `extra_hosts: ["<name>:0.0.0.0"]` so the container binds `0.0.0.0` while advertising
+  `opc.tcp://<name>:4855` (other containers resolve `<name>` via Docker DNS).
+- `docker-compose.yml` + `.env.example`: commented `extra_hosts` recipe and a note that
+  `host_ip_address` / `max_keep_alive_count` are best managed from the web Admin page,
+  since an `OPCGW_OPCUA__*` env var outranks and silently shadows the SQLite value.
+
+### Notes
+- No behavioural change to the data plane; this rc is diagnostics + documentation. The
+  actual churn remedy is the deployment config above. async-opcua 0.18/0.19 do **not**
+  separate bind from advertised host, so a crate upgrade would not fix this; a proper
+  server-side fix needs an upstream async-opcua feature.
+
 ## [2.7.1-rc2] — 2026-07-14 — Web-editable subscription knobs + Admin tabs
 
 > **Status:** release candidate (PR [#158](https://github.com/guycorbaz/opcgw/pull/158)).
