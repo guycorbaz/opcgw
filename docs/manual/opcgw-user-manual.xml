@@ -1357,7 +1357,9 @@ stale_threshold_seconds = 120
               <literal>Uncertain_LastKnownValue</literal>.
               <literal>min_publishing_interval_ms</literal> raises the floor on
               the publishing interval (the client still requests the actual
-              rate). Both use a <literal>0</literal> sentinel (= library
+              rate). These affect established subscriptions only; they do
+              <emphasis>not</emphasis> govern session-less connection churn (see
+              <xref linkend="sec-issue-scada-connection-churn"/>). Both use a <literal>0</literal> sentinel (= library
               default) so they are editable as numbers on the web
               <emphasis>Admin</emphasis> page, and take effect on
               <emphasis>Apply changes</emphasis> (an in-process soft restart —
@@ -2607,6 +2609,75 @@ chirpstack:8080 list</command>.</para>
           <xref linkend="sec-source-timestamp"/>) presents an always-fresh
           source timestamp. These are secondary — the primary fix for this
           symptom is recreating the client-side connection above.</para>
+        </section>
+
+        <section id="sec-issue-scada-connection-churn">
+          <title>SCADA client opens and drops connections constantly
+          (session-less secure-channel churn / log flooded with
+          connect–disconnect pairs)</title>
+          <para><emphasis>Symptom:</emphasis> a single SCADA client (e.g.
+          Ignition) opens <emphasis>and</emphasis> closes fresh OPC UA
+          connections on a steady, short cycle — the opcgw log fills with
+          repeating
+          <literal>Accept new connection from &lt;client-ip&gt;</literal> /
+          <literal>Connection &lt;n&gt; terminated</literal> pairs (often
+          thousands per day, dominating the <literal>INFO</literal> log), with
+          an occasional
+          <literal>ERROR … Fatal transport error: BadSecureChannelClosed</literal>,
+          rare <literal>BadUserAccessDenied</literal>, or
+          <literal>BadTimeout … waiting for channel to be established</literal>.
+          Data is <emphasis>not</emphasis> lost: the session-count gauge holds
+          steady (<literal>event="opcua_session_count" current=1</literal>) and
+          reads return <literal>Good</literal>.</para>
+          <para><emphasis>Root cause (diagnosed in the field):</emphasis> these
+          churning connections carry <emphasis>no session</emphasis>. The real
+          data flows over <emphasis>one</emphasis> persistent connection that
+          holds the client's single session; separately, the client keeps
+          opening extra connections that never activate a session and are then
+          reaped by opcgw's channel-establishment timeout (~60 s), whereupon the
+          client opens fresh ones. This is
+          <emphasis>client-side connection behaviour</emphasis> — an
+          endpoint-discovery / connection-watchdog probe, or a faulted or
+          duplicate OPC UA connection definition (often a security-policy or
+          certificate mismatch on a secondary connection) that never completes
+          a session and retries on a fixed cycle. opcgw is healthy: it accepts
+          each connection and times out the ones that never establish.</para>
+          <para><emphasis>Confirm it is session-less churn</emphasis> from the
+          opcgw log by comparing session creations against connection accepts
+          over the same window:</para>
+          <programlisting>grep -c "Created new session"     opcgw.log.&lt;date&gt;   # e.g. 3 (one per restart)
+grep -c "Accept new connection"   opcgw.log.&lt;date&gt;   # e.g. 1550</programlisting>
+          <para>If sessions are a tiny fraction of accepts, the churning
+          connections are session-less and carry no data — the fix is
+          client-side, and OPC UA subscription tuning
+          (<literal>max_keep_alive_count</literal> /
+          <literal>min_publishing_interval_ms</literal>) will
+          <emphasis>not</emphasis> help, because those govern established
+          subscriptions, of which these connections have none. (In the field,
+          lowering <literal>max_keep_alive_count</literal> from 5 to 2 left the
+          ~60 s churn cycle unchanged, confirming keep-alive timing was not
+          involved.)</para>
+          <orderedlist>
+            <listitem>
+              <para><emphasis>Confirm opcgw is healthy</emphasis> with an
+              independent OPC UA client (e.g. UaExpert): a single clean
+              connection does not churn.</para>
+            </listitem>
+            <listitem>
+              <para><emphasis>Audit the client's OPC UA connections.</emphasis>
+              On Ignition: <emphasis>Config → OPC Client → OPC
+              Connections</emphasis> — look for a second, duplicate, or faulted
+              connection to opcgw, and verify its security policy and client
+              certificate match an endpoint opcgw actually offers. Delete and
+              recreate a suspect connection.</para>
+            </listitem>
+            <listitem>
+              <para><emphasis>Reduce the noise</emphasis> if the churn cannot be
+              eliminated client-side: the accept/terminate lines are
+              <literal>INFO</literal>-level; raising the opcgw log level, or the
+              client's discovery/watchdog interval, keeps the log readable.</para>
+            </listitem>
+          </orderedlist>
         </section>
 
         <section id="sec-issue-database-corruption">
