@@ -18,7 +18,9 @@
 //! one implementation. Per the Phase-B carry-forward rule
 //! (`epics.md:782`): reuse, don't roll new.
 
-use hmac::{Hmac, Mac};
+// hmac 0.13 / digest 0.11: `new_from_slice` lives on the `KeyInit` trait,
+// which is no longer implied by `Mac` — it must be in scope explicitly.
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;

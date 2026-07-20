@@ -255,7 +255,14 @@ impl Command {
         let content = format!("{}{}{}", device_id, command_name, params_json);
         let mut hasher = Sha256::new();
         hasher.update(content.as_bytes());
-        format!("{:x}", hasher.finalize())
+        // digest 0.11 (sha2 0.11) returns a `hybrid_array::Array`, which — unlike
+        // the old `GenericArray` — does not implement `LowerHex`; hex-encode the
+        // fixed 32-byte digest explicitly instead of `format!("{:x}", …)`.
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 }
 

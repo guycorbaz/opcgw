@@ -213,7 +213,7 @@ impl WebAuthState {
     /// empty credentials.
     pub fn new_with_fresh_key(user: &str, password: &str, realm: String) -> Self {
         let mut hmac_key = [0u8; 32];
-        getrandom::getrandom(&mut hmac_key)
+        getrandom::fill(&mut hmac_key)
             .expect("system RNG must produce 32 bytes for HMAC key");
         let user_digest = hmac_sha256(&hmac_key, user.as_bytes());
         let pass_digest = hmac_sha256(&hmac_key, password.as_bytes());
@@ -260,7 +260,7 @@ impl WebAuthState {
         is_first_run: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         // Iter-1 code review M9 fix: pre-fix `for_first_run` invoked
-        // `getrandom::getrandom` THREE times — once for `hmac_key`,
+        // `getrandom::fill` THREE times — once for `hmac_key`,
         // twice for throwaway-user + throwaway-pass digests. The
         // throwaway digests are NEVER COMPARED in first-run mode
         // (the auth middleware's `is_first_run && bypass_path` short-
@@ -273,7 +273,7 @@ impl WebAuthState {
         // compared, they're HMAC-of-zeros under a random key so
         // operationally indistinguishable from random bytes.
         let mut hmac_key = [0u8; 32];
-        getrandom::getrandom(&mut hmac_key)
+        getrandom::fill(&mut hmac_key)
             .expect("system RNG must produce 32 bytes for HMAC key");
         let throwaway_zeros = [0u8; 32];
         let user_digest = hmac_sha256(&hmac_key, &throwaway_zeros);

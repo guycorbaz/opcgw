@@ -29,13 +29,13 @@ prost = "0.14"
 prost-types = "0.14"
 tonic-prost = "0.14"
 async-opcua = { version = "0.19.0", features = ["server"] }
-constant_time_eq = "0.3"
-hmac = "0.12"
+constant_time_eq = "0.5"
+hmac = "0.13"
 # Story 7-2 + 9-1: per-process HMAC keying via OS RNG. Pinned to 0.2
 # explicitly because `getrandom` 0.3 renamed the entry point from
 # `getrandom(&mut [u8])` to `fill(&mut [u8])`; a transitive bump
 # would silently break compilation. Story 9-1 review iter-1 patch.
-getrandom = "0.2"
+getrandom = "0.4"
 clap = { version = "4.6.0", features = ["derive"] }
 local-ip-address = "0.6.5"
 url = "2.5.7"
@@ -49,7 +49,7 @@ serde_json = "1.0.132"
 # endpoint (the canonical Rust TOML library; already present transitively via
 # figment's `toml` feature).
 toml = "0.8"
-sha2 = "0.10.8"
+sha2 = "0.11"
 dashmap = "6.1"
 
 # Dependencies for later stories (added now, not yet used)
