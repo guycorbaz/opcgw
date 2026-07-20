@@ -2713,6 +2713,14 @@ grep -c "Accept new connection"   opcgw.log.&lt;date&gt;   # e.g. 1550</programl
               <literal>Base url: opc.tcp://opcgw:4855</literal> and the churn should
               stop. Use whatever name the clients already resolve (for a client on
               the same Docker network, the container/service name).</para>
+              <para><emphasis>Gotcha:</emphasis> if you set
+              <literal>host_ip_address</literal> on the Admin page but the log still
+              shows <literal>Base url: opc.tcp://0.0.0.0:4855</literal>, an
+              <literal>OPCGW_OPCUA__HOST_IP_ADDRESS</literal> environment variable is
+              overriding it — <literal>OPCGW_*</literal> env vars sit at the top of
+              the configuration precedence and silently win over the web/SQLite
+              value. Remove it from <filename>.env</filename> (opcgw also warns about
+              this at startup, <literal>event="env_shadows_singleton_config"</literal>).</para>
             </listitem>
             <listitem>
               <para><emphasis>Confirm opcgw is healthy</emphasis> with an
@@ -2720,12 +2728,37 @@ grep -c "Accept new connection"   opcgw.log.&lt;date&gt;   # e.g. 1550</programl
               connection does not churn.</para>
             </listitem>
             <listitem>
-              <para><emphasis>Audit the client's OPC UA connections.</emphasis>
-              On Ignition: <emphasis>Config → OPC Client → OPC
-              Connections</emphasis> — look for a second, duplicate, or faulted
-              connection to opcgw, and verify its security policy and client
-              certificate match an endpoint opcgw actually offers. Delete and
-              recreate a suspect connection.</para>
+              <para><emphasis>Delete and recreate the client's OPC UA
+              connection</emphasis> — the definitive remedy. A client (Ignition
+              especially) can hold <emphasis>stale connection state</emphasis>
+              across a server-endpoint change or a host reboot: it churns, or goes
+              to <emphasis>Fault</emphasis> and retries a broken channel (in the
+              opcgw log this looks like the same client IP opening and closing a
+              connection in a few milliseconds every ~30 s, with
+              <emphasis>no session created</emphasis>). On Ignition:
+              <emphasis>Config → OPC Client → OPC Connections</emphasis> — remove
+              the opcgw connection and add it back pointing at
+              <literal>opc.tcp://opcgw:4855</literal>, and <emphasis>remove any Host
+              Override</emphasis> (redundant once opcgw advertises its real name).
+              This forces a fresh discovery + secure-channel + session. See also
+              <xref linkend="sec-issue-ignition-stale-connection"/>.</para>
+            </listitem>
+            <listitem>
+              <para><emphasis>Choose the endpoint deliberately.</emphasis> opcgw
+              currently offers only <literal>None</literal> and the
+              <emphasis>deprecated</emphasis> <literal>Basic256</literal> policies
+              (Sign / SignAndEncrypt). If the recreated connection faults
+              <emphasis>before</emphasis> any session forms (the few-millisecond
+              open/close above), suspect the certificate handshake — with
+              <literal>create_sample_keypair = true</literal> the server presents a
+              self-signed sample certificate that a strict client may not trust.
+              For a trusted internal link (e.g. container-to-container on the same
+              Docker network, which never leaves the host) the
+              <literal>None / None</literal> endpoint is a pragmatic choice: it
+              skips certificate validation and reliably establishes a session. Note
+              that opcgw still requires the configured OPC UA
+              <emphasis>username / password</emphasis> token even on the
+              <literal>None</literal> endpoint.</para>
             </listitem>
             <listitem>
               <para><emphasis>Reduce the noise</emphasis> if the churn cannot be
@@ -2734,6 +2767,19 @@ grep -c "Accept new connection"   opcgw.log.&lt;date&gt;   # e.g. 1550</programl
               client's discovery/watchdog interval, keeps the log readable.</para>
             </listitem>
           </orderedlist>
+          <note>
+            <para><emphasis>Field note.</emphasis> This was diagnosed in production
+            with two clients — <emphasis>Ignition</emphasis> and
+            <emphasis>FUXA</emphasis> (node-opcua) — both Docker containers sharing
+            opcgw's network. Throughout, opcgw served every value
+            <literal>Good</literal>; the churn/fault was entirely
+            <emphasis>client-side</emphasis> connection state, and recreating the
+            connection on a clean endpoint resolved it (one persistent session,
+            no churn). When correlating the opcgw log with a specific client, note
+            that <emphasis>Docker reassigns container IPs on a host reboot</emphasis>,
+            so the churning IP may change between reboots — identify the client from
+            the Docker network's container list, not a remembered address.</para>
+          </note>
         </section>
 
         <section id="sec-issue-database-corruption">
