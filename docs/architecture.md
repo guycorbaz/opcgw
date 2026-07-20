@@ -278,7 +278,7 @@ POST /api/applications/:id/devices
 
 ## Deployment
 
-**Docker:** Multi-stage build (`rust:1.94` builder → `ubuntu:24.04` runtime, non-root user `opcgw` UID 10001). Exposes ports 4840 (OPC UA) and 8080 (web UI). Mounts `log/`, `config/`, `pki/`, `data/` as volumes (the `data/` mount is required — it holds the authoritative SQLite database).
+**Docker:** Multi-stage build (`rust:1.95` builder → `ubuntu:24.04` runtime, non-root user `opcgw` UID 10001). Exposes ports 4840 (OPC UA) and 8080 (web UI). Mounts `log/`, `config/`, `pki/`, `data/` as volumes (the `data/` mount is required — it holds the authoritative SQLite database).
 
 **docker-compose.yml:** Single service `opcgw`, restart always, ports 4840:4840 + 8080:8080.
 

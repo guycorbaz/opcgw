@@ -62,7 +62,7 @@ opcgw/
 ├── build.rs                      # Build script: compiles .proto files with tonic-build
 ├── Cargo.toml                    # Rust package manifest (dependencies, profiles)
 ├── Cargo.lock                    # Dependency lock file
-├── Dockerfile                    # Multi-stage Docker build (rust:1.94 → ubuntu:24.04, non-root)
+├── Dockerfile                    # Multi-stage Docker build (rust:1.95 → ubuntu:24.04, non-root)
 ├── docker-compose.yml            # Docker Compose: exposes port 4840, mounts config/log/pki
 ├── Makefile.toml                 # cargo-make task definitions (test, coverage)
 ├── README.md                     # Project README with setup and usage instructions

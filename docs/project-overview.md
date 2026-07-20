@@ -12,7 +12,7 @@ The project was born from a real-world need: controlling LoRa watering valves in
 
 | Category | Technology | Version | Notes |
 |----------|-----------|---------|-------|
-| Language | Rust | 2021 edition | Builder/MSRV rustc 1.94.0 |
+| Language | Rust | 2021 edition | Builder/MSRV rustc 1.95.0 |
 | Async Runtime | Tokio | 1.50.0 | Full features, multi-thread |
 | gRPC | Tonic | 0.14.5 | ChirpStack API client |
 | Protobuf | tonic-build | 0.14.5 | Build-time proto compilation |
