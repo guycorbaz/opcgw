@@ -26,6 +26,18 @@ services:
       # in `.env`. Uses OPCGW_WEB__PORT when set, else 8080. Browse
       # http://localhost:<port> to reach the first-run setup wizard.
       - "${OPCGW_WEB__PORT:-8080}:${OPCGW_WEB__PORT:-8080}"
+    # OPC UA advertised endpoint host (issue #163). opcgw advertises its
+    # endpoint/discovery URL using `[opcua].host_ip_address` — and async-opcua
+    # 0.17 uses that SAME value to bind the socket. If it is `0.0.0.0` the server
+    # advertises `opc.tcp://0.0.0.0:<port>`, which clients cannot reconnect to
+    # after GetEndpoints, causing session-less connection churn. To bind all
+    # interfaces yet advertise a resolvable name, set `host_ip_address` to that
+    # name AND map it to 0.0.0.0 in the container's /etc/hosts here, e.g.:
+    #   extra_hosts:
+    #     - "opcgw:0.0.0.0"      # bind resolves the name → 0.0.0.0 (all ifaces)
+    # with `host_ip_address = "opcgw"` → advertises `opc.tcp://opcgw:4840`.
+    # Clients on this Docker network resolve `opcgw` via Docker DNS. See the
+    # manual: "SCADA client opens and drops connections constantly".
     # All gateway environment variables — secret credentials and any optional
     # OPCGW_* overrides — live in a single `.env` file in this directory.
     # Copy `.env.example` to `.env`, fill in the required values, then

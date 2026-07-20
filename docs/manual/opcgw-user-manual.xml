@@ -2635,13 +2635,25 @@ chirpstack:8080 list</command>.</para>
           holds the client's single session; separately, the client keeps
           opening extra connections that never activate a session and are then
           reaped by opcgw's channel-establishment timeout (~60 s), whereupon the
-          client opens fresh ones. This is
-          <emphasis>client-side connection behaviour</emphasis> — an
-          endpoint-discovery / connection-watchdog probe, or a faulted or
-          duplicate OPC UA connection definition (often a security-policy or
-          certificate mismatch on a secondary connection) that never completes
-          a session and retries on a fixed cycle. opcgw is healthy: it accepts
-          each connection and times out the ones that never establish.</para>
+          client opens fresh ones. opcgw is healthy: it accepts each connection
+          and times out the ones that never establish.</para>
+          <para>The most common trigger is that <emphasis>opcgw advertises an
+          unreachable endpoint URL</emphasis>. async-opcua 0.17 uses a single
+          value (<literal>[opcua].host_ip_address</literal>) for
+          <emphasis>both</emphasis> the socket bind <emphasis>and</emphasis> the
+          advertised endpoint / discovery URL, so with
+          <literal>host_ip_address = 0.0.0.0</literal> the server binds all
+          interfaces (correct) but also hands every client
+          <literal>opc.tcp://0.0.0.0:4855</literal> — check opcgw's startup log
+          for <literal>Base url: opc.tcp://&lt;host&gt;:4855</literal>. The
+          client connects fine to the address <emphasis>you</emphasis>
+          configured, but on its periodic endpoint rediscovery it receives the
+          unroutable <literal>0.0.0.0</literal> URL, re-probes the advertised
+          endpoints, never completes a session on them, and each is reaped at the
+          ~60 s timeout. (A faulted or duplicate <emphasis>client-side</emphasis>
+          OPC UA connection definition — e.g. a security-policy or certificate
+          mismatch on a secondary connection — produces the same session-less
+          pattern, so rule that out too.)</para>
           <para><emphasis>Confirm it is session-less churn</emphasis> from the
           opcgw log by comparing session creations against connection accepts
           over the same window:</para>
@@ -2658,6 +2670,34 @@ grep -c "Accept new connection"   opcgw.log.&lt;date&gt;   # e.g. 1550</programl
           ~60 s churn cycle unchanged, confirming keep-alive timing was not
           involved.)</para>
           <orderedlist>
+            <listitem>
+              <para><emphasis>Fix the advertised host (most common cause).</emphasis>
+              Check the startup log for <literal>Base url:
+              opc.tcp://&lt;host&gt;:4855</literal>. If <literal>&lt;host&gt;</literal>
+              is <literal>0.0.0.0</literal> or another unspecified address, opcgw
+              also emits a warning
+              (<literal>event="opcua_advertise_host_unroutable"</literal>). Set
+              <literal>[opcua].host_ip_address</literal> (web
+              <emphasis>Admin</emphasis> page) to a hostname or IP the clients can
+              resolve <emphasis>and</emphasis> reach. Because async-opcua uses that
+              one value for both bind and advertisement, a container that must bind
+              all interfaces should keep <literal>0.0.0.0</literal> binding via an
+              <literal>/etc/hosts</literal> entry: set
+              <literal>host_ip_address</literal> to the advertised name and add an
+              <literal>extra_hosts</literal> mapping for it in the compose service —
+              the bind resolves the name to <literal>0.0.0.0</literal> while the
+              advertised URL uses the literal name:</para>
+              <programlisting>services:
+  opcgw:
+    extra_hosts:
+      - "opcgw:0.0.0.0"     # bind: name resolves to 0.0.0.0 (all interfaces)
+    # [opcua].host_ip_address = "opcgw"  →  advertises opc.tcp://opcgw:4855</programlisting>
+              <para>Other containers resolve <literal>opcgw</literal> via Docker DNS
+              to opcgw's real address. After restart the log must show
+              <literal>Base url: opc.tcp://opcgw:4855</literal> and the churn should
+              stop. Use whatever name the clients already resolve (for a client on
+              the same Docker network, the container/service name).</para>
+            </listitem>
             <listitem>
               <para><emphasis>Confirm opcgw is healthy</emphasis> with an
               independent OPC UA client (e.g. UaExpert): a single clean

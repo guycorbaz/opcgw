@@ -135,6 +135,26 @@ pub struct RunHandles {
     pub(crate) state_guard: crate::opc_ua_session_monitor::MonitorStateGuard,
 }
 
+/// Returns `true` when `host` is unsuitable as an *advertised* OPC UA endpoint
+/// host — i.e. a value clients cannot connect back to after `GetEndpoints`:
+/// an empty string, or an unspecified address such as `0.0.0.0` / `::`.
+///
+/// Binding to these is perfectly fine (it means "all interfaces"); the problem
+/// is purely advertisement. async-opcua 0.17 uses one value (`TcpConfig.host`)
+/// for both the socket bind and the advertised endpoint/discovery URL, so when
+/// `host_ip_address` is `0.0.0.0` the server both binds all interfaces *and*
+/// hands clients `opc.tcp://0.0.0.0:4855`, which is unreachable. Clients that
+/// follow the advertised URL then fail to reconnect and churn connections
+/// (see the manual: "SCADA client opens and drops connections constantly").
+fn is_unroutable_advertise_host(host: &str) -> bool {
+    let h = host.trim();
+    h.is_empty()
+        || h.trim_start_matches('[').trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_unspecified())
+            .unwrap_or(false)
+}
+
 /// Structure for storing OpcUa server parameters
 pub struct OpcUa {
     /// Configuration for the OPC UA server
@@ -207,6 +227,29 @@ impl OpcUa {
                 }
             });
         let host_port = config.opcua.host_port.unwrap_or(OPCUA_DEFAULT_PORT);
+
+        // Issue #163: warn whenever the *effective* advertised host is unroutable
+        // (0.0.0.0 / unspecified / empty), regardless of whether it came from an
+        // explicit `host_ip_address` or the `local_ip()` fallback. async-opcua 0.17
+        // uses this one value for both the socket bind and the advertised endpoint
+        // URL, so `0.0.0.0` binds all interfaces (good) but also advertises an
+        // unreachable `opc.tcp://0.0.0.0:<port>` (bad) — SCADA clients that follow
+        // GetEndpoints cannot reconnect and churn connections.
+        if is_unroutable_advertise_host(&host_ip_address) {
+            warn!(
+                event = "opcua_advertise_host_unroutable",
+                host = %host_ip_address,
+                port = host_port,
+                "OPC UA endpoint/discovery URL advertises an unroutable host \
+                 (0.0.0.0/unspecified); SCADA clients that follow GetEndpoints cannot \
+                 reconnect to it and may churn connections. Set [opcua].host_ip_address to a \
+                 hostname/IP clients can resolve. In Docker with a published port, keep binding \
+                 all interfaces by adding `extra_hosts: [\"<advertised-name>:0.0.0.0\"]` to the \
+                 compose service, so the container binds 0.0.0.0 while advertising \
+                 <advertised-name>. See the manual troubleshooting section 'SCADA client opens \
+                 and drops connections constantly'."
+            );
+        }
 
         OpcUa {
             config: config.clone(),
@@ -2206,6 +2249,27 @@ mod tests {
 
     fn make_status_cache() -> StatusCache {
         Arc::new(DashMap::new())
+    }
+
+    /// Issue #163: `is_unroutable_advertise_host` flags exactly the values that
+    /// are fine to *bind* but unreachable when *advertised* (unspecified/empty),
+    /// and leaves resolvable hostnames / concrete IPs alone.
+    #[test]
+    fn unroutable_advertise_host_detection() {
+        // Unroutable when advertised (unspecified / empty).
+        for bad in ["0.0.0.0", "::", "[::]", "", "  ", "0000:0000:0000:0000:0000:0000:0000:0000"] {
+            assert!(
+                is_unroutable_advertise_host(bad),
+                "expected {bad:?} to be flagged as unroutable"
+            );
+        }
+        // Routable / resolvable — must NOT be flagged.
+        for ok in ["opcgw", "192.168.16.6", "127.0.0.1", "gateway.example.com", "::1", "10.0.0.5"] {
+            assert!(
+                !is_unroutable_advertise_host(ok),
+                "expected {ok:?} to be accepted as a routable advertise host"
+            );
+        }
     }
 
     /// Story 6-1, AC#3: a Good→Uncertain transition emits an `info!` line carrying
