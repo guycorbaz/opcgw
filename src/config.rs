@@ -1322,6 +1322,100 @@ impl AppConfig {
         true
     }
 
+    /// Issue #169: warn when an `OPCGW_*` environment variable shadows a field
+    /// that is also set in the SQLite `singleton_config` table (i.e. a field the
+    /// operator manages from the web **Admin** page).
+    ///
+    /// The `Env` provider sits at the TOP of the figment stack (`env > SQLite >
+    /// TOML > default`), so an env override **silently wins** over the web/SQLite
+    /// value — an Admin-page edit to the same field then has no effect. That is
+    /// exactly the trap that made `OPCGW_OPCUA__HOST_IP_ADDRESS=0.0.0.0` shadow
+    /// the web-set `host_ip_address="opcgw"` (#163) and `OPCGW_OPCUA__MAX_KEEP_ALIVE_COUNT`
+    /// shadow the web-set value — both cost real diagnosis time because the shadow
+    /// was invisible.
+    ///
+    /// Emits one `env_shadows_singleton_config` WARN per shadowed field, naming the
+    /// env var, the `[section].key`, and both values, so the conflict is visible.
+    /// Secret fields (`SECRET_FIELDS_BY_SECTION`) are never inspected or logged, and
+    /// only the four web-editable sections (`KNOWN_SECTIONS`) are considered — the
+    /// `.env`-boundary vars (`OPCGW_LOG_LEVEL`, the `WEB__*` bootstrap set, secrets)
+    /// are legitimately env-only and are not flagged.
+    ///
+    /// `singleton_rows` are the `(section, key, value_json)` tuples from
+    /// [`crate::storage::SqliteBackend::load_singleton_config`]. Returns the number
+    /// of shadowed fields warned about. The `already_emitted` guard gives
+    /// once-per-boot semantics (a process-global `AtomicBool` from `main.rs`);
+    /// tests pass a fresh `AtomicBool` so the emit path is exercised deterministically.
+    pub fn maybe_warn_env_shadows_singleton(
+        singleton_rows: &[(String, String, String)],
+        already_emitted: &std::sync::atomic::AtomicBool,
+    ) -> usize {
+        use crate::storage::migrate_singleton_config::{
+            secret_fields_for_section, KNOWN_SECTIONS,
+        };
+        use std::sync::atomic::Ordering;
+
+        if singleton_rows.is_empty() {
+            return 0;
+        }
+
+        // Collect (env_var, section, key, env_value, db_value) for every OPCGW_*
+        // env var that maps to a web-editable field ALSO present in singleton_config.
+        let mut shadowed: Vec<(String, String, String, String, String)> = Vec::new();
+        for (name, env_value) in std::env::vars() {
+            let Some(rest) = name.strip_prefix("OPCGW_") else {
+                continue;
+            };
+            // Only `OPCGW_<SECTION>__<KEY>` maps to a singleton field. Short forms
+            // like `OPCGW_LOG_LEVEL` have no `__` separator — skip them.
+            let Some((section_part, key_part)) = rest.split_once("__") else {
+                continue;
+            };
+            let section = section_part.to_lowercase();
+            let key = key_part.to_lowercase();
+            if !KNOWN_SECTIONS.contains(&section.as_str()) {
+                continue;
+            }
+            // Never inspect or log secret fields.
+            if secret_fields_for_section(&section).contains(&key.as_str()) {
+                continue;
+            }
+            if let Some((_, _, db_value)) = singleton_rows
+                .iter()
+                .find(|(s, k, _)| s == &section && k == &key)
+            {
+                shadowed.push((name, section, key, env_value, db_value.clone()));
+            }
+        }
+
+        if shadowed.is_empty() {
+            return 0;
+        }
+
+        // Once-per-boot guard — only consumed when there is actually a shadow to
+        // report. `swap` returns the previous value: `true` means another call
+        // already emitted this boot.
+        if already_emitted.swap(true, Ordering::SeqCst) {
+            return 0;
+        }
+
+        for (env_var, section, key, env_value, db_value) in &shadowed {
+            warn!(
+                event = "env_shadows_singleton_config",
+                env_var = %env_var,
+                section = %section,
+                key = %key,
+                env_value = %env_value,
+                db_value = %db_value,
+                "environment variable shadows a web/SQLite-managed field; the env \
+                 value wins over the Admin page, so edits made there have no effect. \
+                 Remove this OPCGW_* override and manage the field on the web Admin \
+                 page, or it will keep overriding the UI."
+            );
+        }
+        shadowed.len()
+    }
+
     /// Story F-2: detect whether the ChirpStack API token is still missing.
     ///
     /// Returns `true` when the in-memory `[chirpstack].api_token` is empty or
@@ -5565,5 +5659,83 @@ mod tests {
         config.opcua.max_history_data_results_per_node = Some(1);
 
         assert!(config.validate().is_ok(), "Some(1) must pass validation");
+    }
+
+    // ---- Issue #169: env-shadows-singleton-config warning ----
+
+    /// An `OPCGW_*` env var that shadows a key present in `singleton_config`
+    /// (i.e. a web/Admin-managed field) is flagged.
+    #[test]
+    #[serial_test::serial]
+    fn env_shadows_singleton_flags_shadowed_field() {
+        temp_env::with_vars([("OPCGW_OPCUA__HOST_IP_ADDRESS", Some("0.0.0.0"))], || {
+            let rows = vec![(
+                "opcua".to_string(),
+                "host_ip_address".to_string(),
+                "\"opcgw\"".to_string(),
+            )];
+            let guard = std::sync::atomic::AtomicBool::new(false);
+            assert_eq!(
+                AppConfig::maybe_warn_env_shadows_singleton(&rows, &guard),
+                1,
+                "an env var shadowing a singleton field must be flagged"
+            );
+        });
+    }
+
+    /// An env var with no matching SQLite row is not a shadow.
+    #[test]
+    #[serial_test::serial]
+    fn env_shadows_singleton_ignores_keys_not_in_sqlite() {
+        temp_env::with_vars([("OPCGW_OPCUA__HOST_IP_ADDRESS", Some("0.0.0.0"))], || {
+            // singleton_config has a different key — no shadow for host_ip_address.
+            let rows = vec![("opcua".to_string(), "host_port".to_string(), "4855".to_string())];
+            let guard = std::sync::atomic::AtomicBool::new(false);
+            assert_eq!(
+                AppConfig::maybe_warn_env_shadows_singleton(&rows, &guard),
+                0,
+                "env var with no matching SQLite row must not be flagged"
+            );
+        });
+    }
+
+    /// Secret fields are never inspected or logged, even if (defensively) a
+    /// secret row is present in the passed set.
+    #[test]
+    #[serial_test::serial]
+    fn env_shadows_singleton_skips_secret_fields() {
+        temp_env::with_vars([("OPCGW_OPCUA__USER_PASSWORD", Some("hunter2"))], || {
+            let rows = vec![(
+                "opcua".to_string(),
+                "user_password".to_string(),
+                "\"x\"".to_string(),
+            )];
+            let guard = std::sync::atomic::AtomicBool::new(false);
+            assert_eq!(
+                AppConfig::maybe_warn_env_shadows_singleton(&rows, &guard),
+                0,
+                "secret fields must never be flagged or logged"
+            );
+        });
+    }
+
+    /// Once-per-boot: a second call with the same guard does not re-warn.
+    #[test]
+    #[serial_test::serial]
+    fn env_shadows_singleton_once_per_boot_guard() {
+        temp_env::with_vars([("OPCGW_OPCUA__HOST_IP_ADDRESS", Some("0.0.0.0"))], || {
+            let rows = vec![(
+                "opcua".to_string(),
+                "host_ip_address".to_string(),
+                "\"opcgw\"".to_string(),
+            )];
+            let guard = std::sync::atomic::AtomicBool::new(false);
+            assert_eq!(AppConfig::maybe_warn_env_shadows_singleton(&rows, &guard), 1);
+            assert_eq!(
+                AppConfig::maybe_warn_env_shadows_singleton(&rows, &guard),
+                0,
+                "already-emitted guard must suppress a second warning this boot"
+            );
+        });
     }
 }
