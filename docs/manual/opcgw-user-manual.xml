@@ -745,6 +745,22 @@ docker compose logs -f opcgw</screen>
           </listitem>
         </orderedlist>
 
+        <caution>
+          <title>An env var silently overrides the web UI (issue #169)</title>
+          <para>Because <literal>OPCGW_*</literal> environment variables sit at the
+          top of this ordering, an env var set for a field you also manage on the
+          web <emphasis>Admin</emphasis> page <emphasis>silently wins</emphasis> — an
+          edit you make on the Admin page then has no effect, with no obvious
+          indication. To surface this, opcgw emits a
+          <literal>WARN</literal> at startup
+          (<literal>event="env_shadows_singleton_config"</literal>) naming every
+          <literal>OPCGW_*</literal> env var that shadows a web/SQLite-managed field,
+          together with both values. If you see it, remove the
+          <literal>OPCGW_*</literal> override from <filename>.env</filename> and
+          manage the field on the Admin page instead. (Secrets, logging vars, and the
+          web-server bootstrap vars are exempt — they are legitimately env-only.)</para>
+        </caution>
+
         <para>The rest of this chapter follows the path an operator
         actually takes: complete the <emphasis>first-run setup
         wizard</emphasis>, then add applications, devices, and metrics

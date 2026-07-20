@@ -530,6 +530,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     static CONFIG_TOML_UNUSED_WARNING_EMITTED: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
 
+    // Issue #169: once-per-boot guard for the `env_shadows_singleton_config`
+    // warning (an OPCGW_* env var overriding a web/SQLite-managed field).
+    static ENV_SHADOWS_SINGLETON_WARNING_EMITTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
     // Parse arguments
     let args = Args::parse();
 
@@ -985,6 +990,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         singleton_row_count,
                         &CONFIG_TOML_UNUSED_WARNING_EMITTED,
                     );
+
+                    // Issue #169: warn about any OPCGW_* env var that shadows a
+                    // web/SQLite-managed field (env wins over the Admin page —
+                    // the silent-shadow trap behind #163). Load the rows once to
+                    // compare against the actual environment; on a read fault,
+                    // skip (already logged inside the provider path).
+                    match sqlite_backend.load_singleton_config() {
+                        Ok(singleton_rows) => {
+                            AppConfig::maybe_warn_env_shadows_singleton(
+                                &singleton_rows,
+                                &ENV_SHADOWS_SINGLETON_WARNING_EMITTED,
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                event = "config_provider_failed",
+                                error = %e,
+                                "Failed to load singleton_config rows after the D-2 \
+                                 reload; skipping the env_shadows_singleton_config \
+                                 check for this boot"
+                            );
+                        }
+                    }
                 }
                 Err(e) => {
                     warn!(
