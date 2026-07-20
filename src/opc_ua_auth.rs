@@ -129,7 +129,7 @@ impl OpcgwAuthManager {
         // is NOT a configured credential, so reject-all stays in force until the
         // operator applies a real password via `/setup`.
         let mut hmac_key = [0u8; 32];
-        getrandom::getrandom(&mut hmac_key)
+        getrandom::fill(&mut hmac_key)
             .expect("system RNG must produce 32 bytes for HMAC key");
         let user_digest = hmac_sha256(&hmac_key, config.opcua.user_name.as_bytes());
         let pass_digest = hmac_sha256(&hmac_key, config.opcua.user_password.as_bytes());
