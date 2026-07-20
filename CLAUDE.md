@@ -55,7 +55,7 @@ The build script (`build.rs`) compiles Protocol Buffer definitions from `proto/c
 ## Code Conventions
 
 - SPDX license headers (MIT OR Apache-2.0) and copyright `(c) [2024] Guy Corbaz` in each source file.
-- Rust 2021 edition, minimum rustc 1.87.0.
+- Rust 2021 edition, minimum rustc 1.95.0.
 - Custom error type `OpcGwError` in `utils.rs` using `thiserror`.
 - Extensive doc comments on all public items.
 

@@ -67,7 +67,7 @@ ChirpStack Server (LoRaWAN) ──→ opcgw Gateway ──→ OPC UA Clients (SC
 
 ## Installation
 
-### From Source (Rust 1.94.0+)
+### From Source (Rust 1.95.0+)
 
 ```bash
 git clone https://github.com/guycorbaz/opcgw.git
@@ -444,7 +444,7 @@ Both components share thread-safe in-memory storage via `Arc<Mutex<Storage>>`.
 
 ## Technology Stack
 
-- **Language**: Rust 1.94.0+ with async/await
+- **Language**: Rust 1.95.0+ with async/await
 - **Protocols**: gRPC for ChirpStack, OPC UA 1.04 for industrial clients
 - **Storage**: SQLite (WAL mode) for metric values, history, command queue, and configuration; in-memory cache for current values
 - **Logging**: Tokio-tracing with structured fields, a single retention-capped daily log file, and a stderr console layer

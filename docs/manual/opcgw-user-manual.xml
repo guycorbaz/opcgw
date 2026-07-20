@@ -350,7 +350,7 @@
             <literal>ghcr.io/guycorbaz/opcgw:2.1</literal>; multi-arch
             <literal>linux/amd64</literal> + <literal>linux/arm64</literal>).
             See <xref linkend="ch-installation"/>. Building from source is
-            also possible (Rust 1.94.0+ and the
+            also possible (Rust 1.95.0+ and the
             <literal>protobuf-compiler</literal> /
             <literal>libssl-dev</literal> / <literal>pkg-config</literal>
             packages) for platforms the prebuilt image does not

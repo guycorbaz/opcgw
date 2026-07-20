@@ -6,7 +6,7 @@
 
 | Requirement | Version | Notes |
 |------------|---------|-------|
-| Rust toolchain | >= 1.94.0 | Install via [rustup](https://rustup.rs/) |
+| Rust toolchain | >= 1.95.0 | Install via [rustup](https://rustup.rs/) |
 | Protobuf compiler | protoc | Required for building proto definitions |
 | cargo-make | Latest | Optional, for task runner (`cargo install cargo-make`) |
 | grcov | Latest | Optional, for coverage reports (`cargo install grcov`) |
@@ -31,7 +31,7 @@
 
 3. **Verify Rust toolchain:**
    ```bash
-   rustc --version   # Should be >= 1.94.0
+   rustc --version   # Should be >= 1.95.0
    cargo --version
    ```
 
@@ -144,4 +144,4 @@ docker compose up -d
 #   ./data   → /usr/local/bin/data   (required — SQLite DB persistence)
 ```
 
-The Docker image uses a multi-stage build: Rust 1.94.0 for compilation, `ubuntu:24.04` for runtime, running as **non-root user `opcgw` (UID 10001)**. It exposes **4840** (OPC UA) and **8080** (web UI). Bind-mount targets must be `chown`'d to UID 10001 before first start; see the deployment guide for the full first-deploy checklist.
+The Docker image uses a multi-stage build: Rust 1.95.0 for compilation, `ubuntu:24.04` for runtime, running as **non-root user `opcgw` (UID 10001)**. It exposes **4840** (OPC UA) and **8080** (web UI). Bind-mount targets must be `chown`'d to UID 10001 before first start; see the deployment guide for the full first-deploy checklist.

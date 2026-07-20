@@ -117,7 +117,7 @@ jobs:
           tags: ${{ steps.meta-ghcr.outputs.tags }}
           labels: ${{ steps.meta-ghcr.outputs.labels }}
           build-args: |
-            RUST_VERSION=1.94.0
+            RUST_VERSION=1.95.0
             APP_NAME=opcgw
 
       - name: Build and push to Docker Hub
@@ -132,7 +132,7 @@ jobs:
           tags: ${{ steps.meta-hub.outputs.tags }}
           labels: ${{ steps.meta-hub.outputs.labels }}
           build-args: |
-            RUST_VERSION=1.94.0
+            RUST_VERSION=1.95.0
             APP_NAME=opcgw
 
       - name: Sync Docker Hub repository description

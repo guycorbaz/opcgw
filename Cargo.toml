@@ -6,7 +6,7 @@ description = "A Chirpstack to opc ua gateway"
 readme = "README.md"
 keywords = ["scada","gateway","opc_ua","chirpstack"]
 license = "MIT OR Apache-2.0"
-rust-version = "1.94.0"
+rust-version = "1.95.0"
 edition = "2021"
 categories = ["science"]
 publish = false # for now, until a running version is available
@@ -54,12 +54,12 @@ dashmap = "6.1"
 
 # Dependencies for later stories (added now, not yet used)
 tokio-util = "0.7.18"
-rusqlite = { version = "0.38.0", features = ["bundled"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 uuid = { version = "1.10.0", features = ["v4", "serde"] }
 
 # Story 9-1: embedded Axum web server for FR50 / NFR11 / NFR12 / FR41.
 axum = "0.8"
-tower-http = { version = "0.6", features = ["fs", "set-header"] }
+tower-http = { version = "0.7", features = ["fs", "set-header"] }
 base64 = "0.22"
 # Story D-2 (2026-05-27): removed `toml_edit = "0.25.11"`. Story C-6 (2026-05-26)
 # decommissioned the SIGHUP + TOML round-trip mutation path (Story 9-4's
@@ -93,7 +93,7 @@ serial_test = "3"
 async-opcua = { version = "0.19.0", features = ["client"] }
 # Story 9-1 integration tests: HTTP client for the embedded web server.
 # Dev-only — no inbound HTTP client in a release build.
-reqwest = { version = "0.12", default-features = false, features = ["http2", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["http2", "json"] }
 # Story 9-1 unit tests: tower::ServiceExt::oneshot for in-process Axum
 # middleware testing without binding a TCP listener.
 tower = { version = "0.5", features = ["util"] }

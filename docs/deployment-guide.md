@@ -30,7 +30,7 @@ cargo build --release
 ### 2. Docker
 
 **Dockerfile** uses a multi-stage build:
-1. **Builder stage:** `rust:1.94.0` — installs protobuf compiler, builds release binary
+1. **Builder stage:** `rust:1.95.0` — installs protobuf compiler, builds release binary
 2. **Runtime stage:** `ubuntu:24.04` — minimal runtime with `iputils-ping`, runs as **non-root user `opcgw` (UID 10001)**
 
 The container exposes **4840** (OPC UA) and **8080** (web UI). Because it runs non-root, the host-side bind-mount targets must be owned by UID 10001 before first start:

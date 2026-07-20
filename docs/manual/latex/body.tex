@@ -88,7 +88,7 @@ Outbound TCP to the ChirpStack gRPC endpoint (typically port 8080) and inbound T
 \item
   \emph{OS} --- Linux (Debian, Ubuntu, CentOS, Alpine), macOS, or Windows with Docker. The reference deployment uses Linux containers.
 \item
-  \emph{Runtime} --- Docker, using the published image (\texttt{docker.io/gcorbaz/opcgw:2.1}, mirrored at \texttt{ghcr.io/guycorbaz/opcgw:2.1}; multi-arch \texttt{linux/amd64} + \texttt{linux/arm64}). See \hyperref[ch-installation]{Installation}. Building from source is also possible (Rust 1.94.0+ and the \texttt{protobuf-compiler} / \texttt{libssl-dev} / \texttt{pkg-config} packages) for platforms the prebuilt image does not cover.
+  \emph{Runtime} --- Docker, using the published image (\texttt{docker.io/gcorbaz/opcgw:2.1}, mirrored at \texttt{ghcr.io/guycorbaz/opcgw:2.1}; multi-arch \texttt{linux/amd64} + \texttt{linux/arm64}). See \hyperref[ch-installation]{Installation}. Building from source is also possible (Rust 1.95.0+ and the \texttt{protobuf-compiler} / \texttt{libssl-dev} / \texttt{pkg-config} packages) for platforms the prebuilt image does not cover.
 \item
   \emph{SQLite} --- bundled via \texttt{rusqlite}\textquotesingle s \texttt{bundled} feature; no separate SQLite installation is needed at runtime. The \texttt{sqlite3} CLI is recommended on the operator host for the migration pre-flight script (\hyperref[ch-upgrade]{Upgrade and Migration}).
 \item

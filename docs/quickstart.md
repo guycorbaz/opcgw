@@ -16,7 +16,7 @@ permalink: /quickstart/
 
 ### Prerequisites
 
-- Rust 1.94.0+ ([Install](https://rustup.rs/))
+- Rust 1.95.0+ ([Install](https://rustup.rs/))
 - Docker & Docker Compose (optional, for containerized deployment)
 - Running ChirpStack 4 instance with accessible gRPC API
 - OPC UA client software (Ignition, KEPServerEx, UA Expert, etc.) for testing

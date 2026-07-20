@@ -7,7 +7,7 @@
 # Operator-side: chown 10001:10001 ./log ./config ./pki BEFORE the first `docker compose up`
 # so the gateway can write log files + read+write SQLite database + read PKI.
 
-ARG RUST_VERSION=1.94.0
+ARG RUST_VERSION=1.95.0
 ARG APP_NAME=opcgw
 
 # ─────────────────────────────────────────────────────────────────────────────
