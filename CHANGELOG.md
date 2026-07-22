@@ -5,11 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.1] — 2026-07-22 — Dependency modernization, env-shadow guardrail, SCADA connection fixes
+
+> **Status:** released (stable). Docker `gcorbaz/opcgw:2.7.1` / `:2.7` / `:latest`
+> + GHCR mirror (multi-arch amd64+arm64). Promoted from `v2.7.1-rc4` after a clean
+> soak on the panoramix NAS: ~44 h of continuous uptime with zero restarts, and the
+> **SCADA connection churn that motivated the 2.7.1 line is gone** — session-less
+> connection accepts dropped from ~4,250/day to **2–8/day**, with accepts now
+> matching created sessions, and the OPC UA session gauge steady at `current=5`
+> (FUXA ×4 + Ignition ×1). Five ERROR lines in 44 h (3 × `BadSecureChannelClosed`
+> client disconnects, 1 non-fatal `database is locked` on a gateway-health update).
+> The rc4 env-shadow guardrail was validated in production, correctly naming the
+> 12 `OPCGW_*` env vars shadowing web/SQLite-managed fields on that deployment.
+> Residual: occasional SQLite latency-budget WARNs on NAS storage (count within the
+> historical band; peak `batch_write_metrics` latency 15 s during overnight NAS I/O
+> contention) — observability only, tracked separately.
+>
+> This entry consolidates the `2.7.0-rc1` and `2.7.1-rc1` … `rc4` candidates, none
+> of which were promoted individually. The per-candidate entries below are retained
+> for history.
+
+### Release contents (rc1 → rc4, consolidated)
+- **Per-device OPC UA `SourceTimestamp` mode** (`2.7.0-rc1`,
+  [#153](https://github.com/guycorbaz/opcgw/issues/153)) — schema migration **v014**.
+- **Web-editable OPC UA subscription tuning + tabbed Admin page** (`2.7.1-rc1`/`rc2`,
+  [#155](https://github.com/guycorbaz/opcgw/issues/155),
+  [#157](https://github.com/guycorbaz/opcgw/issues/157)).
+- **Advertised-endpoint-host warning + SCADA churn diagnosis/docs** (`2.7.1-rc3`,
+  [#161](https://github.com/guycorbaz/opcgw/issues/161),
+  [#163](https://github.com/guycorbaz/opcgw/issues/163)) — the deployment recipe
+  (`host_ip_address` + Docker `extra_hosts`) that removed the production churn.
+- **Dependency modernization, env-shadow guardrail, expanded SCADA troubleshooting**
+  (`2.7.1-rc4`, detailed below).
+
 ## [2.7.1-rc4] — 2026-07-20 — Dependency modernization + env-shadow guardrail
 
-> **Status:** release candidate. Docker `gcorbaz/opcgw:2.7.1-rc4` + GHCR mirror
-> (multi-arch amd64+arm64); **not** `:latest` / `:2.7`. Builds on `v2.7.1-rc3`.
-> To be soaked on panoramix before promotion to stable.
+> **Status:** superseded by the `2.7.1` stable release above. Docker
+> `gcorbaz/opcgw:2.7.1-rc4` + GHCR mirror (multi-arch amd64+arm64); **not**
+> `:latest` / `:2.7`. Builds on `v2.7.1-rc3`.
 
 ### Changed — dependency refresh
 - **async-opcua 0.17.1 → 0.19.0** ([#165](https://github.com/guycorbaz/opcgw/issues/165)):
