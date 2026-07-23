@@ -320,6 +320,34 @@ pub(crate) fn classify_poll_error(error: &OpcGwError) -> &'static str {
     }
 }
 
+/// Normalise a ChirpStack `server_address` so it carries an explicit port
+/// before it reaches tonic's channel builder (GH #148).
+///
+/// When the address omits a port, inject [`crate::utils::CHIRPSTACK_DEFAULT_GRPC_PORT`]
+/// (8080) — the same default the TCP availability probe applies. Without this,
+/// a port-less `http://host` resolves to port 80 in hyper/tonic while the probe
+/// checks 8080, so the gateway reports ChirpStack "available" yet every gRPC
+/// call fails with `transport error`. Addresses that already carry a port are
+/// returned verbatim (no trailing-slash rewrite), so this is a no-op for the
+/// common, correctly-configured case.
+pub(crate) fn normalize_chirpstack_endpoint(server_address: &str) -> Result<String, OpcGwError> {
+    let mut url = Url::parse(server_address).map_err(|e| {
+        OpcGwError::Configuration(format!("Invalid Chirpstack server address: {}", e))
+    })?;
+    if url.port().is_some() {
+        return Ok(server_address.to_string());
+    }
+    url.set_port(Some(crate::utils::CHIRPSTACK_DEFAULT_GRPC_PORT))
+        .map_err(|_| {
+            OpcGwError::Configuration(format!(
+                "Cannot apply the default gRPC port to Chirpstack server address '{}' \
+                 (not a host-based URL)",
+                server_address
+            ))
+        })?;
+    Ok(url.to_string())
+}
+
 /// (Story 6-3 AC#6 — iter-3 review pending #1 helper extraction) Classify a
 /// raw boolean metric value. On the only-`0.0`-or-`1.0` invariant violation,
 /// emits the canonical `metric_parse` warn and returns `None`. Tests can
@@ -571,16 +599,22 @@ impl ChirpstackPoller {
         // TCP availability probe instead), so we log a single attempt =
         // 1 here. Story 4-4 will extend this with explicit reconnect
         // logic; the operation name is reserved for compatibility.
-        let endpoint = self.config.chirpstack.server_address.clone();
+        //
         // Review patch P24: validate server_address is non-empty before
         // attempting to connect, so the failure message names the
         // configuration field instead of `Channel::from_shared`'s opaque
         // "invalid endpoint" wrapper.
-        if endpoint.trim().is_empty() {
+        if self.config.chirpstack.server_address.trim().is_empty() {
             return Err(OpcGwError::Configuration(
                 "chirpstack.server_address is empty".to_string(),
             ));
         }
+        // GH #148: normalise the port BEFORE handing the endpoint to tonic. A
+        // port-less `http://host` would otherwise default to port 80 in
+        // hyper/tonic, while the TCP availability probe defaults to 8080 — so
+        // the probe reports "available" and every gRPC call fails. Deriving the
+        // port through the same helper the probe uses keeps them in agreement.
+        let endpoint = normalize_chirpstack_endpoint(&self.config.chirpstack.server_address)?;
         // Iter-3 D-AC1 resolution: AC#1 literal text mandates `timeout_secs`
         // on every `chirpstack_connect` log line. Emit `timeout_secs=0` here
         // — `0` is the documented sentinel for "no deadline configured" on
@@ -816,7 +850,10 @@ impl ChirpstackPoller {
         let host = url.host_str().ok_or_else(|| {
             OpcGwError::Configuration("No Chirpstack host in server address".to_string())
         })?;
-        let port = url.port().unwrap_or(8080); // Default Chirpstack port
+        // GH #148: default to the SAME port the gRPC channel uses
+        // (`normalize_chirpstack_endpoint`), so a port-less address can never
+        // probe one port while the channel connects to another.
+        let port = url.port().unwrap_or(crate::utils::CHIRPSTACK_DEFAULT_GRPC_PORT);
 
         // Resolve host:port to socket addresses. We use to_socket_addrs()
         // rather than SocketAddr::parse() so DNS hostnames are resolved — the
@@ -3192,6 +3229,85 @@ mod tests {
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
     use tracing_test::traced_test;
+
+    // GH #148: a port-less ChirpStack address must be normalised to the
+    // default gRPC port BEFORE it reaches tonic — and to the SAME port the TCP
+    // availability probe uses — so the probe and the channel can never target
+    // different ports.
+    #[test]
+    fn normalize_endpoint_injects_default_port_when_absent() {
+        let out = normalize_chirpstack_endpoint("http://chirpstack.home.arpa").unwrap();
+        // Port is now explicit and equals the probe's default.
+        let url = Url::parse(&out).unwrap();
+        assert_eq!(url.port(), Some(crate::utils::CHIRPSTACK_DEFAULT_GRPC_PORT));
+        assert_eq!(url.host_str(), Some("chirpstack.home.arpa"));
+    }
+
+    #[test]
+    fn normalize_endpoint_and_probe_agree_on_the_port() {
+        // The regression at the heart of #148: the probe defaulted the port one
+        // way, the channel another. Assert they now resolve identically for a
+        // port-less address.
+        let addr = "http://chirpstack.home.arpa";
+        let probe_port = Url::parse(addr)
+            .unwrap()
+            .port()
+            .unwrap_or(crate::utils::CHIRPSTACK_DEFAULT_GRPC_PORT);
+        let channel_port = Url::parse(&normalize_chirpstack_endpoint(addr).unwrap())
+            .unwrap()
+            .port()
+            .unwrap();
+        assert_eq!(
+            probe_port, channel_port,
+            "probe and gRPC channel must target the same port"
+        );
+        assert_eq!(channel_port, 8080);
+    }
+
+    #[test]
+    fn normalize_endpoint_preserves_an_explicit_nondefault_port_verbatim() {
+        // A correctly-configured address with an explicit, non-scheme-default
+        // port is returned unchanged (no trailing-slash rewrite, no port churn).
+        for addr in [
+            "http://chirpstack:8080",
+            "http://chirpstack.home.arpa:8080",
+            "http://192.168.1.12:9090",
+        ] {
+            assert_eq!(
+                normalize_chirpstack_endpoint(addr).unwrap(),
+                addr,
+                "address with an explicit port must pass through verbatim"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_endpoint_treats_a_scheme_default_port_as_unspecified() {
+        // The `url` crate reports `port()` as `None` when the port equals the
+        // scheme default (80 for http, 443 for https), so such an address is
+        // indistinguishable from a port-less one and gets the ChirpStack
+        // default — exactly matching the probe's `port().unwrap_or(8080)`, so
+        // the two paths still agree. (ChirpStack's gRPC API is plaintext on
+        // 8080; a genuine TLS-on-443 deployment must use a non-default port or
+        // is out of scope for #148.)
+        for addr in ["http://cs.example.com:80", "https://cs.example.com:443"] {
+            let url = Url::parse(&normalize_chirpstack_endpoint(addr).unwrap()).unwrap();
+            assert_eq!(url.port(), Some(crate::utils::CHIRPSTACK_DEFAULT_GRPC_PORT));
+            let probe_port = Url::parse(addr)
+                .unwrap()
+                .port()
+                .unwrap_or(crate::utils::CHIRPSTACK_DEFAULT_GRPC_PORT);
+            assert_eq!(url.port(), Some(probe_port), "still agrees with the probe");
+        }
+    }
+
+    #[test]
+    fn normalize_endpoint_rejects_an_unparseable_address() {
+        assert!(matches!(
+            normalize_chirpstack_endpoint("not a url"),
+            Err(OpcGwError::Configuration(_))
+        ));
+    }
 
     // Story G-4 (#127): the cycle-level poll error is classified into the
     // spec-named error-feed categories (AC#4).

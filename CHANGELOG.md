@@ -29,6 +29,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The reconnect-backfill path logs mismatches at `debug` (`source="backfill"`) and
   records nothing — it re-processes the same event on every connect.
 
+### Fixed
+- **A ChirpStack `server_address` without an explicit port no longer silently fails**
+  ([#148](https://github.com/guycorbaz/opcgw/issues/148)): a port-less address such as
+  `http://chirpstack.home.arpa` previously passed the TCP availability probe (which
+  defaulted to 8080) but made the gRPC channel connect to port 80 (tonic's default for
+  `http://`), so the gateway reported ChirpStack **available** while every poll and
+  inventory query failed with `transport error` — a confusing "connected but no data"
+  state. The port is now derived through a single shared default
+  (`CHIRPSTACK_DEFAULT_GRPC_PORT` = 8080) for both the probe and the channel, so a
+  port-less address is normalized to `:8080` before it reaches tonic and the two paths
+  can never target different ports. Addresses with an explicit (non-scheme-default) port
+  are unchanged.
+
+
 ## [2.7.1] — 2026-07-22 — Dependency modernization, env-shadow guardrail, SCADA connection fixes
 
 > **Status:** released (stable). Docker `gcorbaz/opcgw:2.7.1` / `:2.7` / `:latest`
