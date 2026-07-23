@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — 2.8.0 (Epic J — Config Authority & Command Responsiveness)
+
+### Added
+- **Metric configuration faults now reach the web Errors view** ([#160](https://github.com/guycorbaz/opcgw/issues/160), Story J-0):
+  a configured `read_metric` whose uplink field cannot convert to the configured
+  `metric_type` (e.g. typed `Int` while the codec emits a string) is recorded to the
+  bounded error-event feed as category **`metric_type_mismatch`**, and a configured
+  metric that never appears in uplinks as **`metric_never_seen`** — both visible at
+  `/errors.html` and `GET /api/errors`. Previously these were `warn!`-only, so a
+  mis-typed metric silently left its OPC UA node unpopulated until someone read the
+  log by hand (field case: 76 skipped fields in one day on one device).
+
+### Changed
+- **`uplink_field_type_mismatch` is now deduplicated.** It warns **once** per
+  (device, metric) per stream task; later occurrences drop to `debug`. The feed
+  records one entry per *distinct problem*, not per occurrence — an un-deduplicated
+  feed would evict genuine errors from the 500-row ring buffer within hours and add
+  two SQL writes per uplink to already-contended storage
+  ([#152](https://github.com/guycorbaz/opcgw/issues/152)). The dedup is per stream
+  task, so it re-arms on an **Apply changes** soft restart: fix the type, and a
+  still-broken config warns again.
+- The reconnect-backfill path logs mismatches at `debug` (`source="backfill"`) and
+  records nothing — it re-processes the same event on every connect.
+
 ## [2.7.1] — 2026-07-22 — Dependency modernization, env-shadow guardrail, SCADA connection fixes
 
 > **Status:** released (stable). Docker `gcorbaz/opcgw:2.7.1` / `:2.7` / `:latest`
