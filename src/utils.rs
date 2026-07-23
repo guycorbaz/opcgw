@@ -95,6 +95,16 @@ pub const OPCUA_DEFAULT_IP_ADDRESS: &str = "127.0.0.1";
 /// to use an alternative port through the configuration file.
 pub const OPCUA_DEFAULT_PORT: u16 = 4840;
 
+/// ChirpStack's default gRPC API port.
+///
+/// Single source of truth for the port assumed when a configured
+/// `chirpstack.server_address` omits an explicit one. Both the TCP
+/// availability probe and the gRPC channel builder derive the port from this,
+/// so they can never disagree (GH #148: they previously defaulted differently
+/// — the probe to 8080, tonic's channel to 80 — so a port-less address probed
+/// "available" while every gRPC call failed with `transport error`).
+pub const CHIRPSTACK_DEFAULT_GRPC_PORT: u16 = 8080;
+
 /// Default maximum number of concurrent OPC UA client sessions (Story 7-3, FR44).
 ///
 /// When `[opcua].max_connections` is unset (or `None`), the gateway caps

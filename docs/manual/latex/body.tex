@@ -511,7 +511,10 @@ Logging is set up once at install time --- the log directory and verbosity level
 
 \begin{lstlisting}
 [chirpstack]
-# ChirpStack server address (gRPC endpoint, http:// or https://)
+# ChirpStack server address (gRPC endpoint, http:// or https://).
+# Always include the gRPC port explicitly, e.g. :8080 — a port-less
+# address is assumed to be on 8080 (ChirpStack's default), but being
+# explicit avoids surprises behind a reverse proxy on another port.
 server_address = "http://chirpstack.example.com:8080"
 
 # API token issued by ChirpStack. NEVER commit a real token to VCS;
