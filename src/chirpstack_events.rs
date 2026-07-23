@@ -97,6 +97,72 @@ fn json_to_metric(
     }
 }
 
+/// One configured `read_metric` whose uplink field was present but could not
+/// convert to the configured `metric_type` (Story J-0, #160). Reported by
+/// [`map_uplink_to_writes`] instead of being logged inline, so the caller owns
+/// emission — the live ingest path warns once per (device, metric) and records
+/// a web error-event, while the reconnect-backfill path stays quiet.
+///
+/// Deliberately carries no field *value*: uplink payloads are unconstrained
+/// upstream data (log-injection surface). The metric name comes from operator
+/// config and is trusted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FieldMismatch {
+    /// The `chirpstack_metric_name` that failed to convert.
+    pub metric_name: String,
+    /// Debug rendering of the configured [`crate::config::OpcMetricTypeConfig`].
+    pub configured_type: String,
+    /// Why it failed: either the observed JSON kind (`"a string"`, `"a
+    /// number"`, …) or, when the kind matches but the value is out of
+    /// contract, the specific reason.
+    pub reason: &'static str,
+}
+
+impl FieldMismatch {
+    /// Operator-facing message stored in the error-event feed and used in the
+    /// `warn!` line. Pinned by tests — keep the shape stable.
+    pub(crate) fn message(&self) -> String {
+        format!(
+            "metric '{}': configured {}, uplink field was {}; value skipped",
+            self.metric_name, self.configured_type, self.reason
+        )
+    }
+}
+
+/// Result of mapping one decoded uplink object: the last-value writes plus any
+/// configured fields that were present but unconvertible.
+#[derive(Debug, Default)]
+pub(crate) struct UplinkMapping {
+    pub writes: Vec<BatchMetricWrite>,
+    pub mismatches: Vec<FieldMismatch>,
+}
+
+/// Why `value` could not become `target`. Reports the observed JSON kind,
+/// except for the two cases where the kind is right but the value breaks the
+/// codec contract (`Bool` accepts strictly 0/1; `Int` rejects fractional and
+/// inexactly-representable floats) — there a bare "was a number" would read as
+/// nonsense next to a numeric configured type.
+fn mismatch_reason(
+    value: &serde_json::Value,
+    target: &crate::config::OpcMetricTypeConfig,
+) -> &'static str {
+    use crate::config::OpcMetricTypeConfig as T;
+    match value {
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+        serde_json::Value::Null => "null",
+        serde_json::Value::Number(_) => match target {
+            T::Bool => "a number outside the 0/1 flag contract",
+            T::Int => "a non-integral (or too large) number",
+            // Float/String reaching here means serde_json handed us a number
+            // that is neither f64- nor str-convertible; keep it generic.
+            _ => "a number",
+        },
+    }
+}
+
 /// Map a decoded uplink object to last-value [`BatchMetricWrite`]s, one per
 /// configured `read_metric` whose `chirpstack_metric_name` is present in the
 /// object. Each write is stamped with `event_time` (the device's report time,
@@ -105,14 +171,18 @@ fn json_to_metric(
 /// The storage key is `chirpstack_metric_name` — the same key the metrics poll
 /// writes and the OPC UA read path (`OpcUa::get_value`) looks up — so a stream
 /// write is read back identically to a poll write.
+///
+/// Story J-0 (#160): unconvertible fields are returned in
+/// [`UplinkMapping::mismatches`] rather than warned about here, so the caller
+/// decides whether to log and record them. This function stays pure and sync.
 pub(crate) fn map_uplink_to_writes(
     device_id: &str,
     metrics: &[ReadMetric],
     object: &serde_json::Value,
     event_time: DateTime<Utc>,
-) -> Vec<BatchMetricWrite> {
+) -> UplinkMapping {
     let timestamp: SystemTime = event_time.into();
-    let mut writes = Vec::new();
+    let mut mapping = UplinkMapping::default();
     for metric in metrics {
         let field = match object.get(&metric.chirpstack_metric_name) {
             Some(v) if !v.is_null() => v,
@@ -121,22 +191,20 @@ pub(crate) fn map_uplink_to_writes(
             _ => continue,
         };
         match json_to_metric(field, &metric.metric_type) {
-            Some(data_type) => writes.push(BatchMetricWrite {
+            Some(data_type) => mapping.writes.push(BatchMetricWrite {
                 device_id: device_id.to_string(),
                 metric_name: metric.chirpstack_metric_name.clone(),
                 data_type,
                 timestamp,
             }),
-            None => warn!(
-                event = "uplink_field_type_mismatch",
-                device_id = %device_id,
-                metric = %metric.chirpstack_metric_name,
-                configured_type = ?metric.metric_type,
-                "decoded uplink field could not convert to configured type; skipping"
-            ),
+            None => mapping.mismatches.push(FieldMismatch {
+                metric_name: metric.chirpstack_metric_name.clone(),
+                configured_type: format!("{:?}", metric.metric_type),
+                reason: mismatch_reason(field, &metric.metric_type),
+            }),
         }
     }
-    writes
+    mapping
 }
 
 /// Configured `chirpstack_metric_name`s that have not yet been observed in any
@@ -710,8 +778,23 @@ async fn backfill_device(
         }
     };
 
-    let candidate_writes = map_uplink_to_writes(device_id, metrics, &event.object, event.event_time);
-    let writes = filter_fresher_writes(backend, device_id, candidate_writes).await;
+    let mapping = map_uplink_to_writes(device_id, metrics, &event.object, event.event_time);
+    // Story J-0 (#160): the backfill re-processes an already-seen event on
+    // EVERY stream (re)connect, so it deliberately neither warns nor records a
+    // web error-event for a type mismatch — that would re-fire on every
+    // reconnect and flood the bounded feed. The live ingest path (which holds
+    // the once-per-(device, metric) dedup state) is the sole reporter.
+    for mm in &mapping.mismatches {
+        debug!(
+            event = "uplink_field_type_mismatch",
+            device_id = %device_id,
+            metric = %mm.metric_name,
+            configured_type = %mm.configured_type,
+            source = "backfill",
+            "decoded uplink field could not convert to configured type; skipping (backfill path: not reported)"
+        );
+    }
+    let writes = filter_fresher_writes(backend, device_id, mapping.writes).await;
     if writes.is_empty() {
         debug!(
             event = "uplink_backfill_skipped",
@@ -738,6 +821,63 @@ async fn backfill_device(
     }
 }
 
+/// Per-device diagnostic state for one stream task, carried across reconnects
+/// so warnings aren't re-evaluated from scratch on every stream drop. Bundled
+/// (rather than passed as four loose `&mut` arguments) to keep `ingest_event`
+/// and `connect_and_stream` within a sane parameter count.
+///
+/// All sets are keyed by `chirpstack_metric_name` alone — the device is implied
+/// by the owning per-device task. State is rebuilt when the data-plane is
+/// respawned (an operator's **Apply changes** soft restart), which is what
+/// re-arms the warnings after a config fix.
+#[derive(Debug, Default)]
+struct UplinkDiagState {
+    /// Configured metrics observed at least once in an uplink object.
+    seen: HashSet<String>,
+    /// Metrics already reported as never-seen (Story E-1b orphan tracking);
+    /// cleared on a first sighting so the warning self-corrects.
+    warned: HashSet<String>,
+    /// Metrics already reported as type-mismatched (Story J-0, #160). Never
+    /// cleared: a mismatch is a config fault, and the fix path (edit + Apply)
+    /// respawns the task with fresh state.
+    mismatched: HashSet<String>,
+    /// Uplink events ingested by this device's task.
+    events_seen: u32,
+}
+
+/// Best-effort capture of a metric-configuration problem into the bounded
+/// error-event feed backing the web Errors view (Story G-4 #127 / J-0 #160).
+/// Mirrors `ChirpstackPoller::capture_error_event`: the message is sanitized,
+/// and a storage failure is logged and swallowed — observability must never
+/// break uplink ingestion. Goes through the async facade so the blocking SQL
+/// never runs on a tokio worker (#73).
+async fn record_metric_event(
+    backend: &Arc<dyn StorageBackend>,
+    category: &str,
+    device_id: &str,
+    message: String,
+) {
+    let event = crate::storage::ErrorEvent {
+        ts: Utc::now(),
+        category: category.to_string(),
+        device_id: Some(device_id.to_string()),
+        // No application context reaches this layer, and threading `AppConfig`
+        // down the per-device stream tasks to get one is not worth it — the
+        // web view falls back to `device_id`, and the poller's device-scoped
+        // captures pass `None` too.
+        application_id: None,
+        message: crate::utils::sanitize_error_message(&message),
+    };
+    if let Err(e) = backend.async_store().record_error_event(event).await {
+        warn!(
+            error = %e,
+            category = category,
+            device_id = %device_id,
+            "Failed to record metric error event (non-fatal)"
+        );
+    }
+}
+
 /// Ingest one parsed uplink event: orphan-tracking bookkeeping, then the
 /// last-value writes stamped with the device event time. Shared by the live
 /// stream pump (factored out of the pre-E-1b inline loop body, unchanged in
@@ -747,10 +887,9 @@ async fn ingest_event(
     metrics: &[ReadMetric],
     event: &UplinkEvent,
     backend: &Arc<dyn StorageBackend>,
-    seen: &mut HashSet<String>,
-    warned: &mut HashSet<String>,
-    events_seen: &mut u32,
+    diag: &mut UplinkDiagState,
 ) {
+    let UplinkDiagState { seen, warned, mismatched, events_seen } = diag;
     // Track which configured fields this device actually emits, and warn
     // (once per field) about ones that never appear — they won't populate via
     // the stream.
@@ -789,10 +928,56 @@ async fn ingest_event(
                 events_observed = *events_seen,
                 "configured read_metric not seen in the first uplinks; may be DevStatus-sourced (e.g. battery), a chirpstack_metric_name vs codec field-name mismatch, OR only emitted on some uplinks — if it arrives later an uplink_metric_now_seen will follow"
             );
+            // Story J-0 (#160): the `warned` set is already the once-per-metric
+            // gate, so recording here cannot flood the feed.
+            record_metric_event(
+                backend,
+                "metric_never_seen",
+                device_id,
+                format!(
+                    "metric '{}': configured but not present in the first {} uplinks; check the codec field name (or it may be DevStatus-sourced)",
+                    name, *events_seen
+                ),
+            )
+            .await;
             warned.insert(name);
         }
     }
-    let candidates = map_uplink_to_writes(device_id, metrics, &event.object, event.event_time);
+    let mapping = map_uplink_to_writes(device_id, metrics, &event.object, event.event_time);
+    // Story J-0 (#160): report BEFORE the freshness filter — a type mismatch is
+    // a config fault independent of whether this particular event is a replay.
+    // Once per (device, metric) per stream-task lifetime: the feed is a set of
+    // distinct problems, not a stream of occurrences (a persistently mistyped
+    // field would otherwise evict every genuine error from the bounded feed and
+    // add two SQL writes per uplink on contended storage, see #152).
+    for mm in &mapping.mismatches {
+        // The dedup marker is set regardless of whether the feed write below
+        // succeeds. This is deliberate (code review 2026-07-23): the `warn!`
+        // fires unconditionally, so a failed best-effort feed write still
+        // leaves the fault in the operator log; and gating the marker on write
+        // success would re-attempt the record on EVERY subsequent uplink during
+        // a storage outage — the per-uplink write flood on contended NAS
+        // storage that this design (and #152) exist to avoid.
+        if mismatched.insert(mm.metric_name.clone()) {
+            warn!(
+                event = "uplink_field_type_mismatch",
+                device_id = %device_id,
+                metric = %mm.metric_name,
+                configured_type = %mm.configured_type,
+                "decoded uplink field could not convert to configured type; skipping (further occurrences at debug level)"
+            );
+            record_metric_event(backend, "metric_type_mismatch", device_id, mm.message()).await;
+        } else {
+            debug!(
+                event = "uplink_field_type_mismatch",
+                device_id = %device_id,
+                metric = %mm.metric_name,
+                configured_type = %mm.configured_type,
+                "decoded uplink field could not convert to configured type; skipping (already reported)"
+            );
+        }
+    }
+    let candidates = mapping.writes;
     let candidate_count = candidates.len();
     // Freshness guard on the LIVE path too: ChirpStack replays recent event
     // history on every stream (re)connect, so the pump regularly sees events
@@ -933,16 +1118,13 @@ async fn handle_ack(backend: &Arc<dyn StorageBackend>, device_id: &str, ack: &Ac
 /// can never overwrite a newer live value. Returns `Ok(())` on a clean close /
 /// cancellation, `Err` on a connection or stream error (the caller reconnects
 /// with backoff).
-#[allow(clippy::too_many_arguments)]
 async fn connect_and_stream(
     source: &dyn UplinkSource,
     device_id: &str,
     metrics: &[ReadMetric],
     backend: &Arc<dyn StorageBackend>,
     cancel: &CancellationToken,
-    seen: &mut HashSet<String>,
-    warned: &mut HashSet<String>,
-    events_seen: &mut u32,
+    diag: &mut UplinkDiagState,
 ) -> Result<(), OpcGwStreamError> {
     // The initial connect is also cancellation-aware: without this, a child
     // mid-connect to an unreachable server would block the supervisor's
@@ -980,9 +1162,7 @@ async fn connect_and_stream(
                         metrics,
                         &event,
                         backend,
-                        seen,
-                        warned,
-                        events_seen,
+                        diag,
                     ).await,
                     // Story E-3: downlink delivery confirmation rides the same
                     // stream. An ack confirms (or NACK-fails) the queued
@@ -1017,11 +1197,10 @@ async fn run_device_stream(
     cancel: CancellationToken,
 ) {
     let mut backoff = RECONNECT_BACKOFF_START;
-    // Orphan-tracking state persists across reconnects so the "never seen"
-    // warning isn't re-evaluated from scratch on every stream drop.
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut warned: HashSet<String> = HashSet::new();
-    let mut events_seen: u32 = 0;
+    // Diagnostic state persists across reconnects so the "never seen" and
+    // "type mismatch" warnings aren't re-evaluated from scratch on every
+    // stream drop (which would re-fire them on a flapping link).
+    let mut diag = UplinkDiagState::default();
     loop {
         if cancel.is_cancelled() {
             return;
@@ -1032,9 +1211,7 @@ async fn run_device_stream(
             &metrics,
             &backend,
             &cancel,
-            &mut seen,
-            &mut warned,
-            &mut events_seen,
+            &mut diag,
         )
         .await
         {
@@ -1164,7 +1341,7 @@ mod tests {
         ];
         let object = json!({ "valveStatusCode": 195, "valvePosition": 0, "extra": 1 });
         let t = fixed_time();
-        let writes = map_uplink_to_writes("dev1", &metrics, &object, t);
+        let writes = map_uplink_to_writes("dev1", &metrics, &object, t).writes;
 
         assert_eq!(writes.len(), 2, "only configured fields are written");
         let expected_ts: SystemTime = t.into();
@@ -1188,7 +1365,7 @@ mod tests {
     fn string_field_maps_end_to_end() {
         let metrics = vec![rm("State", "state", OpcMetricTypeConfig::String)];
         let object = json!({ "state": "closed" });
-        let writes = map_uplink_to_writes("dev1", &metrics, &object, fixed_time());
+        let writes = map_uplink_to_writes("dev1", &metrics, &object, fixed_time()).writes;
         assert_eq!(writes.len(), 1);
         assert_eq!(
             writes[0].data_type,
@@ -1204,7 +1381,7 @@ mod tests {
         ];
         // codec emits integer flags
         let object = json!({ "moving": 1, "fault": 0 });
-        let writes = map_uplink_to_writes("dev1", &metrics, &object, fixed_time());
+        let writes = map_uplink_to_writes("dev1", &metrics, &object, fixed_time()).writes;
         let moving = writes.iter().find(|w| w.metric_name == "moving").unwrap();
         assert_eq!(moving.data_type, MetricType::Bool(true));
         let fault = writes.iter().find(|w| w.metric_name == "fault").unwrap();
@@ -1215,7 +1392,7 @@ mod tests {
     fn float_accepts_integer_json() {
         let metrics = vec![rm("Code", "valveStatusCode", OpcMetricTypeConfig::Float)];
         let object = json!({ "valveStatusCode": 195 });
-        let writes = map_uplink_to_writes("dev1", &metrics, &object, fixed_time());
+        let writes = map_uplink_to_writes("dev1", &metrics, &object, fixed_time()).writes;
         assert_eq!(writes[0].data_type, MetricType::Float(195.0));
     }
 
@@ -1223,7 +1400,7 @@ mod tests {
     fn absent_field_is_skipped_not_zeroed() {
         let metrics = vec![rm("State", "state", OpcMetricTypeConfig::String)];
         let object = json!({ "other": 1 });
-        let writes = map_uplink_to_writes("dev1", &metrics, &object, fixed_time());
+        let writes = map_uplink_to_writes("dev1", &metrics, &object, fixed_time()).writes;
         assert!(writes.is_empty(), "absent field leaves last value untouched");
     }
 
@@ -1266,8 +1443,56 @@ mod tests {
         // configured Int but the field arrives as a non-numeric string
         let metrics = vec![rm("Code", "valveStatusCode", OpcMetricTypeConfig::Int)];
         let object = json!({ "valveStatusCode": "oops" });
-        let writes = map_uplink_to_writes("dev1", &metrics, &object, fixed_time());
-        assert!(writes.is_empty());
+        let mapping = map_uplink_to_writes("dev1", &metrics, &object, fixed_time());
+        assert!(mapping.writes.is_empty());
+        // Story J-0 (#160): skipped AND reported, so the caller can surface it.
+        assert_eq!(mapping.mismatches.len(), 1);
+        assert_eq!(mapping.mismatches[0].metric_name, "valveStatusCode");
+        assert_eq!(mapping.mismatches[0].reason, "a string");
+        // Pinned operator-facing message (AC#1).
+        assert_eq!(
+            mapping.mismatches[0].message(),
+            "metric 'valveStatusCode': configured Int, uplink field was a string; value skipped"
+        );
+    }
+
+    #[test]
+    fn mapping_reports_each_mismatch_and_keeps_convertible_fields() {
+        // A mismatching field must not suppress its well-typed siblings, and
+        // two distinct broken metrics are reported separately (AC#9 b/e).
+        let metrics = vec![
+            rm("Good", "valveStatusCode", OpcMetricTypeConfig::Int),
+            rm("Bad1", "rain", OpcMetricTypeConfig::Int),
+            rm("Bad2", "label", OpcMetricTypeConfig::Float),
+        ];
+        let object = json!({ "valveStatusCode": 195, "rain": "wet", "label": "x" });
+        let mapping = map_uplink_to_writes("dev1", &metrics, &object, fixed_time());
+        assert_eq!(mapping.writes.len(), 1, "the convertible field still writes");
+        assert_eq!(mapping.writes[0].metric_name, "valveStatusCode");
+        let names: Vec<&str> =
+            mapping.mismatches.iter().map(|m| m.metric_name.as_str()).collect();
+        assert_eq!(names, vec!["rain", "label"]);
+    }
+
+    #[test]
+    fn mismatch_reason_names_the_observed_json_kind() {
+        let cases = [
+            (json!("s"), OpcMetricTypeConfig::Int, "a string"),
+            (json!(true), OpcMetricTypeConfig::Int, "a boolean"),
+            (json!([1]), OpcMetricTypeConfig::Int, "an array"),
+            (json!({"a": 1}), OpcMetricTypeConfig::Int, "an object"),
+            // Kind matches the numeric configured type, so the reason explains
+            // the contract breach instead of claiming a kind mismatch.
+            (json!(2), OpcMetricTypeConfig::Bool, "a number outside the 0/1 flag contract"),
+            (json!(3.9), OpcMetricTypeConfig::Int, "a non-integral (or too large) number"),
+        ];
+        for (value, target, expected) in cases {
+            let metrics = vec![rm("M", "field", target)];
+            let object = json!({ "field": value });
+            let mapping = map_uplink_to_writes("dev1", &metrics, &object, fixed_time());
+            assert_eq!(mapping.mismatches.len(), 1, "value {object} should mismatch");
+            assert_eq!(mapping.mismatches[0].reason, expected, "for {object}");
+        }
     }
 
     #[test]
@@ -1275,11 +1500,11 @@ mod tests {
         let metrics = vec![rm("Fault", "fault", OpcMetricTypeConfig::Bool)];
         // 0 and 1 coerce; any other integer is a type mismatch (codec bug),
         // not a truthy reinterpretation.
-        let ok = map_uplink_to_writes("dev1", &metrics, &json!({"fault": 1}), fixed_time());
+        let ok = map_uplink_to_writes("dev1", &metrics, &json!({"fault": 1}), fixed_time()).writes;
         assert_eq!(ok[0].data_type, MetricType::Bool(true));
-        let bad = map_uplink_to_writes("dev1", &metrics, &json!({"fault": 2}), fixed_time());
+        let bad = map_uplink_to_writes("dev1", &metrics, &json!({"fault": 2}), fixed_time()).writes;
         assert!(bad.is_empty(), "fault=2 must be a mismatch, not true");
-        let neg = map_uplink_to_writes("dev1", &metrics, &json!({"fault": -1}), fixed_time());
+        let neg = map_uplink_to_writes("dev1", &metrics, &json!({"fault": -1}), fixed_time()).writes;
         assert!(neg.is_empty(), "fault=-1 must be a mismatch, not true");
     }
 
@@ -1292,7 +1517,7 @@ mod tests {
             &metrics,
             &json!({"valveStatusCode": 195.0}),
             fixed_time(),
-        );
+        ).writes;
         assert_eq!(ok[0].data_type, MetricType::Int(195));
         // …a fractional one is a mismatch, never silently truncated.
         let bad = map_uplink_to_writes(
@@ -1300,7 +1525,7 @@ mod tests {
             &metrics,
             &json!({"valveStatusCode": 3.9}),
             fixed_time(),
-        );
+        ).writes;
         assert!(bad.is_empty(), "3.9 must be a mismatch, not truncated to 3");
     }
 
@@ -1373,15 +1598,40 @@ mod tests {
         recent: Mutex<Option<UplinkEvent>>,
         connect_count: AtomicUsize,
         next_event_calls: Arc<AtomicUsize>,
+        /// When true, `recent()` re-delivers the same event on EVERY connect
+        /// (cloning, not taking) — mirroring production `GrpcUplinkSource::recent`,
+        /// which genuinely re-fetches the newest uplink on each reconnect. The
+        /// default (false) takes it once, which suits tests that only care about
+        /// the first-connect backfill.
+        recent_persists: bool,
     }
 
     impl ScriptedSource {
         fn new(connects: Vec<Vec<ScriptItem>>, recent: Option<UplinkEvent>) -> Arc<Self> {
+            Self::build(connects, recent, false)
+        }
+
+        /// Like `new`, but `recent()` re-delivers on every connect (see the
+        /// `recent_persists` field). Use for reconnect tests that must exercise
+        /// the backfill path more than once.
+        fn new_persistent_recent(
+            connects: Vec<Vec<ScriptItem>>,
+            recent: Option<UplinkEvent>,
+        ) -> Arc<Self> {
+            Self::build(connects, recent, true)
+        }
+
+        fn build(
+            connects: Vec<Vec<ScriptItem>>,
+            recent: Option<UplinkEvent>,
+            recent_persists: bool,
+        ) -> Arc<Self> {
             Arc::new(Self {
                 connects: Mutex::new(connects.into()),
                 recent: Mutex::new(recent),
                 connect_count: AtomicUsize::new(0),
                 next_event_calls: Arc::new(AtomicUsize::new(0)),
+                recent_persists,
             })
         }
     }
@@ -1409,7 +1659,12 @@ mod tests {
             &self,
             _device_id: &str,
         ) -> Result<Option<UplinkEvent>, OpcGwStreamError> {
-            Ok(self.recent.lock().unwrap().take())
+            let mut guard = self.recent.lock().unwrap();
+            if self.recent_persists {
+                Ok(guard.clone())
+            } else {
+                Ok(guard.take())
+            }
         }
     }
 
@@ -1505,6 +1760,362 @@ mod tests {
         assert!(
             source.connect_count.load(Ordering::SeqCst) >= 2,
             "a reconnect must have happened"
+        );
+
+        cancel.cancel();
+        task.await.unwrap();
+    }
+
+    // ---------------------------------------------------------------
+    // Story J-0 (#160): metric-problem reporting into the web error feed.
+    // ---------------------------------------------------------------
+
+    /// Build an uplink carrying an arbitrary decoded object — `uplink()` above
+    /// is hard-wired to a well-typed `valveStatusCode`, which cannot express a
+    /// mismatch or a multi-field object.
+    fn uplink_obj(ts_secs: i64, object: serde_json::Value) -> UplinkEvent {
+        UplinkEvent {
+            event_time: DateTime::<Utc>::from_timestamp(ts_secs, 0).unwrap(),
+            object,
+        }
+    }
+
+    /// Wait until the pump has fully consumed `n` scripted items.
+    ///
+    /// `next_event_calls` is incremented BEFORE each item is handed over, and
+    /// the pump only issues call n+1 after finishing item n — so observing
+    /// n+1 calls proves item n was ingested. This is the only sound barrier
+    /// for these tests: a type mismatch produces NO write, so `wait_for_stored`
+    /// would return after the first uplink and the assertions below would pass
+    /// even with the dedup removed entirely.
+    async fn wait_for_consumed(source: &Arc<ScriptedSource>, n: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if source.next_event_calls.load(Ordering::SeqCst) > n {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("pump did not consume {n} scripted items in time"));
+    }
+
+    fn events_of(backend: &Arc<dyn StorageBackend>, category: &str) -> Vec<crate::storage::ErrorEvent> {
+        backend
+            .recent_error_events(crate::utils::error_event_cap())
+            .expect("recent_error_events")
+            .into_iter()
+            .filter(|e| e.category == category)
+            .collect()
+    }
+
+    /// AC#1/#3: a persistently mistyped field is recorded ONCE, however many
+    /// uplinks carry it. This is the story's regression guard — it must drive
+    /// `ingest_event` through the real pump, not the pure mapping function.
+    #[tokio::test]
+    async fn type_mismatch_records_one_event_however_many_uplinks() {
+        // Five uplinks, each with a distinct increasing timestamp (equal
+        // timestamps would be dropped by the freshness guard) — `rain` is
+        // configured Int but always arrives as a string.
+        let items: Vec<ScriptItem> = (0..5)
+            .map(|i| {
+                ScriptItem::Event(uplink_obj(
+                    1_700_000_100 + i,
+                    json!({ "valveStatusCode": 190 + i, "rain": "wet" }),
+                ))
+            })
+            .collect();
+        let source = ScriptedSource::new(vec![items], None);
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let cancel = CancellationToken::new();
+        let metrics = vec![
+            rm("Status", "valveStatusCode", OpcMetricTypeConfig::Int),
+            rm("Rain", "rain", OpcMetricTypeConfig::Int),
+        ];
+
+        let task = tokio::spawn(run_device_stream(
+            source.clone() as Arc<dyn UplinkSource>,
+            "dev1".to_string(),
+            metrics,
+            Arc::clone(&backend),
+            cancel.clone(),
+        ));
+        wait_for_consumed(&source, 5).await;
+
+        let events = events_of(&backend, "metric_type_mismatch");
+        assert_eq!(events.len(), 1, "one distinct problem = one feed entry");
+        assert_eq!(events[0].device_id.as_deref(), Some("dev1"));
+        assert_eq!(events[0].application_id, None);
+        assert_eq!(
+            events[0].message,
+            "metric 'rain': configured Int, uplink field was a string; value skipped"
+        );
+
+        // AC#7: the sibling well-typed field kept flowing throughout.
+        let stored = backend
+            .get_metric_value("dev1", "valveStatusCode")
+            .expect("stored")
+            .expect("present");
+        assert_eq!(stored.data_type, MetricType::Int(194), "last value wins");
+
+        cancel.cancel();
+        task.await.unwrap();
+    }
+
+    /// AC#9(b): two different broken metrics are two distinct problems.
+    #[tokio::test]
+    async fn distinct_mismatched_metrics_record_separate_events() {
+        let items: Vec<ScriptItem> = (0..3)
+            .map(|i| {
+                ScriptItem::Event(uplink_obj(
+                    1_700_000_100 + i,
+                    json!({ "rain": "wet", "temp": "hot" }),
+                ))
+            })
+            .collect();
+        let source = ScriptedSource::new(vec![items], None);
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let cancel = CancellationToken::new();
+        let metrics = vec![
+            rm("Rain", "rain", OpcMetricTypeConfig::Int),
+            rm("Temp", "temp", OpcMetricTypeConfig::Float),
+        ];
+
+        let task = tokio::spawn(run_device_stream(
+            source.clone() as Arc<dyn UplinkSource>,
+            "dev1".to_string(),
+            metrics,
+            Arc::clone(&backend),
+            cancel.clone(),
+        ));
+        wait_for_consumed(&source, 3).await;
+
+        let mut msgs: Vec<String> = events_of(&backend, "metric_type_mismatch")
+            .into_iter()
+            .map(|e| e.message)
+            .collect();
+        msgs.sort();
+        assert_eq!(msgs.len(), 2, "one entry per broken metric");
+        assert!(msgs[0].contains("'rain'") || msgs[1].contains("'rain'"));
+        assert!(msgs[0].contains("'temp'") || msgs[1].contains("'temp'"));
+
+        cancel.cancel();
+        task.await.unwrap();
+    }
+
+    /// AC#2: an orphaned metric records exactly one `metric_never_seen` once
+    /// the 3-event threshold is crossed. AC#6: when the field finally shows
+    /// up, `uplink_metric_now_seen` fires but records NOTHING (the feed has no
+    /// clear semantics) — so the total stays at one.
+    #[tokio::test]
+    async fn orphaned_metric_records_once_and_now_seen_records_nothing() {
+        // Ordering matters: the carrying uplink must come AFTER the threshold
+        // is crossed, otherwise the metric is never orphaned and the test is
+        // vacuous.
+        let mut items: Vec<ScriptItem> = (0..3)
+            .map(|i| {
+                ScriptItem::Event(uplink_obj(
+                    1_700_000_100 + i,
+                    json!({ "valveStatusCode": 190 + i }),
+                ))
+            })
+            .collect();
+        items.push(ScriptItem::Event(uplink_obj(
+            1_700_000_110,
+            json!({ "valveStatusCode": 199, "battery": 87 }),
+        )));
+        let source = ScriptedSource::new(vec![items], None);
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let cancel = CancellationToken::new();
+        let metrics = vec![
+            rm("Status", "valveStatusCode", OpcMetricTypeConfig::Int),
+            rm("Battery", "battery", OpcMetricTypeConfig::Int),
+        ];
+
+        let task = tokio::spawn(run_device_stream(
+            source.clone() as Arc<dyn UplinkSource>,
+            "dev1".to_string(),
+            metrics,
+            Arc::clone(&backend),
+            cancel.clone(),
+        ));
+        wait_for_consumed(&source, 4).await;
+
+        let events = events_of(&backend, "metric_never_seen");
+        assert_eq!(events.len(), 1, "orphan reported once, and now_seen adds nothing");
+        assert!(events[0].message.contains("'battery'"), "got: {}", events[0].message);
+
+        cancel.cancel();
+        task.await.unwrap();
+    }
+
+    /// Run `body` under a test-LOCAL tracing subscriber on a current-thread
+    /// runtime and return everything it logged. Test-local (via
+    /// `with_default`, thread-scoped) rather than the `tracing_test` global
+    /// buffer, because sibling `#[tokio::test]`s in this module emit the same
+    /// event names concurrently and would bleed into the capture.
+    fn capture_logs<F, Fut>(body: F) -> String
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        use std::io::Write;
+        use tracing_subscriber::{fmt as tracing_fmt, layer::SubscriberExt, Layer};
+
+        #[derive(Clone)]
+        struct VecWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for VecWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for VecWriter {
+            type Writer = VecWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::Registry::default().with(
+            tracing_fmt::layer()
+                .with_writer(VecWriter(Arc::clone(&buf)))
+                .with_level(true)
+                .with_ansi(false)
+                .with_filter(tracing_subscriber::filter::LevelFilter::TRACE),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tracing::subscriber::with_default(subscriber, || rt.block_on(body()));
+        let out = String::from_utf8_lossy(&buf.lock().unwrap()).to_string();
+        out
+    }
+
+    /// AC#3/#9(f): the FIRST occurrence warns, every repeat drops to `debug!`.
+    /// Without this, an implementation could record once (satisfying every
+    /// other test) while still emitting one WARN per uplink — which is the
+    /// actual operator complaint behind #160 (76 warns/day from one metric).
+    #[test]
+    fn mismatch_warns_once_then_drops_to_debug() {
+        let logs = capture_logs(|| async {
+            let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+            let metrics = vec![rm("Rain", "rain", OpcMetricTypeConfig::Int)];
+            let mut diag = UplinkDiagState::default();
+            for i in 0..4 {
+                let event = uplink_obj(1_700_000_100 + i, json!({ "rain": "wet" }));
+                ingest_event("dev1", &metrics, &event, &backend, &mut diag).await;
+            }
+        });
+        let lines: Vec<&str> = logs
+            .lines()
+            .filter(|l| l.contains("uplink_field_type_mismatch"))
+            .collect();
+        assert_eq!(lines.len(), 4, "every occurrence is still logged somewhere");
+        let warns = lines.iter().filter(|l| l.contains("WARN")).count();
+        let debugs = lines.iter().filter(|l| l.contains("DEBUG")).count();
+        assert_eq!(warns, 1, "exactly one WARN, got logs:\n{logs}");
+        assert_eq!(debugs, 3, "repeats are debug-level, got logs:\n{logs}");
+    }
+
+    /// AC#6/#9(d): when an orphaned metric finally appears, `uplink_metric_now_seen`
+    /// (info) fires to self-correct the earlier `uplink_metric_never_seen` warning,
+    /// and records NOTHING to the feed. The feed-count-only test cannot see whether
+    /// the info actually fired (the count is unaffected either way), so assert the
+    /// log line directly — a regression deleting the self-correction block would
+    /// otherwise pass silently.
+    #[test]
+    fn orphan_then_sighting_emits_now_seen_and_records_nothing() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let logs = capture_logs(|| {
+            let backend = Arc::clone(&backend);
+            async move {
+                let metrics = vec![rm("Battery", "battery", OpcMetricTypeConfig::Int)];
+                let mut diag = UplinkDiagState::default();
+                // Three uplinks WITHOUT the field cross ORPHAN_WARN_AFTER_EVENTS,
+                // so `battery` is flagged never-seen…
+                for i in 0..3 {
+                    let event = uplink_obj(1_700_000_100 + i, json!({ "other": 1 }));
+                    ingest_event("dev1", &metrics, &event, &backend, &mut diag).await;
+                }
+                // …then it finally shows up, which must self-correct.
+                let event = uplink_obj(1_700_000_110, json!({ "battery": 87 }));
+                ingest_event("dev1", &metrics, &event, &backend, &mut diag).await;
+            }
+        });
+
+        assert!(
+            logs.contains("uplink_metric_never_seen"),
+            "the orphan must first be warned; got:\n{logs}"
+        );
+        // Match the structured `event=` field, not a bare substring: the
+        // never-seen WARN's own message text mentions "uplink_metric_now_seen"
+        // ("…an uplink_metric_now_seen will follow"), so a substring filter
+        // would double-count it.
+        let now_seen: Vec<&str> = logs
+            .lines()
+            .filter(|l| l.contains(r#"event="uplink_metric_now_seen""#))
+            .collect();
+        assert_eq!(now_seen.len(), 1, "now_seen fires exactly once; got:\n{logs}");
+        assert!(now_seen[0].contains("INFO"), "now_seen is info-level; got:\n{logs}");
+        // AC#6: the self-correction records nothing — only the single
+        // never-seen entry from before the field appeared remains.
+        let feed = events_of(&backend, "metric_never_seen");
+        assert_eq!(feed.len(), 1, "now_seen adds no feed entry");
+    }
+
+    /// AC#5: the reconnect-backfill path must never record. It re-processes an
+    /// already-seen event on every connect, so recording there would re-fire
+    /// on each reconnect of a flapping link and flood the bounded feed.
+    ///
+    /// Uses `new_persistent_recent` so `recent()` re-delivers the SAME mistyped
+    /// backfill event on every one of the three connects — mirroring production
+    /// `GrpcUplinkSource::recent`, which re-fetches each time. A `take`-once mock
+    /// would only exercise the first delivery and a regression that started
+    /// recording from the second occurrence onward would slip through.
+    #[tokio::test]
+    async fn backfill_mismatch_records_nothing_across_reconnects() {
+        // `recent` (the backfill event) carries the mistyped field; the live
+        // streams carry nothing at all, so the ONLY mismatch source is the
+        // backfill — which runs once per connect, and we force three connects.
+        let source = ScriptedSource::new_persistent_recent(
+            vec![
+                vec![ScriptItem::Error("drop 1")],
+                vec![ScriptItem::Error("drop 2")],
+                vec![],
+            ],
+            Some(uplink_obj(1_700_000_100, json!({ "rain": "wet" }))),
+        );
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let cancel = CancellationToken::new();
+        let metrics = vec![rm("Rain", "rain", OpcMetricTypeConfig::Int)];
+
+        let task = tokio::spawn(run_device_stream(
+            source.clone() as Arc<dyn UplinkSource>,
+            "dev1".to_string(),
+            metrics,
+            Arc::clone(&backend),
+            cancel.clone(),
+        ));
+
+        // Wait for the reconnects (each replays the backfill).
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while source.connect_count.load(Ordering::SeqCst) < 3 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("expected three connects");
+
+        assert!(
+            events_of(&backend, "metric_type_mismatch").is_empty(),
+            "backfill path must not record, however many reconnects occur"
         );
 
         cancel.cancel();
