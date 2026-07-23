@@ -951,6 +951,13 @@ async fn ingest_event(
     // field would otherwise evict every genuine error from the bounded feed and
     // add two SQL writes per uplink on contended storage, see #152).
     for mm in &mapping.mismatches {
+        // The dedup marker is set regardless of whether the feed write below
+        // succeeds. This is deliberate (code review 2026-07-23): the `warn!`
+        // fires unconditionally, so a failed best-effort feed write still
+        // leaves the fault in the operator log; and gating the marker on write
+        // success would re-attempt the record on EVERY subsequent uplink during
+        // a storage outage — the per-uplink write flood on contended NAS
+        // storage that this design (and #152) exist to avoid.
         if mismatched.insert(mm.metric_name.clone()) {
             warn!(
                 event = "uplink_field_type_mismatch",
@@ -1591,15 +1598,40 @@ mod tests {
         recent: Mutex<Option<UplinkEvent>>,
         connect_count: AtomicUsize,
         next_event_calls: Arc<AtomicUsize>,
+        /// When true, `recent()` re-delivers the same event on EVERY connect
+        /// (cloning, not taking) — mirroring production `GrpcUplinkSource::recent`,
+        /// which genuinely re-fetches the newest uplink on each reconnect. The
+        /// default (false) takes it once, which suits tests that only care about
+        /// the first-connect backfill.
+        recent_persists: bool,
     }
 
     impl ScriptedSource {
         fn new(connects: Vec<Vec<ScriptItem>>, recent: Option<UplinkEvent>) -> Arc<Self> {
+            Self::build(connects, recent, false)
+        }
+
+        /// Like `new`, but `recent()` re-delivers on every connect (see the
+        /// `recent_persists` field). Use for reconnect tests that must exercise
+        /// the backfill path more than once.
+        fn new_persistent_recent(
+            connects: Vec<Vec<ScriptItem>>,
+            recent: Option<UplinkEvent>,
+        ) -> Arc<Self> {
+            Self::build(connects, recent, true)
+        }
+
+        fn build(
+            connects: Vec<Vec<ScriptItem>>,
+            recent: Option<UplinkEvent>,
+            recent_persists: bool,
+        ) -> Arc<Self> {
             Arc::new(Self {
                 connects: Mutex::new(connects.into()),
                 recent: Mutex::new(recent),
                 connect_count: AtomicUsize::new(0),
                 next_event_calls: Arc::new(AtomicUsize::new(0)),
+                recent_persists,
             })
         }
     }
@@ -1627,7 +1659,12 @@ mod tests {
             &self,
             _device_id: &str,
         ) -> Result<Option<UplinkEvent>, OpcGwStreamError> {
-            Ok(self.recent.lock().unwrap().take())
+            let mut guard = self.recent.lock().unwrap();
+            if self.recent_persists {
+                Ok(guard.clone())
+            } else {
+                Ok(guard.take())
+            }
         }
     }
 
@@ -1913,16 +1950,16 @@ mod tests {
         task.await.unwrap();
     }
 
-    /// AC#3/#9(f): the FIRST occurrence warns, every repeat drops to `debug!`.
-    /// Without this, an implementation could record once (satisfying every
-    /// other test) while still emitting one WARN per uplink — which is the
-    /// actual operator complaint behind #160 (76 warns/day from one metric).
-    ///
-    /// Uses a test-LOCAL subscriber on a current-thread runtime rather than the
-    /// `tracing_test` global buffer: the sibling tests in this module emit the
-    /// same event concurrently and would otherwise bleed into the counts.
-    #[test]
-    fn mismatch_warns_once_then_drops_to_debug() {
+    /// Run `body` under a test-LOCAL tracing subscriber on a current-thread
+    /// runtime and return everything it logged. Test-local (via
+    /// `with_default`, thread-scoped) rather than the `tracing_test` global
+    /// buffer, because sibling `#[tokio::test]`s in this module emit the same
+    /// event names concurrently and would bleed into the capture.
+    fn capture_logs<F, Fut>(body: F) -> String
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
         use std::io::Write;
         use tracing_subscriber::{fmt as tracing_fmt, layer::SubscriberExt, Layer};
 
@@ -1952,24 +1989,30 @@ mod tests {
                 .with_ansi(false)
                 .with_filter(tracing_subscriber::filter::LevelFilter::TRACE),
         );
-
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        tracing::subscriber::with_default(subscriber, || {
-            rt.block_on(async {
-                let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
-                let metrics = vec![rm("Rain", "rain", OpcMetricTypeConfig::Int)];
-                let mut diag = UplinkDiagState::default();
-                for i in 0..4 {
-                    let event = uplink_obj(1_700_000_100 + i, json!({ "rain": "wet" }));
-                    ingest_event("dev1", &metrics, &event, &backend, &mut diag).await;
-                }
-            });
-        });
+        tracing::subscriber::with_default(subscriber, || rt.block_on(body()));
+        let out = String::from_utf8_lossy(&buf.lock().unwrap()).to_string();
+        out
+    }
 
-        let logs = String::from_utf8_lossy(&buf.lock().unwrap()).to_string();
+    /// AC#3/#9(f): the FIRST occurrence warns, every repeat drops to `debug!`.
+    /// Without this, an implementation could record once (satisfying every
+    /// other test) while still emitting one WARN per uplink — which is the
+    /// actual operator complaint behind #160 (76 warns/day from one metric).
+    #[test]
+    fn mismatch_warns_once_then_drops_to_debug() {
+        let logs = capture_logs(|| async {
+            let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+            let metrics = vec![rm("Rain", "rain", OpcMetricTypeConfig::Int)];
+            let mut diag = UplinkDiagState::default();
+            for i in 0..4 {
+                let event = uplink_obj(1_700_000_100 + i, json!({ "rain": "wet" }));
+                ingest_event("dev1", &metrics, &event, &backend, &mut diag).await;
+            }
+        });
         let lines: Vec<&str> = logs
             .lines()
             .filter(|l| l.contains("uplink_field_type_mismatch"))
@@ -1981,15 +2024,67 @@ mod tests {
         assert_eq!(debugs, 3, "repeats are debug-level, got logs:\n{logs}");
     }
 
+    /// AC#6/#9(d): when an orphaned metric finally appears, `uplink_metric_now_seen`
+    /// (info) fires to self-correct the earlier `uplink_metric_never_seen` warning,
+    /// and records NOTHING to the feed. The feed-count-only test cannot see whether
+    /// the info actually fired (the count is unaffected either way), so assert the
+    /// log line directly — a regression deleting the self-correction block would
+    /// otherwise pass silently.
+    #[test]
+    fn orphan_then_sighting_emits_now_seen_and_records_nothing() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let logs = capture_logs(|| {
+            let backend = Arc::clone(&backend);
+            async move {
+                let metrics = vec![rm("Battery", "battery", OpcMetricTypeConfig::Int)];
+                let mut diag = UplinkDiagState::default();
+                // Three uplinks WITHOUT the field cross ORPHAN_WARN_AFTER_EVENTS,
+                // so `battery` is flagged never-seen…
+                for i in 0..3 {
+                    let event = uplink_obj(1_700_000_100 + i, json!({ "other": 1 }));
+                    ingest_event("dev1", &metrics, &event, &backend, &mut diag).await;
+                }
+                // …then it finally shows up, which must self-correct.
+                let event = uplink_obj(1_700_000_110, json!({ "battery": 87 }));
+                ingest_event("dev1", &metrics, &event, &backend, &mut diag).await;
+            }
+        });
+
+        assert!(
+            logs.contains("uplink_metric_never_seen"),
+            "the orphan must first be warned; got:\n{logs}"
+        );
+        // Match the structured `event=` field, not a bare substring: the
+        // never-seen WARN's own message text mentions "uplink_metric_now_seen"
+        // ("…an uplink_metric_now_seen will follow"), so a substring filter
+        // would double-count it.
+        let now_seen: Vec<&str> = logs
+            .lines()
+            .filter(|l| l.contains(r#"event="uplink_metric_now_seen""#))
+            .collect();
+        assert_eq!(now_seen.len(), 1, "now_seen fires exactly once; got:\n{logs}");
+        assert!(now_seen[0].contains("INFO"), "now_seen is info-level; got:\n{logs}");
+        // AC#6: the self-correction records nothing — only the single
+        // never-seen entry from before the field appeared remains.
+        let feed = events_of(&backend, "metric_never_seen");
+        assert_eq!(feed.len(), 1, "now_seen adds no feed entry");
+    }
+
     /// AC#5: the reconnect-backfill path must never record. It re-processes an
     /// already-seen event on every connect, so recording there would re-fire
     /// on each reconnect of a flapping link and flood the bounded feed.
+    ///
+    /// Uses `new_persistent_recent` so `recent()` re-delivers the SAME mistyped
+    /// backfill event on every one of the three connects — mirroring production
+    /// `GrpcUplinkSource::recent`, which re-fetches each time. A `take`-once mock
+    /// would only exercise the first delivery and a regression that started
+    /// recording from the second occurrence onward would slip through.
     #[tokio::test]
     async fn backfill_mismatch_records_nothing_across_reconnects() {
         // `recent` (the backfill event) carries the mistyped field; the live
         // streams carry nothing at all, so the ONLY mismatch source is the
         // backfill — which runs once per connect, and we force three connects.
-        let source = ScriptedSource::new(
+        let source = ScriptedSource::new_persistent_recent(
             vec![
                 vec![ScriptItem::Error("drop 1")],
                 vec![ScriptItem::Error("drop 2")],

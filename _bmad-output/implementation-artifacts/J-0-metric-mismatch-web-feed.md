@@ -1,6 +1,6 @@
 # Story J.0: Metric Type-Mismatch & Orphaned-Metric Warnings in the Web Error Feed
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -135,6 +135,18 @@ Unit tests inline in `src/chirpstack_events.rs` (`mod tests`, `:1141`); cross-ba
 - Stream ingestion: `E-1-grpc-uplink-event-ingestion.md` (#130) — `StreamDeviceEvents`, raw last-value semantics, orphan tracking; also holds the deferred dedup item this story resolves.
 - Storage contention: [#152](https://github.com/guycorbaz/opcgw/issues/152) — why per-uplink writes are unacceptable on the target NAS.
 - Epic: `sprint-status.yaml` → `epic-J` (target v2.8.0).
+
+## Tasks / Subtasks → Review Findings (AI, 2026-07-23)
+
+Code review: 3 adversarial layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor) on Sonnet, against commit `aa2ab8b`. **No code-correctness bug found — all layers confirmed the dedup, backfill-silent, and best-effort logic are structurally sound.** Blind Hunter clean (2 Low nitpicks). Findings below are 1 design decision, 2 test-fidelity gaps, 2 defers, 2 dismissed.
+
+- [x] [Review][Decision → Accepted as-is 2026-07-23] Storage-failure marks a mismatch "reported" even when the DB write fails [src/chirpstack_events.rs:954] — **Resolved: accept as-is** (owner decision). The `warn!` log fires unconditionally so the operator is never blind, recording is best-effort, and gating the marker on write success would re-flood contended NAS storage with per-uplink writes during an outage (#152) — the exact failure mode this design prevents. Documented as an explicit comment at the call site. Original finding: `mismatched.insert()` gates the record call and is set regardless of whether `record_error_event` succeeds, so a transient storage failure on the *first* occurrence permanently forecloses ever recording that (device, metric) to the feed for the stream-task lifetime. **Mitigation already present:** the `warn!` log fires unconditionally before the record (pre-existing behaviour, so the operator is never blind), and recording is explicitly best-effort. **Tradeoff:** guaranteeing eventual feed delivery (only mark reported on success) would re-attempt the write on *every* uplink during a storage outage — the exact per-uplink-write flood on contended NAS storage that #152 and this story's whole design avoid. Decision needed: accept-as-is vs guarantee-delivery.
+- [x] [Review][Patch] Backfill "records nothing across reconnects" test only proves single delivery [src/chirpstack_events.rs:1630] — the test's `ScriptedSource::recent()` uses `Option::take()`, so the backfill event is delivered once; reconnects 2–3 get `None` and short-circuit. Production `GrpcUplinkSource::recent()` (:502) re-fetches every connect and would re-deliver the same uplink. The docstring claims "however many reconnects occur" but the mock defeats it — strengthen so `recent()` returns on every connect.
+- [x] [Review][Patch] AC#9(d) requires asserting `uplink_metric_now_seen` fires, but no test captures it [src/chirpstack_events.rs:1872] — `orphaned_metric_records_once_and_now_seen_records_nothing` asserts the feed count stays 1, which is unaffected whether or not the self-correction block runs. `uplink_metric_now_seen` has zero assertions in the tree; a regression deleting the `info!`/`warned.remove` block would pass. Add a log-capture assertion (reuse the test-local subscriber from `mismatch_warns_once_then_drops_to_debug`).
+- [x] [Review][Defer] Stale, un-retracted `metric_never_seen` feed entry after a field appears mismatched [src/chirpstack_events.rs:922] — deferred: the feed is append-only by explicit design (AC#6); the `metric_never_seen` event was true when emitted (point-in-time), and live-status reconciliation is exactly the current-state read model descoped to #173. Tracked in #174.
+- [x] [Review][Defer] A mismatch delivered *only* via backfill (device never sends a live uplink) is never recorded [src/chirpstack_events.rs:781] — deferred: narrow window (a device actively emitting mistyped uplinks flows through the live path and is caught); giving backfill its own recording+dedup reintroduces the reconnect-flood the design avoids. Tracked in #174.
+- [x] [Review][Dismiss] Dead `Value::Null => "null"` arm in `mismatch_reason` — the `!v.is_null()` guard filters null before the function runs; harmless total-function defensive code.
+- [x] [Review][Dismiss] "too large" wording reads oddly for very-negative overflow — cosmetic; message string is pinned by tests.
 
 ## Dev Agent Record
 
