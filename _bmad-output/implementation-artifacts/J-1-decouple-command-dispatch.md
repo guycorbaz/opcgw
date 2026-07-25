@@ -341,3 +341,20 @@ Verified clean by iter-5: short-circuit starvation (none — re-drives re-read t
 | Date | Change |
 |------|--------|
 | 2026-07-25 | bmad-code-review iter-5 (focused verification of iter-4): eager-connect crux verified live; warm-cache misclassification fixed via typed `is_provably_unsent` classifier; unmarked-terminal carry map closes the Failed-write double-actuation reopening; ladder-test margin hardened. Gates: cargo test 1894/0, clippy clean. |
+
+### Iteration 6 — loop closure (2026-07-25)
+
+Tight sanity pass over the iter-5 lines (commit 1ce3ef5). **Classifier confirmed LIVE at runtime** — the agent verified the full tonic 0.14.6 / hyper-util 0.1.20 chain (Reconnect::poll_ready → Status::from_error_generic → source preserved down to the io::Error). Findings, both fixed:
+
+- [x] **M (MED) — DNS-class outage still classified ambiguous.** The flagship compose deployment addresses ChirpStack by container DNS name; Docker's embedded DNS stops resolving a stopped container, so a ChirpStack restart surfaces as hyper-util's `"dns error"` ConnectError (io kind `Uncategorized` — outside the kind allowlist; the type is private, no downcast). FIX: exact-match (`==`, not substring) on the `"dns error"` label in the source walk + `TimedOut` added to the kind allowlist (connect-phase only — the 10 s RPC tokio deadline preempts any post-send kernel timeout and carries no io source). **Guarded by two REAL-STACK end-to-end tests** (`classifier_fires_for_real_refused_connect` on a closed loopback port, `classifier_fires_for_real_dns_failure` on an RFC-2606 `.invalid` host) driving an actual lazy tonic client — a dependency upgrade that changes the chain shape or label now fails tests loudly instead of silently killing the classification.
+- [x] **L (latent) — carry-map entry for an externally-removed/changed row could linger.** (The iter-6 "retries forever" walk was actually inert — an absent row is never visited — but the entry did leak.) FIX: `retain()` at drain start drops entries whose id no longer reads `Pending`; runs before the empty-queue return so an emptied queue clears the map.
+
+Verified clean by iter-6: no `NotConnected` false-retry path on Linux; carry-map clobber of a Confirmed/Sent row unreachable (ambiguous rows have no `chirpstack_result_id`, the E-3 ack path can't match them, the timeout sweep filters `Sent`); the test-only injection hook cannot activate outside unit tests; `with_validator` refactor semantically identical.
+
+**LOOP TERMINATION:** this pass's fixes are classification-table extensions + a retain call — no new flow-control. All prior findings across iters 3–6 are patched, deferred-with-issue (#177), or dismissed-with-rationale; remaining residuals are LOW-only (documented #177 crash window, conservative-miss classes that fail safe). Per CLAUDE.md loop condition 2, the review loop TERMINATES here. Gates: cargo test 1898/0, clippy -D warnings clean.
+
+### Change Log — code review (cont. 5)
+
+| Date | Change |
+|------|--------|
+| 2026-07-25 | bmad-code-review iter-6 (loop closure): DNS-class outage now classifies retry-safe (exact-label match + TimedOut kind, guarded by 2 real-stack end-to-end classifier tests); carry-map retain hygiene. Runtime chain verified live. LOOP TERMINATED (LOW-only residuals). Gates 1898/0 + clippy clean. |

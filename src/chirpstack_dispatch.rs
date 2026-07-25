@@ -117,6 +117,19 @@ type CachedDeviceClient = chirpstack_api::api::device_service_client::DeviceServ
 fn is_provably_unsent(status: &tonic::Status) -> bool {
     let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(status);
     while let Some(err) = source {
+        // iter-6: hyper-util labels a connect that failed at DNS resolution
+        // with this exact ConnectError message (the io::Error underneath is
+        // `Uncategorized`, so the kind allowlist below cannot catch it, and
+        // the type is not public for a downcast). A name that never resolved
+        // provably carried no request. In the flagship compose deployment
+        // ChirpStack is addressed by container DNS name, and Docker's embedded
+        // DNS stops resolving a stopped container — so a ChirpStack restart
+        // often surfaces as THIS class, not ConnectionRefused. Exact ==, not
+        // substring; the real-stack classifier tests (closed port + .invalid
+        // host) fail loudly if a hyper-util upgrade ever changes the label.
+        if err.to_string() == "dns error" {
+            return true;
+        }
         if let Some(io) = err.downcast_ref::<std::io::Error>() {
             return matches!(
                 io.kind(),
@@ -124,6 +137,11 @@ fn is_provably_unsent(status: &tonic::Status) -> bool {
                     | std::io::ErrorKind::HostUnreachable
                     | std::io::ErrorKind::NetworkUnreachable
                     | std::io::ErrorKind::NotConnected
+                    // Connect-phase timeout (blackholed SYN). Post-send kernel
+                    // timeouts (~minutes) cannot surface here: the 10 s
+                    // ENQUEUE_RPC_TIMEOUT tokio arm preempts them, and its
+                    // elapsed error carries no io source at all.
+                    | std::io::ErrorKind::TimedOut
             );
         }
         source = err.source();
@@ -311,6 +329,13 @@ pub(crate) async fn drain_pending_commands(
             return false;
         }
     };
+    // iter-6 hygiene: drop carry entries whose row no longer reads as
+    // `Pending` (deleted externally, or its status changed by another actor)
+    // — such an entry could never be visited again and would sit in the map
+    // forever. Every legitimately-carried row IS `Pending` (that is what the
+    // carry means), so it always appears in this read while it exists.
+    // Runs before the empty-queue return so an emptied queue clears the map.
+    unmarked_terminal.retain(|id, _| pending.iter().any(|c| c.id == *id));
     if pending.is_empty() {
         return true;
     }
@@ -1442,6 +1467,54 @@ mod tests {
         assert!(
             err.unwrap_or_default().contains("mock enqueue failure"),
             "the original failure reason must be preserved through the carry"
+        );
+    }
+
+    /// Drives a REAL tonic client (lazy channel, so the connect failure
+    /// surfaces as an RPC-level `Status` — the warm-cache shape) at `uri` and
+    /// returns the resulting error `Status`.
+    async fn real_enqueue_status(uri: &'static str) -> tonic::Status {
+        let channel = tonic::transport::Endpoint::from_static(uri)
+            .connect_timeout(Duration::from_secs(5))
+            .connect_lazy();
+        let mut client =
+            chirpstack_api::api::device_service_client::DeviceServiceClient::new(channel);
+        let request = Request::new(EnqueueDeviceQueueItemRequest {
+            queue_item: None,
+            flush_queue: false,
+        });
+        tokio::time::timeout(Duration::from_secs(15), client.enqueue(request))
+            .await
+            .expect("connect failure must surface well before 15 s")
+            .expect_err("no server is listening — the call must fail")
+    }
+
+    /// J-1 iter-6: END-TO-END classifier liveness against the REAL
+    /// tonic/hyper-util stack — a connection-refused reconnect must classify
+    /// as provably-unsent. This is the guard that fails loudly if a
+    /// dependency upgrade changes the error-chain shape and silently kills
+    /// the warm-cache retry classification.
+    #[tokio::test]
+    async fn classifier_fires_for_real_refused_connect() {
+        // Port 1 on loopback: nothing listens; connect is refused instantly.
+        let status = real_enqueue_status("http://127.0.0.1:1").await;
+        assert!(
+            is_provably_unsent(&status),
+            "a real refused connect must classify as unsent; got: {status:?}"
+        );
+    }
+
+    /// J-1 iter-6: same liveness guard for the DNS-failure outage shape —
+    /// the flagship compose deployment addresses ChirpStack by container DNS
+    /// name, and a stopped container surfaces as a resolution failure, not a
+    /// refused connect. Guards the exact-match "dns error" hyper-util label.
+    #[tokio::test]
+    async fn classifier_fires_for_real_dns_failure() {
+        // RFC 2606 reserves .invalid: resolution is guaranteed to fail.
+        let status = real_enqueue_status("http://chirpstack-does-not-exist.invalid:1").await;
+        assert!(
+            is_provably_unsent(&status),
+            "a real DNS resolution failure must classify as unsent; got: {status:?}"
         );
     }
 
