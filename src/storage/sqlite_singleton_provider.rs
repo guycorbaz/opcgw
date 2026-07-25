@@ -23,7 +23,10 @@
 //! 1. Toml::file(config_path)       (lowest priority — bootstrap seed)
 //! 2. Toml::string(secrets.toml)    (secret fields only)
 //! 3. SqliteSingletonProvider       (non-secret runtime config — THIS)
-//! 4. Env::prefixed("OPCGW_")       (highest priority — operator override)
+//! 4. opcgw_env_provider()          (highest priority, but ALLOWLISTED —
+//!                                   Story J-2/#169: an OPCGW_* var addressing
+//!                                   a web-editable field is filtered out, so
+//!                                   THIS provider is authoritative for it)
 //! ```
 //!
 //! Each higher layer overrides keys present in lower layers. The

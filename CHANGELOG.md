@@ -18,6 +18,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   log by hand (field case: 76 skipped fields in one day on one device).
 
 ### Changed
+- **⚠️ BREAKING: environment-variable configuration is restricted to an allowlist**
+  ([#169](https://github.com/guycorbaz/opcgw/issues/169) /
+  [#168](https://github.com/guycorbaz/opcgw/issues/168), Story J-2): the web Admin
+  page (SQLite) is now genuinely authoritative for the editable configuration. An
+  `OPCGW_<SECTION>__<FIELD>` env var addressing a web-editable field outside the
+  allowlist is **ignored** (excluded from the config at the provider level) and
+  reported once per boot with an `env_var_ignored` WARN naming the variable —
+  previously any env var silently outranked the Admin page (the env-shadows-database
+  trap; v2.7.1's `env_shadows_singleton_config` WARN was the deprecation notice).
+  Still env-capable: the two secrets (`OPCGW_CHIRPSTACK__API_TOKEN`,
+  `OPCGW_OPCUA__USER_PASSWORD`), the web bootstrap trio
+  (`OPCGW_WEB__ENABLED`/`BIND_ADDRESS`/`PORT`), `OPCGW_OPCUA__HOST_PORT`
+  (compose port mapping/healthcheck), the non-web sections (`[storage]`,
+  `[command_validation]`, `[logging]`), and the short-form process knobs
+  (`OPCGW_LOG_DIR`, `OPCGW_LOG_LEVEL`, budget/cap tuning).
+
+  **Migration (do this BEFORE upgrading a deployment that sets `OPCGW_*` vars).**
+  The rule of thumb: *every* `OPCGW_<SECTION>__<FIELD>` var you set for
+  `[global]`, `[chirpstack]`, `[opcua]` or `[web]` stops working unless it is in
+  the allowlist above. Work through your `.env` line by line; the two checks
+  below catch both failure shapes.
+
+  1. **Values that differ between env and the database (the common case).** Every
+     `env_shadows_singleton_config` WARN in your v2.7.1 logs is one of these —
+     and each WARN line already contains both `env_value` and `db_value`. For
+     each, decide which value you actually want: if it is the `env_value`, set it
+     on the web **Admin** page now (the database value is what applies after the
+     upgrade). If they already match, nothing to do.
+  2. **Values that exist only in the environment** (no database row, so they
+     never produced a shadow WARN — e.g. `stream_all_devices=true` on a
+     deployment migrated before that field existed): open the Admin page, verify
+     the field shows the intended effective value (the #155 backfill renders it),
+     and **save the section** — that persists the row. Only then upgrade.
+  3. Then remove the now-ignored vars from `.env`/compose (leaving them only
+     produces a WARN per boot).
+
+  Frequently-hit ignored vars: `OPCGW_CHIRPSTACK__SERVER_ADDRESS`,
+  `OPCGW_CHIRPSTACK__POLLING_FREQUENCY`, `OPCGW_CHIRPSTACK__STREAM_ALL_DEVICES`,
+  `OPCGW_GLOBAL__DEBUG`, `OPCGW_OPCUA__STALE_THRESHOLD_SECONDS`,
+  `OPCGW_OPCUA__HOST_IP_ADDRESS`, `OPCGW_OPCUA__MAX_KEEP_ALIVE_COUNT`,
+  `OPCGW_OPCUA__MIN_PUBLISHING_INTERVAL_MS`, `OPCGW_OPCUA__CREATE_SAMPLE_KEYPAIR`,
+  `OPCGW_WEB__AUTH_REALM` — **not an exhaustive list**: the allowlist above is
+  the authority, and every ignored var is named individually in the boot log.
+
+  Two specific traps:
+  - **`OPCGW_OPCUA__USER_NAME` is also your web-UI login name.** After the
+    upgrade it comes from the Admin page (default `opcua-user`), while the
+    password may still come from the environment. The gateway logs an
+    `env_var_ignored_login_name` WARN naming the *effective* login name at boot,
+    so check that line if a login fails.
+  - **`OPCGW_OPCUA__CREATE_SAMPLE_KEYPAIR=true` no longer masks a missing
+    keypair**, so a deployment that relied on it can fail startup validation.
+    Set it on the Admin page, or provision the keypair (see `docs/security.md`).
 - **OPC UA commands are now dispatched immediately, not on the metrics-poll cycle**
   ([#136](https://github.com/guycorbaz/opcgw/issues/136), Story J-1): a successful
   `set_command` write fires a `tokio::sync::Notify` that wakes a dedicated

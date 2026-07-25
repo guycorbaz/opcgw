@@ -75,7 +75,7 @@ use crate::chirpstack::ChirpstackPoller;
 use crate::storage::{Storage, ConnectionPool, StorageBackend, MetricValueInternal};
 use clap::Parser;
 use config::{AppConfig, LoggingConfig};
-use figment::{providers::{Env, Format, Toml}, Figment};
+use figment::{providers::{Format, Toml}, Figment};
 use tracing::{debug, error, info, trace, warn};
 use tracing_appender::non_blocking;
 use tracing_subscriber::fmt::time::ChronoUtc;
@@ -106,9 +106,14 @@ struct LoggingPeek {
 /// resolvers (the short forms `OPCGW_LOG_DIR` / `OPCGW_LOG_LEVEL` are
 /// still consulted by the resolvers themselves and take precedence).
 fn peek_logging_config(config_path: &str) -> Option<LoggingConfig> {
+    // J-2: shared allowlist-filtered provider (single source of truth with
+    // `from_path_inner`). Consistency, not correctness: `LoggingPeek` only
+    // deserializes `logging.*`, which the filter never touches ([logging] is
+    // outside KNOWN_SECTIONS), so an unfiltered peek could not misbehave —
+    // but two hand-rolled providers WOULD drift eventually.
     Figment::new()
         .merge(Toml::file(config_path))
-        .merge(Env::prefixed("OPCGW_").split("__").global())
+        .merge(config::opcgw_env_provider())
         .extract::<LoggingPeek>()
         .ok()
         .and_then(|p| p.logging)
@@ -611,6 +616,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     static ENV_SHADOWS_SINGLETON_WARNING_EMITTED: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
 
+    // Story J-2 (#169 enforcement): once-per-boot guard for `env_var_ignored`
+    // (an OPCGW_* env var the allowlist filter excluded from the config).
+    static ENV_VAR_IGNORED_WARNING_EMITTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    // Story J-2 (review iter-1): once-per-boot guard for the login-name hint
+    // emitted when an ignored OPCGW_OPCUA__USER_NAME would otherwise change
+    // the web login silently.
+    static ENV_LOGIN_NAME_HINT_EMITTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
     // Parse arguments
     let args = Args::parse();
 
@@ -730,6 +746,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Phase 2: now that tracing is up, load the full config from the same
     // path the bootstrap peek used. Any failure here reaches the file
     // appenders via `error!` (review patch D1).
+    // Story J-2: report allowlist-ignored OPCGW_* vars BEFORE the first
+    // figment load (subscriber is already up, so the WARN reaches the logs).
+    // Deliberately ahead of `from_path`: if the load then FAILS because a
+    // formerly-env-supplied value is now ignored (J-2 smoke finding: e.g.
+    // `OPCGW_OPCUA__CREATE_SAMPLE_KEYPAIR=true` no longer masks a missing
+    // keypair), the operator sees WHY their env var did nothing right next to
+    // the validation error. Also on the BOOTSTRAP path — unlike the shadow
+    // WARN this needs no SQLite rows, and it must fire even if SQLite never
+    // becomes readable this boot.
+    AppConfig::maybe_warn_env_ignored(&ENV_VAR_IGNORED_WARNING_EMITTED);
+
     let mut application_config = match AppConfig::from_path(&config_path) {
         Ok(config) => Arc::new(config),
         Err(e) => {
@@ -1178,6 +1205,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+
+    // Story J-2 (review iter-2, HIGH): the credential-pair hint must report the
+    // EFFECTIVE login name — i.e. AFTER the post-SQLite reload above, because
+    // `[opcua].user_name` is a web/SQLite-managed field and `WebAuthState` is
+    // built from that same post-reload value. Emitting it against the
+    // bootstrap snapshot printed the stale `config.toml` value (or the
+    // `opcua-user` serde default when config.toml has been deleted, which is a
+    // documented deployment shape) — an anti-lockout hint that would itself
+    // cause the lockout.
+    application_config.maybe_warn_ignored_user_name(&ENV_LOGIN_NAME_HINT_EMITTED);
 
     match sqlite_backend.load_all_metrics() {
         Ok(metrics) => {
