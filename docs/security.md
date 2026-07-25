@@ -418,6 +418,26 @@ multi-user RBAC). Configure via:
 | Field                   | Env var                       | Notes                                                      |
 |-------------------------|-------------------------------|------------------------------------------------------------|
 | `[opcua].user_name`     | ~~`OPCGW_OPCUA__USER_NAME`~~  | **v2.8.0: env override IGNORED** (web-Admin-managed, #169). This is also the web-UI login name — check it on the Admin page before upgrading. |
+
+> **⚠️ v2.8.0 upgrade checklist — security-relevant env overrides.** The v2.8.0
+> env allowlist (#169) ignores every `OPCGW_OPCUA__*` / `OPCGW_WEB__*` variable
+> except `OPCGW_OPCUA__USER_PASSWORD`, `OPCGW_OPCUA__HOST_PORT` and
+> `OPCGW_WEB__ENABLED`/`BIND_ADDRESS`/`PORT`. If you **hardened** a deployment
+> through `.env` while the seed config or SQLite still holds a laxer value, the
+> laxer value takes effect after the upgrade. Diff **every** `OPCGW_OPCUA__*` and
+> `OPCGW_WEB__*` variable in your `.env` against the Admin-page value **before**
+> upgrading — the security-relevant ones are:
+>
+> | Field | Risk if the env value is dropped |
+> |-------|----------------------------------|
+> | `[opcua].trust_client_cert` | The shipped seed is `true` (accepts **any** client certificate without validation). An `OPCGW_OPCUA__TRUST_CLIENT_CERT=false` hardening is ignored after upgrade. |
+> | `[opcua].check_cert_time` | Certificate validity-period checking silently reverts to the stored value. |
+> | `[web].allowed_origins` | An env-narrowed CSRF origin allowlist reverts to the broader stored list. |
+> | `[web].auth_realm` | Cosmetic, but changes the browser credential prompt. |
+> | `[opcua].host_ip_address` | Advertised endpoint host (#163) — reverts to the stored value. |
+>
+> Each ignored variable is named individually by an `env_var_ignored` WARN at
+> boot, so the first startup after the upgrade is also a checklist.
 | `[opcua].user_password` | `OPCGW_OPCUA__USER_PASSWORD`  | **Always set via env var** — the placeholder in the shipped TOML is rejected at startup. |
 
 Internally the user-token id is `default-user`

@@ -2841,7 +2841,14 @@ pub(crate) async fn deliver_one(
                 command_id = command.id,
                 "Failed to enqueue command; marking command Failed"
             );
-            let reason = e.to_string();
+            // Epic J security review LOW-1: this reason is REMOTE-supplied
+            // (a `tonic::Status` from ChirpStack) and is persisted into
+            // `command_queue.error_message`, which is served to operators over
+            // OPC UA. Scrub it like the J-0 error-feed path does — Bearer
+            // redaction, control-character strip, length bound — so a hostile
+            // or broken peer cannot inject unbounded control text into an
+            // operator-facing field.
+            let reason = crate::utils::sanitize_error_message(&e.to_string());
             if let Err(e2) = backend
                 .async_store()
                 .update_command_status(command.id, CommandStatus::Failed, Some(reason.clone()))

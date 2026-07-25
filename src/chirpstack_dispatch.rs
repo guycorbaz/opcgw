@@ -131,17 +131,25 @@ fn is_provably_unsent(status: &tonic::Status) -> bool {
             return true;
         }
         if let Some(io) = err.downcast_ref::<std::io::Error>() {
+            // ONLY kinds that are unambiguous at the socket level: the peer
+            // actively refused, or the route/host never existed. Epic J
+            // security review LOW-2: `NotConnected` and `TimedOut` were also
+            // listed, argued safe because the 10 s RPC deadline preempts
+            // post-send kernel timeouts — but that reasoning depends on
+            // hyper-util internals, and if either kind ever surfaced AFTER the
+            // request was written it would flip an ambiguous failure into the
+            // retry-safe class and re-open the double-actuation window. They
+            // are dropped: the cost is that a blackholed connect fails
+            // terminally ("delivery uncertain") instead of retrying, which is
+            // the safe direction for hardware actuation. The common
+            // ChirpStack-restart shapes (refused, DNS) are unaffected, and a
+            // COLD connect failure is classified unreachable at
+            // client-creation regardless of kind.
             return matches!(
                 io.kind(),
                 std::io::ErrorKind::ConnectionRefused
                     | std::io::ErrorKind::HostUnreachable
                     | std::io::ErrorKind::NetworkUnreachable
-                    | std::io::ErrorKind::NotConnected
-                    // Connect-phase timeout (blackholed SYN). Post-send kernel
-                    // timeouts (~minutes) cannot surface here: the 10 s
-                    // ENQUEUE_RPC_TIMEOUT tokio arm preempts them, and its
-                    // elapsed error carries no io source at all.
-                    | std::io::ErrorKind::TimedOut
             );
         }
         source = err.source();
@@ -1380,14 +1388,20 @@ mod tests {
         )));
         assert!(is_provably_unsent(&refused), "refused connect = nothing sent");
 
-        let reset = tonic::Status::from_error(Box::new(std::io::Error::new(
+        for ambiguous in [
             std::io::ErrorKind::ConnectionReset,
-            "connection reset by peer",
-        )));
-        assert!(
-            !is_provably_unsent(&reset),
-            "a reset can happen AFTER the request went out — must stay ambiguous"
-        );
+            // Dropped from the allowlist by the Epic J security review (LOW-2):
+            // their post-send impossibility rested on hyper-util internals.
+            std::io::ErrorKind::NotConnected,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            let status =
+                tonic::Status::from_error(Box::new(std::io::Error::new(ambiguous, "boom")));
+            assert!(
+                !is_provably_unsent(&status),
+                "{ambiguous:?} can occur AFTER the request went out — must stay ambiguous"
+            );
+        }
 
         let plain = tonic::Status::unavailable("service unavailable");
         assert!(
