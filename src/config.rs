@@ -1128,10 +1128,22 @@ pub(crate) fn env_post_prefix_key_passes(raw: &str) -> bool {
     use crate::storage::migrate_singleton_config::env_key_allowed;
     match env_post_prefix_to_section_key(raw) {
         Some((section, key)) => env_key_allowed(&section, &key),
-        // Addresses no section field (short form, or empty segments figment
-        // itself drops) — nothing to protect.
-        None => true,
+        // A separator-less key that IS a section name addresses the WHOLE
+        // section, because figment parses env VALUES into structured dicts
+        // (`value/parse.rs`): `OPCGW_CHIRPSTACK='{polling_frequency=99}'`
+        // deep-merges over the SQLite provider and sets any number of blocked
+        // fields at once — a strictly more powerful bypass than the `__`/`.`/
+        // whitespace shapes, and silent (Epic J security review HIGH-1).
+        None => !env_names_a_known_section(raw),
     }
+}
+
+/// Does this post-prefix key name a whole web-editable section (rather than a
+/// field inside one)? Such a key must be blocked: figment would merge a dict
+/// value straight over the Admin-page settings.
+pub(crate) fn env_names_a_known_section(raw: &str) -> bool {
+    use crate::storage::migrate_singleton_config::KNOWN_SECTIONS;
+    KNOWN_SECTIONS.contains(&raw.trim().to_lowercase().as_str())
 }
 
 /// The single `OPCGW_*` env provider for BOTH production figment stacks
@@ -1504,18 +1516,20 @@ impl AppConfig {
 
         // Collect (env_var, section, key, env_value, db_value) for every OPCGW_*
         // env var that maps to a web-editable field ALSO present in singleton_config.
+        //
+        // Epic J security review MEDIUM-1: this scanner originally had its own
+        // ad-hoc parsing (`vars()`, case-sensitive `strip_prefix`, `__`-only,
+        // no trim) — the very drift the J-2 review fixed in its two siblings.
+        // It now shares `env_name_to_section_key`, so all THREE scanners and
+        // the provider filter classify identically. `vars_os()` also removes
+        // the boot-path panic on a non-UTF-8 environment variable.
         let mut shadowed: Vec<(String, String, String, String, String)> = Vec::new();
-        for (name, env_value) in std::env::vars() {
-            let Some(rest) = name.strip_prefix("OPCGW_") else {
+        for (name_os, value_os) in std::env::vars_os() {
+            let name = name_os.to_string_lossy().into_owned();
+            let Some((section, key)) = env_name_to_section_key(&name) else {
                 continue;
             };
-            // Only `OPCGW_<SECTION>__<KEY>` maps to a singleton field. Short forms
-            // like `OPCGW_LOG_LEVEL` have no `__` separator — skip them.
-            let Some((section_part, key_part)) = rest.split_once("__") else {
-                continue;
-            };
-            let section = section_part.to_lowercase();
-            let key = key_part.to_lowercase();
+            let env_value = value_os.to_string_lossy().into_owned();
             if !KNOWN_SECTIONS.contains(&section.as_str()) {
                 continue;
             }
@@ -1537,7 +1551,13 @@ impl AppConfig {
                 .iter()
                 .find(|(s, k, _)| s == &section && k == &key)
             {
-                shadowed.push((name, section, key, env_value, db_value.clone()));
+                shadowed.push((
+                    name.trim().to_string(),
+                    section,
+                    key,
+                    env_value,
+                    db_value.clone(),
+                ));
             }
         }
 
@@ -1622,7 +1642,19 @@ impl AppConfig {
             // Short forms (`OPCGW_LOG_LEVEL`, budget/cap knobs) resolve to
             // `None`: they address no section field, the filter passes them,
             // so they are NOT "ignored".
-            let Some((section, key)) = env_name_to_section_key(&name) else {
+            let Some((section, key)) = env_name_to_section_key(&name).or_else(|| {
+                // Section-level key (Epic J security review HIGH-1): report it
+                // with an empty field so the operator sees the whole-section
+                // override was dropped, instead of it vanishing silently.
+                let trimmed = name.trim();
+                let rest = trimmed.get(ENV_PREFIX.len()..).filter(|_| {
+                    trimmed
+                        .get(..ENV_PREFIX.len())
+                        .is_some_and(|p| p.eq_ignore_ascii_case(ENV_PREFIX))
+                })?;
+                env_names_a_known_section(rest)
+                    .then(|| (rest.trim().to_lowercase(), "*".to_string()))
+            }) else {
                 continue;
             };
             // Unknown sections were never mergeable into the editable set and
@@ -6266,6 +6298,20 @@ mod tests {
             ("OPCGW_GLOBAL__DEBUG", true),
             ("OPCGW_OPCUA__HOST_IP_ADDRESS", true),
             ("OPCGW_WEB__AUTH_REALM", true),
+            // SECTION-LEVEL keys (Epic J security review HIGH-1): figment
+            // parses env VALUES into dicts, so `OPCGW_CHIRPSTACK={...}`
+            // overrides ANY number of blocked fields at once. Must be
+            // blocked AND reported.
+            ("OPCGW_CHIRPSTACK", true),
+            ("OPCGW_OPCUA", true),
+            ("OPCGW_WEB", true),
+            ("OPCGW_GLOBAL", true),
+            ("opcgw_opcua", true),
+            (" OPCGW_WEB ", true),
+            // ...but a section-less key that is NOT a section stays a
+            // pass-through short form.
+            ("OPCGW_LOGGING", false),
+            ("OPCGW_STORAGE", false),
             // Whitespace AFTER the prefix (J-2 review iter-2): figment trims
             // the key a second time, post-prefix-strip, so these address the
             // real blocked field. Before the fix the untrimmed section
@@ -6351,6 +6397,70 @@ mod tests {
                     "[logging] is outside KNOWN_SECTIONS — its env override must still apply"
                 );
                 assert_eq!(logging.level.as_deref(), Some("debug"));
+            },
+        );
+    }
+
+    /// Epic J security review (HIGH-1, end-to-end): a SECTION-level env var
+    /// carrying a figment dict value must not override blocked fields.
+    /// figment parses env values into structured `Value`s, so
+    /// `OPCGW_CHIRPSTACK='{polling_frequency=99,server_address="..."}'`
+    /// deep-merged over everything — one variable defeating the whole
+    /// allowlist, silently. Non-overlapping fixture values (TOML 10 /
+    /// env 99) so this cannot pass on the broken path.
+    #[test]
+    #[serial_test::serial]
+    fn j2_section_level_dict_env_var_cannot_bypass_the_allowlist() {
+        let toml = r#"
+            [global]
+            debug = false
+            [chirpstack]
+            server_address = "http://from-toml:8080"
+            api_token = "x"
+            tenant_id = "t"
+            polling_frequency = 10
+            retry = 1
+            delay = 1
+            [opcua]
+            application_name = "A"
+            application_uri = "urn:a"
+            product_uri = "urn:p"
+            diagnostics_enabled = false
+            create_sample_keypair = true
+            certificate_path = "c"
+            private_key_path = "k"
+            trust_client_cert = true
+            check_cert_time = false
+            pki_dir = "pki"
+            user_name = "from-toml"
+            user_password = "p"
+        "#;
+        temp_env::with_vars(
+            [
+                (
+                    "OPCGW_CHIRPSTACK",
+                    Some("{polling_frequency=99,server_address=\"http://pwned:1\"}"),
+                ),
+                ("OPCGW_OPCUA", Some("{user_name=\"attacker\"}")),
+            ],
+            || {
+                let config: AppConfig = Figment::new()
+                    .merge(Toml::string(toml))
+                    .merge(super::opcgw_env_provider())
+                    .extract()
+                    .expect("config parses with section-level env vars present");
+                assert_eq!(
+                    config.chirpstack.polling_frequency, 10,
+                    "a section-level dict env var must not override a blocked field"
+                );
+                assert_eq!(
+                    config.chirpstack.server_address, "http://from-toml:8080",
+                    "a section-level dict env var must not override a blocked field"
+                );
+                assert_eq!(
+                    config.opcua.user_name, "from-toml",
+                    "a section-level dict env var must not override the web login name"
+                );
             },
         );
     }

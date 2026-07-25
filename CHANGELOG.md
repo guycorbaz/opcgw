@@ -62,7 +62,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OPCGW_WEB__AUTH_REALM` — **not an exhaustive list**: the allowlist above is
   the authority, and every ignored var is named individually in the boot log.
 
-  Two specific traps:
+  Two specific traps (plus the **security-flag checklist** in `docs/security.md`
+  — if you hardened `trust_client_cert`, `check_cert_time` or `allowed_origins`
+  through `.env`, that hardening is dropped unless you set it on the Admin page
+  first):
   - **`OPCGW_OPCUA__USER_NAME` is also your web-UI login name.** After the
     upgrade it comes from the Admin page (default `opcua-user`), while the
     password may still come from the environment. The gateway logs an
