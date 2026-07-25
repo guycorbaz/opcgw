@@ -1,6 +1,6 @@
 # Epic J — Autonomous Session Report (2026-07-25)
 
-Owner-facing record of every decision taken in the autonomous BMad run (owner pre-delegation 2026-07-25: "continue autonomously with bmad until the end of the epic; when in doubt, party-session and decide; report at the end so we finalize or correct together"). **DRAFT — finalized at end of session.**
+Owner-facing record of every decision taken in the autonomous BMad run (owner pre-delegation 2026-07-25: "continue autonomously with bmad until the end of the epic; when in doubt, party-session and decide; report at the end so we finalize or correct together"). **FINAL — Epic J closed 3/3, v2.8.0-rc1 tagged and publishing.**
 
 ## Session-start decisions (owner-answered, not autonomous)
 
@@ -50,17 +50,42 @@ Panel: Winston (Architect), Amelia (Dev), Quinn (QA), Murat (TEA), John (PM). Co
 ### Autonomous design decision (needs ratification)
 - **R5 — Allowlist boundary = "web-editable fields are blocked from env":** within the four Admin-page sections (`global`/`chirpstack`/`opcua`/`web`), only secrets (`api_token`, `user_password`) and the bootstrap set (`web.enabled/bind_address/port`, `opcua.host_port`) stay env-overridable; everything else is ignored + WARN (`env_var_ignored`). Sections the web cannot edit (`[storage]`, `[command_validation]`, `[logging]`) and the short-form/out-of-figment knobs (`OPCGW_LOG_DIR/LEVEL`, budgets, `OPCGW_ERROR_EVENT_CAP`, `CONFIG_PATH`) are untouched. Effect on your live `.env`: `GLOBAL__DEBUG`, `STALE_THRESHOLD_SECONDS`, `STREAM_ALL_DEVICES` become ignored (by design — they're the vars that were shadowing the Admin page).
 
-_(J-2 implementation/review/landing to be appended.)_
+### Delivered (PR #180, closes #169 + #168)
 
-## Release: v2.8.0-rc1 (planned)
+Allowlist-filtered figment provider; `env_var_ignored` WARN naming each ignored key; the shadow WARN narrowed to the keys that genuinely still win. Full doc sweep (manual chapter + appendix, configuration.md, .env.example, security.md, README, CHANGELOG migration note).
 
-Cut after J-2 lands: bump + tag → Docker Hub/GHCR publish → you repoint panoramix compose. The rc soaks BOTH stories on the NAS: J-1 (command reaches the ChirpStack queue within seconds of a write; no duplicate downlinks) and J-2 (ignored-var WARNs correct; Admin page authoritative). Upgrade steps for you (will be in the rc notes):
+**The review found — and fixed — four separate ways to defeat the allowlist entirely.** This is the story's most important outcome, and worth your attention because each was *silent*:
+1. `OPCGW_CHIRPSTACK__…` with a **dot** instead of `__` (figment nests on `.` regardless).
+2. **Whitespace** after the prefix (figment trims twice; the untrimmed section missed the known-sections list and the check failed open).
+3. A **section-level variable with a dict value** — `OPCGW_CHIRPSTACK='{polling_frequency=99,server_address="…"}'` — overriding *any number* of blocked fields at once, including the web login name. Found by the mandatory security review after three review rounds had missed it.
+4. (Pre-empted before dev by the story validation: the drafted filter order would have been a no-op.)
+
+All four are now closed by **one shared normalizer** that mirrors figment's own key handling and is used by the filter *and* all three reporters, so classification drift is impossible by construction. Every shape has a mutation-verified regression guard.
+
+### Autonomous decisions needing ratification (J-2)
+
+- **R6 — `OPCGW_CHIRPSTACK__SERVER_ADDRESS` and `OPCGW_OPCUA__USER_NAME` are BLOCKED** (party session #2). Both are advertised in `.env.example`, so this is a visible behaviour change; the rationale is that your own 2026-07-20 `.env` cleanup already removed them as "web/SQLite-managed", and both are Admin-page-editable. Mitigation for `user_name` (it is also your web login): the gateway now logs `env_var_ignored_login_name` naming the **effective** login name at boot, so a changed login is self-answering rather than a lockout.
+- **R7 — the four bootstrap keys stay env-capable** (`web.enabled/bind_address/port`, `opcua.host_port`) because the gateway must serve `/setup` before SQLite exists and compose consumes them for port mapping/healthcheck. Consequence you should know: for these four, env still outranks the Admin page, and an Admin save + Apply will report success while the env value keeps winning until the next boot. Deferred as an Admin-page badge (AI-J-6).
+
+## Epic J retrospective + security review
+
+Both complete and on `main` (`epic-J-retro-2026-07-26.md`). **Security verdict: PASS 6/6 — after remediation.** The first pass failed the access-control item (bypass #3 above, plus a third env scanner that still had the boot-panic-on-non-UTF-8 and case-drift its siblings had been fixed for). I held the retrospective open, fixed everything, and merged PR #181 before closing the epic — per the CLAUDE.md rule that an epic cannot close without a clean security check.
+
+Action items **AI-J-1..AI-J-8** are in the retro; AI-J-1 (this rc + your soak) is the release gate, AI-J-2 is your ratification of R1–R7.
+
+## Release: v2.8.0-rc1 — TAGGED AND PUBLISHING
+
+`v2.8.0-rc1` is tagged and pushed; the Docker Build workflow is publishing multi-arch images to Docker Hub (`gcorbaz/opcgw:2.8.0-rc1`) and GHCR. **Not** tagged `:latest` — it is a release candidate. The rc soaks BOTH data-plane stories on the NAS: J-1 (command reaches the ChirpStack queue within seconds of a write; no duplicate downlinks) and J-2 (ignored-var WARNs correct; Admin page authoritative).
+
+⚠️ **Do the pre-upgrade steps BEFORE you pull the image** — this is the first breaking change to the config surface:
 1. **Before** pulling the rc: open Admin → ChirpStack section → verify `stream_all_devices = true` (backfilled from the effective config) → Save section (persists the row).
 2. Optionally clean the three now-ignored vars from `.env` (they'd only produce WARNs).
 3. Decide `global.debug` (SQLite currently `true`).
-4. Pull rc, restart, check the error feed + `env_var_ignored`/`command_dispatch_*` events.
+4. **Check the security-flag checklist in `docs/security.md`** — if you ever hardened `trust_client_cert`, `check_cert_time` or `allowed_origins` through `.env`, that hardening is dropped unless the Admin page holds it.
+5. Pull the rc, restart, then read the first boot's `env_var_ignored` lines — they are the definitive list of what your `.env` was silently overriding.
+6. During the soak, watch for: `command_dispatch_*` (a valve command should reach the ChirpStack queue in seconds — the E-0 symptom that started J-1), any `command_dispatch_expired` (a command that missed its 60 s delivery deadline), and the absence of duplicate downlinks.
 
 ## Open items for the owner
-- Ratify R1–R5 (or ask for changes — everything is one commit away).
+- **Ratify R1–R7** (or ask for changes — everything is one commit away). The two I would most want your eyes on: **R2** (the 60 s delivery deadline — if your ChirpStack restarts take longer than that, commands issued during a restart will expire rather than deliver, and you may want a larger value) and **R6** (`SERVER_ADDRESS`/`USER_NAME` blocked).
 - #151 (NAS `opcgw.db` mode 777 → 600) still open, owner-side manual fix.
 - The retrospective's action items (appended after it runs).
