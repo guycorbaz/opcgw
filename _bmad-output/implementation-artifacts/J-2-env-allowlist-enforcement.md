@@ -1,6 +1,6 @@
 # Story J.2: Enforce the Env-Var Allowlist — Web/SQLite Becomes Authoritative for the Editable Set
 
-Status: review
+Status: done (2026-07-26 — review loop terminated after iters 1-2; AI-G-5 smoke PASS; NAS soak rides the v2.8.0-rc1 release gate)
 
 ## Story
 
