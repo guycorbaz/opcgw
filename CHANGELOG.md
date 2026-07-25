@@ -32,6 +32,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   across an Apply soft restart are delivered without a fresh write) and shares one gRPC
   client factory and one delivery path with the poller (no duplicated auth, no token in
   logs). No new configuration knob — the design is purely event-driven.
+  Review hardening (iter-3): a **transient** ChirpStack enqueue failure (restart, boot
+  ordering, RPC deadline) now leaves the command `Pending` and retries it on an
+  escalating backoff instead of marking it terminally `Failed`; retries — and the
+  startup drain — are bounded by a **delivery deadline** (`command_delivery_timeout_secs`
+  from `created_at`), so a stale command can never actuate hardware hours after it was
+  written. A command whose device/command config was removed after queueing is failed
+  as an **orphan** (previously it fell back to a raw-byte unconfirmed downlink), and a
+  malformed `command_queue` row is **quarantined** `Failed` instead of livelocking the
+  whole dispatch queue. The dispatcher's gRPC client is cached across enqueues (was:
+  a fresh channel per command) with a 10 s deadline on the enqueue RPC itself.
 - **`uplink_field_type_mismatch` is now deduplicated.** It warns **once** per
   (device, metric) per stream task; later occurrences drop to `debug`. The feed
   records one entry per *distinct problem*, not per occurrence — an un-deduplicated

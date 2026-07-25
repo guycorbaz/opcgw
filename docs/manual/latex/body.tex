@@ -728,6 +728,8 @@ opcgw binds an HTTP listener; credentials transit in cleartext. Enable \texttt{{
 
 \textbf{Commands are dispatched immediately.} When a write over OPC UA is accepted, opcgw enqueues the resulting downlink to ChirpStack \emph{right away} --- the delivery is event-driven, triggered by the write itself, not by the metrics-poll cycle. A command therefore reaches the device\textquotesingle s ChirpStack queue within seconds of the write, rather than waiting up to a full \texttt{polling\_frequency} interval as in earlier versions. Delivery, confirmation, and timeout tracking are otherwise unchanged.
 
+\textbf{Delivery deadline and retries.} If ChirpStack is briefly unreachable (a restart, container boot ordering), opcgw does \emph{not} immediately fail the command: it keeps it pending and retries with an increasing backoff. Retries stop at the \emph{delivery deadline} --- \texttt{command\_delivery\_timeout\_secs} (default 60\,s) measured from when the command was written. A command that could not be enqueued within the deadline is marked \emph{failed} and is never delivered late: after any longer outage or restart, a stale command will not actuate your hardware hours after it was written --- re-issue it instead. A pending command whose device or command mapping you removed in the meantime is likewise failed, never sent.
+
 \begin{lstlisting}
 [command_delivery]
 # Polling interval for ChirpStack delivery confirmations (default 5 s)

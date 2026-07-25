@@ -2710,14 +2710,35 @@ pub(crate) trait DownlinkSink: Send + Sync {
 // `create_device_client_from_config` factory (AC#8/AC#9). Tests continue to use
 // the `MockSink` stub.
 
+/// Outcome of a single [`deliver_one`] delivery attempt (J-1 review iter-3 D1).
+///
+/// Distinguishes *permanent* failures (mapping errors — retrying can never
+/// succeed, the row is marked `Failed`) from *transient* sink failures
+/// (gRPC connect/enqueue errors — the row is **left `Pending`** and the caller
+/// schedules a bounded retry, capped by the delivery deadline enforced in
+/// `chirpstack_dispatch::drain_pending_commands`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeliveryOutcome {
+    /// Enqueued to ChirpStack; row transitioned `Pending → Sent`.
+    Delivered,
+    /// Permanent failure; row transitioned `Pending → Failed`.
+    Terminal,
+    /// Transient sink failure; row left `Pending` for a bounded retry.
+    RetryLater,
+}
+
 /// Maps, enqueues, and records the outcome for one queued command.
 ///
 /// Maps the canonical value to a semantic object (class-bound) or raw bytes
-/// (fallback), enqueues it via `sink`, and updates the command's status to
-/// `Sent` (success) or `Failed` (mapping or enqueue error). Never panics or
-/// returns an error: every failure mode is logged and reflected in storage so
-/// the batch loop continues. Factored out of [`ChirpstackPoller::deliver_command`]
-/// so the outcome logic is unit-testable with a stub [`DownlinkSink`].
+/// (fallback), enqueues it via `sink`, and updates the command's status:
+/// `Sent` on success, `Failed` on a *mapping* error (permanent — a malformed
+/// command can never succeed). A *sink* error (gRPC connect/enqueue — typically
+/// transient: ChirpStack restarting, boot ordering) leaves the row `Pending`
+/// and returns [`DeliveryOutcome::RetryLater`] so the dispatcher re-drives it
+/// with its escalating backoff, bounded by the delivery deadline (J-1 review
+/// iter-3 D1; before iter-3 a transient outage marked commands terminally
+/// `Failed` with zero retries). Never panics or returns an error: every
+/// failure mode is logged and reflected in storage so the batch loop continues.
 ///
 /// Story J-1: `pub(crate)` so `chirpstack_dispatch::drain_pending_commands`
 /// (the relocated command drain) reuses the exact same delivery path.
@@ -2727,7 +2748,7 @@ pub(crate) async fn deliver_one(
     command_class: Option<&str>,
     confirmed: bool,
     command: &DeviceCommand,
-) {
+) -> DeliveryOutcome {
     let downlink = match map_command_to_downlink(command_class, &command.payload) {
         Ok(d) => d,
         Err(e) => {
@@ -2743,7 +2764,7 @@ pub(crate) async fn deliver_one(
             {
                 error!(error = %e2, command_id = command.id, "Failed to mark command Failed");
             }
-            return;
+            return DeliveryOutcome::Terminal;
         }
     };
 
@@ -2777,19 +2798,22 @@ pub(crate) async fn deliver_one(
             if let Err(e) = backend.async_store().mark_command_sent(command.id, result_id.clone()).await {
                 error!(error = %e, command_id = command.id, "Failed to mark command Sent");
             }
+            DeliveryOutcome::Delivered
         }
         Err(e) => {
-            error!(
+            // J-1 review iter-3 D1: a sink error is treated as TRANSIENT — the
+            // row stays `Pending` and the dispatcher re-drives it (escalating
+            // backoff, bounded by the delivery deadline). Marking it `Failed`
+            // here turned a 5-second ChirpStack restart into a permanently
+            // failed operator command.
+            warn!(
+                event = "command_dispatch_retry",
                 error = %e,
                 device_id = %command.device_id,
                 command_id = command.id,
-                "Failed to enqueue command; marking command Failed"
+                "Failed to enqueue command; leaving Pending for a bounded retry"
             );
-            if let Err(e2) =
-                backend.async_store().update_command_status(command.id, CommandStatus::Failed, Some(e.to_string())).await
-            {
-                error!(error = %e2, command_id = command.id, "Failed to mark command Failed");
-            }
+            DeliveryOutcome::RetryLater
         }
     }
 }
@@ -4627,7 +4651,8 @@ mod tests {
         let cmd = backend.get_pending_commands().unwrap()[0].clone();
         let sink = MockSink::new(false);
 
-        deliver_one(&sink, &dyn_backend, Some("valve"), true, &cmd).await;
+        let outcome = deliver_one(&sink, &dyn_backend, Some("valve"), true, &cmd).await;
+        assert_eq!(outcome, DeliveryOutcome::Delivered);
 
         // The command's terminal status must actually be Sent (not merely
         // "no longer pending") with no error message.
@@ -4676,10 +4701,12 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    // ---- AC#8(d): failure path marks Failed --------------------------------
+    // ---- AC#8(d), amended by J-1 review iter-3 D1: a transient enqueue
+    // failure leaves the row Pending for a bounded retry (the delivery
+    // deadline in `drain_pending_commands` caps the retries) ----------------
 
     #[tokio::test]
-    async fn deliver_one_enqueue_failure_marks_failed() {
+    async fn deliver_one_enqueue_failure_leaves_pending_for_retry() {
         let backend = Arc::new(InMemoryBackend::new());
         let dyn_backend: Arc<dyn StorageBackend> = backend.clone();
         backend
@@ -4688,17 +4715,24 @@ mod tests {
         let cmd = backend.get_pending_commands().unwrap()[0].clone();
         let sink = MockSink::new(true);
 
-        deliver_one(&sink, &dyn_backend, Some("valve"), false, &cmd).await;
+        let outcome = deliver_one(&sink, &dyn_backend, Some("valve"), false, &cmd).await;
 
         // Enqueue was attempted...
         assert_eq!(sink.calls().len(), 1);
-        // ...and the command's terminal status is Failed with an error message
-        // (asserting the actual Failed transition, not just "not pending").
+        // ...and the transient sink failure must NOT be terminal: the row
+        // stays Pending so the dispatcher's bounded retry can re-drive it
+        // (pre-iter-3 this was marked Failed — a 5 s ChirpStack restart
+        // permanently failed the command).
+        assert_eq!(outcome, DeliveryOutcome::RetryLater);
         let (status, err) = backend
             .command_status_for_test(cmd.id)
             .expect("command must still exist");
-        assert_eq!(status, CommandStatus::Failed, "enqueue failure must mark Failed");
-        assert!(err.is_some(), "Failed command must carry an error message");
+        assert_eq!(
+            status,
+            CommandStatus::Pending,
+            "transient enqueue failure must leave the command Pending for retry"
+        );
+        assert!(err.is_none(), "a Pending retry candidate carries no error message");
     }
 
     #[tokio::test]
@@ -4712,8 +4746,13 @@ mod tests {
         let sink = MockSink::new(false);
 
         // Value 9 is out of range for the valve class -> mapping fails before enqueue.
-        deliver_one(&sink, &dyn_backend, Some("valve"), false, &cmd).await;
+        let outcome = deliver_one(&sink, &dyn_backend, Some("valve"), false, &cmd).await;
 
+        assert_eq!(
+            outcome,
+            DeliveryOutcome::Terminal,
+            "a mapping failure is permanent — retrying can never succeed"
+        );
         assert!(sink.calls().is_empty(), "must not enqueue on mapping failure");
         let (status, err) = backend
             .command_status_for_test(cmd.id)

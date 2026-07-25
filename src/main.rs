@@ -491,10 +491,26 @@ async fn spawn_data_plane(
         // the dispatch loop is panic-free by design, so unobserved task death is
         // low-probability. See the story's Review Findings + deferred-work.md.)
         tokio::spawn(async move {
-            let backend: Arc<dyn storage::StorageBackend> = Arc::new(
-                storage::SqliteBackend::with_pool(pool_dispatch)
-                    .expect("Failed to create SqliteBackend for command dispatcher"),
-            );
+            // J-1 review iter-3 (blind finding): `with_pool` does a 5 s pool
+            // checkout + migrations and CAN fail under contention (#152). A
+            // panic here would silently kill the SOLE command-delivery path
+            // for the whole generation (the JoinHandle is only observed at
+            // shutdown), while writes keep returning Good. Handle it: log at
+            // ERROR and exit the task — commands stay Pending and the next
+            // Apply/restart retries. (The sibling tasks keep their `expect`;
+            // they are not the only owner of their function.)
+            let backend: Arc<dyn storage::StorageBackend> =
+                match storage::SqliteBackend::with_pool(pool_dispatch) {
+                    Ok(b) => Arc::new(b),
+                    Err(e) => {
+                        error!(
+                            error = ?e,
+                            "Failed to create SqliteBackend for command dispatcher; \
+                             command dispatch is DOWN until the next Apply/restart"
+                        );
+                        return;
+                    }
+                };
             let mut dispatcher = chirpstack_dispatch::CommandDispatcher::new(
                 &config_dispatch,
                 backend,
@@ -847,6 +863,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // per-op) as it works:
     //   poller + opc_ua + command-status + command-timeout + events (E-1) +
     //   command-dispatch (J-1) + web = 7.
+    // Transient extra claimants can briefly exceed that steady-state count
+    // during an Apply (the supervisor's `reload_effective_config` backend plus
+    // web CRUD backends run while the old data-plane generation still holds
+    // its claims — worst case ~9); that burst is bounded by the 5 s checkout
+    // busy-wait, costing latency (or a web 500) rather than corruption.
     // Story J-1: bumped 5 → 7 and the comment corrected — the prior count of 5
     // was already stale (it omitted the E-1 `events` uplink-ingestion claimer);
     // J-1 adds the event-driven `CommandDispatcher`. The dispatcher only checks

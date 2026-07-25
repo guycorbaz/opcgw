@@ -265,3 +265,41 @@ Two adversarial layers (general + edge-case) re-reviewed the new flow-control (P
 | Date | Change |
 |------|--------|
 | 2026-07-24 | bmad-code-review iter-2 (mandatory re-review of new flow-control): P1/P3 cleared as correct; P2 watchdog found to introduce a restart double-downlink + abort-backstop hole (both MEDIUM, weaken AC#4). Owner chose to revert P2 + defer supervision. Applied P5 (escalating capped retry backoff) + P6 (cancellation-aware drain). Gates green (1872 tests, clippy clean). |
+
+### Iteration 3 — fresh 3-layer re-review of commit f27b19f (2026-07-25)
+
+Full re-run (Blind Hunter diff-only / Edge Case Hunter with project access / Acceptance Auditor vs this story) on a different LLM (Fable) than the implementer (Opus 4.8). 26 raw findings → deduped triage: 4 decision-needed (delivery-semantics cluster), 9 patches, 2 deferred, rest dismissed. The four decisions were resolved in an autonomous **party session** (Winston/Amelia/Quinn/Murat/John personas; owner pre-delegated 2026-07-25, decisions to be ratified via the end-of-epic report):
+
+- [x] **D1 (MED, blind+edge) — transient sink failure was terminally `Failed` (no delivery retry; boot race with ChirpStack startup).** DECIDED: bounded retry. `deliver_one` now returns `DeliveryOutcome` {Delivered, Terminal, RetryLater}; a gRPC/enqueue error leaves the row `Pending` (`command_dispatch_retry` WARN) and the drain reports "unsettled" so `run()` re-drives it on the existing escalating backoff. Mapping failures stay Terminal. Mutation-verified (dropping retry scheduling fails `transient_sink_failure_is_retried_until_delivered`).
+- [x] **D2 (MED, edge) — unbounded-age startup drain could actuate stale hardware commands.** DECIDED: delivery deadline. A `Pending` row older than `global.command_delivery_timeout_secs` (reused knob — no new config) is marked `Failed` (`command_dispatch_expired` WARN) and never delivered. Bounds D1's retries and the startup drain; AC#5 across-restart delivery holds within the deadline (the Apply soft-restart case). Mutation-verified (disabling the age gate fails `expired_command_is_failed_not_delivered`).
+- [x] **D3 (MED, edge) — Apply-orphaned rows fell back to raw-byte unconfirmed downlink.** DECIDED: orphans are terminal. `find_command_cfg → None` now marks `Failed` (`command_dispatch_orphaned` WARN), never enqueues. Rationale: command nodes exist only for configured commands, so `None` at drain time proves de-configuration. Class-less commands are unaffected (their cfg resolves with `command_class: None`). Test `orphaned_command_is_failed_not_delivered`.
+- [x] **D4 (MED, edge) — one poison `Pending` row livelocked all dispatch (fail-fast `collect`).** DECIDED: storage self-heal. `get_pending_commands` validates per-row; malformed rows are quarantined `Failed` with the parse reason (`command_queue_row_invalid` WARN, once per row) and valid rows still dispatch. Test `test_poison_pending_row_is_quarantined_not_fatal`.
+
+Patches applied (all 9):
+
+- [x] **P7 (MED, blind)** `.expect()` on `SqliteBackend::with_pool` in the dispatcher spawn → handled `match` (ERROR + task exit; commands stay `Pending` until next Apply/restart). Sole-delivery-path death is no longer a silent panic. Siblings keep their `expect` (not sole owners; pre-existing pattern). [src/main.rs]
+- [x] **P8 (MED, blind)** Fresh gRPC channel per command → client cached in `ChirpStackDownlinkSink` behind a `tokio::sync::Mutex`, dropped on any RPC failure for a clean reconnect. [src/chirpstack_dispatch.rs]
+- [x] **P9 (MED, edge)** No deadline on the `enqueue` RPC → `ENQUEUE_RPC_TIMEOUT` (10 s) via `tokio::time::timeout`; timeout treated as a transient (D1) failure. [src/chirpstack_dispatch.rs]
+- [x] **P10 (MED, blind+auditor)** docs/logging.md drift → `command_dispatch_drain_cancelled` row added; `command_dispatch_drain_error` row rewritten (self-driven escalating backoff, not "next signal"); new rows for `command_dispatch_retry` / `command_dispatch_expired` / `command_dispatch_orphaned` / `command_queue_row_invalid`; J-1 summary paragraph updated. [docs/logging.md]
+- [x] **P11 (LOW, blind)** AC#10(a) test's signal was decorative (startup drain delivered) → reworked: `run()` spawns first, startup drain completes empty, THEN queue+signal — deleting the signal arm now fails it. [src/chirpstack_dispatch.rs]
+- [x] **P12 (LOW, blind)** `== StatusCode::Good` → `status.is_good()` in `maybe_signal_dispatch` (robust to Good-class sub-codes). [src/opc_ua.rs]
+- [x] **P13 (LOW, blind)** Enqueue error detail discarded → `OpcGwError::ChirpStack` now carries the tonic status (code+message; no token), which becomes the operator-facing failure reason. [src/chirpstack_dispatch.rs]
+- [x] **P14 (LOW, blind)** Test poll bound ~1 s (CI-flake class) → ~5 s (pass path exits early). [src/chirpstack_dispatch.rs]
+- [x] **P15 (LOW, edge)** Pool comment claimed 7 claimers; documented the transient Apply-window burst (~9, bounded by the 5 s checkout busy-wait). [src/main.rs]
+
+Deferred / dismissed:
+
+- [ ] **DEF-iter3-J1-D5 (MED, edge ×2)** — at-least-once duplicate-send windows: (a) force-abort/crash between a successful `enqueue` and `mark_command_sent`; (b) `mark_command_sent` storage failure after a successful enqueue. Both leave an already-enqueued row `Pending` → re-enqueue on the next drain. Pre-existing E-0 contract (predates J-1; the poll-head drain had the identical windows); full fix = `chirpstack_result_id`-keyed idempotency check before enqueue (iter-1 Cluster C). → deferred-work.md + GH issue (filed this session). The drain comment no longer overclaims "never left half-delivered".
+- Dismissed: backoff-reset-under-writes nuance (documented in-code, correctness-neutral); dormant `opcua_topology_apply` signal site (owner-sanctioned `// J-1:` decision comment, re-confirmed); AC#7 third select-arm deviation (owner-sanctioned iter-1/iter-2, AC text now amended below).
+
+**AC amendments (iter-3):** AC#2/AC#10(e) — the gate is `is_good()`, not `== Good` (superset, same rejection behaviour). AC#5 — across-restart delivery holds **within the delivery deadline** (`command_delivery_timeout_secs`); beyond it commands expire `Failed` by design (D2). AC#7 — `run()`'s `select!` carries the sanctioned third (bounded-retry timer) arm; the happy path remains signal-only. AC#9 — `deliver_one` now returns `DeliveryOutcome`; orphan rows are no longer raw-delivered (D3). AC#10 — the dispatch tests use a module-local `MockSink` (accepted #102 inline-harness pattern), not `chirpstack::tests::MockSink` as the AC text literally suggested; recorded here as the deviation decision. AC#11 — the implementation commit says `Refs #136`; the **PR** carries `Closes #136` so the issue closes when the story lands on main (the NAS soak is tracked by the v2.8.0-rc1 release gate + owner report instead).
+
+**File List additions (iter-3):** `Cargo.toml` (dev-deps tokio `test-util` for the paused-clock retry test), `src/storage/sqlite.rs` (lenient `get_pending_commands` + quarantine), `src/storage/sqlite_tests.rs` (poison-row test), `_bmad-output/implementation-artifacts/deferred-work.md` (D5 entry; also belatedly listed for the iter-2 supervision deferral the iter-2 File List missed).
+
+**Gates after iter-3:** `cargo test` full suite + `cargo clippy --all-targets -- -D warnings` — see Change Log row below. New tests: `orphaned_command_is_failed_not_delivered`, `expired_command_is_failed_not_delivered`, `transient_sink_failure_is_retried_until_delivered`, `test_poison_pending_row_is_quarantined_not_fatal`, reworked `dispatch_delivers_a_queued_command`, renamed `deliver_one_enqueue_failure_leaves_pending_for_retry`. Mutation checks: D1 retry-scheduling and D2 age gate each sabotaged → target test failed → reverted.
+
+### Change Log — code review (cont. 2)
+
+| Date | Change |
+|------|--------|
+| 2026-07-25 | bmad-code-review iter-3 (fresh 3-layer pass on commit f27b19f, Fable vs Opus-4.8 implementer): 4-decision delivery-semantics cluster resolved by party session (bounded retry D1 / delivery deadline D2 / terminal orphans D3 / poison-row quarantine D4) + 9 patches (P7–P15). Duplicate-send at-least-once windows deferred with GH issue (DEF-iter3-J1-D5). Both new guards mutation-verified. |

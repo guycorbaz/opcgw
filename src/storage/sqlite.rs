@@ -1038,35 +1038,56 @@ impl crate::storage::StorageBackend for SqliteBackend {
                 OpcGwError::Database(format!("Failed to prepare statement: {}", e))
             })?;
 
-        let commands = stmt
+        // J-1 review iter-3 D4: a single malformed row (invalid f_port /
+        // unparseable timestamp — schema-version skew, manual edit, corruption)
+        // used to fail the WHOLE read via `collect::<Result<..>>()`, and the
+        // dispatcher's retry then re-ran the identical failing query forever:
+        // one poison row = a permanent, unrecoverable command-dispatch outage.
+        // Now each row is validated individually; malformed rows are marked
+        // `Failed` (self-heal, so each poison row warns exactly once and is
+        // never re-read as Pending) and the valid rows still dispatch.
+        enum RowOutcome {
+            Valid(DeviceCommand),
+            Invalid { id: i64, reason: String },
+        }
+
+        let outcomes = stmt
             .query_map(params![status_str], |row| {
+                // If even the id is unreadable the row is unaddressable —
+                // let the whole query fail (nothing to mark Failed).
                 let id: i64 = row.get(0)?;
-                let device_id: String = row.get(1)?;
-                let payload: Vec<u8> = row.get(2)?;
-                let f_port: i32 = row.get(3)?;
-                let created_at_str: String = row.get(4)?;
+                let parse = || -> Result<DeviceCommand, String> {
+                    let device_id: String =
+                        row.get(1).map_err(|e| format!("device_id: {}", e))?;
+                    let payload: Vec<u8> = row.get(2).map_err(|e| format!("payload: {}", e))?;
+                    let f_port: i32 = row.get(3).map_err(|e| format!("f_port: {}", e))?;
+                    let created_at_str: String =
+                        row.get(4).map_err(|e| format!("created_at: {}", e))?;
 
-                if !(1..=223).contains(&f_port) {
-                    return Err(rusqlite::Error::InvalidParameterName(
-                        format!("Invalid f_port {}: must be 1-223", f_port)
-                    ));
-                }
+                    if !(1..=223).contains(&f_port) {
+                        return Err(format!("Invalid f_port {}: must be 1-223", f_port));
+                    }
 
-                let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|e| rusqlite::Error::InvalidParameterName(
-                        format!("Invalid timestamp format '{}': {}", created_at_str, e)
-                    ))?;
+                    let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .map_err(|e| {
+                            format!("Invalid timestamp format '{}': {}", created_at_str, e)
+                        })?;
 
-                Ok(DeviceCommand {
-                    id: id as u64,
-                    device_id,
-                    payload,
-                    f_port: f_port as u8,
-                    status: CommandStatus::Pending,
-                    created_at,
-                    error_message: None,
-                    command_name: None, // E-0 drain path does not need the name (GH-134)
+                    Ok(DeviceCommand {
+                        id: id as u64,
+                        device_id,
+                        payload,
+                        f_port: f_port as u8,
+                        status: CommandStatus::Pending,
+                        created_at,
+                        error_message: None,
+                        command_name: None, // E-0 drain path does not need the name (GH-134)
+                    })
+                };
+                Ok(match parse() {
+                    Ok(cmd) => RowOutcome::Valid(cmd),
+                    Err(reason) => RowOutcome::Invalid { id, reason },
                 })
             })
             .map_err(|e| {
@@ -1076,6 +1097,34 @@ impl crate::storage::StorageBackend for SqliteBackend {
             .map_err(|e| {
                 OpcGwError::Database(format!("Failed to collect pending commands: {}", e))
             })?;
+
+        let mut commands = Vec::new();
+        for outcome in outcomes {
+            match outcome {
+                RowOutcome::Valid(cmd) => commands.push(cmd),
+                RowOutcome::Invalid { id, reason } => {
+                    warn!(
+                        event = "command_queue_row_invalid",
+                        command_id = id,
+                        reason = %reason,
+                        "malformed pending-command row; marking Failed so it cannot block dispatch"
+                    );
+                    if let Err(e) = conn.execute(
+                        "UPDATE command_queue SET status = ?3, error_message = ?2 WHERE id = ?1",
+                        params![
+                            id,
+                            format!("malformed row quarantined: {}", reason),
+                            Self::status_to_string(&CommandStatus::Failed)
+                        ],
+                    ) {
+                        // Quarantine failed (e.g. write contention): the row
+                        // stays Pending and will warn again next drain — but
+                        // valid rows still dispatched, so no livelock.
+                        warn!(error = %e, command_id = id, "failed to quarantine malformed command row");
+                    }
+                }
+            }
+        }
 
         if !commands.is_empty() {
             debug!(count = commands.len(), "Retrieved pending commands");

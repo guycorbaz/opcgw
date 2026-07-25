@@ -168,7 +168,12 @@ pub(crate) fn maybe_signal_dispatch(
     status: opcua::types::StatusCode,
     dispatch_signal: &tokio::sync::Notify,
 ) {
-    if status == opcua::types::StatusCode::Good {
+    // `is_good()` rather than `== Good` (J-1 review iter-3): today
+    // `set_command` returns exactly `Good`, but if it ever returns another
+    // Good-class sub-code the row would be queued yet the dispatcher never
+    // woken — silently resurrecting the stranded-command symptom this story
+    // exists to fix. Bad/Uncertain codes still wake nothing.
+    if status.is_good() {
         dispatch_signal.notify_one();
     }
 }

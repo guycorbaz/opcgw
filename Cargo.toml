@@ -72,6 +72,10 @@ base64 = "0.22"
 tempfile = "3"
 
 [dev-dependencies]
+# J-1 iter-3: `test-util` enables tokio's paused test clock
+# (`#[tokio::test(start_paused = true)]`), used by the dispatcher's
+# bounded-retry test so the 2 s backoff elapses instantly and deterministically.
+tokio = { version = "1.50.0", features = ["full", "rt-multi-thread", "test-util"] }
 # `no-env-filter` so tests in this crate's integration suite can capture
 # log events from any crate (including the gateway's own `opcgw::*`
 # targets) — the default filter would only capture events from the test
