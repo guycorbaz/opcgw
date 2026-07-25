@@ -765,10 +765,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Story J-2 (review iter-1): the credential-pair hint needs the EFFECTIVE
-    // config, so it runs here rather than with the generic pre-load report.
-    application_config.maybe_warn_ignored_user_name(&ENV_LOGIN_NAME_HINT_EMITTED);
-
     // Epic C C-0 (iter-2 P1 fix): capture `is_first_run` once at boot
     // and reuse the cached value at every downstream call-site (OPC UA
     // audit emit, web AppState construction, WebAuthState constructor).
@@ -1209,6 +1205,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+
+    // Story J-2 (review iter-2, HIGH): the credential-pair hint must report the
+    // EFFECTIVE login name — i.e. AFTER the post-SQLite reload above, because
+    // `[opcua].user_name` is a web/SQLite-managed field and `WebAuthState` is
+    // built from that same post-reload value. Emitting it against the
+    // bootstrap snapshot printed the stale `config.toml` value (or the
+    // `opcua-user` serde default when config.toml has been deleted, which is a
+    // documented deployment shape) — an anti-lockout hint that would itself
+    // cause the lockout.
+    application_config.maybe_warn_ignored_user_name(&ENV_LOGIN_NAME_HINT_EMITTED);
 
     match sqlite_backend.load_all_metrics() {
         Ok(metrics) => {

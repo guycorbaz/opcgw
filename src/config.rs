@@ -1086,9 +1086,16 @@ pub const ENV_PREFIX: &str = "OPCGW_";
 /// - **Empty path segments are dropped** (figment `env.rs:511`), so
 ///   `OPCGW_WEB__` addresses nothing and must not be reported as "ignored".
 pub(crate) fn env_post_prefix_to_section_key(raw: &str) -> Option<(String, String)> {
-    let dotted = raw.replace("__", ".");
+    // figment trims TWICE: the full name before the prefix match (env.rs:507)
+    // and the resulting key again afterwards (env.rs:509). Missing this second
+    // trim was a silent bypass in its own right (J-2 review iter-2): a key like
+    // `OPCGW_ CHIRPSTACK__POLLING_FREQUENCY` yielded section `" chirpstack"`,
+    // which is not in KNOWN_SECTIONS, so `env_key_allowed` FAILED OPEN and
+    // figment then trimmed it back into the real blocked field.
+    let dotted = raw.trim().replace("__", ".");
     let (section, field) = dotted.split_once('.')?;
-    if section.is_empty() || field.split('.').any(|s| s.is_empty()) {
+    let (section, field) = (section.trim(), field.trim());
+    if section.is_empty() || field.split('.').any(|s| s.trim().is_empty()) {
         return None;
     }
     Some((section.to_lowercase(), field.to_lowercase()))
@@ -1101,7 +1108,14 @@ pub(crate) fn env_post_prefix_to_section_key(raw: &str) -> Option<(String, Strin
 /// real, merged variable.
 pub(crate) fn env_name_to_section_key(name: &str) -> Option<(String, String)> {
     let name = name.trim();
-    if name.len() < ENV_PREFIX.len() || !name[..ENV_PREFIX.len()].eq_ignore_ascii_case(ENV_PREFIX) {
+    // `get(..n)` — NOT `name[..n]`: a byte index that lands inside a
+    // multi-byte char panics, and these scanners walk the WHOLE process
+    // environment, so any unrelated variable with a non-ASCII byte at
+    // position 5 would abort the boot (J-2 review iter-2 — the same panic
+    // class the `vars()` → `vars_os()` change removed). figment is safe here
+    // because it compares before slicing (env.rs:201).
+    let prefix = name.get(..ENV_PREFIX.len())?;
+    if !prefix.eq_ignore_ascii_case(ENV_PREFIX) {
         return None;
     }
     env_post_prefix_to_section_key(&name[ENV_PREFIX.len()..])
@@ -1120,6 +1134,22 @@ pub(crate) fn env_post_prefix_key_passes(raw: &str) -> bool {
     }
 }
 
+/// The single `OPCGW_*` env provider for BOTH production figment stacks
+/// ([`AppConfig::from_path_inner`] and `main.rs`'s `peek_logging_config`) —
+/// build it here, never hand-roll a second one.
+///
+/// The allowlist `.filter` MUST precede `.split("__")`: figment chains
+/// `filter`/`map` in call order and `.split` rewrites `__` → `.`, so a filter
+/// placed after `.split` would receive dotted keys and enforce NOTHING (caught
+/// by the J-2 story validation against the figment 0.10.19 source). The
+/// closure therefore sees the raw post-prefix key, which
+/// [`env_post_prefix_to_section_key`] normalizes exactly as figment does.
+/// `.global()` only affects profile selection and is orthogonal to the filter.
+///
+/// The WARN for ignored keys is NOT emitted here: figment may evaluate the
+/// provider several times per `extract()` and there are multiple loads per
+/// boot (peek, bootstrap, reload, Apply). [`AppConfig::maybe_warn_env_ignored`]
+/// does the once-per-boot reporting from a single scan.
 pub fn opcgw_env_provider() -> figment::providers::Env {
     Env::prefixed(ENV_PREFIX)
         .filter(|key| env_post_prefix_key_passes(key.as_str()))
@@ -1642,6 +1672,7 @@ impl AppConfig {
         // so an unguarded warn duplicates every line (J-2 iter-1 smoke caught
         // exactly that). WARN-budget discipline, cf. #144/#149.
         static EMITTED: AtomicBool = AtomicBool::new(false);
+        let mut shadowed: Vec<(&str, &str)> = Vec::new();
         let Ok(parsed) = secrets_body.parse::<toml::Value>() else {
             return; // already reported as malformed upstream
         };
@@ -1659,22 +1690,34 @@ impl AppConfig {
                         .is_some_and(|(s, k)| s == *section && k == *field)
                 });
                 if in_env {
-                    if EMITTED.swap(true, Ordering::SeqCst) {
-                        return;
-                    }
-                    warn!(
-                        event = "env_shadows_secrets_toml",
-                        section = %section,
-                        key = %field,
-                        recommended_action = "remove the OPCGW_* secret from the environment \
-                                              to use the value the setup wizard stored, or \
-                                              delete it from config/secrets.toml",
-                        "an environment variable and config/secrets.toml both supply this \
-                         secret; the environment value wins, so credentials entered in the \
-                         setup wizard have no effect until the env var is removed"
-                    );
+                    shadowed.push((*section, *field));
                 }
             }
+        }
+
+        if shadowed.is_empty() {
+            return;
+        }
+        // Latch AFTER collecting, not per field (J-2 review iter-2): an
+        // in-loop latch reported only the FIRST shadowed secret and
+        // permanently suppressed the second — so an operator whose wizard
+        // password was shadowed got no diagnostic whenever the API token was
+        // shadowed too. `docs/logging.md` promises one line per field.
+        if EMITTED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        for (section, field) in shadowed {
+            warn!(
+                event = "env_shadows_secrets_toml",
+                section = %section,
+                key = %field,
+                recommended_action = "remove the OPCGW_* secret from the environment \
+                                      to use the value the setup wizard stored, or \
+                                      delete it from config/secrets.toml",
+                "an environment variable and config/secrets.toml both supply this \
+                 secret; the environment value wins, so credentials entered in the \
+                 setup wizard have no effect until the env var is removed"
+            );
         }
     }
 
@@ -1688,9 +1731,12 @@ impl AppConfig {
     /// This turns that into a self-answering log line: when an ignored
     /// `OPCGW_OPCUA__USER_NAME` is present, name the **effective** login user
     /// so the operator can sign in immediately. Requires the loaded config, so
-    /// it runs after the load (the generic `env_var_ignored` report runs
-    /// before it). The user name is explicitly NOT a secret (D-0 I1-F12), so
-    /// logging it is safe.
+    /// it runs after the **post-SQLite reload** (the generic `env_var_ignored`
+    /// report runs before the load): `[opcua].user_name` is web/SQLite-managed,
+    /// and `WebAuthState` is built from that same post-reload value — reporting
+    /// the bootstrap snapshot would print a stale name (J-2 review iter-2).
+    /// The user name is explicitly NOT a secret (D-0 I1-F12), so logging it is
+    /// safe.
     ///
     /// Returns `true` if the hint was emitted.
     pub fn maybe_warn_ignored_user_name(
@@ -6220,6 +6266,15 @@ mod tests {
             ("OPCGW_GLOBAL__DEBUG", true),
             ("OPCGW_OPCUA__HOST_IP_ADDRESS", true),
             ("OPCGW_WEB__AUTH_REALM", true),
+            // Whitespace AFTER the prefix (J-2 review iter-2): figment trims
+            // the key a second time, post-prefix-strip, so these address the
+            // real blocked field. Before the fix the untrimmed section
+            // (" chirpstack") missed KNOWN_SECTIONS and FAILED OPEN — a
+            // silent bypass, invisible in both the filter and the report.
+            ("OPCGW_ CHIRPSTACK__POLLING_FREQUENCY", true),
+            ("OPCGW_\tGLOBAL__DEBUG", true),
+            ("OPCGW_OPCUA__ USER_NAME", true),
+            ("OPCGW_ WEB__PORT", false),
             // lower/mixed case — figment matches the prefix uncased, so these
             // are real (filtered) vars and MUST be reported too.
             ("opcgw_chirpstack__polling_frequency", true),
@@ -6297,6 +6352,35 @@ mod tests {
                 );
                 assert_eq!(logging.level.as_deref(), Some("debug"));
             },
+        );
+    }
+
+    /// J-2 review iter-2: the whole-environment scanners must never panic on a
+    /// variable name whose 6th BYTE falls inside a multi-byte char — they walk
+    /// every variable in the process, including ones unrelated to opcgw, and
+    /// they run on the boot critical path. Before the fix `name[..6]` aborted
+    /// the gateway; `get(..6)` returns `None` instead.
+    #[test]
+    fn j2_normalizer_never_panics_on_multibyte_names() {
+        for name in [
+            "OPCGW\u{e9}_WEB__PORT",         // 'e-acute' starts at byte 5
+            "OPCGW\u{fffd}_WEB__PORT",       // lossy replacement char at byte 5
+            "OPC",                           // shorter than the prefix
+            "",
+            "\u{1f512}",
+            "OPCGW_",                        // prefix only
+        ] {
+            let _ = super::env_name_to_section_key(name);
+        }
+        // And the same names through the reporter, which is what main.rs calls.
+        let guard = std::sync::atomic::AtomicBool::new(false);
+        assert_eq!(
+            AppConfig::maybe_warn_env_ignored_from(
+                ["OPCGW\u{e9}_WEB__PORT", "\u{1f512}", "OPC"].into_iter().map(String::from),
+                &guard
+            ),
+            0,
+            "non-addressing names must be skipped, not panic"
         );
     }
 

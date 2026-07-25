@@ -188,3 +188,23 @@ _bmad-code-review 2026-07-25/26, 3 adversarial layers (Blind Hunter / Edge Case 
 | Date | Change |
 |------|--------|
 | 2026-07-26 | bmad-code-review iter-1 (Opus 5 vs Fable 5 implementer): fixed a COMPLETE allowlist bypass via dot-separated vars (shared normalizer, mutation-verified), the credential-pair lock-out hazard, the migration note's missing dominant case, reporter/filter case+whitespace+panic drift, the silent secrets.toml overlap, and the manual/README/security doc contradictions. Gates 1915/0 + clippy clean. |
+
+### Iteration 2 — mandatory re-review of the iter-1 fixes (2026-07-26)
+
+Per the iter-3 doctrine carried from J-1 (a round that introduces new flow-control gets re-reviewed), a focused pass over the iter-1 commit. **It found four real defects in my own fixes — two of them re-introducing the exact classes iter-1 had just removed.** All fixed.
+
+- [x] **HIGH — the anti-lockout hint printed the WRONG name.** `maybe_warn_ignored_user_name` ran against the **bootstrap** snapshot (`main.rs`, before the post-SQLite reload), but `[opcua].user_name` is web/SQLite-managed and `WebAuthState` is built from the **post-reload** value. So the moment an operator had ever changed the login name on the Admin page, the hint reported the stale `config.toml` value — and on the documented "delete config.toml, boot from SQLite + secrets.toml" shape it printed the serde default `opcua-user` unconditionally. An anti-lockout hint that causes the lockout. **FIX:** call it after the reload (`main.rs`, post `application_list_from_sqlite`).
+- [x] **MEDIUM — whitespace after the prefix was a COMPLETE silent bypass** (same class as the iter-1 dot HIGH). figment trims **twice** — the full name before the prefix match AND the resulting key afterwards — while the normalizer trimmed only once. `OPCGW_ CHIRPSTACK__POLLING_FREQUENCY=99` yielded section `" chirpstack"`, which misses `KNOWN_SECTIONS`, so `env_key_allowed` **failed open**; figment then trimmed it back into the real blocked field. Invisible in both scanners. Verified by the reviewer against real figment. **FIX:** trim the post-prefix remainder and each part. **Mutation-verified** (removing the trims turns the new `OPCGW_ CHIRPSTACK__…` case red).
+- [x] **MEDIUM — re-introduced a boot-path panic.** `name[..ENV_PREFIX.len()]` is a **byte** slice taken before any UTF-8 check: any unrelated environment variable with a non-ASCII char starting at byte 5 aborts the gateway — precisely the robustness the iter-1 `vars()` → `vars_os()` change was made to guarantee. **FIX:** `name.get(..n)`. Guard test `j2_normalizer_never_panics_on_multibyte_names`.
+- [x] **MEDIUM — the once-per-process latch suppressed the SECOND shadowed secret.** Placed inside the per-field loop, so with both secrets shadowed only `api_token` was reported and `user_password` never was — contradicting `docs/logging.md`'s "one line per affected field". **FIX:** collect first, latch once, then emit all. Smoke now shows both keys.
+- [x] **LOW — the `opcgw_env_provider` doc block had been orphaned onto `ENV_PREFIX`** by the iter-1 edit and still described the removed `split_once("__")` predicate (the source of the original bypass). Retargeted.
+
+**Gates after iteration 2:** `cargo test` **1917 passed / 0 failed**, clippy `-D warnings` clean. **Smoke re-run** (`/tmp/j2smoke4`): whitespace-form blocked (effective `poll_interval` 10, not 99), both secrets reported, login hint prints the post-reload effective name, every event exactly once, graceful stop.
+
+**LOOP TERMINATION:** iteration 2's changes are a normalization tightening, a call-site move, a bounds-check and a latch relocation — no new flow-control. All findings across iters 1–2 are patched or deferred-with-issue; residuals are LOW-only (the deferred Admin-save/Apply badge and the config.rs size). Per CLAUDE.md loop condition 2, the review loop **TERMINATES**.
+
+### Change Log — code review (cont.)
+
+| Date | Change |
+|------|--------|
+| 2026-07-26 | bmad-code-review iter-2 (mandatory re-review of iter-1): fixed the stale-name anti-lockout hint (HIGH), a whitespace-after-prefix allowlist bypass and a re-introduced boot-path panic (both re-runs of classes iter-1 had just fixed), and a latch that suppressed the second shadowed secret. Mutation-verified; smoke re-run clean. LOOP TERMINATED. |
