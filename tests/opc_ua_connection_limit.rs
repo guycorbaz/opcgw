@@ -247,7 +247,12 @@ async fn setup_test_server_with_max(max: usize) -> TestServer {
         Arc::new(SqliteBackend::with_pool(pool).expect("create backend"));
 
     let cancel = CancellationToken::new();
-    let opc_ua = OpcUa::new(&config, backend, cancel.clone());
+    let opc_ua = OpcUa::new(
+        &config,
+        backend,
+        cancel.clone(),
+        std::sync::Arc::new(tokio::sync::Notify::new()),
+    );
 
     let handle = tokio::spawn(async move {
         let _ = opc_ua.run().await;

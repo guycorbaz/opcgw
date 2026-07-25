@@ -29,7 +29,6 @@
 use crate::config::{AppConfig, OpcMetricTypeConfig};
 use crate::utils::OpcGwError;
 use chirpstack_api::api::DeviceQueueItem;
-use chirpstack_api::api::EnqueueDeviceQueueItemRequest;
 use chirpstack_api::api::GetDeviceMetricsRequest;
 use chirpstack_api::common::Metric;
 use chrono::{DateTime, Utc};
@@ -118,7 +117,7 @@ pub struct DeviceMetric {
 /// gRPC requests made to the ChirpStack server. The token is configured through
 /// the application configuration.
 #[derive(Clone)]
-struct AuthInterceptor {
+pub(crate) struct AuthInterceptor {
     /// ChirpStack API token used for authentication
     api_token: String,
 }
@@ -569,129 +568,108 @@ impl ChirpstackPoller {
             config_rx,
         })
     }
+}
 
-    /// Creates a gRPC channel for communication with the ChirpStack server.
-    ///
-    /// Establishes a gRPC channel to the ChirpStack server using the configured
-    /// server address. This channel is used for all subsequent API calls.
-    ///
-    /// # Returns
-    ///
-    /// `Result<tonic::transport::Channel, OpcGwError>` - Returns a configured gRPC channel
-    /// on success, or an error if the channel creation or connection fails
-    ///
-    /// # Errors
-    ///
-    /// Returns `OpcGwError::ConfigurationError` if:
-    /// - The server address format is invalid
-    /// - The connection to the server fails
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let channel = poller.create_channel().await?;
-    /// ```
-    async fn create_channel(&self) -> Result<tonic::transport::Channel, OpcGwError> {
-        debug!("Create channel");
-        // Story 6-3, AC#1: structured diagnostics around the gRPC connect
-        // attempt. The current code does NOT retry the channel itself
-        // (the retry loop in `get_device_metrics_from_server` retries the
-        // TCP availability probe instead), so we log a single attempt =
-        // 1 here. Story 4-4 will extend this with explicit reconnect
-        // logic; the operation name is reserved for compatibility.
-        //
-        // Review patch P24: validate server_address is non-empty before
-        // attempting to connect, so the failure message names the
-        // configuration field instead of `Channel::from_shared`'s opaque
-        // "invalid endpoint" wrapper.
-        if self.config.chirpstack.server_address.trim().is_empty() {
-            return Err(OpcGwError::Configuration(
-                "chirpstack.server_address is empty".to_string(),
-            ));
-        }
-        // GH #148: normalise the port BEFORE handing the endpoint to tonic. A
-        // port-less `http://host` would otherwise default to port 80 in
-        // hyper/tonic, while the TCP availability probe defaults to 8080 — so
-        // the probe reports "available" and every gRPC call fails. Deriving the
-        // port through the same helper the probe uses keeps them in agreement.
-        let endpoint = normalize_chirpstack_endpoint(&self.config.chirpstack.server_address)?;
-        // Iter-3 D-AC1 resolution: AC#1 literal text mandates `timeout_secs`
-        // on every `chirpstack_connect` log line. Emit `timeout_secs=0` here
-        // — `0` is the documented sentinel for "no deadline configured" on
-        // the create-channel branch (the probe loop further down emits a
-        // real per-attempt timeout). Combined with `max_retries=0u32`, the
-        // numeric schema stays consistent across both connect paths.
-        info!(
-            operation = "chirpstack_connect",
-            attempt = 1u32,
-            endpoint = %endpoint,
-            timeout_secs = 0u64,
-            "gRPC channel connect attempt"
-        );
-        let connect_start = Instant::now();
-        // Story 4-4 (resolves deferred-work.md:86 6-3 carry-forward):
-        // wrap `builder.connect()` with a 5s timeout. Smaller than NFR17's
-        // 30s SLA so a single channel rebuild doesn't blow the recovery
-        // budget; larger than the TCP probe's 1s timeout so transient
-        // slow-but-reachable servers don't get falsely flagged.
-        const CHANNEL_CONNECT_TIMEOUT_SECS: u64 = 5;
-        let channel = match Channel::from_shared(endpoint.clone()) {
-            Ok(builder) => match tokio::time::timeout(
-                Duration::from_secs(CHANNEL_CONNECT_TIMEOUT_SECS),
-                builder.connect(),
-            )
-            .await
-            {
-                Ok(Ok(channel)) => {
-                    let latency_ms = connect_start.elapsed().as_millis() as u64;
-                    info!(
-                        operation = "chirpstack_connect",
-                        attempt = 1u32,
-                        latency_ms = latency_ms,
-                        success = true,
-                        "gRPC channel connected"
-                    );
-                    channel
-                }
-                Ok(Err(e)) => {
-                    warn!(
-                        operation = "chirpstack_connect",
-                        attempt = 1u32,
-                        error = %e,
-                        retry_delay_secs = 0u64,
-                        max_retries = 0u32,
-                        success = false,
-                        "gRPC channel connect failed"
-                    );
-                    // Story 4-4 P2: transport-layer connect failures use
-                    // OpcGwError::ChirpStack so the per-device error branch
-                    // at poll_metrics:1052-1068 (matches!(e, ChirpStack(_)))
-                    // recognises this as a connectivity failure and triggers
-                    // the recovery loop. Previous variant `Configuration`
-                    // was incorrect — Configuration is for parse/validation
-                    // failures, not runtime transport.
-                    return Err(OpcGwError::ChirpStack(format!(
-                        "Failed to connect channel: {}",
-                        e
-                    )));
-                }
-                Err(_elapsed) => {
-                    warn!(
-                        operation = "chirpstack_connect",
-                        attempt = 1u32,
-                        timeout_secs = CHANNEL_CONNECT_TIMEOUT_SECS,
-                        success = false,
-                        "gRPC channel connect timed out"
-                    );
-                    // Story 4-4 P2: same rationale as above — timeout is a
-                    // transport failure, not a config problem.
-                    return Err(OpcGwError::ChirpStack(format!(
-                        "Failed to connect channel: timed out after {}s",
-                        CHANNEL_CONNECT_TIMEOUT_SECS
-                    )));
-                }
-            },
-            Err(e) => {
+// ===========================================================================
+// Story J-1 (AC#8): shared ChirpStack gRPC client factory.
+//
+// Config-parameterized free functions used by BOTH the `ChirpstackPoller` and
+// the `CommandDispatcher` (`src/chirpstack_dispatch.rs`), so there is exactly
+// ONE connect/auth path — no duplicated auth logic, no second hand-rolled
+// connect. Extracted verbatim from the former
+// `ChirpstackPoller::{create_channel, create_interceptor,
+// create_device_client, create_application_client}` inherent methods; they
+// depend only on `config.chirpstack.{server_address, api_token}`. The `#148`
+// port-defaulting (`normalize_chirpstack_endpoint`), the 5 s connect timeout,
+// and the `chirpstack_connect` structured logs are preserved unchanged.
+// ===========================================================================
+
+/// Creates a gRPC channel for communication with the ChirpStack server.
+///
+/// Establishes a gRPC channel to the ChirpStack server using the configured
+/// server address. This channel is used for all subsequent API calls.
+///
+/// # Returns
+///
+/// `Result<tonic::transport::Channel, OpcGwError>` - Returns a configured gRPC channel
+/// on success, or an error if the channel creation or connection fails
+///
+/// # Errors
+///
+/// Returns `OpcGwError::ConfigurationError` if:
+/// - The server address format is invalid
+/// - The connection to the server fails
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let channel = poller.create_channel().await?;
+/// ```
+pub(crate) async fn create_channel_from_config(
+    config: &AppConfig,
+) -> Result<tonic::transport::Channel, OpcGwError> {
+    debug!("Create channel");
+    // Story 6-3, AC#1: structured diagnostics around the gRPC connect
+    // attempt. The current code does NOT retry the channel itself
+    // (the retry loop in `get_device_metrics_from_server` retries the
+    // TCP availability probe instead), so we log a single attempt =
+    // 1 here. Story 4-4 will extend this with explicit reconnect
+    // logic; the operation name is reserved for compatibility.
+    //
+    // Review patch P24: validate server_address is non-empty before
+    // attempting to connect, so the failure message names the
+    // configuration field instead of `Channel::from_shared`'s opaque
+    // "invalid endpoint" wrapper.
+    if config.chirpstack.server_address.trim().is_empty() {
+        return Err(OpcGwError::Configuration(
+            "chirpstack.server_address is empty".to_string(),
+        ));
+    }
+    // GH #148: normalise the port BEFORE handing the endpoint to tonic. A
+    // port-less `http://host` would otherwise default to port 80 in
+    // hyper/tonic, while the TCP availability probe defaults to 8080 — so
+    // the probe reports "available" and every gRPC call fails. Deriving the
+    // port through the same helper the probe uses keeps them in agreement.
+    let endpoint = normalize_chirpstack_endpoint(&config.chirpstack.server_address)?;
+    // Iter-3 D-AC1 resolution: AC#1 literal text mandates `timeout_secs`
+    // on every `chirpstack_connect` log line. Emit `timeout_secs=0` here
+    // — `0` is the documented sentinel for "no deadline configured" on
+    // the create-channel branch (the probe loop further down emits a
+    // real per-attempt timeout). Combined with `max_retries=0u32`, the
+    // numeric schema stays consistent across both connect paths.
+    info!(
+        operation = "chirpstack_connect",
+        attempt = 1u32,
+        endpoint = %endpoint,
+        timeout_secs = 0u64,
+        "gRPC channel connect attempt"
+    );
+    let connect_start = Instant::now();
+    // Story 4-4 (resolves deferred-work.md:86 6-3 carry-forward):
+    // wrap `builder.connect()` with a 5s timeout. Smaller than NFR17's
+    // 30s SLA so a single channel rebuild doesn't blow the recovery
+    // budget; larger than the TCP probe's 1s timeout so transient
+    // slow-but-reachable servers don't get falsely flagged.
+    const CHANNEL_CONNECT_TIMEOUT_SECS: u64 = 5;
+    let channel = match Channel::from_shared(endpoint.clone()) {
+        Ok(builder) => match tokio::time::timeout(
+            Duration::from_secs(CHANNEL_CONNECT_TIMEOUT_SECS),
+            builder.connect(),
+        )
+        .await
+        {
+            Ok(Ok(channel)) => {
+                let latency_ms = connect_start.elapsed().as_millis() as u64;
+                info!(
+                    operation = "chirpstack_connect",
+                    attempt = 1u32,
+                    latency_ms = latency_ms,
+                    success = true,
+                    "gRPC channel connected"
+                );
+                channel
+            }
+            Ok(Err(e)) => {
                 warn!(
                     operation = "chirpstack_connect",
                     attempt = 1u32,
@@ -699,115 +677,153 @@ impl ChirpstackPoller {
                     retry_delay_secs = 0u64,
                     max_retries = 0u32,
                     success = false,
-                    "gRPC channel construction failed (invalid endpoint)"
+                    "gRPC channel connect failed"
                 );
-                return Err(OpcGwError::Configuration(format!(
-                    "Failed to create channel: {}",
+                // Story 4-4 P2: transport-layer connect failures use
+                // OpcGwError::ChirpStack so the per-device error branch
+                // at poll_metrics:1052-1068 (matches!(e, ChirpStack(_)))
+                // recognises this as a connectivity failure and triggers
+                // the recovery loop. Previous variant `Configuration`
+                // was incorrect — Configuration is for parse/validation
+                // failures, not runtime transport.
+                return Err(OpcGwError::ChirpStack(format!(
+                    "Failed to connect channel: {}",
                     e
                 )));
             }
-        };
-        Ok(channel)
-    }
-
-    /// Creates an authentication interceptor for gRPC requests.
-    ///
-    /// Initializes an authentication interceptor that will automatically add
-    /// the Bearer token to all gRPC requests sent to the ChirpStack server.
-    ///
-    /// # Returns
-    ///
-    /// An `AuthInterceptor` instance configured with the API token from the configuration
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let interceptor = poller.create_interceptor();
-    /// ```
-    fn create_interceptor(&self) -> AuthInterceptor {
-        debug!("Create interceptor");
-        AuthInterceptor {
-            api_token: self.config.chirpstack.api_token.clone(),
+            Err(_elapsed) => {
+                warn!(
+                    operation = "chirpstack_connect",
+                    attempt = 1u32,
+                    timeout_secs = CHANNEL_CONNECT_TIMEOUT_SECS,
+                    success = false,
+                    "gRPC channel connect timed out"
+                );
+                // Story 4-4 P2: same rationale as above — timeout is a
+                // transport failure, not a config problem.
+                return Err(OpcGwError::ChirpStack(format!(
+                    "Failed to connect channel: timed out after {}s",
+                    CHANNEL_CONNECT_TIMEOUT_SECS
+                )));
+            }
+        },
+        Err(e) => {
+            warn!(
+                operation = "chirpstack_connect",
+                attempt = 1u32,
+                error = %e,
+                retry_delay_secs = 0u64,
+                max_retries = 0u32,
+                success = false,
+                "gRPC channel construction failed (invalid endpoint)"
+            );
+            return Err(OpcGwError::Configuration(format!(
+                "Failed to create channel: {}",
+                e
+            )));
         }
-    }
+    };
+    Ok(channel)
+}
 
-    /// Creates a ChirpStack ApplicationService client with authentication.
-    ///
-    /// Initializes a gRPC client for the ChirpStack ApplicationService, which is used
-    /// to manage applications and retrieve application-related information.
-    ///
-    /// # Returns
-    ///
-    /// `Result<ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>, OpcGwError>`
-    /// - Returns a configured application service client on success
-    /// - Returns an error if the channel creation fails
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if `create_channel()` fails.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let app_client = poller.create_application_client().await?;
-    /// let request = Request::new(ListApplicationsRequest { /* ... */ });
-    /// let response = app_client.list(request).await?;
-    /// ```
-    #[allow(dead_code)]
-    async fn create_application_client(
-        &self,
-    ) -> Result<ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>, OpcGwError>
-    {
-        let channel = match self.create_channel().await {
-            Ok(channel) => channel,
-            Err(e) => {
-                trace!(error = ?e, "Error when creating channel");
-                return Err(e);
-            }
-        };
-        let interceptor = self.create_interceptor();
-        let application_client = ApplicationServiceClient::with_interceptor(channel, interceptor);
-        Ok(application_client)
+/// Creates an authentication interceptor for gRPC requests.
+///
+/// Initializes an authentication interceptor that will automatically add
+/// the Bearer token to all gRPC requests sent to the ChirpStack server.
+///
+/// # Returns
+///
+/// An `AuthInterceptor` instance configured with the API token from the configuration
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let interceptor = poller.create_interceptor();
+/// ```
+pub(crate) fn create_interceptor_from_config(config: &AppConfig) -> AuthInterceptor {
+    debug!("Create interceptor");
+    AuthInterceptor {
+        api_token: config.chirpstack.api_token.clone(),
     }
+}
 
-    /// Creates a ChirpStack DeviceService client with authentication.
-    ///
-    /// Initializes a gRPC client for the ChirpStack DeviceService, which is used
-    /// to manage devices, retrieve device information, and fetch device metrics.
-    ///
-    /// # Returns
-    ///
-    /// `Result<DeviceServiceClient<InterceptedService<Channel, AuthInterceptor>>, OpcGwError>`
-    /// - Returns a configured device service client on success
-    /// - Returns an error if the channel creation fails
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if `create_channel()` fails.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let device_client = poller.create_device_client().await?;
-    /// let request = Request::new(GetDeviceMetricsRequest { /* ... */ });
-    /// let response = device_client.get_metrics(request).await?;
-    /// ```
-    async fn create_device_client(
-        &self,
-    ) -> Result<DeviceServiceClient<InterceptedService<Channel, AuthInterceptor>>, OpcGwError> {
-        debug!("Create device client");
-        let channel = match self.create_channel().await {
-            Ok(channel) => channel,
-            Err(e) => {
-                trace!(error = ?e, "Error when creating channel");
-                return Err(e);
-            }
-        };
-        let interceptor = self.create_interceptor();
-        let application_client = DeviceServiceClient::with_interceptor(channel, interceptor);
-        Ok(application_client)
-    }
+/// Creates a ChirpStack ApplicationService client with authentication.
+///
+/// Initializes a gRPC client for the ChirpStack ApplicationService, which is used
+/// to manage applications and retrieve application-related information.
+///
+/// # Returns
+///
+/// `Result<ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>, OpcGwError>`
+/// - Returns a configured application service client on success
+/// - Returns an error if the channel creation fails
+///
+/// # Errors
+///
+/// This function will return an error if `create_channel()` fails.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let app_client = poller.create_application_client().await?;
+/// let request = Request::new(ListApplicationsRequest { /* ... */ });
+/// let response = app_client.list(request).await?;
+/// ```
+pub(crate) async fn create_application_client_from_config(
+    config: &AppConfig,
+) -> Result<ApplicationServiceClient<InterceptedService<Channel, AuthInterceptor>>, OpcGwError>
+{
+    let channel = match create_channel_from_config(config).await {
+        Ok(channel) => channel,
+        Err(e) => {
+            trace!(error = ?e, "Error when creating channel");
+            return Err(e);
+        }
+    };
+    let interceptor = create_interceptor_from_config(config);
+    let application_client = ApplicationServiceClient::with_interceptor(channel, interceptor);
+    Ok(application_client)
+}
 
+/// Creates a ChirpStack DeviceService client with authentication.
+///
+/// Initializes a gRPC client for the ChirpStack DeviceService, which is used
+/// to manage devices, retrieve device information, and fetch device metrics.
+///
+/// # Returns
+///
+/// `Result<DeviceServiceClient<InterceptedService<Channel, AuthInterceptor>>, OpcGwError>`
+/// - Returns a configured device service client on success
+/// - Returns an error if the channel creation fails
+///
+/// # Errors
+///
+/// This function will return an error if `create_channel()` fails.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let device_client = poller.create_device_client().await?;
+/// let request = Request::new(GetDeviceMetricsRequest { /* ... */ });
+/// let response = device_client.get_metrics(request).await?;
+/// ```
+pub(crate) async fn create_device_client_from_config(
+    config: &AppConfig,
+) -> Result<DeviceServiceClient<InterceptedService<Channel, AuthInterceptor>>, OpcGwError> {
+    debug!("Create device client");
+    let channel = match create_channel_from_config(config).await {
+        Ok(channel) => channel,
+        Err(e) => {
+            trace!(error = ?e, "Error when creating channel");
+            return Err(e);
+        }
+    };
+    let interceptor = create_interceptor_from_config(config);
+    let application_client = DeviceServiceClient::with_interceptor(channel, interceptor);
+    Ok(application_client)
+}
+
+impl ChirpstackPoller {
     /// Checks the availability of the ChirpStack server.
     ///
     /// Performs a TCP connection test to the ChirpStack server to verify its availability
@@ -1439,10 +1455,16 @@ impl ChirpstackPoller {
         let mut devices_polled: u32 = 0;
         let mut metrics_collected: u32 = 0;
 
-        // Process command queue
-        self.process_command_queue().await?;
+        // Story J-1 (AC#3, CR #136): command delivery is NO LONGER driven by
+        // the metrics poll. A dedicated event-driven `CommandDispatcher`
+        // (`src/chirpstack_dispatch.rs`), woken by the OPC UA write path via a
+        // `tokio::sync::Notify`, now owns the pending-command drain — so a
+        // command reaches ChirpStack within seconds of the write instead of
+        // waiting up to a full `chirpstack.polling_frequency` interval. The
+        // former `self.process_command_queue().await?` head-of-poll call is
+        // intentionally gone (single-owner delivery, AC#4: no double-send).
 
-        // Capture poll start timestamp after command queue succeeds (Story 5-3 AC#4)
+        // Capture poll start timestamp (Story 5-3 AC#4)
         let poll_start_timestamp = chrono::DateTime::<Utc>::from(SystemTime::now());
 
         // Collect all metrics for batch write
@@ -2162,7 +2184,7 @@ impl ChirpstackPoller {
         let mut offset = 0u32;
         let mut pages_fetched = 0u32;
         const MAX_PAGES: u32 = 10_000; // DoS prevention: limit maximum pages per request
-        let application_client = self.create_application_client().await?;
+        let application_client = create_application_client_from_config(&self.config).await?;
 
         loop {
             // Check for cancellation token at each iteration (AC#5: no blocking)
@@ -2248,7 +2270,7 @@ impl ChirpstackPoller {
         let mut offset = 0u32;
         let mut pages_fetched = 0u32;
         const MAX_PAGES: u32 = 10_000; // DoS prevention: limit maximum pages per request
-        let device_client = self.create_device_client().await?;
+        let device_client = create_device_client_from_config(&self.config).await?;
 
         loop {
             // Check for cancellation token at each iteration (AC#5: no blocking)
@@ -2517,7 +2539,7 @@ impl ChirpstackPoller {
         }
 
         trace!("Create device service client for Chirpstack");
-        let mut device_client = self.create_device_client().await?;
+        let mut device_client = create_device_client_from_config(&self.config).await?;
 
         //trace!(request = ?request, "Request created");
         // Story 6-3, AC#6 / AC#7: time the gRPC request so we can classify
@@ -2555,80 +2577,12 @@ impl ChirpstackPoller {
         }
     }
 
-    /// Processes all commands in the device command queue.
-    ///
-    /// This method continuously retrieves and processes commands from the storage queue
-    /// until it's empty. Each command is removed from the queue before being sent to
-    /// the server, ensuring that successfully processed commands are not retried.
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(())` - If all commands were processed successfully or the queue was empty
-    /// * `Err(OpcGwError)` - If there was an error accessing the storage lock
-    ///
-    /// # Behavior
-    ///
-    /// - Commands are processed one at a time to avoid memory overhead
-    /// - Each command is permanently removed from the queue before processing
-    /// - If a command fails to be enqueued, an error is logged but processing continues
-    /// - The method only returns an error if the storage lock cannot be acquired
-    ///
-    /// # Error Handling
-    ///
-    /// Failed command enqueueing is logged but does not stop the processing of remaining
-    /// commands. Consider implementing a retry mechanism or dead letter queue for
-    /// production use cases.
-    async fn process_command_queue(&mut self) -> Result<(), OpcGwError> {
-        trace!("Process command queue");
-
-        // Story E-0: drain the queue that the OPC UA write path actually feeds.
-        // `OpcUa::set_command` enqueues a `DeviceCommand` via
-        // `StorageBackend::queue_command`; those are returned by
-        // `get_pending_commands`. (The high-level `Command` / `dequeue_command`
-        // FIFO of Story 3-1 has no producer in the OPC UA flow and is left
-        // untouched here.)
-        //
-        // A storage-lock failure propagates (it aborts the poll cycle, matching
-        // the pre-existing `?` at the call site); a per-command enqueue failure
-        // is logged and reflected in the command's status but never aborts the
-        // batch — one undeliverable command must not block the others or the
-        // metrics poll.
-        let pending = self.backend.async_store().get_pending_commands().await?;
-        if pending.is_empty() {
-            return Ok(());
-        }
-        debug!(count = pending.len(), "Processing pending device commands");
-        for command in pending {
-            self.deliver_command(command).await;
-        }
-        Ok(())
-    }
-
-    /// Delivers a single queued command to ChirpStack and records the outcome.
-    ///
-    /// Resolves the command's device-class binding from the (SQLite-sourced)
-    /// `application_list` and delegates to [`deliver_one`]. Never returns an
-    /// error: every failure mode is logged and reflected in storage so the
-    /// caller's batch loop continues.
-    async fn deliver_command(&self, command: DeviceCommand) {
-        // Resolve the per-command class + confirmed flag from config BEFORE the
-        // await so the borrow of `self.config` does not cross the await point.
-        let (command_class, confirmed) =
-            match find_command_cfg(&self.config.application_list, &command.device_id, command.f_port)
-            {
-                Some(cfg) => (cfg.command_class.clone(), cfg.command_confirmed),
-                None => (None, false),
-            };
-
-        deliver_one(
-            self,
-            &self.backend,
-            command_class.as_deref(),
-            confirmed,
-            &command,
-        )
-        .await;
-    }
+    // Story J-1 (CR #136): `process_command_queue` and `deliver_command` were
+    // removed here. Command delivery is no longer part of the metrics poll; the
+    // drain now lives in `chirpstack_dispatch::drain_pending_commands` and is
+    // owned by the event-driven `CommandDispatcher`. The shared, unit-tested
+    // delivery machinery (`deliver_one`, `find_command_cfg`, `DownlinkSink`) is
+    // preserved below and reused by the dispatcher's production sink.
 
     /// Converts a `ListApplicationsResponse` into a vector of `ApplicationDetail`.
     ///
@@ -2740,7 +2694,7 @@ pub(crate) enum DownlinkPayload {
 /// unit-tested (success / failure outcomes, status transitions) without a live
 /// gRPC server. Production uses the [`ChirpstackPoller`] implementation.
 #[async_trait::async_trait]
-trait DownlinkSink: Send + Sync {
+pub(crate) trait DownlinkSink: Send + Sync {
     /// Enqueue the downlink and return ChirpStack's queue-item id
     /// (`EnqueueDeviceQueueItemResponse.id`, a UUID). The id is stored as the
     /// command's `chirpstack_result_id` so the Story E-3 confirmation path can
@@ -2749,36 +2703,12 @@ trait DownlinkSink: Send + Sync {
     async fn enqueue_downlink(&self, item: DeviceQueueItem) -> Result<String, OpcGwError>;
 }
 
-#[async_trait::async_trait]
-impl DownlinkSink for ChirpstackPoller {
-    async fn enqueue_downlink(&self, item: DeviceQueueItem) -> Result<String, OpcGwError> {
-        trace!(queue_item = ?item, "Enqueue downlink to ChirpStack");
-        let request = Request::new(EnqueueDeviceQueueItemRequest {
-            queue_item: Some(item),
-            flush_queue: false,
-        });
-
-        // Client-creation failure is a handled error, never a panic.
-        let mut device_client = self.create_device_client().await?;
-        match device_client.enqueue(request).await {
-            Ok(response) => {
-                let inner_response = response.into_inner();
-                trace!(response = ?inner_response, "Downlink enqueued");
-                // Capture the queue-item UUID (E-3 correlation key). It must
-                // not be empty in normal operation; if ChirpStack ever returns
-                // an empty id, confirmation correlation falls back to the
-                // timeout path for this command.
-                Ok(inner_response.id)
-            }
-            Err(e) => {
-                error!(error = %e, "Error enqueueing device request");
-                Err(OpcGwError::ChirpStack(
-                    "Error enqueuing request".to_string(),
-                ))
-            }
-        }
-    }
-}
+// Story J-1 (CR #136): the production `DownlinkSink` implementation moved out of
+// `ChirpstackPoller` (which no longer delivers commands) into
+// `chirpstack_dispatch::ChirpStackDownlinkSink`, which the `CommandDispatcher`
+// owns and which builds its `DeviceServiceClient` via the shared
+// `create_device_client_from_config` factory (AC#8/AC#9). Tests continue to use
+// the `MockSink` stub.
 
 /// Maps, enqueues, and records the outcome for one queued command.
 ///
@@ -2788,7 +2718,10 @@ impl DownlinkSink for ChirpstackPoller {
 /// returns an error: every failure mode is logged and reflected in storage so
 /// the batch loop continues. Factored out of [`ChirpstackPoller::deliver_command`]
 /// so the outcome logic is unit-testable with a stub [`DownlinkSink`].
-async fn deliver_one(
+///
+/// Story J-1: `pub(crate)` so `chirpstack_dispatch::drain_pending_commands`
+/// (the relocated command drain) reuses the exact same delivery path.
+pub(crate) async fn deliver_one(
     sink: &dyn DownlinkSink,
     backend: &Arc<dyn StorageBackend>,
     command_class: Option<&str>,
@@ -2868,7 +2801,7 @@ async fn deliver_one(
 /// the (SQLite-sourced) `application_list` so the class binding can be applied.
 /// Returns the first command on that device whose `command_port` equals
 /// `f_port`.
-fn find_command_cfg<'a>(
+pub(crate) fn find_command_cfg<'a>(
     apps: &'a [crate::config::ChirpStackApplications],
     device_id: &str,
     f_port: u8,
@@ -4818,9 +4751,12 @@ mod tests {
 
     #[tokio::test]
     async fn deliver_batch_continues_past_a_failure() {
-        // Mirrors process_command_queue's loop: drain all pending, deliver each.
-        // One command fails mapping (valve value 9); the others must still be
-        // delivered and marked Sent — the batch is not aborted by one failure.
+        // Story E-0 semantics preserved under J-1: this exercises `deliver_one`'s
+        // per-command isolation directly (the drain loop it models now lives in
+        // `chirpstack_dispatch::drain_pending_commands`, verified there against
+        // the real code path). One command fails mapping (valve value 9); the
+        // others must still be delivered and marked Sent — one failure never
+        // aborts the batch.
         let backend = Arc::new(InMemoryBackend::new());
         let dyn_backend: Arc<dyn StorageBackend> = backend.clone();
         backend
@@ -4862,6 +4798,48 @@ mod tests {
         assert_eq!(
             backend.command_status_for_test(pending[2].id).map(|(s, _)| s),
             Some(CommandStatus::Sent)
+        );
+    }
+
+    // ---- Story J-1 AC#10(d) / AC#3: the poll loop no longer delivers commands
+
+    /// Regression guard: `poll_metrics` must NOT drain the command queue. With
+    /// no configured devices the poll does no gRPC, so the ONLY thing that could
+    /// touch a `Pending` command is the (now-removed) head-of-poll drain. This
+    /// drives the REAL `poll_metrics`, so on the pre-J-1 code — where the head
+    /// called `process_command_queue` → delivered via the poller's live-gRPC
+    /// sink → marked the command `Sent`/`Failed` — this assertion would fail
+    /// (fake-regression-guard class avoided, see the story Dev Notes).
+    #[tokio::test]
+    async fn poll_metrics_does_not_deliver_commands() {
+        let mut config = get_test_config();
+        config.application_list = vec![];
+        let backend = Arc::new(InMemoryBackend::new());
+        let dyn_backend: Arc<dyn StorageBackend> = backend.clone();
+        let restore_barrier = Arc::new(std::sync::Barrier::new(2));
+        let mut poller = ChirpstackPoller::new(
+            &config,
+            dyn_backend,
+            CancellationToken::new(),
+            restore_barrier,
+        )
+        .await
+        .expect("poller fixture must build");
+
+        backend
+            .queue_command(device_command(0, "poll-dev", 10, vec![1]))
+            .unwrap();
+        let cmd_id = backend.get_pending_commands().unwrap()[0].id;
+
+        poller
+            .poll_metrics()
+            .await
+            .expect("poll must succeed with no configured devices");
+
+        assert_eq!(
+            backend.command_status_for_test(cmd_id).map(|(s, _)| s),
+            Some(CommandStatus::Pending),
+            "poll_metrics must NOT deliver commands after J-1 (AC#3): command stays Pending"
         );
     }
 

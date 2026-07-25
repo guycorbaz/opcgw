@@ -155,6 +155,24 @@ fn is_unroutable_advertise_host(host: &str) -> bool {
             .unwrap_or(false)
 }
 
+/// Story J-1 (AC#2): fire the command-dispatch signal **iff** a `set_command`
+/// write succeeded (returned exactly `StatusCode::Good`).
+///
+/// `set_command` returns `Good` only on a successful enqueue; every rejection
+/// path (`Bad`, `BadTypeMismatch`, `BadOutOfRange`, `BadInternalError`) returns
+/// a `Bad*` code, so gating on `== Good` means a rejected write wakes nothing.
+/// `Notify::notify_one` is sync (safe to call from the sync OPC UA write
+/// callback) and, if no waiter is parked, stores a single permit so the
+/// dispatcher never misses a wake that races its `notified()` await (AC#6).
+pub(crate) fn maybe_signal_dispatch(
+    status: opcua::types::StatusCode,
+    dispatch_signal: &tokio::sync::Notify,
+) {
+    if status == opcua::types::StatusCode::Good {
+        dispatch_signal.notify_one();
+    }
+}
+
 /// Structure for storing OpcUa server parameters
 pub struct OpcUa {
     /// Configuration for the OPC UA server
@@ -177,6 +195,12 @@ pub struct OpcUa {
     /// primitive) so the populate-then-read pattern is lock-free for
     /// readers and the build-time fill is a single short critical section.
     node_to_metric: Arc<OpcuaRwLock<HashMap<NodeId, (String, String)>>>,
+    /// Story J-1 (CR #136): fired by each command write callback on a
+    /// successful (`Good`) enqueue, to wake the `CommandDispatcher` so the
+    /// downlink reaches ChirpStack immediately instead of on the next poll
+    /// cycle. Shared (cloned) with the dispatcher spawned in the same
+    /// `spawn_data_plane` cycle; a fresh `Notify` is created per Apply-respawn.
+    dispatch_signal: Arc<tokio::sync::Notify>,
 }
 
 impl OpcUa {
@@ -191,6 +215,10 @@ impl OpcUa {
     ///   server settings and other application parameters
     /// * `storage` - An `Arc<dyn StorageBackend>` providing lock-free access to the
     ///   storage system for device metrics and data (uses internal Mutex for SQLite access)
+    /// * `cancel_token` - Cancellation token for graceful shutdown
+    /// * `dispatch_signal` - Story J-1: shared `tokio::sync::Notify` fired by
+    ///   command write callbacks on a successful enqueue, to wake the
+    ///   `CommandDispatcher` for immediate downlink delivery
     ///
     /// # Returns
     ///
@@ -203,12 +231,14 @@ impl OpcUa {
     ///
     /// let config = AppConfig::new().expect("Failed to load config");
     /// let storage = Arc::new(opcgw::storage::SqliteBackend::new(&config)?);
-    /// let opcua_server = OpcUa::new(&config, storage, cancel_token);
+    /// let dispatch_signal = Arc::new(tokio::sync::Notify::new());
+    /// let opcua_server = OpcUa::new(&config, storage, cancel_token, dispatch_signal);
     /// ```
     pub fn new(
         config: &AppConfig,
         storage: Arc<dyn StorageBackend>,
         cancel_token: tokio_util::sync::CancellationToken,
+        dispatch_signal: Arc<tokio::sync::Notify>,
     ) -> Self {
         trace!("Create new OPC UA server structure");
         //debug!("OPC UA server configuration: {:#?}", config);
@@ -261,6 +291,7 @@ impl OpcUa {
             // Story 8-3: build empty; `add_nodes` fills it during
             // address-space construction.
             node_to_metric: Arc::new(OpcuaRwLock::new(HashMap::new())),
+            dispatch_signal,
         }
     }
 
@@ -297,7 +328,7 @@ impl OpcUa {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut opcua_server = OpcUa::new(&config, storage);
+    /// let mut opcua_server = OpcUa::new(&config, storage, cancel_token, dispatch_signal);
     /// match opcua_server.create_server() {
     ///     Ok(server) => println!("OPC UA server created successfully"),
     ///     Err(e) => eprintln!("Failed to create server: {}", e),
@@ -1189,15 +1220,23 @@ impl OpcUa {
                             let _ =
                                 address_space.add_variables(vec![command_variable], &device_node);
                             let command_clone = command.clone();
+                            // Story J-1 (AC#1/AC#2): clone the dispatch signal into
+                            // the callback so a successful (`Good`) enqueue wakes the
+                            // CommandDispatcher immediately. Firing on the RETURNED
+                            // status covers every early-return path uniformly, and a
+                            // rejected write (`Bad*`) fires nothing.
+                            let dispatch_signal = self.dispatch_signal.clone();
                             manager.inner().simple().add_write_callback(
                                 command_node.clone(),
                                 move |data_value, _numeric_range| {
-                                    Self::set_command(
+                                    let status = Self::set_command(
                                         &storage_clone,
                                         &device_id.to_string(),
                                         &command_clone,
                                         data_value,
-                                    )
+                                    );
+                                    maybe_signal_dispatch(status, &dispatch_signal);
+                                    status
                                 },
                             );
                         }
@@ -3555,6 +3594,59 @@ mod tests {
         assert_eq!(
             dv.status.expect("status"),
             opcua::types::StatusCode::Good.bits().into()
+        );
+    }
+
+    /// Story J-1 AC#10(e) / AC#2: the command write path fires the dispatch
+    /// signal ONLY when `set_command` returns `Good`. A rejected write (`Bad*`)
+    /// must wake nothing — exercises the real `set_command` return threaded
+    /// through the real `maybe_signal_dispatch` gate, exactly as the write
+    /// callback does.
+    #[tokio::test]
+    async fn set_command_signals_dispatch_only_on_good() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
+        let cmd_cfg = crate::config::DeviceCommandCfg {
+            command_id: 1,
+            command_name: "valveCmd".to_string(),
+            command_confirmed: false,
+            command_port: 10,
+            command_class: None,
+        };
+
+        // Rejected write (non-numeric String variant → BadTypeMismatch): the
+        // gate must fire nothing, so a fresh `notified()` stays pending.
+        let bad_signal = tokio::sync::Notify::new();
+        let bad_status = OpcUa::set_command(
+            &storage,
+            "dev-e",
+            &cmd_cfg,
+            opcua::types::DataValue::value_only(opcua::types::Variant::String("nope".into())),
+        );
+        assert_eq!(bad_status, opcua::types::StatusCode::BadTypeMismatch);
+        maybe_signal_dispatch(bad_status, &bad_signal);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), bad_signal.notified())
+                .await
+                .is_err(),
+            "a rejected (Bad*) write must NOT fire the dispatch signal"
+        );
+
+        // Good write (Int32 within the LoRaWAN u8 payload range): the gate
+        // stores exactly one permit, so `notified()` returns immediately.
+        let good_signal = tokio::sync::Notify::new();
+        let good_status = OpcUa::set_command(
+            &storage,
+            "dev-e",
+            &cmd_cfg,
+            opcua::types::DataValue::value_only(1_i32),
+        );
+        assert_eq!(good_status, opcua::types::StatusCode::Good);
+        maybe_signal_dispatch(good_status, &good_signal);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), good_signal.notified())
+                .await
+                .is_ok(),
+            "a Good write must fire the dispatch signal"
         );
     }
 }

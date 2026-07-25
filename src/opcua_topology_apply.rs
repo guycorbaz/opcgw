@@ -675,6 +675,16 @@ pub fn apply_diff_to_address_space(
             // (SQLite-sourced) application_list when encoding the downlink.
             command_class: None,
         };
+        // J-1 (CR #136): this is the SECOND command write-callback site (Story
+        // 9-8 live address-space mutation). Under F-0's staged-apply model the
+        // config-listener that drives this apply pass is NOT spawned, so this
+        // path is dormant. Threading the `CommandDispatcher`'s `Notify` all the
+        // way through `run_opcua_config_listener` → `apply_diff` → here would be
+        // disproportionate plumbing for a dead path, so the signal-on-`Good`
+        // wiring is intentionally NOT added here (see the live path in
+        // `opc_ua.rs` add-command callback). If Story 9-8 live mutation is ever
+        // reactivated, thread the dispatch signal into this callback too so
+        // runtime-added command nodes get immediate dispatch as well.
         manager
             .inner()
             .simple()

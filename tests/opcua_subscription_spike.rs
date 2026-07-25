@@ -284,7 +284,12 @@ async fn setup_test_server_with_max(max: usize) -> TestServer {
 
     let cancel = CancellationToken::new();
     let backend_for_server = backend.clone();
-    let opc_ua = OpcUa::new(&config, backend_for_server, cancel.clone());
+    let opc_ua = OpcUa::new(
+        &config,
+        backend_for_server,
+        cancel.clone(),
+        std::sync::Arc::new(tokio::sync::Notify::new()),
+    );
 
     let handle = tokio::spawn(async move {
         let _ = opc_ua.run().await;
@@ -1407,7 +1412,12 @@ async fn setup_test_server_with_subscription_limits(
 
     let cancel = CancellationToken::new();
     let backend_for_server = backend.clone();
-    let opc_ua = OpcUa::new(&config, backend_for_server, cancel.clone());
+    let opc_ua = OpcUa::new(
+        &config,
+        backend_for_server,
+        cancel.clone(),
+        std::sync::Arc::new(tokio::sync::Notify::new()),
+    );
 
     let handle = tokio::spawn(async move {
         let _ = opc_ua.run().await;

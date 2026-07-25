@@ -193,7 +193,12 @@ async fn setup_test_server(max_results_per_node: Option<usize>) -> TestServer {
 
     let cancel = CancellationToken::new();
     let backend_for_server = backend.clone();
-    let opc_ua = OpcUa::new(&config, backend_for_server, cancel.clone());
+    let opc_ua = OpcUa::new(
+        &config,
+        backend_for_server,
+        cancel.clone(),
+        std::sync::Arc::new(tokio::sync::Notify::new()),
+    );
 
     let handle = tokio::spawn(async move {
         let _ = opc_ua.run().await;
@@ -916,7 +921,12 @@ async fn test_history_read_multi_device_no_node_id_collision_issue_99() {
 
     let cancel = CancellationToken::new();
     let backend_for_server = backend.clone();
-    let opc_ua = OpcUa::new(&config, backend_for_server, cancel.clone());
+    let opc_ua = OpcUa::new(
+        &config,
+        backend_for_server,
+        cancel.clone(),
+        std::sync::Arc::new(tokio::sync::Notify::new()),
+    );
     let handle = tokio::spawn(async move {
         let _ = opc_ua.run().await;
     });

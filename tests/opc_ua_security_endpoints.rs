@@ -226,7 +226,12 @@ async fn setup_test_server() -> TestServer {
         Arc::new(SqliteBackend::with_pool(pool).expect("create backend"));
 
     let cancel = CancellationToken::new();
-    let opc_ua = OpcUa::new(&config, backend, cancel.clone());
+    let opc_ua = OpcUa::new(
+        &config,
+        backend,
+        cancel.clone(),
+        std::sync::Arc::new(tokio::sync::Notify::new()),
+    );
 
     let handle = tokio::spawn(async move {
         // Errors are surfaced via tracing inside `OpcUa::run`; we just
