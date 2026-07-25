@@ -506,7 +506,9 @@ async fn spawn_data_plane(
                         error!(
                             error = ?e,
                             "Failed to create SqliteBackend for command dispatcher; \
-                             command dispatch is DOWN until the next Apply/restart"
+                             command dispatch is DOWN until the next Apply/restart \
+                             (queued commands older than the delivery deadline by \
+                             then will expire Failed rather than deliver late)"
                         );
                         return;
                     }

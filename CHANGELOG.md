@@ -32,11 +32,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   across an Apply soft restart are delivered without a fresh write) and shares one gRPC
   client factory and one delivery path with the poller (no duplicated auth, no token in
   logs). No new configuration knob — the design is purely event-driven.
-  Review hardening (iter-3): a **transient** ChirpStack enqueue failure (restart, boot
-  ordering, RPC deadline) now leaves the command `Pending` and retries it on an
-  escalating backoff instead of marking it terminally `Failed`; retries — and the
-  startup drain — are bounded by a **delivery deadline** (`command_delivery_timeout_secs`
-  from `created_at`), so a stale command can never actuate hardware hours after it was
+  Review hardening (iter-3/iter-4): a **provably-undelivered** enqueue failure
+  (ChirpStack unreachable — connect refused during a restart or boot ordering) now
+  leaves the command `Pending` and retries it on an escalating backoff instead of
+  marking it terminally `Failed`, with the drain short-circuiting after the first
+  unreachable row; an **ambiguous** failure (RPC sent but errored/timed out —
+  ChirpStack may have committed the item) stays terminal with a "delivery uncertain —
+  verify the device queue" reason, because retrying it could double-actuate hardware.
+  Retries — and the startup drain — are bounded by a **delivery deadline**
+  (`command_delivery_timeout_secs` from `created_at`, symmetric against clock
+  step-backs), so a stale command can never actuate hardware hours after it was
   written. A command whose device/command config was removed after queueing is failed
   as an **orphan** (previously it fell back to a raw-byte unconfirmed downlink), and a
   malformed `command_queue` row is **quarantined** `Failed` instead of livelocking the

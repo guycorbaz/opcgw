@@ -2731,14 +2731,17 @@ pub(crate) enum DeliveryOutcome {
 ///
 /// Maps the canonical value to a semantic object (class-bound) or raw bytes
 /// (fallback), enqueues it via `sink`, and updates the command's status:
-/// `Sent` on success, `Failed` on a *mapping* error (permanent — a malformed
-/// command can never succeed). A *sink* error (gRPC connect/enqueue — typically
-/// transient: ChirpStack restarting, boot ordering) leaves the row `Pending`
-/// and returns [`DeliveryOutcome::RetryLater`] so the dispatcher re-drives it
-/// with its escalating backoff, bounded by the delivery deadline (J-1 review
-/// iter-3 D1; before iter-3 a transient outage marked commands terminally
-/// `Failed` with zero retries). Never panics or returns an error: every
-/// failure mode is logged and reflected in storage so the batch loop continues.
+/// `Sent` on success; `Failed` on a *mapping* error (permanent) or on an
+/// *ambiguous* sink error (the RPC was sent but failed/timed out — ChirpStack
+/// may have committed the item, so a retry could double-actuate; the failure
+/// reason says "delivery uncertain"). Only a provably-not-delivered
+/// [`OpcGwError::ChirpStackUnreachable`] (connect failed before any send —
+/// ChirpStack restarting, boot ordering) leaves the row `Pending` and returns
+/// [`DeliveryOutcome::RetryLater`] so the dispatcher re-drives it with its
+/// escalating backoff, bounded by the delivery deadline (J-1 iter-3 D1,
+/// narrowed by iter-4; before iter-3 even connect failures were terminal).
+/// Never panics or returns an error: every failure mode is logged and
+/// reflected in storage so the batch loop continues.
 ///
 /// Story J-1: `pub(crate)` so `chirpstack_dispatch::drain_pending_commands`
 /// (the relocated command drain) reuses the exact same delivery path.
@@ -2800,20 +2803,39 @@ pub(crate) async fn deliver_one(
             }
             DeliveryOutcome::Delivered
         }
-        Err(e) => {
-            // J-1 review iter-3 D1: a sink error is treated as TRANSIENT — the
-            // row stays `Pending` and the dispatcher re-drives it (escalating
-            // backoff, bounded by the delivery deadline). Marking it `Failed`
-            // here turned a 5-second ChirpStack restart into a permanently
-            // failed operator command.
+        // J-1 iter-3 D1, narrowed by iter-4: ONLY a provably-not-delivered
+        // failure (`ChirpStackUnreachable` — the channel/TCP connect failed,
+        // no request was sent) leaves the row `Pending` for the bounded retry.
+        // Any error past the connect is AMBIGUOUS (ChirpStack may have
+        // committed the queue item though the response was lost); retrying it
+        // could enqueue the same downlink twice (double hardware actuation),
+        // so ambiguous failures are terminal with an operator-facing
+        // "delivery uncertain" reason. Pre-iter-3 behaviour marked even
+        // connect failures terminally `Failed` — a 5-second ChirpStack
+        // restart permanently failed the command.
+        Err(OpcGwError::ChirpStackUnreachable(e)) => {
             warn!(
                 event = "command_dispatch_retry",
                 error = %e,
                 device_id = %command.device_id,
                 command_id = command.id,
-                "Failed to enqueue command; leaving Pending for a bounded retry"
+                "ChirpStack unreachable before send; leaving Pending for a bounded retry"
             );
             DeliveryOutcome::RetryLater
+        }
+        Err(e) => {
+            error!(
+                error = %e,
+                device_id = %command.device_id,
+                command_id = command.id,
+                "Failed to enqueue command; marking command Failed"
+            );
+            if let Err(e2) =
+                backend.async_store().update_command_status(command.id, CommandStatus::Failed, Some(e.to_string())).await
+            {
+                error!(error = %e2, command_id = command.id, "Failed to mark command Failed");
+            }
+            DeliveryOutcome::Terminal
         }
     }
 }
@@ -4701,25 +4723,36 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    // ---- AC#8(d), amended by J-1 review iter-3 D1: a transient enqueue
-    // failure leaves the row Pending for a bounded retry (the delivery
-    // deadline in `drain_pending_commands` caps the retries) ----------------
+    // ---- AC#8(d), amended by J-1 iter-3 D1 + iter-4: only a provably-
+    // not-delivered failure (ChirpStackUnreachable) leaves the row Pending
+    // for a bounded retry; an ambiguous failure (RPC sent but errored — may
+    // have been committed server-side) is terminal, else a retry could
+    // double-actuate hardware -----------------------------------------------
+
+    /// Sink failing with the retry-safe class: connect failed before any send.
+    struct UnreachableSink;
+
+    #[async_trait::async_trait]
+    impl DownlinkSink for UnreachableSink {
+        async fn enqueue_downlink(&self, _item: DeviceQueueItem) -> Result<String, OpcGwError> {
+            Err(OpcGwError::ChirpStackUnreachable(
+                "connect refused (mock)".to_string(),
+            ))
+        }
+    }
 
     #[tokio::test]
-    async fn deliver_one_enqueue_failure_leaves_pending_for_retry() {
+    async fn deliver_one_unreachable_leaves_pending_for_retry() {
         let backend = Arc::new(InMemoryBackend::new());
         let dyn_backend: Arc<dyn StorageBackend> = backend.clone();
         backend
             .queue_command(device_command(0, "dev-B", 10, vec![0]))
             .unwrap();
         let cmd = backend.get_pending_commands().unwrap()[0].clone();
-        let sink = MockSink::new(true);
 
-        let outcome = deliver_one(&sink, &dyn_backend, Some("valve"), false, &cmd).await;
+        let outcome = deliver_one(&UnreachableSink, &dyn_backend, Some("valve"), false, &cmd).await;
 
-        // Enqueue was attempted...
-        assert_eq!(sink.calls().len(), 1);
-        // ...and the transient sink failure must NOT be terminal: the row
+        // ChirpStack provably never saw the request → NOT terminal: the row
         // stays Pending so the dispatcher's bounded retry can re-drive it
         // (pre-iter-3 this was marked Failed — a 5 s ChirpStack restart
         // permanently failed the command).
@@ -4730,9 +4763,39 @@ mod tests {
         assert_eq!(
             status,
             CommandStatus::Pending,
-            "transient enqueue failure must leave the command Pending for retry"
+            "an unreachable-class failure must leave the command Pending for retry"
         );
         assert!(err.is_none(), "a Pending retry candidate carries no error message");
+    }
+
+    #[tokio::test]
+    async fn deliver_one_ambiguous_enqueue_failure_marks_failed() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let dyn_backend: Arc<dyn StorageBackend> = backend.clone();
+        backend
+            .queue_command(device_command(0, "dev-B2", 10, vec![0]))
+            .unwrap();
+        let cmd = backend.get_pending_commands().unwrap()[0].clone();
+        // MockSink(true) fails with the plain ChirpStack variant — the
+        // AMBIGUOUS class (RPC-level failure after the request was sent).
+        let sink = MockSink::new(true);
+
+        let outcome = deliver_one(&sink, &dyn_backend, Some("valve"), false, &cmd).await;
+
+        // Enqueue was attempted...
+        assert_eq!(sink.calls().len(), 1);
+        // ...and the ambiguous failure is TERMINAL (iter-4): ChirpStack may
+        // have committed the item, so a retry could double-actuate.
+        assert_eq!(outcome, DeliveryOutcome::Terminal);
+        let (status, err) = backend
+            .command_status_for_test(cmd.id)
+            .expect("command must still exist");
+        assert_eq!(
+            status,
+            CommandStatus::Failed,
+            "an ambiguous enqueue failure must mark Failed, never retry"
+        );
+        assert!(err.is_some(), "Failed command must carry an error message");
     }
 
     #[tokio::test]

@@ -21,8 +21,12 @@
 //! - **Single-owner delivery (AC#4).** Exactly one task drains. `deliver_one`
 //!   marks a row `Sent` only *after* the enqueue succeeds, and each drain
 //!   re-reads `status = 'Pending'`, so a second concurrent drainer would
-//!   double-enqueue. The poll loop no longer drains (AC#3) and the dispatcher
-//!   is a single task, so no duplicate downlink is possible.
+//!   double-enqueue. The poll loop no longer drains (AC#3), the dispatcher is
+//!   a single task, and ambiguous enqueue outcomes (RPC sent but failed/timed
+//!   out) are terminal rather than retried (iter-4) — so no code path
+//!   double-enqueues. Residual: a crash/force-abort in the enqueue→mark-Sent
+//!   window can still re-send on the next startup drain (pre-existing
+//!   at-least-once contract, tracked in #177).
 //! - **No lost wakeup (AC#6).** `Notify` stores a single permit, so a command
 //!   enqueued while a drain is in flight makes the *next* `notified()` return
 //!   immediately. Each drain empties the queue, so one wakeup covering N
@@ -52,16 +56,23 @@ use tracing::{debug, error, info, trace, warn};
 /// (J-1 review P1); the healthy path never waits on it.
 const DRAIN_RETRY_BACKOFF_BASE: Duration = Duration::from_secs(2);
 
-/// Cap for the escalating read-error backoff (J-1 review iter-2 P5). Under a
-/// sustained storage outage (e.g. #152 NAS SQLite contention) the retry
-/// interval doubles each consecutive failure up to this cap, so the dispatcher's
-/// **self-driven** re-drive (the timer arm) happens at most once per cap
-/// interval instead of every 2 s — bounding wasted work and the self-driven
-/// share of `command_dispatch_drain_error` WARNs (project WARN-budget
-/// discipline, cf. #144/#149). Note: a drain triggered by the **signal** arm
-/// (an OPC UA `Good` write) is not gated by this backoff and still WARNs once
-/// per failed drain; that path is naturally self-limiting because a storage
-/// outage also fails the write's own `queue_command`, so few signals fire.
+/// Cap for the escalating unsettled-drain backoff (J-1 review iter-2 P5).
+/// Under a sustained outage the retry interval doubles each consecutive
+/// failure up to this cap, so the dispatcher's **self-driven** re-drive (the
+/// timer arm) happens at most once per cap interval instead of every 2 s —
+/// bounding wasted work and the self-driven share of WARNs (project
+/// WARN-budget discipline, cf. #144/#149). WARN volume per outage class
+/// (iter-4 accounting):
+/// - **Storage outage** (`command_dispatch_drain_error`): signal-arm WARNs are
+///   naturally self-limiting because the outage also fails the write's own
+///   `queue_command`, so few signals fire.
+/// - **ChirpStack outage** (`command_dispatch_retry`): storage is healthy so
+///   writes DO signal, but each drain short-circuits after the FIRST
+///   unreachable row (one WARN + one ≤5 s connect attempt per drive, not one
+///   per pending row), and every affected row expires `Failed` at the
+///   delivery deadline — so the WARN volume is bounded by
+///   (writes during the outage) + (self-drives at this cap), not
+///   writes × pending rows.
 const DRAIN_RETRY_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 /// Computes the escalating read-error backoff for `n` consecutive failures
@@ -129,13 +140,27 @@ impl DownlinkSink for ChirpStackDownlinkSink {
             flush_queue: false,
         });
 
-        // Client-creation failure is a handled error, never a panic.
+        // Client-creation failure is a handled error, never a panic. It is the
+        // ONE provably-safe-to-retry failure class (iter-4): the TCP/channel
+        // connect failed, so no request can have reached ChirpStack —
+        // `ChirpStackUnreachable` tells `deliver_one` to leave the row
+        // `Pending` for the bounded retry.
         let mut guard = self.client.lock().await;
         if guard.is_none() {
-            *guard = Some(create_device_client_from_config(&self.config).await?);
+            *guard = Some(
+                create_device_client_from_config(&self.config)
+                    .await
+                    .map_err(|e| OpcGwError::ChirpStackUnreachable(e.to_string()))?,
+            );
         }
         let device_client = guard.as_mut().expect("client cached on the line above");
 
+        // Any failure PAST this point is AMBIGUOUS: the RPC was (or may have
+        // been) sent, and ChirpStack may have committed the queue item even
+        // though the response was lost. Retrying an ambiguous failure could
+        // enqueue the same downlink twice (double hardware actuation — iter-4
+        // MEDIUM), so these return the plain `ChirpStack` variant, which
+        // `deliver_one` treats as terminal ("delivery uncertain").
         match tokio::time::timeout(ENQUEUE_RPC_TIMEOUT, device_client.enqueue(request)).await {
             Ok(Ok(response)) => {
                 let inner_response = response.into_inner();
@@ -153,7 +178,8 @@ impl DownlinkSink for ChirpStackDownlinkSink {
                 // Preserve the gRPC status detail (code + message, never the
                 // token): it becomes the operator-facing failure reason.
                 Err(OpcGwError::ChirpStack(format!(
-                    "Error enqueuing request: {e}"
+                    "Error enqueuing request: {e} (delivery uncertain — verify the \
+                     device queue in ChirpStack before re-issuing)"
                 )))
             }
             Err(_elapsed) => {
@@ -163,7 +189,9 @@ impl DownlinkSink for ChirpStackDownlinkSink {
                 );
                 *guard = None;
                 Err(OpcGwError::ChirpStack(format!(
-                    "Error enqueuing request: RPC deadline of {}s exceeded",
+                    "Error enqueuing request: RPC deadline of {}s exceeded \
+                     (delivery uncertain — verify the device queue in ChirpStack \
+                     before re-issuing)",
                     ENQUEUE_RPC_TIMEOUT.as_secs()
                 )))
             }
@@ -191,11 +219,16 @@ impl DownlinkSink for ChirpStackDownlinkSink {
 ///   downtime by the startup drain) can never actuate hardware long after the
 ///   operator wrote it. Within the deadline, AC#5's across-restart delivery
 ///   holds unchanged (the Apply soft-restart case it was written for).
-/// - **Transient sink failures retry (D1).** `deliver_one` leaves a
-///   gRPC-failed row `Pending` ([`DeliveryOutcome::RetryLater`]); this fn then
-///   reports the drain as unsettled so the caller re-drives it with the same
-///   escalating backoff used for read errors — bounded by the deadline above.
-///   Mapping failures remain immediately terminal.
+/// - **Provably-undelivered failures retry (D1, narrowed by iter-4).**
+///   `deliver_one` leaves a row `Pending` ([`DeliveryOutcome::RetryLater`])
+///   ONLY when the sink failed before anything was sent
+///   (`ChirpStackUnreachable` — channel connect failure); the drain then
+///   short-circuits (nothing behind it can succeed) and reports itself
+///   unsettled so the caller re-drives with the escalating backoff — bounded
+///   by the deadline above. An **ambiguous** failure (RPC sent but
+///   errored/timed out — ChirpStack may have committed the item) is terminal
+///   `Failed("delivery uncertain")`: retrying it could double-actuate
+///   hardware. Mapping failures remain immediately terminal.
 /// - **Orphans are terminal (D3).** `find_command_cfg` returning `None` means
 ///   the device/command was de-configured *after* the row was queued (command
 ///   nodes only exist for configured commands, so config existed at queue
@@ -261,10 +294,16 @@ pub(crate) async fn drain_pending_commands(
             );
             break;
         }
-        // D2 age gate. `to_std()` fails on a negative age (clock skew /
-        // future-stamped row) — treat that as fresh rather than expired.
+        // D2 age gate, symmetric (iter-4): a row is expired when |now −
+        // created_at| exceeds the deadline in EITHER direction. Small negative
+        // ages (clock skew < deadline) are treated as fresh; but a
+        // far-future `created_at` (clock stepped back after e.g. a power
+        // event) must not make the row immortal — pre-iter-4 a negative age
+        // bypassed the gate entirely, so the retry ladder ran unbounded for
+        // hours and the command could actuate long after the operator wrote
+        // it, the exact outcome D2 exists to prevent.
         let age = chrono::Utc::now().signed_duration_since(command.created_at);
-        if age.to_std().is_ok_and(|a| a > deadline) {
+        if age.num_seconds().unsigned_abs() > deadline.as_secs() {
             warn!(
                 event = "command_dispatch_expired",
                 command_id = command.id,
@@ -273,7 +312,7 @@ pub(crate) async fn drain_pending_commands(
                 deadline_secs = deadline.as_secs(),
                 "command exceeded the delivery deadline before it could be enqueued; marking Failed"
             );
-            mark_failed(
+            let marked = mark_failed(
                 backend,
                 command.id,
                 format!(
@@ -282,6 +321,14 @@ pub(crate) async fn drain_pending_commands(
                 ),
             )
             .await;
+            if !marked {
+                // iter-4: a transient storage failure on the bookkeeping write
+                // leaves the row `Pending` — schedule the same self-driven
+                // retry the read-error path gets, instead of waiting for an
+                // unrelated future write. (The gates run before delivery, so
+                // the row can never actuate meanwhile.)
+                retry_needed = true;
+            }
             continue;
         }
         // Resolve the per-command class + confirmed flag from config BEFORE the
@@ -298,34 +345,55 @@ pub(crate) async fn drain_pending_commands(
                         f_port = command.f_port,
                         "no configured command matches this queued row (device/command removed since queueing); marking Failed"
                     );
-                    mark_failed(
+                    let marked = mark_failed(
                         backend,
                         command.id,
                         "device/command no longer configured (removed after the command was queued)"
                             .to_string(),
                     )
                     .await;
+                    if !marked {
+                        retry_needed = true; // iter-4: same rationale as the expiry gate above
+                    }
                     continue;
                 }
             };
         let outcome =
             deliver_one(sink, backend, command_class.as_deref(), confirmed, &command).await;
         if outcome == DeliveryOutcome::RetryLater {
+            // `RetryLater` means ChirpStack was UNREACHABLE (connect failed
+            // before any send — the only retryable class after iter-4).
+            // Nothing behind this row can succeed either, so short-circuit the
+            // drain instead of paying a serial 5 s connect timeout per
+            // remaining row (iter-4); the backoff re-drives the whole queue.
             retry_needed = true;
+            debug!(
+                event = "command_dispatch_drain",
+                command_id = command.id,
+                "ChirpStack unreachable; deferring the remaining pending commands to the bounded retry"
+            );
+            break;
         }
     }
     !retry_needed
 }
 
-/// Marks a queued command `Failed` with `reason`, logging (never propagating)
-/// a storage error — the drain must not abort over a bookkeeping failure.
-async fn mark_failed(backend: &Arc<dyn StorageBackend>, command_id: u64, reason: String) {
-    if let Err(e) = backend
+/// Marks a queued command `Failed` with `reason`. Returns `false` (after
+/// logging — the drain must not abort over a bookkeeping failure) if the
+/// storage write failed and the row is still `Pending`; the caller then
+/// schedules a bounded retry so the row is re-examined without waiting for an
+/// unrelated write (iter-4).
+async fn mark_failed(backend: &Arc<dyn StorageBackend>, command_id: u64, reason: String) -> bool {
+    match backend
         .async_store()
         .update_command_status(command_id, CommandStatus::Failed, Some(reason))
         .await
     {
-        error!(error = %e, command_id, "Failed to mark command Failed");
+        Ok(()) => true,
+        Err(e) => {
+            error!(error = %e, command_id, "Failed to mark command Failed");
+            false
+        }
     }
 }
 
@@ -969,8 +1037,9 @@ mod tests {
         );
     }
 
-    /// A sink failing its first N enqueues then succeeding — models a
-    /// transient ChirpStack outage (restart, boot ordering).
+    /// A sink whose first N enqueues fail with `ChirpStackUnreachable` (the
+    /// provably-not-delivered, retry-safe class — models a ChirpStack
+    /// restart / boot-ordering connect failure), then succeed.
     struct FlakySink {
         fail_remaining: std::sync::atomic::AtomicU32,
         calls: std::sync::Mutex<Vec<DeviceQueueItem>>,
@@ -1001,7 +1070,9 @@ mod tests {
                 )
                 .unwrap();
             if prev > 0 {
-                Err(OpcGwError::ChirpStack("transient outage (mock)".to_string()))
+                Err(OpcGwError::ChirpStackUnreachable(
+                    "connect refused (mock outage)".to_string(),
+                ))
             } else {
                 Ok("qid-mock-flaky".to_string())
             }
@@ -1045,6 +1116,146 @@ mod tests {
             sink.calls_len(),
             2,
             "exactly two enqueue attempts: the transient failure, then the retry that delivers"
+        );
+
+        cancel.cancel();
+        let _ = handle.await;
+    }
+
+    /// J-1 iter-4 (M2, symmetric age gate): a FUTURE-stamped row (clock
+    /// stepped back further than the deadline, e.g. NTP correction after a
+    /// power event) must expire like an old one — pre-iter-4 a negative age
+    /// bypassed the gate entirely, making the row immortal until the clock
+    /// caught up (and letting it actuate hours late when ChirpStack returned).
+    #[tokio::test]
+    async fn future_stamped_command_is_failed_not_delivered() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let dyn_backend: Arc<dyn StorageBackend> = backend.clone();
+        let config = test_config();
+        let deadline = u64::from(config.global.command_delivery_timeout_secs);
+        let mut skewed = device_command(0, CFG_DEV, CFG_PORT, vec![1]);
+        skewed.created_at = chrono::Utc::now()
+            + chrono::Duration::seconds(i64::try_from(deadline).unwrap() * 2 + 60);
+        backend.queue_command(skewed).unwrap();
+        let cmd_id = backend.get_pending_commands().unwrap()[0].id;
+        let sink = MockSink::new(false);
+        let cancel = CancellationToken::new();
+
+        drain_pending_commands(&sink, &dyn_backend, &config, &cancel).await;
+
+        assert!(
+            sink.calls().is_empty(),
+            "a far-future-stamped command must never be enqueued"
+        );
+        assert_eq!(
+            backend.command_status_for_test(cmd_id).map(|(s, _)| s),
+            Some(CommandStatus::Failed),
+            "clock-skew beyond the deadline must expire the row, not immortalize it"
+        );
+    }
+
+    /// J-1 iter-4 (M1): an AMBIGUOUS sink failure (RPC sent but errored/timed
+    /// out — ChirpStack may have committed the item) is TERMINAL, not retried:
+    /// retrying could enqueue the same downlink twice (double actuation).
+    /// Mutation guard: if ambiguous errors were classified RetryLater, the row
+    /// would stay Pending and this Failed assertion trips.
+    #[tokio::test]
+    async fn ambiguous_sink_failure_is_terminal_not_retried() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let dyn_backend: Arc<dyn StorageBackend> = backend.clone();
+        backend
+            .queue_command(device_command(0, CFG_DEV, CFG_PORT, vec![1]))
+            .unwrap();
+        let cmd_id = backend.get_pending_commands().unwrap()[0].id;
+        let config = test_config();
+        // MockSink(true) fails with the plain `ChirpStack` variant = ambiguous.
+        let sink = MockSink::new(true);
+        let cancel = CancellationToken::new();
+
+        let settled = drain_pending_commands(&sink, &dyn_backend, &config, &cancel).await;
+
+        assert!(settled, "an ambiguous failure is terminal — no retry scheduled");
+        assert_eq!(sink.calls().len(), 1, "exactly one attempt — never re-sent");
+        let (status, err) = backend
+            .command_status_for_test(cmd_id)
+            .expect("command must still exist");
+        assert_eq!(status, CommandStatus::Failed);
+        assert!(err.is_some(), "terminal failure must carry the reason");
+    }
+
+    /// J-1 iter-4 (drain short-circuit): when ChirpStack is unreachable, the
+    /// drain defers ALL remaining rows after the first failed connect instead
+    /// of paying a serial connect timeout per row — one attempt per drive.
+    #[tokio::test]
+    async fn drain_short_circuits_when_unreachable() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let dyn_backend: Arc<dyn StorageBackend> = backend.clone();
+        for i in 0..3u8 {
+            backend
+                .queue_command(device_command(0, CFG_DEV, CFG_PORT, vec![i]))
+                .unwrap();
+        }
+        let config = test_config();
+        let sink = FlakySink::failing_first(u32::MAX); // always unreachable
+        let cancel = CancellationToken::new();
+
+        let settled = drain_pending_commands(&sink, &dyn_backend, &config, &cancel).await;
+
+        assert!(!settled, "an unreachable sink must schedule a retry");
+        assert_eq!(
+            sink.calls_len(),
+            1,
+            "the drain must short-circuit after the first unreachable row"
+        );
+        assert_eq!(
+            backend.get_pending_commands().unwrap().len(),
+            3,
+            "all rows stay Pending for the bounded retry"
+        );
+    }
+
+    /// J-1 iter-4 (L: retry→expiry interplay): a row that keeps failing
+    /// with `ChirpStackUnreachable` rides the backoff ladder INTO the delivery
+    /// deadline and expires `Failed` — proving "retries are bounded by the
+    /// deadline" on the real `run()` loop (real clock: the row starts 1 s
+    /// short of the deadline; the first 2 s backoff carries it past).
+    /// Mutation guards: gating only the first attempt, or moving the age gate
+    /// below `deliver_one`, leaves the row `Pending` forever and this test
+    /// times out its wait loop.
+    #[tokio::test]
+    async fn retry_ladder_is_bounded_by_delivery_deadline() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let dyn_backend: Arc<dyn StorageBackend> = backend.clone();
+        let config = test_config();
+        let deadline = i64::from(config.global.command_delivery_timeout_secs);
+        let mut nearly_expired = device_command(0, CFG_DEV, CFG_PORT, vec![1]);
+        nearly_expired.created_at = chrono::Utc::now() - chrono::Duration::seconds(deadline - 1);
+        backend.queue_command(nearly_expired).unwrap();
+        let cmd_id = backend.get_pending_commands().unwrap()[0].id;
+
+        let sink = Arc::new(FlakySink::failing_first(u32::MAX)); // never recovers
+        let signal = Arc::new(Notify::new());
+        let cancel = CancellationToken::new();
+        let mut dispatcher = CommandDispatcher::with_sink(
+            test_config(),
+            dyn_backend,
+            cancel.clone(),
+            signal.clone(),
+            sink.clone(),
+        );
+        let handle = tokio::spawn(async move { dispatcher.run().await });
+
+        // Startup drain: attempt fails (unreachable) → Pending; the 2 s
+        // backoff re-drive lands past the deadline → expired Failed.
+        wait_for_status(&backend, cmd_id, CommandStatus::Failed).await;
+        let (_, err) = backend.command_status_for_test(cmd_id).unwrap();
+        assert!(
+            err.unwrap_or_default().contains("delivery deadline"),
+            "the ladder must terminate via the deadline, not another path"
+        );
+        assert!(
+            sink.calls_len() >= 1,
+            "at least the initial delivery attempt must have happened"
         );
 
         cancel.cancel();

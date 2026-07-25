@@ -303,3 +303,25 @@ Deferred / dismissed:
 | Date | Change |
 |------|--------|
 | 2026-07-25 | bmad-code-review iter-3 (fresh 3-layer pass on commit f27b19f, Fable vs Opus-4.8 implementer): 4-decision delivery-semantics cluster resolved by party session (bounded retry D1 / delivery deadline D2 / terminal orphans D3 / poison-row quarantine D4) + 9 patches (P7–P15). Duplicate-send at-least-once windows deferred with GH issue (DEF-iter3-J1-D5). Both new guards mutation-verified. |
+
+### Iteration 4 — mandatory re-review of the iter-3 flow-control (2026-07-25)
+
+Per the iter-3 doctrine (new flow-control ⇒ iter-N+1 mandatory), a fresh adversarial pass over commit f8a0ea2. **The doctrine paid again**: 2 MEDIUM + 5 LOW on the code iter-3 itself introduced.
+
+- [x] **M1 (MED) — iter-3's D1 retry made AMBIGUOUS enqueue outcomes retryable → systematic duplicate downlink.** An RPC timeout / post-send error can mean ChirpStack committed the item though the response was lost; retrying re-enqueues it (double actuation, no crash required — outside #177's crash-window scope). FIX: D1 narrowed to "retry only provably-undelivered failures". New `OpcGwError::ChirpStackUnreachable` raised only by the sink's channel-connect path (nothing was sent) → `RetryLater`; any post-send error (incl. the 10 s RPC timeout) → Terminal `Failed("… delivery uncertain — verify the device queue in ChirpStack before re-issuing")`. Mutation-verified (classifying ambiguous as retryable fails 2 tests). Tests: `ambiguous_sink_failure_is_terminal_not_retried`, `deliver_one_ambiguous_enqueue_failure_marks_failed`, `deliver_one_unreachable_leaves_pending_for_retry`.
+- [x] **M2 (MED) — future-stamped rows bypassed the delivery deadline (negative age = fresh forever).** A clock step-back (NTP after a power event) made queued rows immortal, resurrecting the late-actuation hazard D2 exists to prevent. FIX: symmetric gate — `|now − created_at| > deadline` expires in either direction. Mutation-verified. Test: `future_stamped_command_is_failed_not_delivered`.
+- [x] **L1 — permanent per-device gRPC errors classified transient + cache torn down per failure.** Resolved by M1 (post-send statuses like NotFound are now terminal on first attempt).
+- [x] **L2 — `mark_failed` failure on an expired/orphaned row stranded it `Pending` with no self-driven retry.** FIX: `mark_failed` returns success; a bookkeeping failure now sets `retry_needed` (parity with the read-error path).
+- [x] **L3 — main.rs recovery comment overclaimed** ("next Apply retries" — rows past the deadline expire instead). Comment corrected.
+- [x] **L4 — WARN-budget rationale stale + N×5 s serial connect burn under full outage.** FIX: drain short-circuits after the first unreachable row (one connect attempt + one WARN per drive, remaining rows deferred to the backoff); `DRAIN_RETRY_BACKOFF_MAX` comment now carries the per-outage-class WARN accounting. Test: `drain_short_circuits_when_unreachable`.
+- [x] **L5 — retry→expiry interplay untested** (the "retries are bounded by the deadline" claim was mutation-vulnerable). FIX: `retry_ladder_is_bounded_by_delivery_deadline` drives a nearly-expired row through a failing ladder on the real `run()` loop into `Failed("delivery deadline")`.
+
+Verified non-findings (iter-4): quarantine can only touch `Pending` rows; no sink-mutex deadlock; no drain starvation; InMemoryBackend needs no quarantine; `error_streak` accounting correct; the reused deadline knob does not double-penalize the Sent-side sweep (it keys on `sent_at`).
+
+**Docs re-synced:** logging.md (`command_dispatch_retry` narrowed + short-circuit; `command_dispatch_expired` symmetric-skew note), CHANGELOG, README, manual (`delivery uncertain` operator guidance). **File List addition:** `src/utils.rs` (`ChirpStackUnreachable` variant).
+
+### Change Log — code review (cont. 3)
+
+| Date | Change |
+|------|--------|
+| 2026-07-25 | bmad-code-review iter-4 (mandatory re-review of iter-3's new flow-control): D1 narrowed to provably-undelivered-only retry (ambiguous → terminal "delivery uncertain"), symmetric delivery-deadline gate, mark_failed retry parity, unreachable short-circuit, ladder-into-deadline test. 2 MEDIUM + 5 LOW all resolved; both new guards mutation-verified. |
