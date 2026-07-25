@@ -5,7 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — 2.8.0 (Epic J — Config Authority & Command Responsiveness)
+## [2.8.0-rc1] — 2026-07-26 — Epic J: Config Authority & Command Responsiveness
+
+**Release-candidate for the panoramix soak.** Both data-plane stories in this
+release (J-1 immediate command dispatch, J-2 env allowlist) are gated on a
+clean NAS soak before a v2.8.0 stable tag, per the AI-G-5 doctrine.
+
+⚠️ **This is the first BREAKING change to the configuration surface** — read
+the env-allowlist migration steps below *before* pulling the image, and the
+security-flag checklist in `docs/security.md`.
 
 ### Added
 - **Metric configuration faults now reach the web Errors view** ([#160](https://github.com/guycorbaz/opcgw/issues/160), Story J-0):
