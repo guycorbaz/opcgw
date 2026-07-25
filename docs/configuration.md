@@ -35,7 +35,9 @@ Provide the real values through any of these paths:
 - **`config/secrets.toml`** — the persisted secrets file (chmod `0600`); the
   wizard manages it, but you may pre-create it for unattended deployments.
 - **Environment variables** — `OPCGW_CHIRPSTACK__API_TOKEN`,
-  `OPCGW_OPCUA__USER_PASSWORD`, etc. (highest precedence).
+  `OPCGW_OPCUA__USER_PASSWORD` (highest precedence; these two secrets are on
+  the v2.8.0 env allowlist — most other `OPCGW_*` overrides are ignored, see
+  "Environment Variable Overrides" below).
 
 See [`docs/security.md`](security.md) for the env var convention, the
 Docker / Kubernetes recipe, and the migration path for existing deployments.
@@ -99,7 +101,7 @@ Configuration for ChirpStack connection and polling behavior.
 | `polling_frequency` | u64 | ✓ | Seconds between polls (must be > 0) |
 | `retry` | u32 | ✓ | Maximum retry attempts on connection failure (must be > 0) |
 | `delay` | u64 | ✓ | Milliseconds to wait between retry attempts (must be > 0) |
-| `stream_all_devices` | bool | ✗ | Default `false`. When `true`, opcgw subscribes to the gRPC uplink event stream for **all** devices (not just command-class devices). The streamed device set is fixed at startup (restart-required). Env override: `OPCGW_CHIRPSTACK__STREAM_ALL_DEVICES`. |
+| `stream_all_devices` | bool | ✗ | Default `false`. When `true`, opcgw subscribes to the gRPC uplink event stream for **all** devices (not just command-class devices). The streamed device set is fixed at startup (restart-required). Managed on the web Admin page (since v2.8.0 the former env override `OPCGW_CHIRPSTACK__STREAM_ALL_DEVICES` is ignored — see "Environment Variable Overrides"). |
 | `list_page_size` | u32 | ✗ | Page size for ChirpStack list calls (applications/devices). Tuning knob; default 100. |
 | `inventory_cache_ttl_seconds` | u64 | ✗ | How long (seconds) the web UI caches ChirpStack inventory (applications/devices/measurements) before refetching. Default 60. |
 | `inventory_uplink_max_wait_seconds` | u64 | ✗ | Maximum seconds the metric picker waits when reading recent uplinks for a device. Default 5. |
@@ -492,22 +494,53 @@ metric_type = "Bool"
 
 ## Environment Variable Overrides
 
-Override any config value via environment variables. Format: `OPCGW_<SECTION>__<FIELD>` — note the **double underscore** (`__`) between the section and the field name.
+**Since v2.8.0 (Story J-2 / #169), environment overrides are restricted to an
+allowlist.** The web Admin page (backed by SQLite) is the authoritative source
+for the editable configuration; an `OPCGW_<SECTION>__<FIELD>` env var that
+addresses a web-editable field outside the allowlist is **ignored** and
+reported once per boot with a `env_var_ignored` WARN naming the variable.
+(Before v2.8.0 any env var silently outranked the Admin page — the
+env-shadows-database trap, #168.)
+
+Format for the vars that ARE env-capable: `OPCGW_<SECTION>__<FIELD>` — note
+the **double underscore** (`__`) between the section and the field name.
+
+### The allowlist
+
+| Env var | Why it stays env-capable |
+|---------|--------------------------|
+| `OPCGW_CHIRPSTACK__API_TOKEN` | Secret — never stored in SQLite; needed before SQLite exists (first boot / unattended provisioning) |
+| `OPCGW_OPCUA__USER_PASSWORD` | Secret — same rationale (also the web Basic-auth password) |
+| `OPCGW_WEB__ENABLED`, `OPCGW_WEB__BIND_ADDRESS`, `OPCGW_WEB__PORT` | Bootstrap: the gateway must be able to serve `/setup` before SQLite exists; `OPCGW_WEB__PORT` also drives docker-compose port publishing |
+| `OPCGW_OPCUA__HOST_PORT` | docker-compose port mapping + container healthcheck |
+
+Sections that are **not** web-editable are unaffected by the filter and remain
+fully env-overridable: `[storage]` (e.g. `OPCGW_STORAGE__DATABASE_PATH`),
+`[command_validation]`, and `[logging]` (`OPCGW_LOGGING__DIR`,
+`OPCGW_LOGGING__LEVEL`). The short-form/process-level knobs below are likewise
+untouched.
+
+Everything else in `[global]`, `[chirpstack]`, `[opcua]`, `[web]` — including
+`OPCGW_CHIRPSTACK__SERVER_ADDRESS`, `OPCGW_CHIRPSTACK__POLLING_FREQUENCY`,
+`OPCGW_CHIRPSTACK__STREAM_ALL_DEVICES`, `OPCGW_OPCUA__USER_NAME`,
+`OPCGW_GLOBAL__DEBUG`, `OPCGW_OPCUA__STALE_THRESHOLD_SECONDS` — is managed on
+the web **Admin** page. If you still set such a var, it is ignored (WARN) and
+the Admin-page value wins.
 
 ### Examples
 
 ```bash
-# Override ChirpStack server
-export OPCGW_CHIRPSTACK__SERVER_ADDRESS="http://prod-chirpstack:8080"
+# Secrets for unattended provisioning (allowlisted)
+export OPCGW_CHIRPSTACK__API_TOKEN="eyJ0eXAi..."
+export OPCGW_OPCUA__USER_PASSWORD="a-strong-password"
 
-# Override OPC UA port
+# Bootstrap ports (allowlisted)
 export OPCGW_OPCUA__HOST_PORT="4860"
-
-# Override polling frequency
-export OPCGW_CHIRPSTACK__POLLING_FREQUENCY="30"
-
-# Enable the web UI
 export OPCGW_WEB__ENABLED="true"
+
+# IGNORED since v2.8.0 (web/SQLite-managed — set it on the Admin page):
+#   export OPCGW_CHIRPSTACK__SERVER_ADDRESS="http://prod-chirpstack:8080"
+#   export OPCGW_CHIRPSTACK__POLLING_FREQUENCY="30"
 
 # Run with overrides
 cargo run --release
@@ -515,8 +548,9 @@ cargo run --release
 
 ### Precedence
 
-1. Environment variables (highest priority)
-2. SQLite — the live configuration store
+1. Environment variables — **allowlisted vars only** (highest priority)
+2. SQLite — the live configuration store (authoritative for everything the
+   web Admin page edits; non-allowlisted env vars cannot outrank it)
 3. `config.toml` — the bootstrap seed (first boot only)
 4. Built-in defaults (lowest priority)
 

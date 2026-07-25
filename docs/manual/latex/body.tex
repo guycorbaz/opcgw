@@ -166,7 +166,7 @@ OPCGW_CHIRPSTACK__API_TOKEN=<your-chirpstack-api-token>
 OPCGW_OPCUA__USER_PASSWORD=<a-strong-password>
 \end{lstlisting}
 
-The password is used both for the OPC UA user login and for the web UI\textquotesingle s login. Every variable uses the \texttt{OPCGW\_} prefix, with \texttt{\_\_} (double underscore) separating nested configuration keys. Any configuration value can be set this way; the variables most deployments touch (ChirpStack address, OPC UA user name, web-UI enable, log level) are listed in \texttt{.env.example}, and the \emph{complete} list is in \hyperref[app-env-reference]{appendix\_title}.
+The password is used both for the OPC UA user login and for the web UI\textquotesingle s login. Every variable uses the \texttt{OPCGW\_} prefix, with \texttt{\_\_} (double underscore) separating nested configuration keys. \textbf{Since v2.8.0, environment overrides are restricted to an allowlist}: the web Admin page is authoritative for the editable configuration, and a non-allowlisted \texttt{OPCGW\_*} variable is \emph{ignored} (the gateway logs an \texttt{env\_var\_ignored} warning naming it at boot). Env-capable variables are: the two secrets above, the web bootstrap trio (\texttt{OPCGW\_WEB\_\_ENABLED} / \texttt{\_\_BIND\_ADDRESS} / \texttt{\_\_PORT}), \texttt{OPCGW\_OPCUA\_\_HOST\_PORT}, the \texttt{[logging]}/\texttt{[storage]} sections, and the short-form knobs (\texttt{OPCGW\_LOG\_DIR}, \texttt{OPCGW\_LOG\_LEVEL}). Everything else --- including the ChirpStack address and the OPC UA user name --- is managed on the web Admin page.
 
 \begin{admonition}{admwarn}{Keep secrets out of version control}
 
@@ -345,7 +345,7 @@ The configuration precedence ordering (highest priority first) is:
 \begin{enumerate}
 \def\labelenumi{\arabic{enumi}.}
 \item
-  Environment variables (\texttt{OPCGW\_} prefix) --- always win. See \hyperref[app-env-reference]{appendix\_title}.
+  Environment variables (\texttt{OPCGW\_} prefix) --- win \emph{for the allowlisted set only} (secrets, web bootstrap, OPC UA port, logging/storage); since v2.8.0 any other \texttt{OPCGW\_*} variable is ignored with a logged warning, so the Admin page cannot be shadowed. See \hyperref[app-env-reference]{appendix\_title}.
 \item
   The SQLite database --- the web-UI-editable runtime config.
 \item

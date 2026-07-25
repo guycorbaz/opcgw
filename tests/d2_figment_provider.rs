@@ -139,17 +139,52 @@ fn t02_provider_populated_after_migration() {
     );
 }
 
-/// Test 3 — Precedence test (env > SQLite): SQLite has
-/// `polling_frequency=10`; env-var
-/// `OPCGW_CHIRPSTACK__POLLING_FREQUENCY=5` is set. Loaded value is 5.
+/// Test 3 — Precedence test (env > SQLite) for an ALLOWLISTED key
+/// (Story J-2 re-spec: the original `OPCGW_CHIRPSTACK__POLLING_FREQUENCY`
+/// is now allowlist-blocked — see t03b). SQLite has `web.port=9090`;
+/// env-var `OPCGW_WEB__PORT=9555` is set. Loaded value is 9555.
 #[test]
 fn t03_precedence_env_beats_sqlite() {
-    temp_env::with_var("OPCGW_CHIRPSTACK__POLLING_FREQUENCY", Some("5"), || {
+    temp_env::with_var("OPCGW_WEB__PORT", Some("9555"), || {
         let (_dir, config_path, backend) = fresh_env();
         // Bootstrap-load + run D-0 migration so SQLite has a value.
         let cfg = load_bootstrap_config(&config_path);
         migrate_singleton_toml_to_sqlite(&cfg, &backend).expect("migrate");
         // Now write a different SQLite value to demonstrate env-var wins.
+        backend
+            .write_singleton_section(
+                "web",
+                &[(
+                    "port".to_string(),
+                    serde_json::to_string(&serde_json::json!(9090))
+                        .expect("serialize"),
+                )],
+            )
+            .expect("write");
+        let loaded =
+            AppConfig::from_path_with_sqlite(&config_path, Arc::new(backend))
+                .expect("from_path_with_sqlite");
+        assert_eq!(
+            loaded.web.port,
+            Some(9555),
+            "allowlisted env-var must win over SQLite; got web.port={:?}",
+            loaded.web.port
+        );
+    });
+}
+
+/// Test 3b — Story J-2 (AC#1): a BLOCKED key does NOT beat SQLite.
+/// SQLite has `chirpstack.polling_frequency=20`; the env var says 5;
+/// the loaded value is 20 (SQLite wins — pre-J-2 this was 5).
+/// Fake-regression-guard hygiene: 5 vs 20 are non-overlapping through
+/// the filtered and unfiltered paths, so removing the filter flips the
+/// assertion (mutation-verified at dev time).
+#[test]
+fn t03b_blocked_env_var_does_not_beat_sqlite() {
+    temp_env::with_var("OPCGW_CHIRPSTACK__POLLING_FREQUENCY", Some("5"), || {
+        let (_dir, config_path, backend) = fresh_env();
+        let cfg = load_bootstrap_config(&config_path);
+        migrate_singleton_toml_to_sqlite(&cfg, &backend).expect("migrate");
         backend
             .write_singleton_section(
                 "chirpstack",
@@ -164,8 +199,24 @@ fn t03_precedence_env_beats_sqlite() {
             AppConfig::from_path_with_sqlite(&config_path, Arc::new(backend))
                 .expect("from_path_with_sqlite");
         assert_eq!(
-            loaded.chirpstack.polling_frequency, 5,
-            "env-var must win over SQLite; got polling_frequency={}",
+            loaded.chirpstack.polling_frequency, 20,
+            "a blocked env var must be IGNORED — SQLite wins (J-2); got {}",
+            loaded.chirpstack.polling_frequency
+        );
+    });
+}
+
+/// Test 3c — Story J-2 (AC#1): a blocked key with NO SQLite row falls
+/// back to TOML (10 in the fixture), not the env value.
+#[test]
+fn t03c_blocked_env_var_falls_back_to_toml_without_row() {
+    temp_env::with_var("OPCGW_CHIRPSTACK__POLLING_FREQUENCY", Some("5"), || {
+        let (_dir, config_path, _backend) = fresh_env();
+        // Bootstrap load only — no migration, no SQLite provider.
+        let loaded = load_bootstrap_config(&config_path);
+        assert_eq!(
+            loaded.chirpstack.polling_frequency, 10,
+            "a blocked env var must be IGNORED — TOML wins (J-2); got {}",
             loaded.chirpstack.polling_frequency
         );
     });

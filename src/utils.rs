@@ -138,7 +138,7 @@ pub const OPCUA_SESSION_GAUGE_INTERVAL_SECS: u64 = 5;
 /// `MAX_SUBSCRIPTIONS_PER_SESSION = 10`. When `[opcua].max_subscriptions_per_session`
 /// is unset (or `None`), the gateway falls back to this value so the
 /// configured behaviour matches the async-opcua library default. Override
-/// via env var `OPCGW_OPCUA__MAX_SUBSCRIPTIONS_PER_SESSION`.
+/// via the web Admin page (since v2.8.0 `OPCGW_OPCUA__MAX_SUBSCRIPTIONS_PER_SESSION` is IGNORED).
 pub const OPCUA_DEFAULT_MAX_SUBSCRIPTIONS_PER_SESSION: usize = 10;
 
 /// Hard upper bound for `[opcua].max_subscriptions_per_session` (Story 8-2, AC#1).
@@ -156,7 +156,7 @@ pub const OPCUA_MAX_SUBSCRIPTIONS_PER_SESSION_HARD_CAP: usize = 1000;
 /// `DEFAULT_MAX_MONITORED_ITEMS_PER_SUB = 1000`. Note the library field
 /// name is `max_monitored_items_per_sub` (not `_per_subscription`); the
 /// gateway field, TOML key, and env var all use the library name. Override
-/// via env var `OPCGW_OPCUA__MAX_MONITORED_ITEMS_PER_SUB`.
+/// via the web Admin page (since v2.8.0 `OPCGW_OPCUA__MAX_MONITORED_ITEMS_PER_SUB` is IGNORED).
 pub const OPCUA_DEFAULT_MAX_MONITORED_ITEMS_PER_SUB: usize = 1000;
 
 /// Hard upper bound for `[opcua].max_monitored_items_per_sub` (Story 8-2, AC#1).
@@ -174,7 +174,7 @@ pub const OPCUA_MAX_MONITORED_ITEMS_PER_SUB_HARD_CAP: usize = 100_000;
 /// 65535 * MAX_CHUNK_COUNT = 65535 * 5 = 327_675`. When
 /// `[opcua].max_message_size` is unset (or `None`), the gateway falls
 /// back to this value so behaviour matches the library default. Override
-/// via env var `OPCGW_OPCUA__MAX_MESSAGE_SIZE`.
+/// via the web Admin page (since v2.8.0 `OPCGW_OPCUA__MAX_MESSAGE_SIZE` is IGNORED).
 pub const OPCUA_DEFAULT_MAX_MESSAGE_SIZE: usize = 65_535 * 5;
 
 /// Hard upper bound for `[opcua].max_message_size` in bytes (Story 8-2, AC#1).
@@ -195,7 +195,7 @@ pub const OPCUA_MAX_MESSAGE_SIZE_HARD_CAP: usize = 4096 * 65_535;
 /// Mirrors `async-opcua-types-0.17.1::lib.rs:48`'s `MAX_CHUNK_COUNT = 5`.
 /// When `[opcua].max_chunk_count` is unset (or `None`), the gateway falls
 /// back to this value so behaviour matches the library default. Override
-/// via env var `OPCGW_OPCUA__MAX_CHUNK_COUNT`.
+/// via the web Admin page (since v2.8.0 `OPCGW_OPCUA__MAX_CHUNK_COUNT` is IGNORED).
 pub const OPCUA_DEFAULT_MAX_CHUNK_COUNT: usize = 5;
 
 /// Hard upper bound for `[opcua].max_chunk_count` (Story 8-2, AC#1).
@@ -237,8 +237,8 @@ pub const STORAGE_RETENTION_DAYS_HARD_CAP: u32 = 365;
 /// windows page via repeated calls (Story 8-3 does NOT implement
 /// OPC UA `ByteString` continuation points; manual paging via
 /// `last_returned_row.timestamp + 1µs` is the contract — see
-/// `docs/security.md#historical-data-access`). Override via env
-/// var `OPCGW_OPCUA__MAX_HISTORY_DATA_RESULTS_PER_NODE`.
+/// `docs/security.md#historical-data-access`). Web-Admin-managed; since
+/// v2.8.0 `OPCGW_OPCUA__MAX_HISTORY_DATA_RESULTS_PER_NODE` is IGNORED.
 pub const OPCUA_DEFAULT_MAX_HISTORY_DATA_RESULTS_PER_NODE: usize = 10_000;
 
 /// Hard upper bound for `[opcua].max_history_data_results_per_node` (Story 8-3, AC#3).
@@ -298,9 +298,9 @@ pub const WEB_DEFAULT_BIND_ADDRESS: &str = "0.0.0.0";
 ///
 /// The realm is the human-readable label browsers display in their
 /// credential prompt. `"opcgw"` is short and unambiguous; operators
-/// running multiple gateways may override per-deployment to make the
-/// prompt distinguishable. Override via env var:
-/// `OPCGW_WEB__AUTH_REALM`.
+/// running multiple gateways may override per-deployment (web Admin
+/// page) to make the prompt distinguishable. Since v2.8.0 (Story J-2)
+/// `OPCGW_WEB__AUTH_REALM` is IGNORED.
 pub const WEB_DEFAULT_AUTH_REALM: &str = "opcgw";
 
 /// Maximum length (chars) of `[web].auth_realm` (Story 9-1, AC#1).

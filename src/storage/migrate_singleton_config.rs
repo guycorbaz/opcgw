@@ -95,6 +95,52 @@ pub fn secret_fields_for_section(section: &str) -> &'static [&'static str] {
     &[]
 }
 
+/// Story J-2 (CR #169): non-secret fields inside [`KNOWN_SECTIONS`] that stay
+/// **env-overridable** after the allowlist enforcement. Everything else in
+/// those four (web-Admin-editable) sections is IGNORED when supplied via an
+/// `OPCGW_<SECTION>__<FIELD>` env var (with an `env_var_ignored` WARN), so the
+/// web/SQLite value is genuinely authoritative for the editable set (#168).
+///
+/// The list is deliberately tiny — only what a container needs BEFORE SQLite
+/// is readable or what docker-compose consumes for port mapping:
+/// - `web.enabled` / `web.bind_address` / `web.port`: must serve `/setup` on a
+///   fresh install (no SQLite yet); `OPCGW_WEB__PORT` also drives the compose
+///   port publishing.
+/// - `opcua.host_port`: compose port mapping + container healthcheck probe.
+///
+/// Secrets ([`SECRET_FIELDS_BY_SECTION`]) are allowlisted implicitly by
+/// [`env_key_allowed`]. Sections OUTSIDE `KNOWN_SECTIONS` (`[storage]`,
+/// `[command_validation]`, `[logging]`) are not filtered at all — they are
+/// invisible to the Admin page and cannot shadow it. This is a compile-time
+/// constant by design: an env var configuring which env vars count would be
+/// absurd (story AC#11).
+pub const ENV_ALLOWLISTED_FIELDS: &[(&str, &[&str])] = &[
+    ("web", &["enabled", "bind_address", "port"]),
+    ("opcua", &["host_port"]),
+];
+
+/// Story J-2: is `OPCGW_<section>__<key>` allowed to reach the figment stack?
+///
+/// `section`/`key` must already be lowercased (the caller mirrors the
+/// normalization in `maybe_warn_env_shadows_singleton`). Returns `true` for:
+/// secrets (needed pre-SQLite / unattended provisioning), the explicit
+/// bootstrap allowlist above, and any section outside [`KNOWN_SECTIONS`]
+/// (not web-editable — nothing to protect).
+pub fn env_key_allowed(section: &str, key: &str) -> bool {
+    if !KNOWN_SECTIONS.contains(&section) {
+        return true;
+    }
+    if secret_fields_for_section(section).contains(&key) {
+        return true;
+    }
+    for (s, fields) in ENV_ALLOWLISTED_FIELDS {
+        if *s == section {
+            return fields.contains(&key);
+        }
+    }
+    false
+}
+
 /// Detect whether a singleton-config migration is needed and, if so, run it.
 ///
 /// Returns `Ok(SingletonMigrationOutcome)` in all non-fatal cases. Callers

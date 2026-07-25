@@ -18,6 +18,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   log by hand (field case: 76 skipped fields in one day on one device).
 
 ### Changed
+- **⚠️ BREAKING: environment-variable configuration is restricted to an allowlist**
+  ([#169](https://github.com/guycorbaz/opcgw/issues/169) /
+  [#168](https://github.com/guycorbaz/opcgw/issues/168), Story J-2): the web Admin
+  page (SQLite) is now genuinely authoritative for the editable configuration. An
+  `OPCGW_<SECTION>__<FIELD>` env var addressing a web-editable field outside the
+  allowlist is **ignored** (excluded from the config at the provider level) and
+  reported once per boot with an `env_var_ignored` WARN naming the variable —
+  previously any env var silently outranked the Admin page (the env-shadows-database
+  trap; v2.7.1's `env_shadows_singleton_config` WARN was the deprecation notice).
+  Still env-capable: the two secrets (`OPCGW_CHIRPSTACK__API_TOKEN`,
+  `OPCGW_OPCUA__USER_PASSWORD`), the web bootstrap trio
+  (`OPCGW_WEB__ENABLED`/`BIND_ADDRESS`/`PORT`), `OPCGW_OPCUA__HOST_PORT`
+  (compose port mapping/healthcheck), the non-web sections (`[storage]`,
+  `[command_validation]`, `[logging]`), and the short-form process knobs
+  (`OPCGW_LOG_DIR`, `OPCGW_LOG_LEVEL`, budget/cap tuning).
+
+  **Migration (do this BEFORE upgrading a deployment that sets `OPCGW_*` vars):**
+  1. Your v2.7.1 logs' `env_shadows_singleton_config` WARNs are the definitive
+     checklist of affected vars.
+  2. Now-ignored vars commonly found in `.env`: `OPCGW_CHIRPSTACK__SERVER_ADDRESS`,
+     `OPCGW_OPCUA__USER_NAME` (your web Basic-auth login name comes from the Admin
+     page after this release), `OPCGW_CHIRPSTACK__STREAM_ALL_DEVICES`,
+     `OPCGW_GLOBAL__DEBUG`, `OPCGW_OPCUA__STALE_THRESHOLD_SECONDS`,
+     `OPCGW_CHIRPSTACK__POLLING_FREQUENCY`.
+  3. **If a value you rely on is env-only today** (no SQLite row — e.g.
+     `stream_all_devices=true` on a deployment migrated before that field
+     existed): open the web **Admin** page, verify the field shows the intended
+     effective value (the #155 backfill renders it), and **save the section** —
+     that persists the row. Only then upgrade and remove the env var.
 - **OPC UA commands are now dispatched immediately, not on the metrics-poll cycle**
   ([#136](https://github.com/guycorbaz/opcgw/issues/136), Story J-1): a successful
   `set_command` write fires a `tokio::sync::Notify` that wakes a dedicated

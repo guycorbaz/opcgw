@@ -1,6 +1,6 @@
 # Story J.2: Enforce the Env-Var Allowlist — Web/SQLite Becomes Authoritative for the Editable Set
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -115,13 +115,35 @@ Current panoramix `.env` (2026-07-25) mapped onto the rule: **kept** = API_TOKEN
 
 ### Agent Model Used
 
-_(fill at dev time)_
+Claude Fable 5 (`claude-fable-5`) — autonomous bmad-dev-story, 2026-07-25.
 
 ### Debug Log References
 
+- J-2 AI-G-5 smoke run `/tmp/j2smoke` (2026-07-25): 3 blocked vars each reported once via `env_var_ignored` (`OPCGW_GLOBAL__DEBUG`, `OPCGW_CHIRPSTACK__POLLING_FREQUENCY`, `OPCGW_OPCUA__CREATE_SAMPLE_KEYPAIR`); blocked `POLLING_FREQUENCY=7` ignored → effective `poll_interval_seconds=10` (TOML); allowlisted `OPCGW_OPCUA__HOST_PORT=14857` effective (endpoint bind); `env_shadows_singleton_config` fired only for the allowlisted HOST_PORT (narrowed semantics); graceful stop. Log-grep gotcha rediscovered: `grep`→`ugrep` alias mangles patterns on ANSI logs — use python re (memory-documented).
+
 ### Completion Notes List
 
+- **Smoke-caught fix:** the `env_var_ignored` report initially ran AFTER `AppConfig::from_path`; smoke run 1 failed boot because the now-ignored `OPCGW_OPCUA__CREATE_SAMPLE_KEYPAIR=true` no longer masked a missing keypair — and the operator got the validation error WITHOUT the "your env var is ignored" explanation. Moved the report BEFORE the load so the WHY sits next to the failure. (This failure mode is itself the enforcement working; noted for the migration note's class of "env-only value you rely on".)
+- **Testability refactor:** `maybe_warn_env_ignored` splits into a pure-input core (`maybe_warn_env_ignored_from(names, guard)`) + a thin `std::env::vars()` wrapper — whole-env scans with exact-count assertions are racy under parallel `temp_env` sibling tests. Exact scoping tests drive the core; the wrapper is exercised by the real-binary smoke.
+- AC#5 deviation (minor): the story suggested calling the report near the post-reload site too; the once-per-boot guard makes a second call a no-op, and the single pre-load bootstrap call already precedes every reload — one call site total.
+- Mutation checks: provider filter ripped out → exactly `t03b`+`t03c` red (AC#10h); restored green. Full suite 1908/0 + clippy -D warnings clean.
+- config.rs grew by ~+220 lines (provider, ignored-report, tests) to ~5960; tests-module extraction (#172) deliberately NOT started per AC#11 (story-scoped restraint) — flagged for the epic retro.
+
 ### File List
+
+- `src/storage/migrate_singleton_config.rs` — `ENV_ALLOWLISTED_FIELDS` + `env_key_allowed` beside the existing constants.
+- `src/config.rs` — `opcgw_env_provider()` (filter-BEFORE-split); `from_path_inner` swapped to it; `maybe_warn_env_shadows_singleton` narrowed (blocked keys skip); new `maybe_warn_env_ignored` (+ pure core); 5 in-file test stacks swapped to the shared builder; `test_chirpstack_nested_env_override` re-specced (blocked TOML-wins + allowlisted twin); 3 shadow tests re-specced to allowlisted keys + new `env_shadows_singleton_skips_blocked_keys`; new `env_key_allowed_matrix`, `j2_secret_env_vars_still_reach_config`, `j2_env_var_ignored_once_per_boot_and_scoped`; stale "override via env var" doc comments swept.
+- `src/main.rs` — `peek_logging_config` swapped to the shared provider; `ENV_VAR_IGNORED_WARNING_EMITTED` static; `maybe_warn_env_ignored` called BEFORE the bootstrap load; `Env` import dropped; stale utils doc comments swept (via utils).
+- `src/utils.rs` — stale env-override doc comments swept (limits + auth realm).
+- `tests/d2_figment_provider.rs` — `t03` re-specced onto `web.port`; new `t03b` (blocked ≠ beat SQLite), `t03c` (blocked → TOML fallback).
+- `tests/web_singleton_config.rs` — logging.md grep invariant extended (`env_var_ignored`, `env_shadows_singleton_config`).
+- `docs/logging.md` — two new audit rows (incl. the previously-undocumented shadow WARN, narrowed semantics).
+- `docs/configuration.md` — override sections rewritten (allowlist table, blocked examples, precedence).
+- `.env.example` — allowlist banner; SERVER_ADDRESS/USER_NAME marked IGNORED; #163 note updated; user_name promise rewritten.
+- `README.md` — Epic J row (J-2 review) + breaking summary.
+- `CHANGELOG.md` — BREAKING entry + 3-step migration note.
+- `docs/manual/latex/body.tex` — env-var section + precedence list updated.
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` — J-2 → review.
 
 _Expected:_ `src/config.rs` (provider builder, predicate, ignored-WARN fn, shadow-WARN narrowing, tests), `src/storage/migrate_singleton_config.rs` (allowlist constant), `src/main.rs` (peek swap, ignored-WARN call sites), `tests/d2_figment_provider.rs` (t03 re-spec + t03b), `docs/logging.md`, `docs/configuration.md`, `.env.example`, `README.md`, `CHANGELOG.md`, `docs/manual/latex/body.tex`, `_bmad-output/implementation-artifacts/sprint-status.yaml`. Possibly `src/config_tests.rs` (AC#11 extraction) and `tests/web_singleton_config.rs` (event-name list).
 
