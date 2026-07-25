@@ -1631,11 +1631,17 @@ impl AppConfig {
     /// J-2 review iter-1: warn when an allowlisted **secret** env var and the
     /// wizard-written `secrets.toml` both supply the same field — env sits
     /// above `secrets.toml` in the stack, so the file value silently loses.
-    /// Values are never logged, and this deliberately has no once-per-boot
-    /// guard: it is emitted from the config load itself (bounded by the small
-    /// number of loads per boot) and each line names a distinct field.
+    /// Values are never logged. Guarded once-per-process: the config load runs
+    /// several times per boot (bootstrap, post-SQLite reload, every Apply), so
+    /// an unguarded warn duplicates each line — caught by the J-2 iter-1 smoke.
     fn warn_env_shadows_secrets_toml(secrets_body: &str) {
         use crate::storage::migrate_singleton_config::SECRET_FIELDS_BY_SECTION;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // Once per process: `from_path_inner` runs at least twice per boot
+        // (bootstrap, then the post-SQLite reload) and again on every Apply,
+        // so an unguarded warn duplicates every line (J-2 iter-1 smoke caught
+        // exactly that). WARN-budget discipline, cf. #144/#149.
+        static EMITTED: AtomicBool = AtomicBool::new(false);
         let Ok(parsed) = secrets_body.parse::<toml::Value>() else {
             return; // already reported as malformed upstream
         };
@@ -1653,6 +1659,9 @@ impl AppConfig {
                         .is_some_and(|(s, k)| s == *section && k == *field)
                 });
                 if in_env {
+                    if EMITTED.swap(true, Ordering::SeqCst) {
+                        return;
+                    }
                     warn!(
                         event = "env_shadows_secrets_toml",
                         section = %section,
