@@ -236,7 +236,12 @@ async fn setup_apply_test_server() -> ApplyTestServer {
     let backend_for_listener = backend.clone();
 
     let cancel = CancellationToken::new();
-    let opc_ua = OpcUa::new(&config, backend.clone(), cancel.clone());
+    let opc_ua = OpcUa::new(
+        &config,
+        backend.clone(),
+        cancel.clone(),
+        std::sync::Arc::new(tokio::sync::Notify::new()),
+    );
     let handles = opc_ua.build().await.expect("OpcUa::build must succeed");
     let manager = Arc::clone(&handles.manager);
     let subscriptions = handles.server_handle.subscriptions().clone();

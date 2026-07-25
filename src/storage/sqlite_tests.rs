@@ -245,6 +245,79 @@
         let _ = fs::remove_file(&path);
     }
 
+    /// J-1 review iter-3 D4 (poison-row self-heal): a malformed `Pending` row
+    /// (here: an unparseable `created_at`; no CHECK constraint guards it) used
+    /// to fail the WHOLE `get_pending_commands` read via the fail-fast
+    /// `collect::<Result<..>>()` — one poison row livelocked all command
+    /// dispatch forever (the dispatcher retried the identical failing query).
+    /// Now the valid rows are returned and the poison row is quarantined:
+    /// marked `Failed` with the parse reason, so it is never re-read as
+    /// Pending (and therefore warns exactly once — WARN-budget discipline).
+    #[test]
+    fn test_poison_pending_row_is_quarantined_not_fatal() {
+        let path = temp_backend_path();
+        let backend = SqliteBackend::new(&path).expect("Should create backend");
+
+        // One healthy Pending row through the normal write path...
+        backend
+            .queue_command(DeviceCommand {
+                id: 0,
+                device_id: "healthy-dev".to_string(),
+                payload: vec![0x01],
+                f_port: 10,
+                status: CommandStatus::Pending,
+                created_at: Utc::now(),
+                error_message: None,
+                command_name: None,
+            })
+            .expect("Should queue command");
+
+        // ...and one poison row with an unparseable created_at (raw SQL —
+        // models schema-version skew / manual edit / restored corrupt backup).
+        {
+            let conn = backend.pool.checkout(Duration::from_secs(5))
+                .expect("Should checkout");
+            conn.execute(
+                "INSERT INTO command_queue (device_id, payload, f_port, status, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params!["poison-dev", vec![0x02u8], 10, "Pending", "not-a-timestamp", "not-a-timestamp"],
+            ).expect("Should insert poison row");
+        }
+
+        // The read must SUCCEED and return only the healthy row.
+        let commands = backend
+            .get_pending_commands()
+            .expect("a poison row must not fail the whole pending read (pre-fix it did)");
+        assert_eq!(commands.len(), 1, "only the healthy row is dispatchable");
+        assert_eq!(commands[0].device_id, "healthy-dev");
+
+        // The poison row must be quarantined: status Failed, reason recorded.
+        {
+            let conn = backend.pool.checkout(Duration::from_secs(5))
+                .expect("Should checkout");
+            let (status, err): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT status, error_message FROM command_queue WHERE device_id = 'poison-dev'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("poison row must still exist");
+            assert_eq!(status, "Failed", "poison row must be marked Failed");
+            assert!(
+                err.unwrap_or_default().contains("malformed row quarantined"),
+                "quarantine reason must be recorded"
+            );
+        }
+
+        // A second read neither returns nor re-warns about the quarantined row.
+        let commands = backend
+            .get_pending_commands()
+            .expect("Should read again");
+        assert_eq!(commands.len(), 1, "quarantined row must never reappear");
+
+        let _ = fs::remove_file(&path);
+    }
+
     /// GH-134 regression: a `command_queue` row written by the pre-fix OPC-UA
     /// path has NULL `command_name`/`parameters`/`command_hash`/`enqueued_at`.
     /// `find_pending_confirmations` must return it with safe defaults instead

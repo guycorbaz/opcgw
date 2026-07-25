@@ -22,6 +22,8 @@
 //! `[logging].dir` in `config.toml`, then the default `./log`.
 
 mod chirpstack;
+/// Story J-1 (CR #136): event-driven command dispatch decoupled from the poll loop.
+mod chirpstack_dispatch;
 /// Story E-1 (E-1a): gRPC uplink-event ingestion — last-known value, no aggregation.
 mod chirpstack_events;
 /// Story C-1: ChirpStack inventory layer — types + cache + stream helper.
@@ -288,6 +290,8 @@ struct DataPlaneHandles {
     cmd_status: tokio::task::JoinHandle<()>,
     cmd_timeout: tokio::task::JoinHandle<()>,
     events: tokio::task::JoinHandle<()>,
+    /// Story J-1: event-driven command dispatcher.
+    cmd_dispatch: tokio::task::JoinHandle<()>,
 }
 
 /// Story F-0: re-read the effective configuration from SQLite for an
@@ -380,7 +384,17 @@ async fn spawn_data_plane(
              until the operator completes the /setup wizard and applies the new password."
         );
     }
-    let opc_ua = OpcUa::new(config, opcua_backend, restart_token.clone());
+    // Story J-1 (AC#7): a FRESH command-dispatch signal per data-plane cycle,
+    // shared (cloned) between the OPC UA write callbacks and the
+    // `CommandDispatcher` spawned below. Building a new `Notify` each respawn
+    // means an Apply never cross-signals across generations.
+    let dispatch_signal = Arc::new(tokio::sync::Notify::new());
+    let opc_ua = OpcUa::new(
+        config,
+        opcua_backend,
+        restart_token.clone(),
+        dispatch_signal.clone(),
+    );
     let run_handles = opc_ua.build().await?;
 
     // Spawn the poller FIRST so it reaches its own `barrier.wait()`; then
@@ -457,12 +471,67 @@ async fn spawn_data_plane(
         })
     };
 
+    // Command dispatcher (Story J-1 / CR #136). Event-driven: woken by the OPC
+    // UA write path via `dispatch_signal`, it delivers queued downlinks to
+    // ChirpStack immediately instead of on the metrics-poll cycle. Own SQLite
+    // backend from the shared pool, like the sibling command tasks.
+    let cmd_dispatch = {
+        let pool_dispatch = pool.clone();
+        let cancel_dispatch = restart_token.clone();
+        let config_dispatch = config.clone();
+        let signal_dispatch = dispatch_signal.clone();
+        // Single registered task, exactly like the sibling command tasks
+        // (`cmd_status` / `cmd_timeout`), so `join_data_plane`'s force-abort
+        // backstop covers it directly. (A restart-on-death watchdog was
+        // prototyped in J-1 review P2 but reverted: restarting the dispatcher
+        // would re-run the startup drain over any row left `Pending` in the
+        // enqueue→mark-Sent window, re-sending the downlink — a double-actuation
+        // that weakens the AC#4 single-delivery guarantee. Per-task supervision
+        // is deferred as a cross-cutting concern for all four data-plane tasks;
+        // the dispatch loop is panic-free by design, so unobserved task death is
+        // low-probability. See the story's Review Findings + deferred-work.md.)
+        tokio::spawn(async move {
+            // J-1 review iter-3 (blind finding): `with_pool` does a 5 s pool
+            // checkout + migrations and CAN fail under contention (#152). A
+            // panic here would silently kill the SOLE command-delivery path
+            // for the whole generation (the JoinHandle is only observed at
+            // shutdown), while writes keep returning Good. Handle it: log at
+            // ERROR and exit the task — commands stay Pending and the next
+            // Apply/restart retries. (The sibling tasks keep their `expect`;
+            // they are not the only owner of their function.)
+            let backend: Arc<dyn storage::StorageBackend> =
+                match storage::SqliteBackend::with_pool(pool_dispatch) {
+                    Ok(b) => Arc::new(b),
+                    Err(e) => {
+                        error!(
+                            error = ?e,
+                            "Failed to create SqliteBackend for command dispatcher; \
+                             command dispatch is DOWN until the next Apply/restart \
+                             (queued commands older than the delivery deadline by \
+                             then will expire Failed rather than deliver late)"
+                        );
+                        return;
+                    }
+                };
+            let mut dispatcher = chirpstack_dispatch::CommandDispatcher::new(
+                &config_dispatch,
+                backend,
+                cancel_dispatch,
+                signal_dispatch,
+            );
+            if let Err(e) = dispatcher.run().await {
+                error!(error = ?e, "CommandDispatcher error");
+            }
+        })
+    };
+
     Ok(DataPlaneHandles {
         chirpstack,
         opcua,
         cmd_status,
         cmd_timeout,
         events,
+        cmd_dispatch,
     })
 }
 
@@ -478,9 +547,16 @@ async fn join_data_plane(handles: DataPlaneHandles) {
         cmd_status,
         cmd_timeout,
         events,
+        cmd_dispatch,
     } = handles;
-    let tasks: [tokio::task::JoinHandle<()>; 5] =
-        [chirpstack, opcua, cmd_status, cmd_timeout, events];
+    let tasks: [tokio::task::JoinHandle<()>; 6] = [
+        chirpstack,
+        opcua,
+        cmd_status,
+        cmd_timeout,
+        events,
+        cmd_dispatch,
+    ];
     // Story F-0 review (D1): hold abort handles so that, if the bounded join
     // times out, we can FORCE-cancel any straggler. Dropping a `JoinHandle`
     // does NOT abort its task in tokio, so without this an unresponsive OPC UA
@@ -784,12 +860,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Pool shared via Arc; each task (poller, OPC UA) gets own connection from pool via Arc::clone()
     // SQLite WAL mode: true concurrent readers + single writer (no Rust Mutex bottleneck)
     //
-    // Story 9-2 review iter-1 D1: pool size matches the count of long-lived
-    // task-claimers (poller + opc_ua + command-status + command-timeout +
-    // web = 5). Sized below 5, the 5th task busy-waits up to 5 s on
-    // checkout under contention and surfaces a generic 500 — undersized
-    // pool was the root cause not the underlying request.
-    let pool = match ConnectionPool::new("data/opcgw.db", 5) {
+    // Pool size tracks the long-lived task-claimers, each of which builds its
+    // own `SqliteBackend::with_pool` and checks a connection out (RAII,
+    // per-op) as it works:
+    //   poller + opc_ua + command-status + command-timeout + events (E-1) +
+    //   command-dispatch (J-1) + web = 7.
+    // Transient extra claimants can briefly exceed that steady-state count
+    // during an Apply (the supervisor's `reload_effective_config` backend plus
+    // web CRUD backends run while the old data-plane generation still holds
+    // its claims — worst case ~9); that burst is bounded by the 5 s checkout
+    // busy-wait, costing latency (or a web 500) rather than corruption.
+    // Story J-1: bumped 5 → 7 and the comment corrected — the prior count of 5
+    // was already stale (it omitted the E-1 `events` uplink-ingestion claimer);
+    // J-1 adds the event-driven `CommandDispatcher`. The dispatcher only checks
+    // out briefly per drain, so this is a keep-the-invariant-honest sizing, not
+    // a starvation fix (checkout busy-waits up to 5 s under contention and
+    // surfaces a generic 500, so undersizing is best avoided regardless).
+    let pool = match ConnectionPool::new("data/opcgw.db", 7) {
         Ok(pool_inner) => Arc::new(pool_inner),
         Err(e) => {
             error!(error = %e, "Failed to create connection pool");

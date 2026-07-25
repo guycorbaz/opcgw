@@ -18,6 +18,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   log by hand (field case: 76 skipped fields in one day on one device).
 
 ### Changed
+- **OPC UA commands are now dispatched immediately, not on the metrics-poll cycle**
+  ([#136](https://github.com/guycorbaz/opcgw/issues/136), Story J-1): a successful
+  `set_command` write fires a `tokio::sync::Notify` that wakes a dedicated
+  event-driven `CommandDispatcher` task (`src/chirpstack_dispatch.rs`), which drains
+  the pending-command queue and enqueues the downlink to ChirpStack within seconds of
+  the write. Previously command delivery ran only at the head of `poll_metrics`, so a
+  command could sit undelivered for up to a full `chirpstack.polling_frequency`
+  interval — long enough that an operator read the still-empty ChirpStack device queue
+  as a delivery failure (the E-0 valve-test symptom). The metrics poll no longer
+  delivers commands at all; a single-owner dispatcher rules out double-sends. The
+  dispatcher does one startup drain (so commands persisted `Pending` before boot or
+  across an Apply soft restart are delivered without a fresh write) and shares one gRPC
+  client factory and one delivery path with the poller (no duplicated auth, no token in
+  logs). No new configuration knob — the design is purely event-driven.
+  Review hardening (iter-3/iter-4): a **provably-undelivered** enqueue failure
+  (ChirpStack unreachable — connect refused during a restart or boot ordering) now
+  leaves the command `Pending` and retries it on an escalating backoff instead of
+  marking it terminally `Failed`, with the drain short-circuiting after the first
+  unreachable row; an **ambiguous** failure (RPC sent but errored/timed out —
+  ChirpStack may have committed the item) stays terminal with a "delivery uncertain —
+  verify the device queue" reason, because retrying it could double-actuate hardware.
+  Retries — and the startup drain — are bounded by a **delivery deadline**
+  (`command_delivery_timeout_secs` from `created_at`, symmetric against clock
+  step-backs), so a stale command can never actuate hardware hours after it was
+  written. A command whose device/command config was removed after queueing is failed
+  as an **orphan** (previously it fell back to a raw-byte unconfirmed downlink), and a
+  malformed `command_queue` row is **quarantined** `Failed` instead of livelocking the
+  whole dispatch queue. The dispatcher's gRPC client is cached across enqueues (was:
+  a fresh channel per command) with a 10 s deadline on the enqueue RPC itself.
 - **`uplink_field_type_mismatch` is now deduplicated.** It warns **once** per
   (device, metric) per stream task; later occurrences drop to `debug`. The feed
   records one entry per *distinct problem*, not per occurrence — an un-deduplicated

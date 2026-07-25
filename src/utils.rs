@@ -801,6 +801,19 @@ pub enum OpcGwError {
     #[error("ChirpStack poller error: {0}")]
     ChirpStack(String),
 
+    /// ChirpStack was provably unreachable **before** any request was sent
+    /// (channel/TCP connect failure) — nothing can have been delivered.
+    ///
+    /// Story J-1 iter-4: the command dispatcher retries ONLY this variant.
+    /// An error raised *after* an RPC was sent (timeout, reset, gRPC status)
+    /// is ambiguous — ChirpStack may have committed the queue item even though
+    /// the response was lost — so retrying it could enqueue the same downlink
+    /// twice (double hardware actuation). Ambiguous failures are therefore
+    /// terminal (`Failed`, "delivery uncertain"), and only this
+    /// provably-not-delivered class re-drives the bounded retry.
+    #[error("ChirpStack unreachable: {0}")]
+    ChirpStackUnreachable(String),
+
     /// OPC UA server and client communication errors.
     ///
     /// This variant encompasses errors in the OPC UA layer:

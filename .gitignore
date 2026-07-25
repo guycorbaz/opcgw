@@ -50,3 +50,13 @@ docs/manual/latex/*.fls
 docs/manual/latex/*.fdb_latexmk
 docs/manual/latex/main.pdf
 docs/manual/latex/opcgw-user-manual.pdf
+
+# Local runtime state — never commit (J-1 iter-3 near-miss: a `git add -A`
+# swept data/opcgw.db + a rotated log into a review commit)
+data/
+config/log/
+# BMad installer-local configuration (the tracked _bmad/_config manifests stay)
+_bmad/config.toml
+_bmad/config.user.toml
+_bmad/custom/
+_bmad/scripts/

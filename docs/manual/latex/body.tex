@@ -62,7 +62,7 @@ opcgw runs as a single process built around a few cooperating components that sh
 \item
   \emph{Web UI (optional)} --- A password-protected web interface for first-run setup, configuration, and live monitoring. Enabled by default; it can be turned off.
 \item
-  \emph{Command delivery} --- Writes received over OPC UA are validated, queued, sent to ChirpStack as downlinks, and tracked from pending through sent to confirmed or failed.
+  \emph{Command delivery} --- Writes received over OPC UA are validated, queued, and dispatched to ChirpStack as downlinks \emph{immediately} (event-driven, not on the poll cycle), then tracked from pending through sent to confirmed or failed.
 \end{itemize}
 
 \chapter{System Requirements}\label{ch-requirements}
@@ -725,6 +725,10 @@ opcgw binds an HTTP listener; credentials transit in cleartext. Enable \texttt{{
 \end{admonition}
 
 \section{Command delivery}\label{sec-command-delivery-config}
+
+\textbf{Commands are dispatched immediately.} When a write over OPC UA is accepted, opcgw enqueues the resulting downlink to ChirpStack \emph{right away} --- the delivery is event-driven, triggered by the write itself, not by the metrics-poll cycle. A command therefore reaches the device\textquotesingle s ChirpStack queue within seconds of the write, rather than waiting up to a full \texttt{polling\_frequency} interval as in earlier versions. Delivery, confirmation, and timeout tracking are otherwise unchanged.
+
+\textbf{Delivery deadline and retries.} If ChirpStack is briefly unreachable (a restart, container boot ordering), opcgw does \emph{not} immediately fail the command: it keeps it pending and retries with an increasing backoff. Retries stop at the \emph{delivery deadline} --- \texttt{command\_delivery\_timeout\_secs} (default 60\,s) measured from when the command was written. A command that could not be enqueued within the deadline is marked \emph{failed} and is never delivered late: after any longer outage or restart, a stale command will not actuate your hardware hours after it was written --- re-issue it instead. A pending command whose device or command mapping you removed in the meantime is likewise failed, never sent. Only \emph{provably-undelivered} failures are retried: if a request reached ChirpStack but the response was lost (an RPC error or timeout), the command is failed with a \emph{delivery uncertain} reason instead of retried --- check the device queue in ChirpStack before re-issuing, so the device cannot receive the same command twice.
 
 \begin{lstlisting}
 [command_delivery]

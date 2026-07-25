@@ -233,7 +233,12 @@ async fn setup_dyn_test_server(
 
     let cancel = CancellationToken::new();
     let backend_for_server = backend.clone();
-    let opc_ua = OpcUa::new(&config, backend_for_server, cancel.clone());
+    let opc_ua = OpcUa::new(
+        &config,
+        backend_for_server,
+        cancel.clone(),
+        std::sync::Arc::new(tokio::sync::Notify::new()),
+    );
 
     // Story 9-0 AC#5 Shape B: split build/run_handles so the test can
     // grab the manager Arc clone before the server enters its
