@@ -1,6 +1,6 @@
 # Story J.1: Decouple Command Dispatch from the Metrics Poll Loop
 
-Status: review
+Status: done (2026-07-25 — review loop terminated iters 3-6; local AI-G-5 smoke PASS; NAS soak deferred to the v2.8.0-rc1 release gate)
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
