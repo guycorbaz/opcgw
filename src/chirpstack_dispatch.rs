@@ -104,6 +104,33 @@ type CachedDeviceClient = chirpstack_api::api::device_service_client::DeviceServ
     tonic::codegen::InterceptedService<tonic::transport::Channel, AuthInterceptor>,
 >;
 
+/// Returns `true` when a gRPC `Status`'s error chain proves the request was
+/// **never transmitted** (J-1 iter-5): with a warm cached client, tonic
+/// reconnects lazily inside the RPC, so a ChirpStack restart surfaces as an
+/// RPC-level error whose source chain bottoms out in a connect-class
+/// `std::io::Error`. A connection that was REFUSED (or a host/network that was
+/// unreachable, or a socket that was never connected) provably carried no
+/// request, so retrying is double-send-safe. Anything else — including
+/// `ConnectionReset`, which can happen after the request went out — stays
+/// ambiguous. Typed `downcast_ref` walk, deliberately NOT substring matching
+/// (project finding-class: substring matchers misclassify).
+fn is_provably_unsent(status: &tonic::Status) -> bool {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(status);
+    while let Some(err) = source {
+        if let Some(io) = err.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::HostUnreachable
+                    | std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::NotConnected
+            );
+        }
+        source = err.source();
+    }
+    false
+}
+
 /// Production [`DownlinkSink`]: enqueues a downlink to ChirpStack over gRPC.
 ///
 /// Builds its `DeviceServiceClient` through the shared
@@ -175,6 +202,18 @@ impl DownlinkSink for ChirpStackDownlinkSink {
                 error!(error = %e, "Error enqueueing device request");
                 // The channel may be bad — drop it so the next attempt reconnects.
                 *guard = None;
+                // iter-5 (warm-cache classification): with a cached client the
+                // eager-connect path above is skipped, so a ChirpStack restart
+                // surfaces HERE as an RPC error. If the error chain proves the
+                // request never left (connect refused/unreachable), it is the
+                // retry-safe class — without this check the first command of
+                // every warm-cache outage was terminally Failed, silently
+                // reverting the D1 retry for the most common case.
+                if is_provably_unsent(&e) {
+                    return Err(OpcGwError::ChirpStackUnreachable(format!(
+                        "enqueue failed before transmission: {e}"
+                    )));
+                }
                 // Preserve the gRPC status detail (code + message, never the
                 // token): it becomes the operator-facing failure reason.
                 Err(OpcGwError::ChirpStack(format!(
@@ -246,11 +285,20 @@ impl DownlinkSink for ChirpStackDownlinkSink {
 /// permit and strands every currently-`Pending` command until an unrelated
 /// future write happens to fire a new signal (the timeout sweep only rescues
 /// `Sent` rows, never `Pending`).
+/// `unmarked_terminal` (J-1 iter-5) carries rows whose delivery outcome was
+/// terminal but whose `Failed` bookkeeping write failed — they are still
+/// `Pending` in storage yet must NEVER be re-delivered (an ambiguous prior
+/// attempt may have been committed by ChirpStack; re-delivering would reopen
+/// the double-actuation window). Each drain first re-attempts the status
+/// write for carried rows and suppresses their delivery until it succeeds.
+/// The map lives on the dispatcher task (fresh per generation; a crash loses
+/// it, which degrades to the pre-existing #177 startup-drain residual).
 pub(crate) async fn drain_pending_commands(
     sink: &dyn DownlinkSink,
     backend: &Arc<dyn StorageBackend>,
     config: &AppConfig,
     cancel_token: &CancellationToken,
+    unmarked_terminal: &mut std::collections::HashMap<u64, String>,
 ) -> bool {
     let pending = match backend.async_store().get_pending_commands().await {
         Ok(pending) => pending,
@@ -293,6 +341,17 @@ pub(crate) async fn drain_pending_commands(
                 "drain interrupted by shutdown; remaining pending commands deferred to next startup drain"
             );
             break;
+        }
+        // iter-5: a row carried as unmarked-terminal is NEVER delivered again —
+        // only its pending `Failed` status write is re-attempted. (Checked
+        // before the age/orphan gates so those cannot re-classify it.)
+        if let Some(reason) = unmarked_terminal.get(&command.id) {
+            if mark_failed(backend, command.id, reason.clone()).await {
+                unmarked_terminal.remove(&command.id);
+            } else {
+                retry_needed = true; // keep re-attempting the status write
+            }
+            continue;
         }
         // D2 age gate, symmetric (iter-4): a row is expired when |now −
         // created_at| exceeds the deadline in EITHER direction. Small negative
@@ -360,19 +419,29 @@ pub(crate) async fn drain_pending_commands(
             };
         let outcome =
             deliver_one(sink, backend, command_class.as_deref(), confirmed, &command).await;
-        if outcome == DeliveryOutcome::RetryLater {
-            // `RetryLater` means ChirpStack was UNREACHABLE (connect failed
-            // before any send — the only retryable class after iter-4).
-            // Nothing behind this row can succeed either, so short-circuit the
-            // drain instead of paying a serial 5 s connect timeout per
-            // remaining row (iter-4); the backoff re-drives the whole queue.
-            retry_needed = true;
-            debug!(
-                event = "command_dispatch_drain",
-                command_id = command.id,
-                "ChirpStack unreachable; deferring the remaining pending commands to the bounded retry"
-            );
-            break;
+        match outcome {
+            DeliveryOutcome::RetryLater => {
+                // `RetryLater` means ChirpStack was UNREACHABLE (connect failed
+                // before any send — the only retryable class after iter-4).
+                // Nothing behind this row can succeed either, so short-circuit
+                // the drain instead of paying a serial 5 s connect timeout per
+                // remaining row (iter-4); the backoff re-drives the whole queue.
+                retry_needed = true;
+                debug!(
+                    event = "command_dispatch_drain",
+                    command_id = command.id,
+                    "ChirpStack unreachable; deferring the remaining pending commands to the bounded retry"
+                );
+                break;
+            }
+            DeliveryOutcome::TerminalUnmarked(reason) => {
+                // iter-5: terminal outcome, but the `Failed` write failed —
+                // carry the row so delivery stays suppressed while the status
+                // write is re-attempted on the bounded retry.
+                unmarked_terminal.insert(command.id, reason);
+                retry_needed = true;
+            }
+            DeliveryOutcome::Delivered | DeliveryOutcome::Terminal => {}
         }
     }
     !retry_needed
@@ -466,12 +535,16 @@ impl CommandDispatcher {
     /// Returns `false` if the pending-queue read failed (→ the caller schedules
     /// a bounded retry, J-1 review P1), `true` otherwise (including a
     /// cancellation-interrupted drain).
-    async fn drain_all(&self) -> bool {
+    async fn drain_all(
+        &self,
+        unmarked_terminal: &mut std::collections::HashMap<u64, String>,
+    ) -> bool {
         drain_pending_commands(
             self.sink.as_ref(),
             &self.backend,
             &self.config,
             &self.cancel_token,
+            unmarked_terminal,
         )
         .await
     }
@@ -501,9 +574,15 @@ impl CommandDispatcher {
     pub async fn run(&mut self) -> Result<(), OpcGwError> {
         debug!("Starting CommandDispatcher (event-driven command dispatch)");
 
+        // iter-5: rows whose terminal `Failed` write failed — delivery is
+        // suppressed for these ids until the status write lands (see
+        // `drain_pending_commands` docs). Task-local by design.
+        let mut unmarked_terminal: std::collections::HashMap<u64, String> =
+            std::collections::HashMap::new();
+
         // AC#5: drain commands persisted before this task started (pre-boot or
         // carried across a soft-restart) without needing a fresh OPC UA write.
-        let mut drain_ok = self.drain_all().await;
+        let mut drain_ok = self.drain_all(&mut unmarked_terminal).await;
         // Consecutive read-error count driving the escalating retry backoff.
         let mut error_streak: u32 = if drain_ok { 0 } else { 1 };
 
@@ -531,7 +610,7 @@ impl CommandDispatcher {
                     // rows. The single stored `Notify` permit covers a command
                     // enqueued during the drain (→ immediate re-drain next loop),
                     // so no wakeup is lost even under a burst of writes.
-                    drain_ok = self.drain_all().await;
+                    drain_ok = self.drain_all(&mut unmarked_terminal).await;
                     error_streak = if drain_ok { 0 } else { error_streak.saturating_add(1) };
                 }
                 _ = retry => {
@@ -541,7 +620,7 @@ impl CommandDispatcher {
                     // fault never strands a `Pending` command indefinitely,
                     // while a sustained outage backs off toward the cap — until
                     // the delivery deadline expires the affected rows.
-                    drain_ok = self.drain_all().await;
+                    drain_ok = self.drain_all(&mut unmarked_terminal).await;
                     error_streak = if drain_ok { 0 } else { error_streak.saturating_add(1) };
                 }
             }
@@ -921,8 +1000,8 @@ mod tests {
         let sink = MockSink::new(false);
         let cancel = CancellationToken::new();
 
-        drain_pending_commands(&sink, &dyn_backend, &config, &cancel).await;
-        drain_pending_commands(&sink, &dyn_backend, &config, &cancel).await;
+        drain_pending_commands(&sink, &dyn_backend, &config, &cancel, &mut std::collections::HashMap::new()).await;
+        drain_pending_commands(&sink, &dyn_backend, &config, &cancel, &mut std::collections::HashMap::new()).await;
 
         assert_eq!(
             sink.calls().len(),
@@ -952,7 +1031,7 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel(); // pre-cancelled
 
-        let ok = drain_pending_commands(&sink, &dyn_backend, &config, &cancel).await;
+        let ok = drain_pending_commands(&sink, &dyn_backend, &config, &cancel, &mut std::collections::HashMap::new()).await;
 
         assert!(ok, "a cancellation-interrupted drain is not a read-error");
         assert_eq!(
@@ -983,7 +1062,7 @@ mod tests {
         let sink = MockSink::new(false);
         let cancel = CancellationToken::new();
 
-        let settled = drain_pending_commands(&sink, &dyn_backend, &config, &cancel).await;
+        let settled = drain_pending_commands(&sink, &dyn_backend, &config, &cancel, &mut std::collections::HashMap::new()).await;
 
         assert!(settled, "an orphan is terminal — no retry must be scheduled");
         assert!(
@@ -1020,7 +1099,7 @@ mod tests {
         let sink = MockSink::new(false);
         let cancel = CancellationToken::new();
 
-        let settled = drain_pending_commands(&sink, &dyn_backend, &config, &cancel).await;
+        let settled = drain_pending_commands(&sink, &dyn_backend, &config, &cancel, &mut std::collections::HashMap::new()).await;
 
         assert!(settled, "an expired command is terminal — no retry");
         assert!(
@@ -1141,7 +1220,7 @@ mod tests {
         let sink = MockSink::new(false);
         let cancel = CancellationToken::new();
 
-        drain_pending_commands(&sink, &dyn_backend, &config, &cancel).await;
+        drain_pending_commands(&sink, &dyn_backend, &config, &cancel, &mut std::collections::HashMap::new()).await;
 
         assert!(
             sink.calls().is_empty(),
@@ -1172,7 +1251,7 @@ mod tests {
         let sink = MockSink::new(true);
         let cancel = CancellationToken::new();
 
-        let settled = drain_pending_commands(&sink, &dyn_backend, &config, &cancel).await;
+        let settled = drain_pending_commands(&sink, &dyn_backend, &config, &cancel, &mut std::collections::HashMap::new()).await;
 
         assert!(settled, "an ambiguous failure is terminal — no retry scheduled");
         assert_eq!(sink.calls().len(), 1, "exactly one attempt — never re-sent");
@@ -1199,7 +1278,7 @@ mod tests {
         let sink = FlakySink::failing_first(u32::MAX); // always unreachable
         let cancel = CancellationToken::new();
 
-        let settled = drain_pending_commands(&sink, &dyn_backend, &config, &cancel).await;
+        let settled = drain_pending_commands(&sink, &dyn_backend, &config, &cancel, &mut std::collections::HashMap::new()).await;
 
         assert!(!settled, "an unreachable sink must schedule a retry");
         assert_eq!(
@@ -1228,8 +1307,11 @@ mod tests {
         let dyn_backend: Arc<dyn StorageBackend> = backend.clone();
         let config = test_config();
         let deadline = i64::from(config.global.command_delivery_timeout_secs);
+        // deadline − 5 (iter-5): wide enough that a stalled CI runner cannot
+        // expire the row before the first delivery attempt, small enough that
+        // the 2 s + 4 s backoff drives it past the deadline.
         let mut nearly_expired = device_command(0, CFG_DEV, CFG_PORT, vec![1]);
-        nearly_expired.created_at = chrono::Utc::now() - chrono::Duration::seconds(deadline - 1);
+        nearly_expired.created_at = chrono::Utc::now() - chrono::Duration::seconds(deadline - 5);
         backend.queue_command(nearly_expired).unwrap();
         let cmd_id = backend.get_pending_commands().unwrap()[0].id;
 
@@ -1260,6 +1342,107 @@ mod tests {
 
         cancel.cancel();
         let _ = handle.await;
+    }
+
+    /// J-1 iter-5 (typed unsent-classifier): only connect-class io errors in a
+    /// `Status`'s source chain prove the request never left; reset/plain
+    /// statuses stay ambiguous.
+    #[test]
+    fn is_provably_unsent_classifies_by_io_error_kind() {
+        let refused = tonic::Status::from_error(Box::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        )));
+        assert!(is_provably_unsent(&refused), "refused connect = nothing sent");
+
+        let reset = tonic::Status::from_error(Box::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "connection reset by peer",
+        )));
+        assert!(
+            !is_provably_unsent(&reset),
+            "a reset can happen AFTER the request went out — must stay ambiguous"
+        );
+
+        let plain = tonic::Status::unavailable("service unavailable");
+        assert!(
+            !is_provably_unsent(&plain),
+            "no io source = no proof of non-transmission"
+        );
+
+        // Nested wrapping (hyper-style): the walk must reach the io error.
+        #[derive(Debug)]
+        struct Wrap(std::io::Error);
+        impl std::fmt::Display for Wrap {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "wrapped: {}", self.0)
+            }
+        }
+        impl std::error::Error for Wrap {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let nested = tonic::Status::from_error(Box::new(Wrap(std::io::Error::new(
+            std::io::ErrorKind::HostUnreachable,
+            "no route to host",
+        ))));
+        assert!(
+            is_provably_unsent(&nested),
+            "the source walk must find io errors through wrapper layers"
+        );
+    }
+
+    /// J-1 iter-5 (unmarked-terminal carry): when a terminal outcome's
+    /// `Failed` bookkeeping write fails, the row must NEVER be re-delivered —
+    /// the dispatcher suppresses delivery and re-attempts only the status
+    /// write until it lands. Mutation guard (verified): without the carry map,
+    /// the second drain re-reads the still-`Pending` row and re-enqueues it —
+    /// `calls().len()` would be 2 (the reopened double-actuation window).
+    #[tokio::test]
+    async fn unmarked_terminal_row_is_never_redelivered() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let dyn_backend: Arc<dyn StorageBackend> = backend.clone();
+        backend
+            .queue_command(device_command(0, CFG_DEV, CFG_PORT, vec![1]))
+            .unwrap();
+        let cmd_id = backend.get_pending_commands().unwrap()[0].id;
+        let config = test_config();
+        // Ambiguous sink failure AND a failing Failed-write: outcome is
+        // TerminalUnmarked (delivery attempted once, row still Pending).
+        let sink = MockSink::new(true);
+        let cancel = CancellationToken::new();
+        let mut unmarked = std::collections::HashMap::new();
+        backend.fail_next_update_command_status(1);
+
+        let settled =
+            drain_pending_commands(&sink, &dyn_backend, &config, &cancel, &mut unmarked).await;
+        assert!(!settled, "an unmarked terminal must schedule a retry");
+        assert_eq!(sink.calls().len(), 1);
+        assert_eq!(unmarked.len(), 1, "the row must be carried as unmarked");
+        assert_eq!(
+            backend.command_status_for_test(cmd_id).map(|(s, _)| s),
+            Some(CommandStatus::Pending),
+            "the Failed write was injected to fail — row still Pending"
+        );
+
+        // Second drain (the backoff re-drive): delivery MUST stay suppressed;
+        // only the status write is re-attempted, and it now succeeds.
+        let settled =
+            drain_pending_commands(&sink, &dyn_backend, &config, &cancel, &mut unmarked).await;
+        assert!(settled, "carry healed — drain settles");
+        assert_eq!(
+            sink.calls().len(),
+            1,
+            "the ambiguous row must NEVER be re-enqueued (double-actuation guard)"
+        );
+        assert!(unmarked.is_empty(), "carry entry removed once the write lands");
+        let (status, err) = backend.command_status_for_test(cmd_id).unwrap();
+        assert_eq!(status, CommandStatus::Failed);
+        assert!(
+            err.unwrap_or_default().contains("mock enqueue failure"),
+            "the original failure reason must be preserved through the carry"
+        );
     }
 
     /// J-1 review iter-2 P5: the read-error retry backoff escalates

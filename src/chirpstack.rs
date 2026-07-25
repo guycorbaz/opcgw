@@ -2717,13 +2717,20 @@ pub(crate) trait DownlinkSink: Send + Sync {
 /// (gRPC connect/enqueue errors — the row is **left `Pending`** and the caller
 /// schedules a bounded retry, capped by the delivery deadline enforced in
 /// `chirpstack_dispatch::drain_pending_commands`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DeliveryOutcome {
     /// Enqueued to ChirpStack; row transitioned `Pending → Sent`.
     Delivered,
     /// Permanent failure; row transitioned `Pending → Failed`.
     Terminal,
-    /// Transient sink failure; row left `Pending` for a bounded retry.
+    /// Permanent failure whose `Failed` bookkeeping write ITSELF failed — the
+    /// row is still `Pending` in storage. Carries the intended failure reason.
+    /// The dispatcher must suppress delivery for this row and re-attempt only
+    /// the status write (J-1 iter-5): re-delivering a row whose prior attempt
+    /// was ambiguous would reopen the double-actuation window iter-4 closed.
+    TerminalUnmarked(String),
+    /// Transient sink failure (ChirpStack provably unreachable); row left
+    /// `Pending` for a bounded retry.
     RetryLater,
 }
 
@@ -2762,10 +2769,14 @@ pub(crate) async fn deliver_one(
                 f_port = command.f_port,
                 "Command mapping failed; marking command Failed"
             );
-            if let Err(e2) =
-                backend.async_store().update_command_status(command.id, CommandStatus::Failed, Some(e.to_string())).await
+            let reason = e.to_string();
+            if let Err(e2) = backend
+                .async_store()
+                .update_command_status(command.id, CommandStatus::Failed, Some(reason.clone()))
+                .await
             {
                 error!(error = %e2, command_id = command.id, "Failed to mark command Failed");
+                return DeliveryOutcome::TerminalUnmarked(reason);
             }
             return DeliveryOutcome::Terminal;
         }
@@ -2830,10 +2841,18 @@ pub(crate) async fn deliver_one(
                 command_id = command.id,
                 "Failed to enqueue command; marking command Failed"
             );
-            if let Err(e2) =
-                backend.async_store().update_command_status(command.id, CommandStatus::Failed, Some(e.to_string())).await
+            let reason = e.to_string();
+            if let Err(e2) = backend
+                .async_store()
+                .update_command_status(command.id, CommandStatus::Failed, Some(reason.clone()))
+                .await
             {
+                // iter-5: the row is still `Pending` but must NEVER be
+                // re-delivered (the attempt was ambiguous — ChirpStack may
+                // have committed it). Hand the reason back so the dispatcher
+                // suppresses delivery and re-attempts only the status write.
                 error!(error = %e2, command_id = command.id, "Failed to mark command Failed");
+                return DeliveryOutcome::TerminalUnmarked(reason);
             }
             DeliveryOutcome::Terminal
         }

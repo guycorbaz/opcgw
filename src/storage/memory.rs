@@ -55,6 +55,11 @@ pub struct InMemoryBackend {
     error_events: Arc<Mutex<VecDeque<ErrorEvent>>>,
     /// Optional command validator (Story 3-2)
     validator: Option<Arc<CommandValidator>>,
+    /// Test-only failure injection: the next N calls to
+    /// `update_command_status` return a Storage error (J-1 iter-5 — exercises
+    /// the unmarked-terminal carry path in the dispatcher). Always present so
+    /// constructors stay `cfg`-free; the setter is `#[cfg(test)]`.
+    fail_update_command_status: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl InMemoryBackend {
@@ -70,7 +75,17 @@ impl InMemoryBackend {
             health_metrics: Arc::new(Mutex::new(GatewayHealthMetrics::default())),
             error_events: Arc::new(Mutex::new(VecDeque::new())),
             validator: None,
+            fail_update_command_status: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
+    }
+
+    /// Test-only: make the next `n` `update_command_status` calls fail with a
+    /// Storage error (models #152-style pool/contention faults on the
+    /// bookkeeping write).
+    #[cfg(test)]
+    pub fn fail_next_update_command_status(&self, n: u32) {
+        self.fail_update_command_status
+            .store(n, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test helper: read a queued `DeviceCommand`'s status and error message by
@@ -92,15 +107,8 @@ impl InMemoryBackend {
     /// Creates a new InMemoryBackend with an optional command validator
     pub fn with_validator(validator: Option<Arc<CommandValidator>>) -> Self {
         Self {
-            metrics: Arc::new(Mutex::new(HashMap::new())),
-            metric_values: Arc::new(Mutex::new(HashMap::new())),
-            commands: Arc::new(Mutex::new(Vec::new())),
-            command_queue: Arc::new(Mutex::new(Vec::new())),
-            command_id_counter: Arc::new(Mutex::new(0)),
-            status: Arc::new(Mutex::new(ChirpstackStatus::default())),
-            health_metrics: Arc::new(Mutex::new(GatewayHealthMetrics::default())),
-            error_events: Arc::new(Mutex::new(VecDeque::new())),
             validator,
+            ..Self::new()
         }
     }
 }
@@ -167,6 +175,20 @@ impl StorageBackend for InMemoryBackend {
     }
 
     fn update_command_status(&self, command_id: u64, status: CommandStatus, error_message: Option<String>) -> Result<(), OpcGwError> {
+        // Test-only failure injection (see `fail_next_update_command_status`).
+        if self
+            .fail_update_command_status
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |v| if v > 0 { Some(v - 1) } else { None },
+            )
+            .is_ok()
+        {
+            return Err(OpcGwError::Storage(
+                "injected update_command_status failure (test)".to_string(),
+            ));
+        }
         let mut commands = self.commands.lock().map_err(|e| OpcGwError::Storage(format!("Lock error: {}", e)))?;
         if let Some(cmd) = commands.iter_mut().find(|c| c.id == command_id) {
             cmd.status = status;

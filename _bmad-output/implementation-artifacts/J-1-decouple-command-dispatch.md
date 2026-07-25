@@ -325,3 +325,19 @@ Verified non-findings (iter-4): quarantine can only touch `Pending` rows; no sin
 | Date | Change |
 |------|--------|
 | 2026-07-25 | bmad-code-review iter-4 (mandatory re-review of iter-3's new flow-control): D1 narrowed to provably-undelivered-only retry (ambiguous → terminal "delivery uncertain"), symmetric delivery-deadline gate, mark_failed retry parity, unreachable short-circuit, ladder-into-deadline test. 2 MEDIUM + 5 LOW all resolved; both new guards mutation-verified. |
+
+### Iteration 5 — focused verification of iter-4 (2026-07-25)
+
+Verification-style pass over commit 85ca5ca. **Crux cleared:** tonic 0.14.5's `Endpoint::connect()` is EAGER (verified in tonic sources) — client-creation failure genuinely proves nothing was sent, so the iter-4 retry path is live. Two adjacent defects found and fixed:
+
+- [x] **M1 (MED) — warm cached client bypassed the retryable classification.** With a warm cache the eager-connect path is skipped, so a ChirpStack restart surfaced as an RPC-level error → classified ambiguous → the FIRST command of every warm-cache outage was terminally Failed (D1 silently dead for the most common case; safe direction, but reverts the story's headline fix). FIX: `is_provably_unsent(&Status)` — a **typed** `source()`-chain walk (deliberately not substring matching, per the project's substring-matcher finding-class) that classifies connect-class `io::ErrorKind`s (`ConnectionRefused`/`HostUnreachable`/`NetworkUnreachable`/`NotConnected`) as retry-safe; `ConnectionReset` and plain statuses stay ambiguous. Unit-tested incl. nested (hyper-style) wrapping.
+- [x] **M2 (MED) — ambiguous-terminal branch lost "never re-send" when the `Failed` bookkeeping write failed.** The row stayed `Pending` and the next drive re-delivered it — reopening the double-actuation window iter-4 closed. FIX: `DeliveryOutcome::TerminalUnmarked(reason)` + a task-local carry map: delivery is SUPPRESSED for carried ids; each drain re-attempts only the status write until it lands (mapping-failure branch gets the same treatment). Mutation-verified (disabling the carry suppression fails the new test). New `InMemoryBackend::fail_next_update_command_status` test-only injection hook. Test: `unmarked_terminal_row_is_never_redelivered`.
+- [x] **L — ladder test's 2 s scheduling cliff** → row now starts `deadline − 5` (CI-stall margin).
+
+Verified clean by iter-5: short-circuit starvation (none — re-drives re-read the full queue), symmetric-gate i64 edges (no panic, correct strict `>`), settled/retry accounting (only the deliver_one branch needed M2), test tautologies (none — the mock sinks pin the actual variant→outcome mapping). Process note: the M2 mutation run was restored with an over-broad `git checkout` that reverted the uncommitted iter-5 edits in `chirpstack_dispatch.rs`; they were re-applied from the session record and re-verified (gates re-run green).
+
+### Change Log — code review (cont. 4)
+
+| Date | Change |
+|------|--------|
+| 2026-07-25 | bmad-code-review iter-5 (focused verification of iter-4): eager-connect crux verified live; warm-cache misclassification fixed via typed `is_provably_unsent` classifier; unmarked-terminal carry map closes the Failed-write double-actuation reopening; ladder-test margin hardened. Gates: cargo test 1894/0, clippy clean. |
