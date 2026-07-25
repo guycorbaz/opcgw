@@ -152,3 +152,39 @@ _Expected:_ `src/config.rs` (provider builder, predicate, ignored-WARN fn, shado
 | Date | Change |
 |------|--------|
 | 2026-07-25 | Story created via bmad-create-story (autonomous session; allowlist designed from the live panoramix `.env` per owner decision). |
+
+## Review Findings
+
+_bmad-code-review 2026-07-25/26, 3 adversarial layers (Blind Hunter / Edge Case Hunter / Acceptance Auditor) on **Opus 5** vs the **Fable 5** implementer. 31 raw findings. Both HIGHs from the Blind Hunter and the HIGH from the Edge Case Hunter were real; the Auditor confirmed 8 of 11 ACs satisfied and correctly failed AC#7/#10/#3-partial on doc/test gaps._
+
+### Iteration 1 — resolution (2026-07-26)
+
+**The bypass (HIGH, edge) — the story's whole premise was defeatable.**
+- [x] **`OPCGW_CHIRPSTACK.POLLING_FREQUENCY` (a DOT instead of `__`) sailed through the filter and still merged.** `split_once("__")` returned `None` → the predicate's fail-open branch → `.split("__")` a no-op → figment's `util::nest` splits on `.` anyway. Every blocked field — including both party-session-#2 decisions — was overridable, silently (the reporter skipped it too). Empirically verified by the reviewer with a standalone figment harness. **FIX:** one **shared normalizer** (`env_post_prefix_to_section_key` / `env_name_to_section_key`) used by BOTH the provider filter and the reporter, mirroring figment's own key handling: `__` and `.` are equivalent separators, names are trimmed, the prefix matches case-insensitively, empty path segments are dropped. Drift is now impossible by construction. **Mutation-verified end-to-end**: restoring the original `split_once("__")` predicate makes `j2_dotted_env_var_cannot_bypass_the_allowlist` fail 99≠10.
+
+**The two HIGHs from the blind layer.**
+- [x] **Credential-pair split → possible lock-out.** `user_password` is env-capable (secret) but `user_name` is not, so a deployment setting both keeps its password and silently switches login *name* — and the documented remedy sits behind that login. **FIX (design kept, hazard removed):** new `env_var_ignored_login_name` WARN naming the **effective** login user at boot, so the answer is in the log. (Re-affirmed the party-#2 BLOCK decision rather than allowlisting `user_name`: it is web-editable, and the owner's own 2026-07-20 `.env` cleanup removed it as Admin-managed.)
+- [x] **Migration note addressed only the rarer case.** Step 1 pointed at the v2.7.1 shadow WARNs — which fire exactly when a SQLite row EXISTS — while the only actionable step covered "no row". **FIX:** rewritten around the two failure shapes, exploiting that each shadow WARN already logs *both* `env_value` and `db_value`; plus a longer (explicitly non-exhaustive) ignored-var list and two named traps (`USER_NAME` login, `CREATE_SAMPLE_KEYPAIR` boot failure).
+
+**Other fixes.**
+- [x] Reporter used a case-SENSITIVE prefix strip while figment matches uncased (`UncasedStr`) → lowercase vars were filtered but never reported; and it used `std::env::vars()`, which **panics** on any non-UTF-8 variable in the environment (figment itself uses `vars_os()`), on the boot path before the config load. Both fixed via the shared normalizer + `vars_os()`.
+- [x] Whitespace-padded names (figment trims before matching) could make the WARN **lie** ("ignored" for a var actually in force); `OPCGW_WEB__` produced a false-positive WARN for a key figment drops itself. Both fixed.
+- [x] **`env_shadows_secrets_toml`** (new): an allowlisted secret env var and the wizard-written `secrets.toml` both supplying the same field was silent in *both* scanners — an operator re-entering credentials in the wizard kept authenticating with the stale `.env` value. Values never logged.
+- [x] Docs: the manual's **configuration chapter** env section AND the **Environment Variable Reference appendix** still taught "environment variables always win" (the appendix is what README/manual cross-refs point at); README troubleshooting still described the #168 trap as current; `docs/security.md` listed blocked vars as env-settable; `configuration.md`'s env-only table omitted `CONFIG_PATH`/`LOG_DIR`/`LOG_LEVEL`; `logging.md` misstated the emission point as "right after" the load (it is deliberately **before**); stale provider comments in `opc_ua.rs` / `sqlite_singleton_provider.rs`. All corrected.
+- [x] `maybe_warn_env_shadows_singleton`'s doc comment still described the pre-narrowing behaviour and contradicted its own re-specced tests. Rewritten.
+- [x] Tests: added `j2_filter_and_reporter_agree_for_every_key_shape` (the structural drift guard — 20 key shapes incl. dotted/cased/whitespace/empty, asserting filter and reporter agree; this is what would have caught the case bug), `j2_dotted_env_var_cannot_bypass_the_allowlist` (real `Figment::extract`), `j2_logging_env_overrides_still_reach_the_peek_stack` (AC#10f, the previously-untested second stack), `t03d` default-fallback leg (AC#10b, on a field genuinely ABSENT from the fixture — the first attempt used one the fixture sets to the same value as the default: a fake guard caught in review of my own patch).
+
+### Accepted / deferred
+
+- **Production wrapper (`maybe_warn_env_ignored`) has no unit test** — it is a 3-line `vars_os()` adapter over the fully-tested core; exercised by the AI-G-5 smoke. Accepted (documented rationale: whole-env scans race parallel `temp_env` tests).
+- **Admin-page save of an ALLOWLISTED key + Apply still loses to the env var**, with the shadow WARN only at boot (LOW, edge). Inherent to allowlisting those four keys; a web-layer "env override active" badge is a separate story. → deferred-work.md.
+- **`config.rs` is now ~6100 lines** (AC#11's conditional extraction). Deliberately not started mid-review; flagged for the Epic J retrospective with #172.
+- Dismissed: once-per-boot guard being a single latch (correct for the single call site; a per-key set would be gold-plating); `env_var_ignored` "misdirecting" on typo'd var names (a typo in a *blocked* section is still an ignored var — the message is accurate).
+
+**Gates after iteration 1:** `cargo test` **1915 passed / 0 failed**, `cargo clippy --all-targets -- -D warnings` clean.
+
+### Change Log — code review
+
+| Date | Change |
+|------|--------|
+| 2026-07-26 | bmad-code-review iter-1 (Opus 5 vs Fable 5 implementer): fixed a COMPLETE allowlist bypass via dot-separated vars (shared normalizer, mutation-verified), the credential-pair lock-out hazard, the migration note's missing dominant case, reporter/filter case+whitespace+panic drift, the silent secrets.toml overlap, and the manual/README/security doc contradictions. Gates 1915/0 + clippy clean. |

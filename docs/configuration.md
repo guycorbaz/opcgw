@@ -554,12 +554,16 @@ cargo run --release
 3. `config.toml` — the bootstrap seed (first boot only)
 4. Built-in defaults (lowest priority)
 
-### Process-level tuning knobs (env-only)
+### Process-level / short-form knobs (env-only, always applied)
 
-A few operational knobs are not part of the TOML/SQLite config surface — they are read once from the environment at startup:
+These are read directly from the environment at startup — they never pass
+through the figment layer, so the v2.8.0 allowlist does not affect them:
 
 | Env var | Default | Description |
 |---------|---------|-------------|
+| `CONFIG_PATH` | `config/config.toml` | Path to the seed config file (unprefixed; the `-c` CLI flag wins over it). |
+| `OPCGW_LOG_DIR` | `./log` | Log directory. Short form (no `__`); wins over `[logging].dir`. |
+| `OPCGW_LOG_LEVEL` | `info` | Log verbosity (`error`/`warn`/`info`/`debug`/`trace`); the `-d` CLI flag wins over it. |
 | `OPCGW_ERROR_EVENT_CAP` | 500 | Story G-4 (#127): maximum number of recent error events retained in the bounded feed behind the dashboard error drill-down (`GET /api/errors` → `/errors.html`). Oldest events are pruned beyond this cap. A positive integer; invalid/zero values fall back to the default. |
 | `OPCGW_STORAGE_QUERY_BUDGET_MS` | 250 | Latency above which a storage-query timing log is upgraded from `debug` to `warn`. |
 | `OPCGW_BATCH_WRITE_BUDGET_MS` | 2000 | Latency above which a batch-write timing log is emitted at `warn`. |

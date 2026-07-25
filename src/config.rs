@@ -1062,18 +1062,67 @@ pub struct AppConfig {
 /// provider several times per `extract()` and there are multiple loads per
 /// boot (peek, bootstrap, reload, Apply). `maybe_warn_env_ignored` does the
 /// once-per-boot reporting from a single scan.
-pub fn opcgw_env_provider() -> figment::providers::Env {
+/// The `OPCGW_` env-var prefix — single source of truth for the figment
+/// provider and the ignored-var reporter (they MUST agree; J-2 review iter-1
+/// found the reporter's case-sensitive strip silently under-reporting keys the
+/// provider had filtered).
+pub const ENV_PREFIX: &str = "OPCGW_";
+
+/// Resolves a **post-prefix** env key (e.g. `CHIRPSTACK__POLLING_FREQUENCY`)
+/// to the `(section, key)` the figment stack would actually address, or `None`
+/// when it addresses no section field.
+///
+/// Mirrors figment 0.10.19's own key handling exactly — the classification is
+/// shared by the provider filter and the ignored-var reporter so the two can
+/// never drift (J-2 review iter-1 found real drift in both directions):
+///
+/// - **Both `__` AND `.` separate the path.** `.split("__")` rewrites `__` →
+///   `.`, and figment then nests on `.` (`util::nest`). A dotted variable
+///   (`OPCGW_CHIRPSTACK.POLLING_FREQUENCY`) therefore addresses exactly the
+///   same field as the `__` form — before this normalization it slipped past
+///   the filter's `split_once("__")` (which returned `None` → fail-open) while
+///   figment still merged it: a **complete allowlist bypass**, silent in the
+///   report too.
+/// - **Empty path segments are dropped** (figment `env.rs:511`), so
+///   `OPCGW_WEB__` addresses nothing and must not be reported as "ignored".
+pub(crate) fn env_post_prefix_to_section_key(raw: &str) -> Option<(String, String)> {
+    let dotted = raw.replace("__", ".");
+    let (section, field) = dotted.split_once('.')?;
+    if section.is_empty() || field.split('.').any(|s| s.is_empty()) {
+        return None;
+    }
+    Some((section.to_lowercase(), field.to_lowercase()))
+}
+
+/// Resolves a FULL env var name (as seen in the process environment) the same
+/// way. Trims first and matches the prefix case-**insensitively**, because
+/// figment trims the name before matching (`env.rs:509`) and compares the
+/// prefix through `UncasedStr` (`env.rs:201`) — so `" opcgw_web__port "` is a
+/// real, merged variable.
+pub(crate) fn env_name_to_section_key(name: &str) -> Option<(String, String)> {
+    let name = name.trim();
+    if name.len() < ENV_PREFIX.len() || !name[..ENV_PREFIX.len()].eq_ignore_ascii_case(ENV_PREFIX) {
+        return None;
+    }
+    env_post_prefix_to_section_key(&name[ENV_PREFIX.len()..])
+}
+
+/// The provider's filter decision for one post-prefix env key. Named (not
+/// inline) so tests can drive the exact predicate the provider uses and assert
+/// it agrees with the ignored-var reporter.
+pub(crate) fn env_post_prefix_key_passes(raw: &str) -> bool {
     use crate::storage::migrate_singleton_config::env_key_allowed;
-    Env::prefixed("OPCGW_")
-        .filter(|key| {
-            let raw = key.as_str();
-            match raw.split_once("__") {
-                Some((section, field)) => {
-                    env_key_allowed(&section.to_lowercase(), &field.to_lowercase())
-                }
-                None => true,
-            }
-        })
+    match env_post_prefix_to_section_key(raw) {
+        Some((section, key)) => env_key_allowed(&section, &key),
+        // Addresses no section field (short form, or empty segments figment
+        // itself drops) — nothing to protect.
+        None => true,
+    }
+}
+
+pub fn opcgw_env_provider() -> figment::providers::Env {
+    Env::prefixed(ENV_PREFIX)
+        .filter(|key| env_post_prefix_key_passes(key.as_str()))
         .split("__")
         .global()
 }
@@ -1295,6 +1344,17 @@ impl AppConfig {
         if let Some(backend) = sqlite_backend {
             figment = figment.merge(crate::storage::SqliteSingletonProvider::new(backend));
         }
+        // J-2 review iter-1 (MEDIUM): the two secrets are allowlisted, so an
+        // `.env` secret still outranks `secrets.toml` — which the first-run
+        // wizard writes. An operator who re-enters credentials in the wizard
+        // would otherwise see the gateway keep authenticating with the stale
+        // env value, with no diagnostic anywhere (neither scanner covers this
+        // pair: the shadow scan skips secrets, the ignored scan skips
+        // allowlisted keys). Warn on the overlap — never the values.
+        if let Some(body) = secrets_body.as_deref() {
+            Self::warn_env_shadows_secrets_toml(body);
+        }
+
         let config: AppConfig = figment
             .merge(opcgw_env_provider())
             .extract()
@@ -1373,19 +1433,26 @@ impl AppConfig {
     /// operator manages from the web **Admin** page).
     ///
     /// The `Env` provider sits at the TOP of the figment stack (`env > SQLite >
-    /// TOML > default`), so an env override **silently wins** over the web/SQLite
-    /// value — an Admin-page edit to the same field then has no effect. That is
-    /// exactly the trap that made `OPCGW_OPCUA__HOST_IP_ADDRESS=0.0.0.0` shadow
-    /// the web-set `host_ip_address="opcgw"` (#163) and `OPCGW_OPCUA__MAX_KEEP_ALIVE_COUNT`
-    /// shadow the web-set value — both cost real diagnosis time because the shadow
-    /// was invisible.
+    /// TOML > default`), so an env override that REACHES the stack wins over the
+    /// web/SQLite value — an Admin-page edit to the same field then has no effect.
+    /// That is the trap that made `OPCGW_OPCUA__HOST_IP_ADDRESS=0.0.0.0` shadow
+    /// the web-set `host_ip_address="opcgw"` (#163), costing real diagnosis time
+    /// because the shadow was invisible.
+    ///
+    /// **Story J-2 narrowed this event.** Non-allowlisted keys no longer reach the
+    /// stack at all ([`opcgw_env_provider`] filters them), so they cannot shadow
+    /// anything — `HOST_IP_ADDRESS` / `MAX_KEEP_ALIVE_COUNT` and friends are now
+    /// reported by `env_var_ignored` instead ([`Self::maybe_warn_env_ignored`]).
+    /// What remains here is the genuinely-still-shadowing set: an **allowlisted**
+    /// key (the `WEB__*` bootstrap trio, `OPCUA__HOST_PORT`) that also has a
+    /// SQLite row — for those, env really does still outrank the Admin page.
     ///
     /// Emits one `env_shadows_singleton_config` WARN per shadowed field, naming the
     /// env var, the `[section].key`, and both values, so the conflict is visible.
-    /// Secret fields (`SECRET_FIELDS_BY_SECTION`) are never inspected or logged, and
-    /// only the four web-editable sections (`KNOWN_SECTIONS`) are considered — the
-    /// `.env`-boundary vars (`OPCGW_LOG_LEVEL`, the `WEB__*` bootstrap set, secrets)
-    /// are legitimately env-only and are not flagged.
+    /// Secret fields (`SECRET_FIELDS_BY_SECTION`) are never inspected or logged
+    /// (they have no SQLite row either), and only the four web-editable sections
+    /// (`KNOWN_SECTIONS`) are considered — short forms like `OPCGW_LOG_LEVEL` are
+    /// legitimately env-only and are not flagged.
     ///
     /// `singleton_rows` are the `(section, key, value_json)` tuples from
     /// [`crate::storage::SqliteBackend::load_singleton_config`]. Returns the number
@@ -1490,7 +1557,20 @@ impl AppConfig {
     ///
     /// Returns the number of ignored vars warned about.
     pub fn maybe_warn_env_ignored(already_emitted: &std::sync::atomic::AtomicBool) -> usize {
-        Self::maybe_warn_env_ignored_from(std::env::vars().map(|(n, _)| n), already_emitted)
+        // Mirrors figment's OWN key handling (`Env::iter`, figment 0.10.19
+        // providers/env.rs:504-519) so the report can never disagree with the
+        // filter (J-2 review iter-1):
+        // - `vars_os()` + `to_string_lossy()`, NOT `vars()`: the latter PANICS
+        //   on any non-UTF-8 variable in the environment — including ones
+        //   unrelated to opcgw — and this runs on the boot critical path.
+        // - the prefix match is case-INSENSITIVE, because figment's
+        //   `Env::prefixed` compares through `UncasedStr`: a lowercase
+        //   `opcgw_chirpstack__polling_frequency` IS matched (and filtered) by
+        //   the provider, so it must be reported too.
+        Self::maybe_warn_env_ignored_from(
+            std::env::vars_os().map(|(n, _)| n.to_string_lossy().into_owned()),
+            already_emitted,
+        )
     }
 
     /// Pure-input core of [`Self::maybe_warn_env_ignored`] — takes the
@@ -1506,17 +1586,15 @@ impl AppConfig {
 
         let mut ignored: Vec<(String, String, String)> = Vec::new();
         for name in var_names {
-            let Some(rest) = name.strip_prefix("OPCGW_") else {
+            // SHARED classification with the provider filter (trim, uncased
+            // prefix, `__`-or-`.` separator, empty-segment drop) — the single
+            // normalizer is what makes filter/report drift impossible.
+            // Short forms (`OPCGW_LOG_LEVEL`, budget/cap knobs) resolve to
+            // `None`: they address no section field, the filter passes them,
+            // so they are NOT "ignored".
+            let Some((section, key)) = env_name_to_section_key(&name) else {
                 continue;
             };
-            // Short forms (`OPCGW_LOG_LEVEL`, budget/cap knobs) have no `__`
-            // and never enter the figment provider as section fields — the
-            // filter passes them, so they are NOT "ignored".
-            let Some((section_part, key_part)) = rest.split_once("__") else {
-                continue;
-            };
-            let section = section_part.to_lowercase();
-            let key = key_part.to_lowercase();
             // Unknown sections were never mergeable into the editable set and
             // pass the filter untouched — not "ignored" either.
             if !KNOWN_SECTIONS.contains(&section.as_str()) {
@@ -1525,7 +1603,7 @@ impl AppConfig {
             if env_key_allowed(&section, &key) {
                 continue;
             }
-            ignored.push((name, section, key));
+            ignored.push((name.trim().to_string(), section, key));
         }
 
         if ignored.is_empty() {
@@ -1548,6 +1626,88 @@ impl AppConfig {
             );
         }
         ignored.len()
+    }
+
+    /// J-2 review iter-1: warn when an allowlisted **secret** env var and the
+    /// wizard-written `secrets.toml` both supply the same field — env sits
+    /// above `secrets.toml` in the stack, so the file value silently loses.
+    /// Values are never logged, and this deliberately has no once-per-boot
+    /// guard: it is emitted from the config load itself (bounded by the small
+    /// number of loads per boot) and each line names a distinct field.
+    fn warn_env_shadows_secrets_toml(secrets_body: &str) {
+        use crate::storage::migrate_singleton_config::SECRET_FIELDS_BY_SECTION;
+        let Ok(parsed) = secrets_body.parse::<toml::Value>() else {
+            return; // already reported as malformed upstream
+        };
+        for (section, fields) in SECRET_FIELDS_BY_SECTION {
+            for field in *fields {
+                let in_file = parsed
+                    .get(section)
+                    .and_then(|t| t.get(field))
+                    .is_some();
+                if !in_file {
+                    continue;
+                }
+                let in_env = std::env::vars_os().any(|(n, _)| {
+                    env_name_to_section_key(&n.to_string_lossy())
+                        .is_some_and(|(s, k)| s == *section && k == *field)
+                });
+                if in_env {
+                    warn!(
+                        event = "env_shadows_secrets_toml",
+                        section = %section,
+                        key = %field,
+                        recommended_action = "remove the OPCGW_* secret from the environment \
+                                              to use the value the setup wizard stored, or \
+                                              delete it from config/secrets.toml",
+                        "an environment variable and config/secrets.toml both supply this \
+                         secret; the environment value wins, so credentials entered in the \
+                         setup wizard have no effect until the env var is removed"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Story J-2 (review iter-1, HIGH — credential-pair split): `user_password`
+    /// stays env-capable (it is a secret, never stored in SQLite) while
+    /// `user_name` does not. A deployment that set BOTH in `.env` therefore
+    /// keeps its password but silently switches to the Admin-page login NAME
+    /// after the upgrade — and the documented remedy ("manage it on the Admin
+    /// page") sits behind the very login that just changed.
+    ///
+    /// This turns that into a self-answering log line: when an ignored
+    /// `OPCGW_OPCUA__USER_NAME` is present, name the **effective** login user
+    /// so the operator can sign in immediately. Requires the loaded config, so
+    /// it runs after the load (the generic `env_var_ignored` report runs
+    /// before it). The user name is explicitly NOT a secret (D-0 I1-F12), so
+    /// logging it is safe.
+    ///
+    /// Returns `true` if the hint was emitted.
+    pub fn maybe_warn_ignored_user_name(
+        &self,
+        already_emitted: &std::sync::atomic::AtomicBool,
+    ) -> bool {
+        use std::sync::atomic::Ordering;
+        let present = std::env::vars_os().any(|(n, _)| {
+            env_name_to_section_key(&n.to_string_lossy())
+                .is_some_and(|(section, key)| section == "opcua" && key == "user_name")
+        });
+        if !present || already_emitted.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        warn!(
+            event = "env_var_ignored_login_name",
+            env_var = "OPCGW_OPCUA__USER_NAME",
+            effective_user_name = %self.opcua.user_name,
+            recommended_action = "sign in with the effective user name shown here, then \
+                                  set it on the web Admin page and remove the env var",
+            "OPCGW_OPCUA__USER_NAME is IGNORED (Story J-2, #169) — this is also the \
+             web UI login name, so the effective value is reported here to avoid a \
+             lock-out. The password may still be supplied via the environment (it is \
+             a secret); only the name is web/SQLite-managed."
+        );
+        true
     }
 
     /// Story F-2: detect whether the ChirpStack API token is still missing.
@@ -5878,8 +6038,11 @@ mod tests {
                 "a blocked key no longer shadows — it is ignored, not winning"
             );
             // ...and the same var IS reported by the ignored-var scan.
-            // Precise twin via the pure-input core (immune to sibling tests'
-            // env mutations): the same name is classified as ignored.
+            // Precise twin via the pure-input core. NOTE: the core reads only
+            // its explicit iterator, so this assertion is independent of the
+            // surrounding `temp_env` scope — it pins the CLASSIFICATION of the
+            // name, which is exactly the complement being asserted above (same
+            // key: shadow=0, ignored=1).
             let ignored_guard = std::sync::atomic::AtomicBool::new(false);
             assert_eq!(
                 AppConfig::maybe_warn_env_ignored_from(
@@ -6009,6 +6172,179 @@ mod tests {
                     .expect("secret env overrides parse");
                 assert_eq!(config.chirpstack.api_token, "token-from-env");
                 assert_eq!(config.opcua.user_password, "pw-from-env");
+            },
+        );
+    }
+
+    /// J-2 review iter-1 (drift guard): for EVERY key shape, the provider's
+    /// filter predicate and the ignored-var reporter must agree — a key the
+    /// provider drops must be reported, and a key it passes must not be.
+    /// Without this, the case-sensitivity bug (reporter used a case-SENSITIVE
+    /// prefix strip while figment's `Env::prefixed` matches through
+    /// `UncasedStr`) silently under-reported filtered vars — the exact
+    /// "silent no-op" the story exists to eliminate.
+    #[test]
+    fn j2_filter_and_reporter_agree_for_every_key_shape() {
+        let cases = [
+            // (full env var name, expected: provider drops it)
+            ("OPCGW_CHIRPSTACK__POLLING_FREQUENCY", true),
+            // DOT separator — figment nests on `.` just like `__`, so these
+            // address the same fields and MUST be blocked+reported. Before
+            // the shared normalizer these bypassed the filter entirely
+            // (J-2 review iter-1 HIGH: complete allowlist bypass).
+            ("OPCGW_CHIRPSTACK.POLLING_FREQUENCY", true),
+            ("OPCGW_OPCUA.USER_NAME", true),
+            ("OPCGW_GLOBAL.DEBUG", true),
+            ("OPCGW_OPCUA.HOST_IP_ADDRESS", true),
+            ("OPCGW_WEB.PORT", false),
+            // Whitespace — figment trims the NAME before matching, so these
+            // are real vars; the reporter must not claim a merged var was
+            // ignored (nor stay silent about a filtered one).
+            (" OPCGW_GLOBAL__DEBUG", true),
+            ("OPCGW_WEB__PORT ", false),
+            // Empty path segments — figment drops these itself, so they
+            // address nothing and must not be reported as ignored.
+            ("OPCGW_WEB__", false),
+            ("OPCGW___X", false),
+            ("OPCGW_CHIRPSTACK__SERVER_ADDRESS", true),
+            ("OPCGW_OPCUA__USER_NAME", true),
+            ("OPCGW_GLOBAL__DEBUG", true),
+            ("OPCGW_OPCUA__HOST_IP_ADDRESS", true),
+            ("OPCGW_WEB__AUTH_REALM", true),
+            // lower/mixed case — figment matches the prefix uncased, so these
+            // are real (filtered) vars and MUST be reported too.
+            ("opcgw_chirpstack__polling_frequency", true),
+            ("OpCgW_GlObAl__DeBuG", true),
+            // allowed
+            ("OPCGW_WEB__PORT", false),
+            ("OPCGW_WEB__BIND_ADDRESS", false),
+            ("OPCGW_WEB__ENABLED", false),
+            ("OPCGW_OPCUA__HOST_PORT", false),
+            ("OPCGW_CHIRPSTACK__API_TOKEN", false),
+            ("OPCGW_OPCUA__USER_PASSWORD", false),
+            ("opcgw_web__port", false),
+            // outside KNOWN_SECTIONS / short forms / unprefixed
+            ("OPCGW_LOGGING__DIR", false),
+            ("OPCGW_STORAGE__DATABASE_PATH", false),
+            ("OPCGW_LOG_LEVEL", false),
+            ("OPCGW_ERROR_EVENT_CAP", false),
+        ];
+        for (name, provider_drops) in cases {
+            // What the provider does: figment trims the name, strips the
+            // prefix (uncased), then applies the filter predicate.
+            let trimmed = name.trim();
+            let rest = &trimmed[super::ENV_PREFIX.len()..];
+            let passes = super::env_post_prefix_key_passes(rest);
+            assert_eq!(
+                !passes, provider_drops,
+                "provider filter disagrees with expectation for {name}"
+            );
+            // What the reporter does, over the same name.
+            let guard = std::sync::atomic::AtomicBool::new(false);
+            let reported = AppConfig::maybe_warn_env_ignored_from(
+                std::iter::once(name.to_string()),
+                &guard,
+            );
+            assert_eq!(
+                reported == 1,
+                provider_drops,
+                "reporter disagrees with the provider filter for {name}: \
+                 dropped={provider_drops} reported={reported}"
+            );
+        }
+    }
+
+    /// AC#3 / AC#10(f) — the SECOND production stack (`peek_logging_config`)
+    /// must keep applying `[logging]` env overrides (that section is outside
+    /// KNOWN_SECTIONS, so the filter never touches it), even with a blocked
+    /// key simultaneously present. Rebuilds the peek's exact provider chain;
+    /// `LoggingPeek` lives in `main.rs`, so this deserializes the equivalent
+    /// shape here.
+    #[test]
+    #[serial_test::serial]
+    fn j2_logging_env_overrides_still_reach_the_peek_stack() {
+        #[derive(serde::Deserialize)]
+        struct LoggingPeekLike {
+            logging: Option<LoggingConfig>,
+        }
+        temp_env::with_vars(
+            [
+                ("OPCGW_LOGGING__DIR", Some("/tmp/j2-peek-dir")),
+                ("OPCGW_LOGGING__LEVEL", Some("debug")),
+                // A blocked key present at the same time must not disturb it.
+                ("OPCGW_CHIRPSTACK__POLLING_FREQUENCY", Some("99")),
+            ],
+            || {
+                let peek: LoggingPeekLike = Figment::new()
+                    .merge(Toml::string("[logging]\ndir = \"/from-toml\"\n"))
+                    .merge(super::opcgw_env_provider())
+                    .extract()
+                    .expect("peek stack extracts");
+                let logging = peek.logging.expect("logging section present");
+                assert_eq!(
+                    logging.dir.as_deref(),
+                    Some("/tmp/j2-peek-dir"),
+                    "[logging] is outside KNOWN_SECTIONS — its env override must still apply"
+                );
+                assert_eq!(logging.level.as_deref(), Some("debug"));
+            },
+        );
+    }
+
+    /// J-2 review iter-1 (HIGH, end-to-end bypass guard): a blocked field
+    /// addressed with a **dot** separator must not reach the extracted config.
+    /// This drives the REAL provider through a real `Figment::extract`, so it
+    /// fails if the normalization is removed even though the `__` twin still
+    /// passes — figment nests on `.` (`util::nest`), so `.split("__")` alone
+    /// never saw these keys. Fixture TOML says 10; the env says 99; a correct
+    /// filter yields 10 (non-overlapping values, so this cannot pass on the
+    /// broken path).
+    #[test]
+    #[serial_test::serial]
+    fn j2_dotted_env_var_cannot_bypass_the_allowlist() {
+        let toml = r#"
+            [global]
+            debug = false
+            [chirpstack]
+            server_address = "http://from-toml:8080"
+            api_token = "x"
+            tenant_id = "t"
+            polling_frequency = 10
+            retry = 1
+            delay = 1
+            [opcua]
+            application_name = "A"
+            application_uri = "urn:a"
+            product_uri = "urn:p"
+            diagnostics_enabled = false
+            create_sample_keypair = true
+            certificate_path = "c"
+            private_key_path = "k"
+            trust_client_cert = true
+            check_cert_time = false
+            pki_dir = "pki"
+            user_name = "from-toml"
+            user_password = "p"
+        "#;
+        temp_env::with_vars(
+            [
+                ("OPCGW_CHIRPSTACK.POLLING_FREQUENCY", Some("99")),
+                ("OPCGW_OPCUA.USER_NAME", Some("from-env")),
+            ],
+            || {
+                let config: AppConfig = Figment::new()
+                    .merge(Toml::string(toml))
+                    .merge(super::opcgw_env_provider())
+                    .extract()
+                    .expect("config parses with dotted blocked vars present");
+                assert_eq!(
+                    config.chirpstack.polling_frequency, 10,
+                    "a DOT-separated blocked var must be ignored — TOML wins"
+                );
+                assert_eq!(
+                    config.opcua.user_name, "from-toml",
+                    "a DOT-separated blocked var must be ignored — TOML wins"
+                );
             },
         );
     }

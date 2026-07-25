@@ -173,7 +173,7 @@ chmod 600 .env
 docker compose up -d
 ```
 
-`docker-compose.yml` loads **all** environment variables from `.env` via `env_file`, so `.env` is the single place to set every `OPCGW_*` variable — nothing is configured in the compose file itself. See [`.env.example`](./.env.example) for the template and the user manual's *Environment Variable Reference* appendix for the full list; see [`docs/security.md`](./docs/security.md) for the secret-management contract.
+`docker-compose.yml` loads **all** environment variables from `.env` via `env_file`, so `.env` is the single place to set the `OPCGW_*` variables — nothing is configured in the compose file itself. **Since v2.8.0 only allowlisted variables are applied** (secrets, `WEB__ENABLED`/`BIND_ADDRESS`/`PORT`, `OPCUA__HOST_PORT`, the `[logging]`/`[storage]` sections, and the short-form knobs); anything else belongs on the web **Admin** page and is ignored with an `env_var_ignored` warning. See [`.env.example`](./.env.example) for the template and the user manual's *Environment Variable Reference* appendix for the full list; see [`docs/security.md`](./docs/security.md) for the secret-management contract.
 
 ### Documentation
 
@@ -206,12 +206,14 @@ tenant_id = "your-tenant-id"
 polling_frequency = 10
 # Story C-1: server-side TTL cache for /api/inventory/{applications,devices}.
 # Default 60. Set to 0 to disable caching (every inventory request hits
-# ChirpStack — useful for development). Env-var override:
-# OPCGW_CHIRPSTACK__INVENTORY_CACHE_TTL_SECONDS. Restart-required.
+# ChirpStack — useful for development). Web-Admin-managed since v2.8.0
+# (the OPCGW_CHIRPSTACK__INVENTORY_CACHE_TTL_SECONDS env override is
+# ignored). Restart-required.
 inventory_cache_ttl_seconds = 60
 # Story C-1: max wait window for /api/inventory/uplinks (bounded read
 # against InternalService.StreamDeviceEvents). Default 5; range 1..=60.
-# Env-var override: OPCGW_CHIRPSTACK__INVENTORY_UPLINK_MAX_WAIT_SECONDS.
+# Web-Admin-managed since v2.8.0 (the
+# OPCGW_CHIRPSTACK__INVENTORY_UPLINK_MAX_WAIT_SECONDS env override is ignored).
 inventory_uplink_max_wait_seconds = 5
 
 [opcua]
@@ -347,7 +349,7 @@ threshold still flips to Uncertain.
 >
 > **Troubleshooting — a SCADA client opens/drops connections constantly (log flooded with `Accept new connection` / `Connection … terminated` pairs, occasional `BadSecureChannelClosed`).**
 > Check whether these connections carry a session: compare `grep -c "Created new session"` against `grep -c "Accept new connection"` on the same day's log. If sessions are a tiny fraction of accepts (field example: **3 sessions vs 1,550 accepts**), the churning connections are **session-less** — the real data flows over one persistent connection/session (`opcua_session_count current=1`), while the client separately opens connections that never activate a session and are reaped by opcgw's ~60 s channel timeout.
-> **Most common cause: opcgw advertises an unreachable endpoint URL.** Check the startup log for `Base url: opc.tcp://<host>:4855` — if `<host>` is `0.0.0.0` (opcgw also logs `event="opcua_advertise_host_unroutable"`), clients following endpoint rediscovery re-probe an unroutable URL and churn. async-opcua 0.17 uses one value (`[opcua].host_ip_address`) for **both** bind and advertisement, so set `host_ip_address` to a hostname/IP clients resolve. In Docker with a published port, keep binding all interfaces by adding `extra_hosts: ["<name>:0.0.0.0"]` to the compose service and setting `host_ip_address = <name>` — the container binds `0.0.0.0` (the name resolves to `0.0.0.0` in its own `/etc/hosts`) while advertising `opc.tcp://<name>:4855`; other containers resolve `<name>` via Docker DNS. (A faulted/duplicate **client-side** OPC UA connection — security-policy or certificate mismatch — causes the same pattern, so audit Ignition's *Config → OPC Client → OPC Connections* too.) **The definitive remedy when a client churns or Faults after a reboot/endpoint change is to delete and recreate its OPC UA connection** (stale client state); on the endpoint step, if it faults before a session forms, prefer the `None` policy (opcgw's self-signed sample keypair can trip strict `Basic256` cert validation; `None` is fine for an internal Docker link). Note `host_ip_address` set on the Admin page has no effect if an `OPCGW_OPCUA__HOST_IP_ADDRESS` env var shadows it (env outranks web/SQLite). OPC UA subscription tuning (`max_keep_alive_count` / `min_publishing_interval_ms`) does **not** help — those govern established subscriptions, which these connections don't have (lowering `max_keep_alive_count` 5→2 left the ~60 s cycle unchanged). See the manual's Troubleshooting chapter (§ *SCADA client opens and drops connections constantly*).
+> **Most common cause: opcgw advertises an unreachable endpoint URL.** Check the startup log for `Base url: opc.tcp://<host>:4855` — if `<host>` is `0.0.0.0` (opcgw also logs `event="opcua_advertise_host_unroutable"`), clients following endpoint rediscovery re-probe an unroutable URL and churn. async-opcua 0.17 uses one value (`[opcua].host_ip_address`) for **both** bind and advertisement, so set `host_ip_address` to a hostname/IP clients resolve. In Docker with a published port, keep binding all interfaces by adding `extra_hosts: ["<name>:0.0.0.0"]` to the compose service and setting `host_ip_address = <name>` — the container binds `0.0.0.0` (the name resolves to `0.0.0.0` in its own `/etc/hosts`) while advertising `opc.tcp://<name>:4855`; other containers resolve `<name>` via Docker DNS. (A faulted/duplicate **client-side** OPC UA connection — security-policy or certificate mismatch — causes the same pattern, so audit Ignition's *Config → OPC Client → OPC Connections* too.) **The definitive remedy when a client churns or Faults after a reboot/endpoint change is to delete and recreate its OPC UA connection** (stale client state); on the endpoint step, if it faults before a session forms, prefer the `None` policy (opcgw's self-signed sample keypair can trip strict `Basic256` cert validation; `None` is fine for an internal Docker link). Note that **before v2.8.0** an `OPCGW_OPCUA__HOST_IP_ADDRESS` env var silently outranked the Admin page — the original cause of this incident. Since v2.8.0 that variable is ignored (with an `env_var_ignored` warning) and the Admin-page value always applies; on older versions, remove it from `.env` first. OPC UA subscription tuning (`max_keep_alive_count` / `min_publishing_interval_ms`) does **not** help — those govern established subscriptions, which these connections don't have (lowering `max_keep_alive_count` 5→2 left the ~60 s cycle unchanged). See the manual's Troubleshooting chapter (§ *SCADA client opens and drops connections constantly*).
 
 **Story F-4 adds config export / import.** From the singleton-configuration
 page, **Export config** downloads the whole configuration — the `[global]` /

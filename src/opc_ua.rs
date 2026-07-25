@@ -3045,8 +3045,8 @@ mod tests {
     /// the `Figment::new().merge(Toml::string(...))` call that historically
     /// stood in for `AppConfig::new()`. After the Story 6-2 two-phase init
     /// refactor, the canonical entry point is `AppConfig::from_path`, which
-    /// runs `figment` *and* takes the `Env::prefixed("OPCGW_").split("__")`
-    /// merge — neither of which the string-backed test exercises. This
+    /// runs `figment` *and* takes the allowlist-filtered `opcgw_env_provider()`
+    /// merge (Story J-2) — neither of which the string-backed test exercises. This
     /// production-path test writes the same TOML to a tempfile and drives
     /// `from_path` end-to-end, so a future logging addition inside the
     /// real loader is caught by the same sentinel assertion.

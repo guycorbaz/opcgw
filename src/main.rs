@@ -621,6 +621,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     static ENV_VAR_IGNORED_WARNING_EMITTED: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
 
+    // Story J-2 (review iter-1): once-per-boot guard for the login-name hint
+    // emitted when an ignored OPCGW_OPCUA__USER_NAME would otherwise change
+    // the web login silently.
+    static ENV_LOGIN_NAME_HINT_EMITTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
     // Parse arguments
     let args = Args::parse();
 
@@ -758,6 +764,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(e.into());
         }
     };
+
+    // Story J-2 (review iter-1): the credential-pair hint needs the EFFECTIVE
+    // config, so it runs here rather than with the generic pre-load report.
+    application_config.maybe_warn_ignored_user_name(&ENV_LOGIN_NAME_HINT_EMITTED);
 
     // Epic C C-0 (iter-2 P1 fix): capture `is_first_run` once at boot
     // and reuse the cached value at every downstream call-site (OPC UA

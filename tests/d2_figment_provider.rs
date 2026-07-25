@@ -222,6 +222,33 @@ fn t03c_blocked_env_var_falls_back_to_toml_without_row() {
     });
 }
 
+/// Test 3d — Story J-2 AC#10(b) second leg: a blocked key with NEITHER a
+/// SQLite row NOR a TOML value falls back to the built-in DEFAULT, not the
+/// env value. Uses `[global].command_timeout_check_interval_secs`, which is
+/// genuinely ABSENT from `TOML_BASE` (default 10) — deliberately not a field
+/// the fixture sets, so the assertion cannot pass via the TOML path and the
+/// three values (env 42 / default 10) stay non-overlapping.
+#[test]
+fn t03d_blocked_env_var_falls_back_to_default_without_row_or_toml() {
+    temp_env::with_var(
+        "OPCGW_GLOBAL__COMMAND_TIMEOUT_CHECK_INTERVAL_SECS",
+        Some("42"),
+        || {
+            assert!(
+                !TOML_BASE.contains("command_timeout_check_interval_secs"),
+                "fixture precondition: the field must be absent so the default is what applies"
+            );
+            let (_dir, config_path, _backend) = fresh_env();
+            let loaded = load_bootstrap_config(&config_path);
+            assert_eq!(
+                loaded.global.command_timeout_check_interval_secs, 10,
+                "a blocked env var must be IGNORED — built-in default wins (J-2); got {}",
+                loaded.global.command_timeout_check_interval_secs
+            );
+        },
+    );
+}
+
 /// Test 4 — Precedence test (SQLite > TOML): TOML has
 /// `polling_frequency=10`; SQLite has `polling_frequency=20`. Loaded
 /// value is 20.

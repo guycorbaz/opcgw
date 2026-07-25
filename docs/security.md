@@ -33,8 +33,8 @@ walk into nested TOML keys).
 |--------------------------------|--------------------------------------|-------------------------------|
 | `chirpstack.api_token`         | `OPCGW_CHIRPSTACK__API_TOKEN`        | **yes** — but Story F-2: an empty/placeholder token + no env-var triggers the first-run wizard (which collects it) instead of aborting; env-var-set-but-empty is still rejected |
 | `opcua.user_password`          | `OPCGW_OPCUA__USER_PASSWORD`         | **yes** — GH #146: an empty *or* placeholder password + no env-var triggers the first-run wizard (symmetric with `api_token`); a placeholder is rejected once a real ChirpStack token is configured (i.e. past first-run); env-var-set-but-empty is still rejected. While in first-run the OPC UA server rejects all auth, so the placeholder never becomes a live credential |
-| `chirpstack.tenant_id`         | `OPCGW_CHIRPSTACK__TENANT_ID`        | optional — placeholder UUID is a valid format; ChirpStack will reject calls until set |
-| `chirpstack.server_address`    | `OPCGW_CHIRPSTACK__SERVER_ADDRESS`   | optional |
+| `chirpstack.tenant_id`         | ~~`OPCGW_CHIRPSTACK__TENANT_ID`~~    | **v2.8.0: env override IGNORED** (web-Admin-managed, #169) — placeholder UUID is a valid format; ChirpStack will reject calls until set on the Admin page |
+| `chirpstack.server_address`    | ~~`OPCGW_CHIRPSTACK__SERVER_ADDRESS`~~ | **v2.8.0: env override IGNORED** (web-Admin-managed, #169); set it in the seed `config.toml` for first boot or on the Admin page afterwards |
 | `opcua.host_port`              | `OPCGW_OPCUA__HOST_PORT`             | optional |
 | `[logging].dir`                | `OPCGW_LOGGING__DIR` *or* `OPCGW_LOG_DIR` (bootstrap short form) | optional |
 | `[logging].level`              | `OPCGW_LOGGING__LEVEL` *or* `OPCGW_LOG_LEVEL` (bootstrap short form) | optional |
@@ -417,7 +417,7 @@ multi-user RBAC). Configure via:
 
 | Field                   | Env var                       | Notes                                                      |
 |-------------------------|-------------------------------|------------------------------------------------------------|
-| `[opcua].user_name`     | `OPCGW_OPCUA__USER_NAME`      | Display name.                                              |
+| `[opcua].user_name`     | ~~`OPCGW_OPCUA__USER_NAME`~~  | **v2.8.0: env override IGNORED** (web-Admin-managed, #169). This is also the web-UI login name — check it on the Admin page before upgrading. |
 | `[opcua].user_password` | `OPCGW_OPCUA__USER_PASSWORD`  | **Always set via env var** — the placeholder in the shipped TOML is rejected at startup. |
 
 Internally the user-token id is `default-user`

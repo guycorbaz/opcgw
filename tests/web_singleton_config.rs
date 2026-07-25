@@ -737,6 +737,8 @@ fn d1_audit_event_names_documented_in_logging_md() {
         // the (previously undocumented) shadow WARN it narrows.
         "env_var_ignored",
         "env_shadows_singleton_config",
+        "env_var_ignored_login_name",
+        "env_shadows_secrets_toml",
     ] {
         assert!(
             doc.contains(ev),

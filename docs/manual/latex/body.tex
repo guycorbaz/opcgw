@@ -873,11 +873,24 @@ rm config/config.toml
   Restart opcgw. With \texttt{config.toml} absent, the unused-file warning no longer fires and opcgw boots from SQLite + \texttt{secrets.toml} alone.
 \end{enumerate}
 
-To change a runtime setting afterwards, use the singleton-config editor or an \texttt{OPCGW\_} environment-variable override --- not a \texttt{config.toml} hand-edit.
+To change a runtime setting afterwards, use the singleton-config editor (the web \emph{Admin} page) --- not a \texttt{config.toml} hand-edit, and (since v2.8.0) not an \texttt{OPCGW\_} environment variable either: for the editable settings those are ignored.
 
 \section{Environment Variable Overrides}\label{sec-config-env-overrides}
 
-Any configuration value can be overridden by an environment variable, and environment variables always take precedence over SQLite and the seed file. The convention is the \texttt{OPCGW\_} prefix with \texttt{\_\_} separating nested keys (for example \texttt{OPCGW\_CHIRPSTACK\_\_POLLING\_FREQUENCY=30}). Two convenience aliases, \texttt{OPCGW\_LOG\_DIR} and \texttt{OPCGW\_LOG\_LEVEL}, are read early during startup so logging is configured before the rest of the config loads. The full list of variables is in \hyperref[app-env-reference]{appendix\_title}.
+\textbf{Since v2.8.0, only an allowlisted set of environment variables is applied.} The web \emph{Admin} page (backed by SQLite) is authoritative for everything it can edit; an \texttt{OPCGW\_} variable addressing one of those fields is \emph{ignored}, and the gateway logs an \texttt{env\_var\_ignored} warning naming it at startup. Before v2.8.0 such a variable silently outranked the Admin page --- the cause of a hard-to-diagnose class of "I changed it in the UI and nothing happened" incidents.
+
+The convention for the variables that \emph{are} applied is the \texttt{OPCGW\_} prefix with \texttt{\_\_} separating nested keys (for example \texttt{OPCGW\_WEB\_\_PORT=8080}). The allowlist is:
+
+\begin{itemize}
+\tightlist
+\item the two secrets, \texttt{OPCGW\_CHIRPSTACK\_\_API\_TOKEN} and \texttt{OPCGW\_OPCUA\_\_USER\_PASSWORD} (they are never stored in SQLite);
+\item the web bootstrap trio \texttt{OPCGW\_WEB\_\_ENABLED}, \texttt{OPCGW\_WEB\_\_BIND\_ADDRESS}, \texttt{OPCGW\_WEB\_\_PORT} (the gateway must be able to serve the setup wizard before SQLite exists);
+\item \texttt{OPCGW\_OPCUA\_\_HOST\_PORT} (container port mapping and healthcheck);
+\item the \texttt{[logging]} and \texttt{[storage]} sections, which the Admin page does not edit;
+\item the convenience aliases \texttt{OPCGW\_LOG\_DIR} and \texttt{OPCGW\_LOG\_LEVEL}, read early during startup so logging is configured before the rest of the config loads, and the process-tuning knobs (\texttt{OPCGW\_ERROR\_EVENT\_CAP}, \texttt{OPCGW\_STORAGE\_QUERY\_BUDGET\_MS}, \texttt{OPCGW\_BATCH\_WRITE\_BUDGET\_MS}).
+\end{itemize}
+
+Everything else --- including \texttt{OPCGW\_CHIRPSTACK\_\_SERVER\_ADDRESS}, \texttt{OPCGW\_CHIRPSTACK\_\_POLLING\_FREQUENCY} and \texttt{OPCGW\_OPCUA\_\_USER\_NAME} --- belongs on the Admin page. The full list of variables is in \hyperref[app-env-reference]{appendix\_title}.
 
 \chapter{Daily Operation and Maintenance}\label{ch-operation}
 
@@ -1662,7 +1675,9 @@ Section.Key & Type & Default & Override \\
 
 \chapter{Environment Variable Reference}\label{app-env-reference}
 
-All environment variables use the \texttt{OPCGW\_} prefix, with \texttt{\_\_} (double underscore) separating nested configuration keys. They are set in the \texttt{.env} file and override the corresponding configuration value --- environment variables always win.
+All environment variables use the \texttt{OPCGW\_} prefix, with \texttt{\_\_} (double underscore) separating nested configuration keys. They are set in the \texttt{.env} file.
+
+\textbf{Since v2.8.0 only the allowlisted variables are applied} (see \hyperref[sec-config-env-overrides]{the Environment Variable Overrides section}): the two secrets, \texttt{OPCGW\_WEB\_\_ENABLED} / \texttt{\_\_BIND\_ADDRESS} / \texttt{\_\_PORT}, \texttt{OPCGW\_OPCUA\_\_HOST\_PORT}, the \texttt{[logging]} and \texttt{[storage]} sections, and the short-form aliases and tuning knobs. Every other variable in the table below addresses a field the web \emph{Admin} page owns: setting it has no effect and produces an \texttt{env\_var\_ignored} warning at startup. Those rows are retained because they document the underlying configuration field --- set the value on the Admin page instead.
 
 \begin{longtable}[]{@{}lll@{}}
 \caption{Environment variables}\tabularnewline
