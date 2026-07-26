@@ -7,6 +7,7 @@
   <img src="https://img.shields.io/badge/version-2.8.0--rc2-blue" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-green" alt="License">
   <img src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64-brightgreen" alt="Architectures">
+  <a href="https://hub.docker.com/r/gcorbaz/opcgw"><img src="https://img.shields.io/docker/v/gcorbaz/opcgw?sort=semver&label=docker%20hub&color=2496ED&logo=docker&logoColor=white" alt="Docker Hub"></a>
 </p>
 
 # opcgw — ChirpStack to OPC UA Gateway
@@ -80,16 +81,32 @@ cargo build --release
 
 Pre-built images are published to two registries on every `v*` tag. Both registries receive identical multi-architecture manifests covering `linux/amd64` and `linux/arm64`.
 
-**Docker Hub** (primary):
+**Docker Hub** (primary) — latest stable:
 
 ```bash
-docker pull docker.io/gcorbaz/opcgw:2.1
+docker pull gcorbaz/opcgw:latest
 ```
 
 **GitHub Container Registry** (mirror):
 
 ```bash
-docker pull ghcr.io/guycorbaz/opcgw:2.1
+docker pull ghcr.io/guycorbaz/opcgw:latest
+```
+
+#### Tag scheme
+
+| Tag | Points at | Use it when |
+|-----|-----------|-------------|
+| `latest` | the newest **stable** release | you want the current recommended build |
+| `2.7.1` | that exact stable release | you pin an exact version (recommended for production) |
+| `2.7` | the newest patch on that minor line | you want patch updates but not minor bumps |
+| `2.8.0-rc2` | a specific **release candidate** | you are soak-testing a candidate before it goes stable |
+| `sha-<short>` | one exact commit | you need to reproduce a specific build |
+
+A release candidate publishes **only** its exact `X.Y.Z-rcN` tag (and `sha-…`) — it deliberately does **not** move `latest` or the `X.Y` line, so pulling `latest` never lands you on a candidate. To run one, name it explicitly:
+
+```bash
+docker pull gcorbaz/opcgw:2.8.0-rc2
 ```
 
 The container runs as non-root user `opcgw` (UID 10001) and exposes port `4840` (OPC UA). Minimal `docker run` example:
@@ -107,7 +124,7 @@ docker run -d \
   -v "$(pwd)/data:/usr/local/bin/data" \
   -e OPCGW_WEB__ENABLED=true \
   -p 8080:8080 \
-  gcorbaz/opcgw:2.1
+  gcorbaz/opcgw:latest
 ```
 
 The `data/` bind mount is **required** so the SQLite database (and its 7-day metric history) survives container restarts. Without it, persisted metrics live in the ephemeral container layer and are destroyed on every `docker rm`.
