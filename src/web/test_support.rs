@@ -111,6 +111,7 @@ pub fn stub_app_config_with_apps(apps: &[crate::config::ChirpStackApplications])
             prune_interval_minutes: 60,
             command_delivery_poll_interval_secs: 5,
             command_delivery_timeout_secs: 60,
+            command_dispatch_deadline_secs: 120,
             command_timeout_check_interval_secs: 10,
             history_retention_days: 7,
         },

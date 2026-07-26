@@ -69,6 +69,30 @@ pub struct Global {
     #[serde(default = "default_command_delivery_timeout")]
     pub command_delivery_timeout_secs: u32,
 
+    /// Dispatch deadline in seconds (#182; the gate Story J-1 introduced).
+    ///
+    /// A command still `Pending` this long after it was **created** is marked
+    /// `Failed` (`command_dispatch_expired`) and never delivered, so a stale
+    /// command cannot actuate hardware long after the operator wrote it. It
+    /// also bounds the dispatcher's retry ladder when ChirpStack is
+    /// unreachable.
+    ///
+    /// Deliberately **separate** from [`Self::command_delivery_timeout_secs`],
+    /// which governs how long an already-`Sent` command waits for *device
+    /// confirmation*. The two are different concerns and must be tunable
+    /// independently: on a LoRaWAN class-A deployment with a slow uplink
+    /// cadence the confirmation timeout may legitimately need to be minutes or
+    /// tens of minutes, and coupling the dispatch deadline to it would make the
+    /// gateway deliver very old commands — the exact hazard this gate exists to
+    /// prevent. (J-1 originally reused the one knob to avoid adding config;
+    /// #182 splits them after a real deployment needed a longer restart window
+    /// on one and not the other.)
+    ///
+    /// Default: 120 seconds — long enough to ride out a ChirpStack container
+    /// restart. Must be >= 1.
+    #[serde(default = "default_command_dispatch_deadline")]
+    pub command_dispatch_deadline_secs: u32,
+
     /// Command timeout check interval in seconds (Story 3-3).
     ///
     /// How often the timeout handler scans for expired commands.
@@ -880,6 +904,12 @@ fn default_command_delivery_poll_interval() -> u64 {
 
 fn default_command_delivery_timeout() -> u32 {
     60
+}
+
+/// Default dispatch deadline (#182): 120 s, chosen to ride out a ChirpStack
+/// container restart on a NAS-class host, where 60 s proved too short.
+fn default_command_dispatch_deadline() -> u32 {
+    120
 }
 
 fn default_command_timeout_check_interval() -> u64 {
@@ -2836,6 +2866,10 @@ impl AppConfig {
 
         if self.global.command_delivery_timeout_secs < 1 {
             errors.push("global.command_delivery_timeout_secs: must be >= 1".to_string());
+        }
+
+        if self.global.command_dispatch_deadline_secs < 1 {
+            errors.push("global.command_dispatch_deadline_secs: must be >= 1".to_string());
         }
 
         if self.global.command_timeout_check_interval_secs < 1 {
