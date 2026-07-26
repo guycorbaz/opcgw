@@ -278,8 +278,8 @@ impl DownlinkSink for ChirpStackDownlinkSink {
 ///   propagated: the dispatcher is a long-lived task, and a returned error
 ///   would strand every future command until the next signal at best (or kill
 ///   the task at worst). The caller schedules a bounded retry instead.
-/// - **Delivery deadline (D2).** A `Pending` row older than
-///   `global.command_delivery_timeout_secs` is marked `Failed("expired")` and
+/// - **Delivery deadline (D2, #182).** A `Pending` row older than
+///   `global.command_dispatch_deadline_secs` is marked `Failed("expired")` and
 ///   never delivered — so a stale command (e.g. carried across hours of
 ///   downtime by the startup drain) can never actuate hardware long after the
 ///   operator wrote it. Within the deadline, AC#5's across-restart delivery
@@ -352,10 +352,13 @@ pub(crate) async fn drain_pending_commands(
         count = pending.len(),
         "dispatching pending device commands"
     );
-    // J-1 iter-3 D2: the dispatch-side delivery deadline. Reuses the existing
-    // `command_delivery_timeout_secs` knob (whose Sent-side meaning is "how
-    // long may delivery take") rather than introducing a new one.
-    let deadline = Duration::from_secs(u64::from(config.global.command_delivery_timeout_secs));
+    // J-1 iter-3 D2, split out by #182: the dispatch-side deadline is its OWN
+    // knob (default 120 s). It used to reuse `command_delivery_timeout_secs`,
+    // but that governs how long a *Sent* command waits for device
+    // confirmation — a slow-cadence LoRaWAN deployment may need that in the
+    // tens of minutes, which would have made this gate deliver very old
+    // commands, the exact hazard it exists to prevent.
+    let deadline = Duration::from_secs(u64::from(config.global.command_dispatch_deadline_secs));
     let mut retry_needed = false;
     for command in pending {
         // J-1 review iter-2 P6: make the drain cancellation-aware so teardown /
@@ -1338,21 +1341,24 @@ mod tests {
     async fn retry_ladder_is_bounded_by_delivery_deadline() {
         let backend = Arc::new(InMemoryBackend::new());
         let dyn_backend: Arc<dyn StorageBackend> = backend.clone();
-        let config = test_config();
-        let deadline = i64::from(config.global.command_delivery_timeout_secs);
-        // deadline − 5 (iter-5): wide enough that a stalled CI runner cannot
-        // expire the row before the first delivery attempt, small enough that
-        // the 2 s + 4 s backoff drives it past the deadline.
-        let mut nearly_expired = device_command(0, CFG_DEV, CFG_PORT, vec![1]);
-        nearly_expired.created_at = chrono::Utc::now() - chrono::Duration::seconds(deadline - 5);
-        backend.queue_command(nearly_expired).unwrap();
+        // #182: pin an explicit SHORT dispatch deadline rather than deriving the
+        // timing from the default — that default changed 60 s → 120 s and
+        // silently broke this test's "the 2 s + 4 s backoff carries it past"
+        // assumption. 1 s deadline + a fresh row: the startup drain attempts
+        // once (age 0, inside the deadline), fails unreachable, and the 2 s
+        // backoff re-drive then finds it expired.
+        let mut config = test_config();
+        config.global.command_dispatch_deadline_secs = 1;
+        backend
+            .queue_command(device_command(0, CFG_DEV, CFG_PORT, vec![1]))
+            .unwrap();
         let cmd_id = backend.get_pending_commands().unwrap()[0].id;
 
         let sink = Arc::new(FlakySink::failing_first(u32::MAX)); // never recovers
         let signal = Arc::new(Notify::new());
         let cancel = CancellationToken::new();
         let mut dispatcher = CommandDispatcher::with_sink(
-            test_config(),
+            config,
             dyn_backend,
             cancel.clone(),
             signal.clone(),
@@ -1529,6 +1535,48 @@ mod tests {
         assert!(
             is_provably_unsent(&status),
             "a real DNS resolution failure must classify as unsent; got: {status:?}"
+        );
+    }
+
+    /// #182: the dispatch deadline and the delivery-confirmation timeout are
+    /// INDEPENDENT knobs. With a SHORT confirmation timeout and a LONG dispatch
+    /// deadline, a command far past the confirmation timeout must still be
+    /// delivered — it is nowhere near the dispatch deadline. Mutation guard: if
+    /// the gate read `command_delivery_timeout_secs` again (the pre-#182
+    /// coupling), this row would be expired `Failed` and never enqueued.
+    #[tokio::test]
+    async fn dispatch_deadline_is_independent_of_confirmation_timeout() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let dyn_backend: Arc<dyn StorageBackend> = backend.clone();
+        let mut config = test_config();
+        config.global.command_delivery_timeout_secs = 5; // short confirmation sweep
+        config.global.command_dispatch_deadline_secs = 600; // long dispatch window
+
+        // 60 s old: way past the confirmation timeout, well inside the deadline.
+        let mut cmd = device_command(0, CFG_DEV, CFG_PORT, vec![1]);
+        cmd.created_at = chrono::Utc::now() - chrono::Duration::seconds(60);
+        backend.queue_command(cmd).unwrap();
+        let cmd_id = backend.get_pending_commands().unwrap()[0].id;
+
+        let sink = MockSink::new(false);
+        let cancel = CancellationToken::new();
+        drain_pending_commands(
+            &sink,
+            &dyn_backend,
+            &config,
+            &cancel,
+            &mut std::collections::HashMap::new(),
+        )
+        .await;
+
+        assert_eq!(
+            sink.calls().len(),
+            1,
+            "the dispatch gate must read its OWN knob, not the confirmation timeout"
+        );
+        assert_eq!(
+            backend.command_status_for_test(cmd_id).map(|(s, _)| s),
+            Some(CommandStatus::Sent),
         );
     }
 

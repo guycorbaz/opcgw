@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **The command dispatch deadline is now its own knob, defaulting to 120 s**
+  ([#182](https://github.com/guycorbaz/opcgw/issues/182)). Story J-1 reused
+  `[global].command_delivery_timeout_secs` (60 s) for both the dispatch-side age
+  gate and the delivery-*confirmation* sweep. Two problems surfaced on the first
+  production soak: 60 s is shorter than a ChirpStack container restart on a
+  NAS-class host, so a command written during a restart expired instead of being
+  delivered when ChirpStack returned; and the two deadlines are different
+  concerns that must be tunable independently — on a class-A LoRaWAN deployment
+  with a slow uplink cadence the confirmation timeout may legitimately need to be
+  minutes, and coupling the dispatch gate to it would make the gateway deliver
+  very old commands, the exact stale-actuation hazard the gate exists to prevent.
+  New `[global].command_dispatch_deadline_secs` (default **120**, web-Admin-
+  managed like its siblings) governs the dispatch gate alone.
+
 ## [2.8.0-rc1] — 2026-07-26 — Epic J: Config Authority & Command Responsiveness
 
 **Release-candidate for the panoramix soak.** Both data-plane stories in this

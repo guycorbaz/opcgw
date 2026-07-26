@@ -74,6 +74,7 @@ Global application settings.
 | `history_retention_days` | u32 | 7 | How many days of metric/command history to keep before pruning. |
 | `command_delivery_poll_interval_secs` | u64 | 5 | How often opcgw polls ChirpStack for command delivery confirmations (must be >= 1). |
 | `command_delivery_timeout_secs` | u32 | 60 | A command left in the "sent" state longer than this is marked failed (must be >= 1). |
+| `command_dispatch_deadline_secs` | u32 | 120 | Story J-1 / [#182](https://github.com/guycorbaz/opcgw/issues/182). A command still `Pending` this long after **creation** is marked `Failed` (`command_dispatch_expired`) and never delivered, so a stale command cannot actuate hardware late; it also bounds the dispatcher's retry ladder while ChirpStack is unreachable. **Independent of `command_delivery_timeout_secs`** (which is the *confirmation* sweep): on a slow-cadence LoRaWAN deployment the confirmation timeout may need to be minutes, and coupling the two would deliver very old commands. Raise this if your ChirpStack restarts take longer than the default. Must be >= 1. |
 | `command_timeout_check_interval_secs` | u64 | 10 | How often (seconds) opcgw sweeps for timed-out commands. |
 
 ### Example
@@ -83,6 +84,10 @@ Global application settings.
 debug = true  # Set to false in production for better performance
 command_delivery_poll_interval_secs = 5
 command_delivery_timeout_secs = 60
+# Dispatch deadline (#182): a command still Pending this long after creation is
+# failed rather than delivered late. Independent of the confirmation timeout
+# above — raise it if your ChirpStack restarts take longer than this.
+command_dispatch_deadline_secs = 120
 ```
 
 ---
