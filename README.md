@@ -8,6 +8,7 @@
   <img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-green" alt="License">
   <img src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64-brightgreen" alt="Architectures">
   <a href="https://hub.docker.com/r/gcorbaz/opcgw"><img src="https://img.shields.io/docker/v/gcorbaz/opcgw?sort=semver&label=docker%20hub&color=2496ED&logo=docker&logoColor=white" alt="Docker Hub"></a>
+  <a href="https://hub.docker.com/r/gcorbaz/opcgw"><img src="https://img.shields.io/docker/pulls/gcorbaz/opcgw?label=docker%20pulls&color=2496ED&logo=docker&logoColor=white" alt="Docker pulls"></a>
 </p>
 
 # opcgw — ChirpStack to OPC UA Gateway
