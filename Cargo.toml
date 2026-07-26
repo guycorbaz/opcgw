@@ -1,6 +1,6 @@
 [package]
 name = "opcgw"
-version = "2.8.0-rc1"
+version = "2.8.0-rc2"
 authors = ["Guy Corbaz <guy@corbaz.org>"]
 description = "A Chirpstack to opc ua gateway"
 readme = "README.md"
