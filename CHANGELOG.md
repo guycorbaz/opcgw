@@ -5,7 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.0] — 2026-08-05 — Epic J: Config Authority & Command Responsiveness
+
+> **Status:** released (stable). Docker `gcorbaz/opcgw:2.8.0` / `:2.8` / `:latest`
+> + GHCR mirror (multi-arch amd64+arm64). Promoted from `v2.8.0-rc2` after a
+> **10-day soak on the panoramix NAS** (boot 2026-07-26T10:42:45Z, **zero
+> restarts**, no crash, no gap in the log stream). Consolidates `v2.8.0-rc1` and
+> `v2.8.0-rc2`, neither of which was promoted individually.
+>
+> **Soak result (2026-07-26 → 2026-08-05).** 21 ERROR lines in 10 days, **all**
+> OPC UA client-side transport events (`BadSecureChannelClosed`,
+> `BadCommunicationError`, one `ConnectionReset`); none after 2026-08-03, and no
+> opcgw-internal error at any point. 622 WARN, of which 517 are the known
+> NAS-storage latency-budget overruns ([#152](https://github.com/guycorbaz/opcgw/issues/152) —
+> `update_gateway_status` 412×, median 322 ms, max 1129 ms; `prune_metric_history`
+> 95×, max 2046 ms) — observability only, within the historical band. Since
+> 2026-07-30 **every** WARN belongs to that one family. Data kept flowing
+> throughout: 12 of 15 devices carried values less than 20 minutes old at the
+> analysis point, `chirpstack_available=1`, `error_count=0`, and history
+> retention pruned correctly. The OPC UA session gauge showed **zero churn**.
+>
+> **Validated in production by this soak:** the J-2 env allowlist (3
+> `env_var_ignored` warnings correctly naming `STREAM_ALL_DEVICES`, `GLOBAL__DEBUG`
+> and `STALE_THRESHOLD_SECONDS`, with the Admin-page value winning), the J-0 error
+> feed (which caught two real config faults — `metric_never_seen` on
+> `meteo02/batteryPercent`, and the `metric_type_mismatch` entries that guided the
+> operator's 2026-07-29 retyping of two soil probes), and the #182 dispatch
+> deadline as a knob independent of the confirmation timeout.
+>
+> ⚠️ **Known gap, owner-accepted:** J-1 command dispatch
+> ([#136](https://github.com/guycorbaz/opcgw/issues/136)) ships stable **without
+> production evidence**. No downlink was dispatched during the soak — the newest
+> `command_queue` row predates it by seven weeks — because the Tonhe valve
+> batteries are dead and a class-A downlink cannot reach them. This is a conscious
+> deviation from the AI-G-5 real-binary doctrine, recorded in `deferred-work.md`;
+> the outstanding valve test stands for when the batteries are replaced.
+>
+> Residual, not release-blocking: [#152](https://github.com/guycorbaz/opcgw/issues/152)
+> (NAS storage latency) and [#151](https://github.com/guycorbaz/opcgw/issues/151)
+> (`data/opcgw.db` file mode wider than 0600 on that host) remain open. Four
+> `OPCGW_*` variables still shadow web-managed fields on the deployment
+> (`WEB__ENABLED`, `WEB__PORT`, `WEB__BIND_ADDRESS`, `OPCUA__HOST_PORT`) — all
+> four are allowlisted by design, so the warning is informational.
+
 ## [2.8.0-rc2] — 2026-07-26 — dispatch-deadline split (soak follow-up)
+
+> **Superseded by [2.8.0].**
 
 ### Changed
 - **The command dispatch deadline is now its own knob, defaulting to 120 s**
@@ -24,9 +69,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.8.0-rc1] — 2026-07-26 — Epic J: Config Authority & Command Responsiveness
 
+> **Superseded by [2.8.0].**
+
 **Release-candidate for the panoramix soak.** Both data-plane stories in this
 release (J-1 immediate command dispatch, J-2 env allowlist) are gated on a
-clean NAS soak before a v2.8.0 stable tag, per the AI-G-5 doctrine.
+clean NAS soak before a v2.8.0 stable tag, per the AI-G-5 doctrine. The soak ran
+2026-07-26 → 2026-08-05 and was clean; see [2.8.0] for the result and for the
+one gate that was **not** met (J-1 dispatch was never exercised in production).
 
 ⚠️ **This is the first BREAKING change to the configuration surface** — read
 the env-allowlist migration steps below *before* pulling the image, and the
